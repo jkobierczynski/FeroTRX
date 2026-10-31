@@ -2,20 +2,22 @@
 
 FeroTRX is a traffic replay tool written in Rust, inspired by
 [Cisco TRex](https://trex-tgn.cisco.com/). It replays pcap and pcapng captures
-at a controlled rate on Linux, macOS and Windows, and its engine is a library
-you can use from your own programs.
+at a controlled rate on Linux, macOS and Windows, rewrites them on the way
+(addresses, ports, VLAN tags), runs several streams at once from a profile, and
+its engine is a library you can use from your own programs.
 
 ## Status
 
-Milestone 1 (pcap replay) is in progress. See the plan for what comes next:
-rewriting, a control API, flow multiplication, packet inspection and building,
-and faster Linux backends.
+* **M1, pcap replay:** done.
+* **M2, rewriting and multi-stream profiles:** this release.
+* Next: packet inspection and building (`ferotrx-packet`), a control API
+  (`ferotrx-ctl`), flow multiplication, faster Linux backends (AF_XDP, DPDK).
 
 ## Crates
 
 | Crate | What it is |
 | --- | --- |
-| `ferotrx-core` | The core API: load captures, pace packets, run replays, collect stats. No platform code. |
+| `ferotrx-core` | The core API: captures, rewrites, streams, profiles, pacing and the scheduler. No platform code. |
 | `ferotrx-io` | Packet sinks: network interfaces through libpcap/Npcap, pcap files. |
 | `ferotrx-cli` | The `ferotrx` command line tool. |
 
@@ -47,6 +49,60 @@ ferotrx replay capture.pcap --mbps 100 --out sent.pcap          # write instead 
 ferotrx replay capture.pcap --topspeed --null --loop 1000       # engine speed test
 ```
 
+### Rewriting
+
+`--rewrite` (`-r`) changes packets before they are sent. Repeat it to chain
+rewrites; they run in order. Address and port rewrites keep checksums correct.
+
+```sh
+ferotrx replay capture.pcap -i eth0 \
+  -r vlan_push=20 \
+  -r mac_dst=02:00:00:00:00:01 \
+  -r ip_dst=10.0.0.0/8->192.168.0.0 \
+  -r port_dst=53->5353
+```
+
+| Rewrite | Effect |
+| --- | --- |
+| `mac_src=TO`, `mac_dst=TO`, `mac=TO` | Set Ethernet addresses. `FROM->TO` only changes `FROM`. |
+| `ip_src=TO`, `ip_dst=TO`, `ip=TO` | Set IPv4 or IPv6 addresses. `NET/LEN->TO` maps a prefix: the first `LEN` bits come from `TO`, the rest are kept. |
+| `port_src=TO`, `port_dst=TO`, `port=TO` | Set TCP and UDP ports. `FROM->TO` only changes `FROM`. |
+| `vlan_push=ID[:PCP]`, `qinq_push=ID[:PCP]` | Add an outer 802.1Q or 802.1ad tag. |
+| `vlan_set=ID[:PCP]` | Change the outer tag. |
+| `vlan_pop` | Remove the outer tag. |
+| `fix_checksums` | Recompute IPv4, TCP, UDP and ICMPv6 checksums (for captures taken with checksum offload). |
+
+Without `_src` or `_dst`, a rewrite changes both.
+
+### Profiles
+
+A profile runs several streams at once into one output, each with its own
+capture, rate, loops, start delay and rewrites. The scheduler always sends the
+packet with the earliest deadline, so paced streams keep their rate and top
+speed streams fill the gaps.
+
+```toml
+[[stream]]
+name = "dns"
+pcap = "dns.pcap"            # relative to the profile
+rate = "500pps"              # 1000pps, 10kpps, 100mbps, 1gbps, 2x, topspeed
+loops = 0                    # 0 = until the run ends
+rewrite = ["vlan_push=10", "ip_dst=192.168.20.50"]
+
+[[stream]]
+pcap = "web.pcap"
+rate = "20mbps"
+delay = "5s"
+limit = 100000
+```
+
+```sh
+sudo ferotrx run lab.toml -i eth0 --duration 60s
+```
+
+[`examples/lab-two-vlans.toml`](examples/lab-two-vlans.toml) is a commented
+profile for a lab with a NAT router between two VLANs.
+
 Sending on an interface needs root or `CAP_NET_RAW` on Linux, access to
 `/dev/bpf*` on macOS, and Npcap on Windows.
 
@@ -63,7 +119,28 @@ let stats = replay(&capture, &mut sink, &config)?;
 println!("{} packets at {:.0} pps", stats.packets, stats.pps());
 ```
 
-Implement the `PacketSink` trait to send packets anywhere else.
+Several streams with rewrites:
+
+```rust
+use ferotrx_core::{run, Capture, CaptureSource, Rate, Rewrite, RunConfig, Stream};
+
+let capture = Capture::from_path("capture.pcap")?;
+let mut streams = [
+    Stream::new("vlan10", CaptureSource::new(&capture).loops(0))
+        .with_rate(Rate::Pps(1000.0))
+        .with_transform("vlan_push=10".parse::<Rewrite>()?),
+    Stream::new("vlan20", CaptureSource::new(&capture).loops(0))
+        .with_rate("50mbps".parse()?)
+        .with_transform("vlan_push=20".parse::<Rewrite>()?),
+];
+let config = RunConfig { duration: Some(std::time::Duration::from_secs(30)), ..Default::default() };
+let stats = run(&mut streams, &mut sink, &config)?;
+```
+
+Packets flow `PacketSource -> Transform... -> Pacer -> PacketSink`. Implement
+`PacketSource` to generate packets, `Transform` to change them, and `PacketSink`
+to send them anywhere else. `Profile::from_path(...)?.load()?` builds the streams
+of a TOML profile.
 
 ## License
 

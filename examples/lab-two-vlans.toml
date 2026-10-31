@@ -1,0 +1,65 @@
+# FeroTRX profile for a small lab: one switch, a NAT router between two VLANs.
+#
+#   sender (VM or PC) --- switch (trunk) --- router --- VLAN 10: 192.168.10.0/24
+#                                                   \-- VLAN 20: 192.168.20.0/24
+#
+# Run it with:
+#   sudo ferotrx run examples/lab-two-vlans.toml -i <interface> --duration 60s
+#
+# Replace the MAC and IP addresses with your own:
+#   * ROUTER_MAC: the router's MAC on VLAN 10 (`arp -a` on a VLAN 10 host shows it).
+#   * 192.168.20.50: a host on VLAN 20 that should receive the traffic.
+#
+# The vlan_push rewrites are for a sender on a trunk port. If the sender sits on
+# an access port in VLAN 10 (the switch adds the tag), remove them.
+#
+# VirtualBox: use a bridged adapter and set "Promiscuous Mode: Allow All", or the
+# host drops frames whose source MAC is not the VM's.
+#
+# The pcap paths are relative to this file. Any Ethernet capture works: the
+# rewrites below point its traffic at your lab whatever addresses it had.
+
+# Steady DNS-like traffic from VLAN 10 to a host on VLAN 20, looping until the run ends.
+[[stream]]
+name = "dns"
+pcap = "dns.pcap"
+rate = "200pps"
+loops = 0
+rewrite = [
+  "vlan_push=10",
+  "mac_dst=02:00:00:00:00:01",        # ROUTER_MAC
+  "ip_src=192.168.10.100",            # pretend to be a VLAN 10 host
+  "ip_dst=192.168.20.50",             # the receiver on VLAN 20
+  "port_dst=53",
+]
+
+# A web capture replayed at 20 Mbps, starting 5 seconds in. Keeps each client's
+# host bits: 10.0.0.0/8 becomes 192.0.0.0/8, so 10.1.2.3 becomes 192.1.2.3.
+# Use a prefix of the same length on both sides, e.g. 10.1.2.0/24->192.168.10.0.
+[[stream]]
+name = "web"
+pcap = "web.pcap"
+rate = "20mbps"
+loops = 0
+delay = "5s"
+rewrite = [
+  "vlan_push=10",
+  "mac_dst=02:00:00:00:00:01",        # ROUTER_MAC
+  "ip_src=10.1.2.0/24->192.168.10.0",
+  "ip_dst=192.168.20.50",
+]
+
+# A burst at top speed to see what the router's NAT does under load, 10 s in.
+[[stream]]
+name = "burst"
+pcap = "dns.pcap"
+rate = "topspeed"
+loops = 0
+limit = 100000
+delay = "10s"
+rewrite = [
+  "vlan_push=10",
+  "mac_dst=02:00:00:00:00:01",        # ROUTER_MAC
+  "ip_src=192.168.10.101",
+  "ip_dst=192.168.20.50",
+]
