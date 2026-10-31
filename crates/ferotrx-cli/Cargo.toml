@@ -1,0 +1,23 @@
+[package]
+name = "ferotrx-cli"
+description = "FeroTRX command line traffic replay tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ferotrx"
+path = "src/main.rs"
+
+[features]
+default = ["pcap"]
+pcap = ["ferotrx-io/pcap"]
+
+[dependencies]
+ferotrx-core.workspace = true
+ferotrx-io.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+ctrlc.workspace = true

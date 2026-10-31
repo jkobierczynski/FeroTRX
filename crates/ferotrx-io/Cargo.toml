@@ -1,0 +1,17 @@
+[package]
+name = "ferotrx-io"
+description = "Packet sinks for FeroTRX: libpcap/Npcap interfaces, pcap files, null"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["pcap"]
+# Send on real interfaces through libpcap (Linux, macOS) or Npcap (Windows).
+pcap = ["dep:pcap"]
+
+[dependencies]
+ferotrx-core.workspace = true
+pcap = { workspace = true, optional = true }
