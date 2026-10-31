@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/ferotrx-core", "crates/ferotrx-io", "crates/ferotrx-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/jkobierczynski/FeroTRX"
+rust-version = "1.75"
+
+[workspace.dependencies]
+ferotrx-core = { path = "crates/ferotrx-core", version = "0.1.0" }
+ferotrx-io = { path = "crates/ferotrx-io", version = "0.1.0", default-features = false }
+pcap-file = "2.0"
+pcap = "2.2"
+thiserror = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"

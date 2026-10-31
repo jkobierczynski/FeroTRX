@@ -1,0 +1,12 @@
+[package]
+name = "ferotrx-core"
+description = "Core library of FeroTRX: capture loading, rate pacing and the replay engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pcap-file.workspace = true
+thiserror.workspace = true
