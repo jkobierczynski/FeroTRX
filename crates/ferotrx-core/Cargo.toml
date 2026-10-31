@@ -1,12 +1,19 @@
 [package]
 name = "ferotrx-core"
-description = "Core library of FeroTRX: capture loading, rate pacing and the replay engine"
+description = "Core library of FeroTRX: captures, rewrites, streams, profiles and the replay engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["profile"]
+# Load multi-stream traffic profiles from TOML files.
+profile = ["dep:serde", "dep:toml"]
+
 [dependencies]
 pcap-file.workspace = true
 thiserror.workspace = true
+serde = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }

@@ -9,10 +9,14 @@ pub enum Error {
     UnknownFormat([u8; 4]),
     #[error("malformed capture: {0}")]
     Malformed(String),
-    #[error("capture mixes link types {0} and {1}; replay needs a single link type")]
+    #[error("packets mix link types {0} and {1}; one output needs a single link type")]
     MixedLinkTypes(u32, u32),
     #[error("invalid rate: {0}")]
     InvalidRate(String),
+    #[error("{0}")]
+    InvalidSpec(String),
+    #[error("profile: {0}")]
+    Profile(String),
     #[error("sending packet {index} failed: {source}")]
     Sink {
         index: u64,
