@@ -27,3 +27,24 @@ serde_json.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
+
+# `cargo deb -p ferotrx-cli` builds the Debian package the release workflow
+# publishes. Dependencies come from the binary's linked libraries (libpcap).
+[package.metadata.deb]
+name = "ferotrx"
+maintainer = "Jurgen Kobierczynski <jkobierczynski@users.noreply.github.com>"
+copyright = "FeroTRX contributors"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+FeroTRX replays pcap and pcapng captures at a controlled rate, rewrites them \
+on the way, varies fields from packet to packet, builds packets from scratch, \
+runs several streams at once from a profile and replays TCP sessions \
+statefully. Sends through libpcap or AF_XDP."""
+section = "net"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/ferotrx", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/ferotrx/README.md", "644"],
+    ["../../examples/*", "usr/share/doc/ferotrx/examples/", "644"],
+]

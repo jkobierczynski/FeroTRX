@@ -28,6 +28,20 @@ routers and firewalls), and its engine is a library you can use from your own pr
 | `ferotrx-ctl` | Remote control: a JSON-RPC server and client to load profiles, start and stop runs, and read live counters. |
 | `ferotrx-cli` | The `ferotrx` command line tool. |
 
+## Install
+
+Every release on the [Releases page](https://github.com/jkobierczynski/FeroTRX/releases)
+has ready-made packages:
+
+* **Debian and Ubuntu (x86_64):** download `ferotrx_*_amd64.deb` and run
+  `sudo apt install ./ferotrx_*_amd64.deb`.
+* **Other Linux, macOS:** unpack the `.tar.gz` for your system and put `ferotrx` on your `PATH`
+  (Linux needs libpcap: `libpcap0.8` on Debian, `libpcap` elsewhere).
+* **Windows:** unpack the `.zip`; install [Npcap](https://npcap.com/) to send and receive.
+
+The packages have the default backends (libpcap/Npcap, and AF_XDP on Linux).
+For DPDK, build from source. How releases are made: [RELEASING.md](RELEASING.md).
+
 ## Build
 
 You need a stable Rust toolchain and libpcap:

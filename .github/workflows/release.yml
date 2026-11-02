@@ -1,0 +1,201 @@
+name: Release
+
+# Pushing a version tag (vX.Y.Z) builds the `ferotrx` command line tool for
+# Linux, macOS and Windows and publishes a GitHub Release with the packages.
+# Pushing the same tag again (moved or recreated) replaces that release.
+#
+# Pull requests that touch packaging, and manual runs, build the same packages
+# as workflow artifacts without publishing anything.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - crates/ferotrx-cli/Cargo.toml
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.v.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          echo "Workspace version: $version"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match the workspace version $version (Cargo.toml). Bump the version or fix the tag."
+              exit 1
+            fi
+            echo "name=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=v$version-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Built in Debian 12 so the binary and the .deb run on Debian 12 and newer
+  # and Ubuntu 22.04 and newer (glibc 2.36, libpcap0.8).
+  linux:
+    name: Linux x86_64 (.deb, .tar.gz)
+    needs: version
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    env:
+      NAME: ferotrx-${{ needs.version.outputs.name }}-x86_64-linux
+    steps:
+      - name: Install build tools and libpcap
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config libpcap-dev dpkg-dev
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+      - name: Build
+        run: cargo build --release --locked -p ferotrx-cli
+      - name: Smoke test
+        run: |
+          ./target/release/ferotrx --version
+          ./target/release/ferotrx backends
+          ./target/release/ferotrx info examples/web.pcap
+      - name: Debian package
+        run: |
+          cargo deb -p ferotrx-cli --no-build --output dist/
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb
+          # Install it like a user would, and run it.
+          apt-get install -y ./dist/*.deb
+          ferotrx --version
+      - name: Archive
+        run: |
+          mkdir -p "$NAME"
+          cp target/release/ferotrx README.md LICENSE "$NAME/"
+          cp -r examples "$NAME/"
+          tar czf "dist/$NAME.tar.gz" "$NAME"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+
+  # One runner builds both: Apple silicon natively, Intel by cross-compiling
+  # against the same SDK (libpcap ships with macOS).
+  macos:
+    name: macOS ${{ matrix.arch }} (.tar.gz)
+    needs: version
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    env:
+      NAME: ferotrx-${{ needs.version.outputs.name }}-${{ matrix.arch }}-macos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked -p ferotrx-cli --target ${{ matrix.target }}
+      - name: Smoke test
+        if: matrix.arch == 'aarch64'
+        run: |
+          ./target/${{ matrix.target }}/release/ferotrx --version
+          ./target/${{ matrix.target }}/release/ferotrx info examples/web.pcap
+      - name: Archive
+        run: |
+          mkdir -p dist "$NAME"
+          cp target/${{ matrix.target }}/release/ferotrx README.md LICENSE "$NAME/"
+          cp -r examples "$NAME/"
+          tar czf "dist/$NAME.tar.gz" "$NAME"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Links against the Npcap SDK; running it needs Npcap installed.
+  windows:
+    name: Windows x86_64 (.zip)
+    needs: version
+    runs-on: windows-latest
+    env:
+      NAME: ferotrx-${{ needs.version.outputs.name }}-x86_64-windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Npcap SDK
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://npcap.com/dist/npcap-sdk-1.13.zip -OutFile npcap-sdk.zip
+          Expand-Archive npcap-sdk.zip -DestinationPath npcap-sdk
+          "LIB=$PWD\npcap-sdk\Lib\x64;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build
+        run: cargo build --release --locked -p ferotrx-cli
+      - name: Archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist, $env:NAME | Out-Null
+          Copy-Item target\release\ferotrx.exe, README.md, LICENSE $env:NAME
+          Copy-Item -Recurse examples $env:NAME
+          Compress-Archive -Path $env:NAME -DestinationPath "dist\$env:NAME.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    if: github.ref_type == 'tag'
+    needs: [version, linux, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Two pushes of the same tag must not publish at the same time.
+    concurrency:
+      group: release-${{ github.ref_name }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create the release
+        run: |
+          # A tag that was moved or recreated replaces its release: delete the
+          # old one (the tag stays) so no stale packages or notes remain.
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG exists; replacing it."
+            gh release delete "$TAG" --yes
+          fi
+          gh release create "$TAG" dist/* \
+            --verify-tag \
+            --title "FeroTRX $TAG" \
+            --generate-notes
