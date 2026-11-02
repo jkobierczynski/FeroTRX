@@ -21,7 +21,9 @@
 //!   the CLI and the `ferotrx-ctl` control server both run traffic this way.
 //!
 //! Sinks that talk to real interfaces or files live in the `ferotrx-io` crate,
-//! so this crate has no platform specific code.
+//! so this crate has no platform specific code. [`SendSettings`] names the
+//! sender a run asks for (libpcap/Npcap, AF_XDP or DPDK, see [`Backend`]);
+//! `ferotrx-io` implements them.
 //!
 //! ```
 //! use ferotrx_core::{Capture, Packet, Rate, ReplayConfig, VecSink, replay};
@@ -66,6 +68,7 @@ mod pacer;
 #[cfg(feature = "profile")]
 mod profile;
 mod replay;
+mod send;
 mod sink;
 mod source;
 mod stream;
@@ -79,6 +82,7 @@ pub use pacer::{parse_duration, Pacer, Rate};
 #[cfg(feature = "profile")]
 pub use profile::{Profile, StreamSource, StreamSpec, DEFAULT_INTERVAL};
 pub use replay::{replay, replay_with_progress, ReplayConfig, ReplayStats};
+pub use send::{Backend, SendSettings, XdpMode, DEFAULT_BATCH};
 pub use sink::{NullSink, PacketSink, SinkError, VecSink};
 pub use source::{CaptureSource, PacketSource};
 pub use stream::{run, run_with_progress, RunConfig, RunStats, Stream};

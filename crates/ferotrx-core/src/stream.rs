@@ -191,7 +191,18 @@ where
                 break;
             }
         }
-        if !wait_until(start + lane.deadline, &stop_requested) {
+        let send_at = start + lane.deadline;
+        if send_at > Instant::now() {
+            // Let batching sinks hand over what they hold before we wait.
+            if let Err(source) = sink.idle() {
+                if !config.ignore_send_errors {
+                    let index = stats.total.packets + stats.total.send_errors;
+                    let _ = sink.flush();
+                    return Err(Error::Sink { index, source });
+                }
+            }
+        }
+        if !wait_until(send_at, &stop_requested) {
             stats.total.stopped = true;
             break;
         }

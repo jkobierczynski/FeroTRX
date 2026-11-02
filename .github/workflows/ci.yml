@@ -56,3 +56,53 @@ jobs:
       - name: Test control API (Windows)
         if: runner.os == 'Windows'
         run: cargo test -p ferotrx-ctl --no-default-features
+
+      # AF_XDP needs root and an interface it may send on: a veth pair.
+      - name: AF_XDP on a veth pair (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo ip link add xt0 type veth peer name xt1
+          sudo ip link set xt0 up
+          sudo ip link set xt1 up
+          bin=$(cargo test -p ferotrx-io --lib --no-run --message-format=json \
+                | jq -r 'select(.executable != null and .target.kind == ["lib"]) | .executable')
+          sudo FEROTRX_TEST_XDP_IFACE=xt0 "$bin" af_xdp --nocapture
+          cargo build -p ferotrx-cli
+          before=$(cat /sys/class/net/xt1/statistics/rx_packets)
+          sudo ./target/debug/ferotrx replay examples/web.pcap -i xt0 -B af_xdp --xdp-mode copy -t -l 100
+          after=$(cat /sys/class/net/xt1/statistics/rx_packets)
+          echo "xt1 received $((after - before)) packets"
+          test $((after - before)) -ge 2100
+
+  # DPDK is an optional feature: build it against Ubuntu's DPDK and send
+  # through DPDK's af_packet driver on a veth pair, without hugepages.
+  dpdk:
+    name: dpdk (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install DPDK and libpcap
+        run: sudo apt-get update && sudo apt-get install -y dpdk-dev libpcap-dev pkg-config
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --features ferotrx-cli/dpdk -- -D warnings
+      - name: Build
+        run: cargo build -p ferotrx-cli --features dpdk
+      - name: Send through DPDK
+        run: |
+          sudo ip link add dt0 type veth peer name dt1
+          sudo ip link set dt0 up
+          sudo ip link set dt1 up
+          eal='--no-huge -m 256 --no-pci -l 0 --log-level=warning'
+          ./target/debug/ferotrx backends | grep -q '^yes  dpdk'
+          before=$(cat /sys/class/net/dt1/statistics/rx_packets)
+          sudo ./target/debug/ferotrx replay examples/web.pcap -i net_af_packet0,iface=dt0 \
+            -B dpdk --dpdk-args "$eal" -t -l 100
+          after=$(cat /sys/class/net/dt1/statistics/rx_packets)
+          echo "dt1 received $((after - before)) packets"
+          test $((after - before)) -ge 2100
+          sudo ./target/debug/ferotrx replay examples/web.pcap -i net_null0 \
+            -B dpdk --dpdk-args "$eal" --pps 2000 -l 5

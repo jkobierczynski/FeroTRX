@@ -4,8 +4,13 @@
 //!   It works everywhere and needs no privileges.
 //! * [`InterfaceSink`] sends packets on a network interface through libpcap
 //!   (Linux, macOS) or Npcap (Windows). Enabled by the default `pcap` feature.
+//! * `AfXdpSink` sends through a Linux AF_XDP socket, in batches. Enabled by
+//!   the default `af-xdp` feature, on Linux only; needs no system libraries.
+//! * `DpdkSink` sends through DPDK. Enabled by the `dpdk` feature, which needs
+//!   DPDK installed to build.
 //! * [`Output`] names one of these (or [`NullSink`]) and opens it; the CLI and
-//!   the control server both choose outputs this way.
+//!   the control server both choose outputs this way. Which interface sender is
+//!   used is a [`Backend`], chosen with [`SendSettings`].
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -14,7 +19,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ferotrx_core::{PacketSink, SinkError};
 
-pub use ferotrx_core::NullSink;
+pub use ferotrx_core::{Backend, NullSink, SendSettings, XdpMode};
+
+#[cfg(all(feature = "af-xdp", target_os = "linux"))]
+mod afxdp;
+#[cfg(all(feature = "af-xdp", target_os = "linux"))]
+pub use afxdp::{AfXdpConfig, AfXdpSink};
+
+#[cfg(feature = "dpdk")]
+mod dpdk;
+#[cfg(feature = "dpdk")]
+pub use dpdk::{DpdkConfig, DpdkSink};
 
 /// Writes every packet to a pcap file with nanosecond timestamps of when it was sent.
 pub struct PcapFileSink {
@@ -38,37 +53,144 @@ impl PcapFileSink {
 
 const SNAPLEN: u32 = 262_144;
 
+/// The interface backends this build can use, in [`Backend::ALL`] order.
+pub fn backends() -> Vec<Backend> {
+    Backend::ALL
+        .into_iter()
+        .filter(|b| backend_missing(*b).is_none())
+        .collect()
+}
+
+/// Why `backend` cannot be used in this build, or `None` if it can.
+fn backend_missing(backend: Backend) -> Option<&'static str> {
+    match backend {
+        Backend::Pcap if cfg!(feature = "pcap") => None,
+        Backend::Pcap => Some("this build has no libpcap/Npcap support (feature `pcap`)"),
+        Backend::AfXdp if cfg!(all(feature = "af-xdp", target_os = "linux")) => None,
+        Backend::AfXdp if cfg!(not(target_os = "linux")) => Some("AF_XDP only exists on Linux"),
+        Backend::AfXdp => Some("this build has no AF_XDP support (feature `af-xdp`)"),
+        Backend::Dpdk if cfg!(feature = "dpdk") => None,
+        Backend::Dpdk => {
+            Some("this build has no DPDK support (rebuild with `--features dpdk`, DPDK installed)")
+        }
+    }
+}
+
 /// Where a run sends its packets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Output {
-    /// A network interface (needs the `pcap` feature to open).
-    Interface(String),
+    /// A network interface, sent on as `send` says. With the DPDK backend the
+    /// name is a DPDK device: a PCI address, a virtual device such as
+    /// `net_af_packet0,iface=eth0`, or a port number.
+    Interface { name: String, send: SendSettings },
     /// A pcap file, stamped with each packet's send time.
     File(PathBuf),
     /// Nowhere: packets are discarded.
     Null,
 }
 
+/// An opened [`Output`], with a line on how it sends.
+pub struct Opened {
+    pub sink: Box<dyn PacketSink + Send>,
+    /// For example `pcap on enp0s3` or `af_xdp on enp0s3 queue 0, copy mode`.
+    pub detail: String,
+}
+
 impl Output {
+    /// A network interface with the default sender (libpcap/Npcap).
+    pub fn interface(name: impl Into<String>) -> Self {
+        Output::Interface {
+            name: name.into(),
+            send: SendSettings::default(),
+        }
+    }
+
+    /// Fills the send settings this output does not set from `defaults`, for
+    /// example a profile's `[output]` table. Other outputs are unchanged.
+    pub fn with_defaults(self, defaults: &SendSettings) -> Self {
+        match self {
+            Output::Interface { name, send } => Output::Interface {
+                name,
+                send: send.or(defaults),
+            },
+            other => other,
+        }
+    }
+
     /// Opens the output for packets of `linktype`.
     pub fn open(&self, linktype: u32) -> Result<Box<dyn PacketSink + Send>, SinkError> {
+        Ok(self.open_detailed(linktype)?.sink)
+    }
+
+    /// Opens the output, and says how it sends.
+    pub fn open_detailed(&self, linktype: u32) -> Result<Opened, SinkError> {
         match self {
-            #[cfg(feature = "pcap")]
-            Output::Interface(name) => {
-                Ok(Box::new(InterfaceSink::open(name).map_err(|e| {
-                    format!("cannot open interface {name}: {e}")
-                })?))
-            }
-            #[cfg(not(feature = "pcap"))]
-            Output::Interface(name) => Err(format!(
-                "cannot send on {name}: this build has no interface support (feature `pcap`)"
+            Output::Interface { name, send } => open_interface(name, send),
+            Output::File(path) => Ok(Opened {
+                sink: Box::new(
+                    PcapFileSink::create(path, linktype)
+                        .map_err(|e| format!("cannot create {}: {e}", path.display()))?,
+                ),
+                detail: format!("file {}", path.display()),
+            }),
+            Output::Null => Ok(Opened {
+                sink: Box::new(NullSink),
+                detail: "null".into(),
+            }),
+        }
+    }
+}
+
+fn open_interface(name: &str, send: &SendSettings) -> Result<Opened, SinkError> {
+    send.validate()?;
+    let backend = send.backend();
+    if let Some(why) = backend_missing(backend) {
+        return Err(format!("cannot send on {name} with {backend}: {why}").into());
+    }
+    let fail =
+        |e: SinkError| -> SinkError { format!("cannot open {name} with {backend}: {e}").into() };
+    match backend {
+        #[cfg(feature = "pcap")]
+        Backend::Pcap => Ok(Opened {
+            sink: Box::new(InterfaceSink::open(name).map_err(fail)?),
+            detail: format!("pcap on {name}"),
+        }),
+        #[cfg(all(feature = "af-xdp", target_os = "linux"))]
+        Backend::AfXdp => {
+            let sink = AfXdpSink::open(
+                name,
+                &AfXdpConfig {
+                    queue: send.queue(),
+                    mode: send.xdp_mode(),
+                    batch: send.batch(),
+                },
             )
-            .into()),
-            Output::File(path) => Ok(Box::new(
-                PcapFileSink::create(path, linktype)
-                    .map_err(|e| format!("cannot create {}: {e}", path.display()))?,
-            )),
-            Output::Null => Ok(Box::new(NullSink)),
+            .map_err(fail)?;
+            Ok(Opened {
+                detail: sink.describe(),
+                sink: Box::new(sink),
+            })
+        }
+        #[cfg(feature = "dpdk")]
+        Backend::Dpdk => {
+            let sink = DpdkSink::open(
+                name,
+                &DpdkConfig {
+                    queue: send.queue(),
+                    batch: send.batch(),
+                    eal_args: send.dpdk_args().to_vec(),
+                },
+            )
+            .map_err(fail)?;
+            Ok(Opened {
+                detail: sink.describe(),
+                sink: Box::new(sink),
+            })
+        }
+        #[allow(unreachable_patterns)]
+        _ => {
+            let _ = fail;
+            unreachable!("backend_missing covers backends this build lacks")
         }
     }
 }
@@ -76,7 +198,12 @@ impl Output {
 impl std::fmt::Display for Output {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Output::Interface(name) => write!(f, "interface {name}"),
+            Output::Interface { name, send } if send.backend() == Backend::Pcap => {
+                write!(f, "interface {name}")
+            }
+            Output::Interface { name, send } => {
+                write!(f, "interface {name} via {}", send.backend())
+            }
             Output::File(path) => write!(f, "file {}", path.display()),
             Output::Null => f.write_str("null"),
         }
@@ -156,6 +283,103 @@ mod tests {
     use super::*;
     use ferotrx_core::{replay, Capture, Packet, Rate, ReplayConfig};
     use std::time::Duration;
+
+    #[test]
+    fn backends_this_build_lacks_say_why() {
+        let have = backends();
+        for b in Backend::ALL {
+            let out = Output::Interface {
+                name: "no-such-if0".into(),
+                send: SendSettings {
+                    backend: Some(b),
+                    ..Default::default()
+                },
+            };
+            if have.contains(&b) {
+                continue;
+            }
+            let err = out.open(1).err().expect("cannot open").to_string();
+            assert!(err.contains(b.name()), "{err}");
+        }
+        assert!(have.contains(&Backend::Pcap) == cfg!(feature = "pcap"));
+    }
+
+    #[test]
+    fn output_takes_profile_defaults() {
+        let profile = SendSettings {
+            backend: Some(Backend::AfXdp),
+            batch: Some(8),
+            ..Default::default()
+        };
+        let out = Output::Interface {
+            name: "eth0".into(),
+            send: SendSettings {
+                batch: Some(32),
+                ..Default::default()
+            },
+        }
+        .with_defaults(&profile);
+        let Output::Interface { send, .. } = &out else {
+            panic!()
+        };
+        assert_eq!((send.backend(), send.batch()), (Backend::AfXdp, 32));
+        assert_eq!(out.to_string(), "interface eth0 via af_xdp");
+        assert_eq!(Output::Null.with_defaults(&profile), Output::Null);
+    }
+
+    /// Sends on a real interface through AF_XDP. Needs root; set
+    /// FEROTRX_TEST_XDP_IFACE to an interface it may send junk on, e.g. one end
+    /// of a veth pair: `ip link add xt0 type veth peer name xt1`.
+    #[cfg(all(feature = "af-xdp", target_os = "linux"))]
+    #[test]
+    fn af_xdp_sends_on_a_real_interface() {
+        let Ok(name) = std::env::var("FEROTRX_TEST_XDP_IFACE") else {
+            eprintln!("skipped: set FEROTRX_TEST_XDP_IFACE to run");
+            return;
+        };
+        let counter = format!("/sys/class/net/{name}/statistics/tx_packets");
+        let read = || -> u64 {
+            std::fs::read_to_string(&counter)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        for batch in [1, 64] {
+            let before = read();
+            let mut sink = AfXdpSink::open(
+                &name,
+                &AfXdpConfig {
+                    queue: 0,
+                    mode: XdpMode::Copy,
+                    batch,
+                },
+            )
+            .unwrap();
+            assert!(!sink.is_zero_copy());
+            // More packets than the UMEM has frames, so frames must be recycled.
+            for i in 0..10_000u32 {
+                let mut frame = vec![0u8; 60];
+                frame[..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 0x01]);
+                frame[12..14].copy_from_slice(&[0x88, 0xb5]); // local experimental ethertype
+                frame[14..18].copy_from_slice(&i.to_be_bytes());
+                sink.send(&frame).unwrap();
+            }
+            sink.flush().unwrap();
+            assert_eq!(read() - before, 10_000, "batch {batch}");
+        }
+        let too_big = vec![0u8; 5000];
+        let mut sink = AfXdpSink::open(
+            &name,
+            &AfXdpConfig {
+                queue: 0,
+                mode: XdpMode::Copy,
+                batch: 1,
+            },
+        )
+        .unwrap();
+        assert!(sink.send(&too_big).is_err());
+    }
 
     #[test]
     fn file_sink_round_trips() {

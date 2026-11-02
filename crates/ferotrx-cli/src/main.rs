@@ -9,8 +9,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use ferotrx_core::{
-    parse_duration, Capture, CaptureSource, Job, PacketSink, Profile, Rate, ReplayStats, Rewrite,
-    RunConfig, RunStats, Stream, Transform, LINKTYPE_ETHERNET,
+    parse_duration, Backend, Capture, CaptureSource, Job, PacketSink, Profile, Rate, ReplayStats,
+    Rewrite, RunConfig, RunStats, SendSettings, Stream, Transform, XdpMode, LINKTYPE_ETHERNET,
 };
 
 /// FeroTRX: replay captured traffic at a controlled rate.
@@ -39,6 +39,8 @@ enum Command {
     /// List the interfaces packets can be sent on.
     #[cfg(feature = "pcap")]
     Interfaces,
+    /// List the ways this build can send on interfaces (pcap, af_xdp, dpdk).
+    Backends,
     /// Run a control server: other programs load profiles, start and stop runs
     /// and read live counters over JSON-RPC (see `ferotrx ctl`).
     Serve(remote::ServeArgs),
@@ -53,6 +55,9 @@ struct ReplayArgs {
 
     #[command(flatten)]
     output: Output,
+
+    #[command(flatten)]
+    send: SendArgs,
 
     #[command(flatten)]
     rate: RateArgs,
@@ -127,9 +132,11 @@ struct BuildArgs {
     out: Option<PathBuf>,
 
     /// Send the built packets on this network interface (see `ferotrx interfaces`).
-    #[cfg(feature = "pcap")]
     #[arg(short, long)]
     iface: Option<String>,
+
+    #[command(flatten)]
+    send: SendArgs,
 
     #[command(flatten)]
     rate: RateArgs,
@@ -186,6 +193,9 @@ struct RunArgs {
     output: Output,
 
     #[command(flatten)]
+    send: SendArgs,
+
+    #[command(flatten)]
     common: CommonArgs,
 }
 
@@ -211,8 +221,9 @@ struct CommonArgs {
 #[derive(Args)]
 #[group(required = true, multiple = false)]
 struct Output {
-    /// Send on this network interface (see `ferotrx interfaces`).
-    #[cfg(feature = "pcap")]
+    /// Send on this network interface (see `ferotrx interfaces`). With
+    /// `--backend dpdk`, a DPDK device: a PCI address, a virtual device such as
+    /// `net_af_packet0,iface=eth0`, or a port number.
     #[arg(short, long)]
     iface: Option<String>,
 
@@ -223,6 +234,51 @@ struct Output {
     /// Discard packets; measures the engine's own speed.
     #[arg(long)]
     null: bool,
+}
+
+/// How to send on `--iface`. Values left out come from the profile's
+/// `[output]` table, then the defaults.
+#[derive(Args, Clone, Default)]
+pub struct SendArgs {
+    /// Sender for --iface: pcap (libpcap/Npcap, the default), af_xdp (Linux)
+    /// or dpdk (builds with the `dpdk` feature). `ferotrx backends` lists what this build has.
+    #[arg(short = 'B', long, value_name = "NAME")]
+    pub backend: Option<Backend>,
+
+    /// Transmit queue of the interface (af_xdp, dpdk; default 0).
+    #[arg(long)]
+    pub queue: Option<u16>,
+
+    /// AF_XDP mode: auto (default; zero-copy if the driver can), copy (also
+    /// called skb or generic; works on every interface, VMs included) or zerocopy.
+    #[arg(long, value_name = "MODE")]
+    pub xdp_mode: Option<XdpMode>,
+
+    /// Packets handed to the kernel or NIC at once (af_xdp, dpdk; default 64).
+    /// Paced packets are never held back to fill a batch.
+    #[arg(long)]
+    pub batch: Option<u32>,
+
+    /// DPDK EAL arguments as one string, e.g. '-l 0-1 --no-huge -m 512'.
+    #[arg(long, value_name = "ARGS", allow_hyphen_values = true)]
+    pub dpdk_args: Option<String>,
+}
+
+impl SendArgs {
+    pub fn settings(&self) -> Result<SendSettings> {
+        let s = SendSettings {
+            backend: self.backend,
+            queue: self.queue,
+            xdp_mode: self.xdp_mode,
+            batch: self.batch,
+            dpdk_args: self
+                .dpdk_args
+                .as_deref()
+                .map(|a| a.split_whitespace().map(String::from).collect()),
+        };
+        s.validate()?;
+        Ok(s)
+    }
 }
 
 #[derive(Args)]
@@ -284,6 +340,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Build(args) => cmd_build(args),
         #[cfg(feature = "pcap")]
         Command::Interfaces => cmd_interfaces(),
+        Command::Backends => cmd_backends(),
         Command::Serve(args) => remote::cmd_serve(args),
         Command::Ctl(args) => remote::cmd_ctl(args),
     }
@@ -439,16 +496,7 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
     }
     let cap = Capture::from_specs(&specs, args.interval)?;
 
-    let sending = {
-        #[cfg(feature = "pcap")]
-        {
-            args.iface.is_some()
-        }
-        #[cfg(not(feature = "pcap"))]
-        {
-            false
-        }
-    };
+    let sending = args.iface.is_some();
     if !(sending && args.common.quiet) {
         for (i, p) in cap.packets.iter().enumerate() {
             let d = ferotrx_packet::decode(cap.linktype, &p.data);
@@ -498,7 +546,6 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
         eprintln!("wrote {} packets to {}", cap.len(), out.display());
     }
 
-    #[cfg(feature = "pcap")]
     if let Some(iface) = &args.iface {
         let rate = args.rate.rate();
         rate.validate()?;
@@ -518,7 +565,7 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
             out: None,
             null: false,
         };
-        let sink = open_sink(&output, linktype)?;
+        let sink = open_sink(&output, &args.send, linktype, args.common.quiet)?;
         let job = Job::spawn(vec![stream], sink, run_config(&args.common)?)?;
         let stats = watch(job, &args.common)?;
         print_line(done_label(&stats.total), &stats.total);
@@ -526,6 +573,20 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
     }
     if args.out.is_none() && (args.loops != 1 || args.rate.is_set()) {
         eprintln!("note: --loop and rates apply when sending with --iface");
+    }
+    Ok(())
+}
+
+fn cmd_backends() -> Result<()> {
+    let have = ferotrx_io::backends();
+    for b in Backend::ALL {
+        let what = match b {
+            Backend::Pcap => "libpcap (Linux, macOS) or Npcap (Windows); works everywhere",
+            Backend::AfXdp => "Linux AF_XDP sockets; batched, copy or zero-copy mode",
+            Backend::Dpdk => "DPDK user space drivers; needs a DPDK-bound NIC or a vdev",
+        };
+        let state = if have.contains(&b) { "yes" } else { "no " };
+        println!("{state}  {:<7} {what}", b.name());
     }
     Ok(())
 }
@@ -548,10 +609,16 @@ fn cmd_interfaces() -> Result<()> {
 }
 
 impl Output {
-    fn to_io(&self) -> Result<ferotrx_io::Output> {
-        #[cfg(feature = "pcap")]
+    fn to_io(&self, send: &SendArgs) -> Result<ferotrx_io::Output> {
+        let send = send.settings()?;
         if let Some(name) = &self.iface {
-            return Ok(ferotrx_io::Output::Interface(name.clone()));
+            return Ok(ferotrx_io::Output::Interface {
+                name: name.clone(),
+                send,
+            });
+        }
+        if !send.is_empty() {
+            eprintln!("note: --backend, --queue, --xdp-mode, --batch and --dpdk-args apply to --iface only");
         }
         if let Some(path) = &self.out {
             return Ok(ferotrx_io::Output::File(path.clone()));
@@ -563,14 +630,25 @@ impl Output {
     }
 }
 
-fn open_sink(output: &Output, linktype: u32) -> Result<Box<dyn PacketSink + Send>> {
-    let output = output.to_io()?;
+fn open_sink(
+    output: &Output,
+    send: &SendArgs,
+    linktype: u32,
+    quiet: bool,
+) -> Result<Box<dyn PacketSink + Send>> {
+    let output = output.to_io(send)?;
     warn_linktype(&output, linktype);
-    output.open(linktype).map_err(|e| anyhow::anyhow!(e))
+    let opened = output
+        .open_detailed(linktype)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    if !quiet && matches!(output, ferotrx_io::Output::Interface { .. }) {
+        eprintln!("sending with {}", opened.detail);
+    }
+    Ok(opened.sink)
 }
 
 fn warn_linktype(output: &ferotrx_io::Output, linktype: u32) {
-    if let ferotrx_io::Output::Interface(name) = output {
+    if let ferotrx_io::Output::Interface { name, .. } = output {
         if linktype != LINKTYPE_ETHERNET {
             eprintln!("warning: capture link type is {linktype}, not Ethernet; frames may not be valid on {name}");
         }
@@ -600,7 +678,7 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
     for r in args.rewrites {
         stream.push_transform(r);
     }
-    let sink = open_sink(&args.output, linktype)?;
+    let sink = open_sink(&args.output, &args.send, linktype, args.common.quiet)?;
     let job = Job::spawn(vec![stream], sink, run_config(&args.common)?)?;
     let stats = watch(job, &args.common)?;
     print_line(done_label(&stats.total), &stats.total);
@@ -626,10 +704,15 @@ fn cmd_run(args: RunArgs) -> Result<()> {
             );
         }
     }
-    let output = args.output.to_io()?;
+    let output = args.output.to_io(&args.send)?;
     // The same function starts `run.start` runs on the control server.
-    let job = ferotrx_ctl::start_run(&profile, &output, None, run_config(&args.common)?)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let started =
+        ferotrx_ctl::start_run_detailed(&profile, &output, None, run_config(&args.common)?)
+            .map_err(|e| anyhow::anyhow!(e))?;
+    if !args.common.quiet && matches!(output, ferotrx_io::Output::Interface { .. }) {
+        eprintln!("sending with {}", started.detail);
+    }
+    let job = started.job;
     let names = job.stream_names().to_vec();
     let stats = watch(job, &args.common)?;
     for (name, st) in names.iter().zip(&stats.streams) {

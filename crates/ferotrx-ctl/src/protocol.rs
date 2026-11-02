@@ -142,6 +142,9 @@ pub struct ServerInfo {
     pub protocol: u32,
     /// True when the server can send on network interfaces.
     pub interfaces: bool,
+    /// The interface backends the server has: `pcap`, `af_xdp`, `dpdk`.
+    #[serde(default)]
+    pub backends: Vec<String>,
     /// True when connections must send `auth` first.
     pub auth_required: bool,
 }
@@ -212,13 +215,32 @@ pub struct StreamInfo {
 
 // ----- run.* -----
 
-/// Where a run sends its packets: set exactly one field.
+/// Where a run sends its packets: set exactly one of `iface`, `file` and `null`.
+///
+/// With `iface`, the other fields choose how to send; any left out come from
+/// the profile's `[output]` table, then the defaults.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputSpec {
-    /// A network interface on the server, e.g. `enp0s3`.
+    /// A network interface on the server, e.g. `enp0s3` (a DPDK device with
+    /// the `dpdk` backend).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iface: Option<String>,
+    /// `pcap` (default), `af_xdp` or `dpdk`; see `server.info` for what the server has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Transmit queue (af_xdp, dpdk).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<u16>,
+    /// AF_XDP mode: `auto`, `copy` or `zerocopy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xdp_mode: Option<String>,
+    /// Packets handed over at once (af_xdp, dpdk).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<u32>,
+    /// DPDK EAL arguments. EAL starts once per server process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dpdk_args: Option<Vec<String>>,
     /// A pcap file on the server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<PathBuf>,

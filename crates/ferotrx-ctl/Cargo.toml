@@ -8,9 +8,13 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["pcap"]
+default = ["pcap", "af-xdp"]
 # Let runs send on real network interfaces (libpcap/Npcap).
 pcap = ["ferotrx-io/pcap"]
+# Let runs send through Linux AF_XDP sockets.
+af-xdp = ["ferotrx-io/af-xdp"]
+# Let runs send through DPDK (needs DPDK installed to build).
+dpdk = ["ferotrx-io/dpdk"]
 
 [dependencies]
 ferotrx-core.workspace = true

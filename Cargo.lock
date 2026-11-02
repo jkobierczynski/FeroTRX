@@ -273,8 +273,11 @@ dependencies = [
 name = "ferotrx-io"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "ferotrx-core",
+ "libc",
  "pcap",
+ "pkg-config",
 ]
 
 [[package]]

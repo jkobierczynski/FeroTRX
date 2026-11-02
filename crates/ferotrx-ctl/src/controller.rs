@@ -9,7 +9,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use ferotrx_core::{
-    parse_duration, Job, JobState, Profile, Rate, RunConfig, StreamSource, LINKTYPE_ETHERNET,
+    parse_duration, Job, JobState, Profile, Rate, RunConfig, SendSettings, StreamSource,
+    LINKTYPE_ETHERNET,
 };
 use ferotrx_io::Output;
 
@@ -18,17 +19,35 @@ use crate::protocol::*;
 /// Error from [`start_run`].
 pub type StartError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+/// A run started by [`start_run_detailed`].
+pub struct Started {
+    pub job: Job,
+    /// How the output sends, e.g. `af_xdp on enp0s3 queue 0, copy mode`.
+    pub detail: String,
+}
+
 /// Loads a profile's streams, opens the output and starts a [`Job`].
 ///
 /// This is the one way traffic profiles are started: `ferotrx run` calls it,
 /// and so does `run.start` on the control server. `rate`, when given,
-/// replaces the rate of every stream.
+/// replaces the rate of every stream. Send settings the output leaves unset
+/// come from the profile's `[output]` table.
 pub fn start_run(
     profile: &Profile,
     output: &Output,
     rate: Option<Rate>,
     config: RunConfig,
 ) -> Result<Job, StartError> {
+    Ok(start_run_detailed(profile, output, rate, config)?.job)
+}
+
+/// Like [`start_run`], and says how the output sends.
+pub fn start_run_detailed(
+    profile: &Profile,
+    output: &Output,
+    rate: Option<Rate>,
+    config: RunConfig,
+) -> Result<Started, StartError> {
     let mut streams = profile.load()?;
     if let Some(rate) = rate {
         rate.validate()?;
@@ -39,8 +58,14 @@ pub fn start_run(
     let linktype = streams
         .first()
         .map_or(LINKTYPE_ETHERNET, ferotrx_core::Stream::linktype);
-    let sink = output.open(linktype)?;
-    Ok(Job::spawn(streams, sink, config)?)
+    let opened = output
+        .clone()
+        .with_defaults(&profile.output)
+        .open_detailed(linktype)?;
+    Ok(Started {
+        job: Job::spawn(streams, opened.sink, config)?,
+        detail: opened.detail,
+    })
 }
 
 /// How long `run.stop` waits for a run to end before answering anyway.
@@ -61,7 +86,8 @@ pub struct Controller {
 struct Run {
     id: u64,
     profile: String,
-    output: Output,
+    /// How the output sends, as `start_run_detailed` described it.
+    output: String,
     job: Job,
     stopped_by_request: std::sync::atomic::AtomicBool,
 }
@@ -131,7 +157,11 @@ impl Controller {
             name: "ferotrx".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             protocol: PROTOCOL_VERSION,
-            interfaces: cfg!(feature = "pcap"),
+            interfaces: !ferotrx_io::backends().is_empty(),
+            backends: ferotrx_io::backends()
+                .into_iter()
+                .map(|b| b.name().to_string())
+                .collect(),
             auth_required: self.auth_required,
         }
     }
@@ -231,10 +261,16 @@ impl Controller {
             .get(&p.profile)
             .cloned()
             .ok_or_else(|| no_profile(&p.profile))?;
+        let send = p.output.send_settings()?;
         let output = match (p.output.iface, p.output.file, p.output.null) {
-            (Some(i), None, false) => Output::Interface(i),
-            (None, Some(f), false) => Output::File(f),
-            (None, None, true) => Output::Null,
+            (Some(name), None, false) => Output::Interface { name, send },
+            (None, Some(f), false) if send.is_empty() => Output::File(f),
+            (None, None, true) if send.is_empty() => Output::Null,
+            (None, Some(_), false) | (None, None, true) => {
+                return Err(RpcError::invalid_params(
+                    "backend, queue, xdp_mode, batch and dpdk_args need iface",
+                ))
+            }
             _ => {
                 return Err(RpcError::invalid_params(
                     "output needs exactly one of iface, file or null",
@@ -259,13 +295,14 @@ impl Controller {
             ignore_send_errors: p.ignore_errors,
             stop: None,
         };
-        let job = start_run(&profile, &output, rate, config).map_err(RpcError::failed)?;
+        let started =
+            start_run_detailed(&profile, &output, rate, config).map_err(RpcError::failed)?;
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
         let run = Arc::new(Run {
             id,
             profile: p.profile,
-            output,
-            job,
+            output: started.detail,
+            job: started.job,
             stopped_by_request: Default::default(),
         });
         let info = run.info();
@@ -347,7 +384,7 @@ impl Run {
         RunInfo {
             id: self.id,
             profile: self.profile.clone(),
-            output: self.output.to_string(),
+            output: self.output.clone(),
             state,
             error,
             total,
@@ -384,6 +421,32 @@ fn display_path(p: &Path) -> String {
 
 fn no_profile(name: &str) -> RpcError {
     RpcError::not_found(format!("no profile '{name}' (load it with profile.load)"))
+}
+
+impl OutputSpec {
+    /// The send settings of an `iface` output, checked.
+    pub fn send_settings(&self) -> Result<SendSettings, RpcError> {
+        let bad = |e: ferotrx_core::Error| RpcError::invalid_params(e.to_string());
+        let s = SendSettings {
+            backend: self
+                .backend
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(bad)?,
+            queue: self.queue,
+            xdp_mode: self
+                .xdp_mode
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(bad)?,
+            batch: self.batch,
+            dpdk_args: self.dpdk_args.clone(),
+        };
+        s.validate().map_err(bad)?;
+        Ok(s)
+    }
 }
 
 pub(crate) fn parse<T: DeserializeOwned>(params: Value) -> Result<T, RpcError> {

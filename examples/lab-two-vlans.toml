@@ -20,6 +20,12 @@
 # samples that ship next to it (examples/make-sample-pcaps.py writes them).
 # To replay your own traffic, change `pcap` to any Ethernet capture: the
 # rewrites below point it at your lab whatever addresses it had.
+#
+# Faster sending on Linux: add `-B af_xdp` to the command, or uncomment this.
+# A VirtualBox NIC has no zero-copy support, so use copy mode there.
+# [output]
+# backend = "af_xdp"
+# xdp_mode = "copy"
 
 # Steady DNS-like traffic from VLAN 10 to a host on VLAN 20, looping until the run ends.
 [[stream]]

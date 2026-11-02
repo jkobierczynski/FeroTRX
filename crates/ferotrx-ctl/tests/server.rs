@@ -242,6 +242,31 @@ fn reports_errors() {
         ),
         RpcError::INVALID_PARAMS
     );
+    for output in [
+        serde_json::json!({"null": true, "backend": "af_xdp"}),
+        serde_json::json!({"iface": "eth0", "backend": "netmap"}),
+        serde_json::json!({"iface": "eth0", "xdp_mode": "fast"}),
+        serde_json::json!({"iface": "eth0", "batch": 0}),
+    ] {
+        assert_eq!(
+            call(
+                &mut c,
+                "run.start",
+                serde_json::json!({"profile": "lab", "output": output})
+            ),
+            RpcError::INVALID_PARAMS,
+            "{output}"
+        );
+    }
+    // A backend this build lacks, or an interface that does not exist, fails to start.
+    assert_eq!(
+        call(
+            &mut c,
+            "run.start",
+            serde_json::json!({"profile": "lab", "output": {"iface": "no-such-if0", "backend": "af_xdp"}})
+        ),
+        RpcError::FAILED
+    );
     assert_eq!(
         call(
             &mut c,

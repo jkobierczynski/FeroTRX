@@ -17,8 +17,10 @@
 //! ← {"jsonrpc":"2.0","id":1,"result":{"name":"lab-two-vlans","streams":[...]}}
 //! → {"jsonrpc":"2.0","id":2,"method":"run.start","params":{"profile":"lab-two-vlans","output":{"iface":"enp0s3"}}}
 //! ← {"jsonrpc":"2.0","id":2,"result":{"id":1,"state":"running",...}}
-//! → {"jsonrpc":"2.0","id":3,"method":"stats.subscribe","params":{"id":1,"interval_ms":1000}}
-//! ← {"jsonrpc":"2.0","id":3,"result":{"subscription":1}}
+//! → {"jsonrpc":"2.0","id":3,"method":"run.start","params":{"profile":"lab-two-vlans","output":{"iface":"enp0s3","backend":"af_xdp","xdp_mode":"copy"}}}
+//! ← {"jsonrpc":"2.0","id":3,"result":{"id":2,"output":"af_xdp on enp0s3 queue 0, copy mode",...}}
+//! → {"jsonrpc":"2.0","id":4,"method":"stats.subscribe","params":{"id":1,"interval_ms":1000}}
+//! ← {"jsonrpc":"2.0","id":4,"result":{"subscription":1}}
 //! ← {"jsonrpc":"2.0","method":"stats","params":{"subscription":1,"run":{...,"total":{"packets":5120,...}}}}
 //! ```
 //!
@@ -60,6 +62,6 @@ pub mod protocol;
 mod server;
 
 pub use client::{Client, ClientError};
-pub use controller::{start_run, Controller, StartError};
+pub use controller::{start_run, start_run_detailed, Controller, StartError, Started};
 pub use protocol::RpcError;
 pub use server::{Server, MAX_LINE};

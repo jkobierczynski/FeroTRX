@@ -155,6 +155,9 @@ struct StartArgs {
     #[command(flatten)]
     output: RemoteOutput,
 
+    #[command(flatten)]
+    send: crate::SendArgs,
+
     /// Rate for every stream instead of the profile's, e.g. 10kpps or 100mbps.
     #[arg(short, long)]
     rate: Option<String>,
@@ -179,7 +182,7 @@ struct StartArgs {
 #[derive(Args)]
 #[group(required = true, multiple = false)]
 struct RemoteOutput {
-    /// Send on this interface of the server.
+    /// Send on this interface of the server (a DPDK device with `--backend dpdk`).
     #[arg(short, long)]
     iface: Option<String>,
 
@@ -223,9 +226,12 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                 if i.interfaces {
                     "yes"
                 } else {
-                    "no (built without libpcap)"
+                    "no (built without interface backends)"
                 }
             );
+            if !i.backends.is_empty() {
+                println!("backends: {}", i.backends.join(", "));
+            }
             println!(
                 "token required: {}",
                 if i.auth_required { "yes" } else { "no" }
@@ -289,10 +295,18 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
         CtlCommand::Start(s) => {
             let params = StartParams {
                 profile: s.profile,
-                output: OutputSpec {
-                    iface: s.output.iface,
-                    file: s.output.out,
-                    null: s.output.null,
+                output: {
+                    let send = s.send.settings()?;
+                    OutputSpec {
+                        iface: s.output.iface,
+                        file: s.output.out,
+                        null: s.output.null,
+                        backend: send.backend.map(|b| b.name().to_string()),
+                        queue: send.queue,
+                        xdp_mode: send.xdp_mode.map(|m| m.name().to_string()),
+                        batch: send.batch,
+                        dpdk_args: send.dpdk_args,
+                    }
                 },
                 rate: s.rate,
                 limit: s.limit,
