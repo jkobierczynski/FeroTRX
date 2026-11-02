@@ -446,3 +446,29 @@ fn answers_arp_and_ping() {
     assert!(echo.info.contains("reply"), "{}", echo.info);
     assert!(echo.problems.is_empty(), "{:?}", echo.problems);
 }
+
+#[test]
+fn says_when_arp_replies_come_back_untagged() {
+    // The router answers on VLAN 10, but the switch strips the tag.
+    let mut engine = TcpEngine::new(TcpConfig {
+        program: Arc::new(web_program(10)),
+        client: Some(client(1, 1.0, 0)),
+        server: None,
+        options: TcpOptions::default(),
+    })
+    .unwrap();
+    let mut router = NatRouter::new(0);
+    let mut now = Duration::ZERO;
+    while engine.error().is_none() && now < Duration::from_secs(10) {
+        engine.poll(now);
+        for (_, f) in engine.take_output() {
+            if let Some(mut reply) = router.route(f) {
+                reply.drain(12..16);
+                engine.handle_frame(0, &reply, now);
+            }
+        }
+        now += Duration::from_millis(10);
+    }
+    let err = engine.error().expect("ARP fails");
+    assert!(err.contains("arrive untagged"), "{err}");
+}

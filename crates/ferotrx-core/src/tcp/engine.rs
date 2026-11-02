@@ -787,6 +787,9 @@ struct Host {
     next_hop_mac: Option<MacAddr>,
     arp_next: Duration,
     arp_since: Option<Duration>,
+    /// A reply from the next hop seen on the right port but another VLAN
+    /// (`Some(None)`: untagged), for the error message if ARP fails.
+    arp_elsewhere: Option<Option<u16>>,
 }
 
 /// Emulated TCP clients and servers that replay a [`TcpProgram`].
@@ -853,6 +856,7 @@ impl TcpEngine {
                 ep: c.endpoint.clone(),
                 arp_next: Duration::ZERO,
                 arp_since: None,
+                arp_elsewhere: None,
             });
         }
         if let Some(s) = &server {
@@ -875,6 +879,7 @@ impl TcpEngine {
                 ep: s.endpoint.clone(),
                 arp_next: Duration::ZERO,
                 arp_since: None,
+                arp_elsewhere: None,
             });
         }
         let seed = options.seed | 1;
@@ -961,7 +966,13 @@ impl TcpEngine {
             return;
         };
         for host in &mut self.hosts {
-            if host.ep.port != port || host.ep.vlan != link.vlan {
+            if host.ep.port != port {
+                continue;
+            }
+            if host.ep.vlan != link.vlan {
+                if host.next_hop == Some(arp.sender_ip) && arp.op == 2 {
+                    host.arp_elsewhere = Some(link.vlan);
+                }
                 continue;
             }
             if host.next_hop == Some(arp.sender_ip) && host.ep.next_hop_mac.is_none() {
@@ -1147,13 +1158,27 @@ impl TcpEngine {
             }
             let since = *host.arp_since.get_or_insert(now);
             if now.saturating_sub(since) >= timeout {
-                self.error = Some(format!(
-                    "no ARP reply from {hop} (the {}'s next hop) on VLAN {} within {:?}; \
-                     check the gateway address, the VLAN, and that the port can receive",
-                    host.role,
-                    host.ep.vlan.map_or("none".to_string(), |v| v.to_string()),
-                    timeout
-                ));
+                let vlan =
+                    |v: Option<u16>| v.map_or("untagged".to_string(), |v| format!("on VLAN {v}"));
+                self.error = Some(match host.arp_elsewhere {
+                    Some(seen) => format!(
+                        "no ARP reply from {hop} (the {}'s next hop) {} within {:?}, but its replies \
+                         arrive {}: the switch or interface changes the tag; set the {}'s VLAN to match, \
+                         or use a VLAN the switch keeps tagged (VLAN 1 is often sent untagged)",
+                        host.role,
+                        vlan(host.ep.vlan),
+                        timeout,
+                        vlan(seen),
+                        host.role
+                    ),
+                    None => format!(
+                        "no ARP reply from {hop} (the {}'s next hop) {} within {:?}; \
+                         check the gateway address, the VLAN, and that the port can receive",
+                        host.role,
+                        vlan(host.ep.vlan),
+                        timeout
+                    ),
+                });
                 return;
             }
             if now >= host.arp_next {
