@@ -9,15 +9,17 @@ its engine is a library you can use from your own programs.
 ## Status
 
 * **M1, pcap replay:** done.
-* **M2, rewriting and multi-stream profiles:** this release.
-* Next: packet inspection and building (`ferotrx-packet`), a control API
-  (`ferotrx-ctl`), flow multiplication, faster Linux backends (AF_XDP, DPDK).
+* **M2, rewriting and multi-stream profiles:** done.
+* **M3, packet inspection (`ferotrx-packet`, `ferotrx inspect`):** this release.
+* Next: packet building, a control API (`ferotrx-ctl`), flow multiplication,
+  faster Linux backends (AF_XDP, DPDK).
 
 ## Crates
 
 | Crate | What it is |
 | --- | --- |
 | `ferotrx-core` | The core API: captures, rewrites, streams, profiles, pacing and the scheduler. No platform code. |
+| `ferotrx-packet` | Packet decoding: layers, fields with byte ranges, checksum checks, summaries. No dependencies. |
 | `ferotrx-io` | Packet sinks: network interfaces through libpcap/Npcap, pcap files. |
 | `ferotrx-cli` | The `ferotrx` command line tool. |
 
@@ -48,6 +50,30 @@ sudo ferotrx replay capture.pcap -i eth0 --pps 50000 --loop 0   # 50k pps until 
 ferotrx replay capture.pcap --mbps 100 --out sent.pcap          # write instead of send
 ferotrx replay capture.pcap --topspeed --null --loop 1000       # engine speed test
 ```
+
+### Inspecting
+
+`ferotrx inspect` decodes a capture: Ethernet, 802.3/LLC, VLAN and QinQ tags,
+Linux cooked captures, ARP, IPv4, IPv6 with extension headers, TCP, UDP, ICMP,
+ICMPv6 and DNS/mDNS, and names common ports (HTTP, TLS, SSH, DHCP, NTP, SNMP).
+It checks IPv4, TCP, UDP, ICMP and ICMPv6 checksums and flags truncated headers.
+
+```sh
+ferotrx inspect capture.pcap                  # one line per packet
+ferotrx inspect capture.pcap -p 3 -p 10-12    # layers, fields and hex dump of chosen packets
+ferotrx inspect capture.pcap -v -c 20         # layers of the first 20 packets
+ferotrx inspect capture.pcap --problems       # only bad checksums and truncated packets
+ferotrx inspect capture.pcap -p 1 -r vlan_push=10 -r ip_dst=192.168.20.50   # preview rewrites
+```
+
+```text
+   No.         Time  Source        Destination   Protocol    Len  Info
+     1     0.000000  10.1.2.20     10.1.2.80     TCP          54  50000 → 80 [SYN] Seq=1000 Win=64240 Len=0
+     3     0.011000  10.1.2.20     10.1.2.80     HTTP        140  GET /page0.html HTTP/1.1
+```
+
+Every field in the `-p` view shows the byte range it came from, so you can find
+it in the hex dump below it.
 
 ### Rewriting
 

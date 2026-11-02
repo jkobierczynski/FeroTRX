@@ -18,6 +18,7 @@ pcap = ["ferotrx-io/pcap"]
 [dependencies]
 ferotrx-core.workspace = true
 ferotrx-io.workspace = true
+ferotrx-packet.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
