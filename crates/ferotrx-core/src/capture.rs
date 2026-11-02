@@ -1,10 +1,11 @@
 use std::fs::File;
-use std::io::{BufReader, Cursor, Read};
+use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
-use pcap_file::pcap::PcapReader;
+use pcap_file::pcap::{PcapHeader, PcapPacket, PcapReader, PcapWriter};
 use pcap_file::pcapng::{Block, PcapNgReader};
+use pcap_file::{DataLink, Endianness, TsResolution};
 
 use crate::{Error, Result};
 
@@ -123,6 +124,71 @@ impl Capture {
         })
     }
 
+    /// Writes the capture as a pcap file with nanosecond timestamps.
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        let mut w = BufWriter::new(File::create(path)?);
+        self.write_pcap(&mut w)?;
+        w.flush()?;
+        Ok(())
+    }
+
+    /// Writes the capture in pcap format (little endian, nanosecond timestamps).
+    pub fn write_pcap<W: Write>(&self, writer: W) -> Result<()> {
+        let header = PcapHeader {
+            snaplen: 262_144,
+            datalink: DataLink::from(self.linktype),
+            ts_resolution: TsResolution::NanoSecond,
+            endianness: Endianness::Little,
+            ..Default::default()
+        };
+        let mut w = PcapWriter::with_header(writer, header)?;
+        for p in &self.packets {
+            let len = u32::try_from(p.data.len())
+                .map_err(|_| Error::Malformed("packet longer than 4 GiB".into()))?;
+            w.write_packet(&PcapPacket::new(p.timestamp, len, &p.data))?;
+        }
+        Ok(())
+    }
+
+    /// Builds one packet per text description (see `ferotrx_packet::PacketSpec`),
+    /// `interval` apart on the capture's timeline. Lengths and checksums are filled in.
+    ///
+    /// ```
+    /// use ferotrx_core::Capture;
+    /// use std::time::Duration;
+    ///
+    /// let cap = Capture::from_specs(
+    ///     &["eth/ipv4(dst=10.0.0.2)/udp(dport=7)/raw(text=\"hi\")", "eth/arp"],
+    ///     Duration::from_millis(10),
+    /// ).unwrap();
+    /// assert_eq!(cap.len(), 2);
+    /// assert_eq!(cap.packets[1].timestamp, Duration::from_millis(10));
+    /// ```
+    #[cfg(feature = "build")]
+    pub fn from_specs<S: AsRef<str>>(specs: &[S], interval: Duration) -> Result<Self> {
+        let mut linktype = None;
+        let mut packets = Vec::with_capacity(specs.len());
+        for (i, text) in specs.iter().enumerate() {
+            let text = text.as_ref();
+            let ctx = |e: ferotrx_packet::BuildError| {
+                Error::InvalidSpec(format!("packet {} '{text}': {e}", i + 1))
+            };
+            let spec: ferotrx_packet::PacketSpec = text.parse().map_err(ctx)?;
+            let lt = spec.linktype().map_err(ctx)?;
+            match linktype {
+                None => linktype = Some(lt),
+                Some(seen) if seen != lt => return Err(Error::MixedLinkTypes(seen, lt)),
+                _ => {}
+            }
+            let ts = interval.saturating_mul(u32::try_from(i).unwrap_or(u32::MAX));
+            packets.push(Packet::new(ts, spec.build().map_err(ctx)?));
+        }
+        Ok(Self {
+            linktype: linktype.unwrap_or(LINKTYPE_ETHERNET),
+            packets,
+        })
+    }
+
     pub fn len(&self) -> usize {
         self.packets.len()
     }
@@ -142,5 +208,24 @@ impl Capture {
             (Some(first), Some(last)) => last.timestamp.saturating_sub(first.timestamp),
             _ => Duration::ZERO,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pcap_round_trip() {
+        let cap = Capture::new(
+            101,
+            vec![
+                Packet::new(Duration::from_nanos(5), vec![0x45, 1, 2]),
+                Packet::new(Duration::from_millis(1500), vec![0x60; 70]),
+            ],
+        );
+        let mut buf = Vec::new();
+        cap.write_pcap(&mut buf).unwrap();
+        assert_eq!(Capture::from_reader(&buf[..]).unwrap(), cap);
     }
 }

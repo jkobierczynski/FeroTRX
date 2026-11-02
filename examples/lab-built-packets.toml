@@ -1,0 +1,39 @@
+# FeroTRX profile with packets built from scratch, for the lab in
+# lab-two-vlans.toml (a NAT router between VLAN 10 and VLAN 20). No pcap needed.
+#
+#   sudo ferotrx run examples/lab-built-packets.toml -i <interface> --duration 60s
+#   ferotrx run examples/lab-built-packets.toml --out built.pcap --duration 10s   # dry run
+#
+# Replace 02:00:00:00:00:01 with the router's MAC on VLAN 10 and 192.168.20.50
+# with a host on VLAN 20. Remove the vlan(id=10) layers if the sender is on an
+# access port. Packet syntax: `ferotrx build --help` or the README.
+
+# A ping every second, until the run ends.
+[[stream]]
+name = "ping"
+packet = "eth(dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.100,dst=192.168.20.50)/icmp(id=1)/raw(len=56)"
+interval = "1s"
+loops = 0
+
+# DNS queries for three names, 50 per second, starting 2 s in.
+[[stream]]
+name = "dns"
+packets = [
+  "eth(dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.100,dst=192.168.20.50)/udp(sport=40001)/dns(id=1,q=example.com)",
+  "eth(dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.100,dst=192.168.20.50)/udp(sport=40002)/dns(id=2,q=example.org,qtype=AAAA)",
+  "eth(dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.100,dst=192.168.20.50)/udp(sport=40003)/dns(id=3,q=example.net,qtype=MX)",
+]
+rate = "50pps"
+loops = 0
+delay = "2s"
+
+# 20000 TCP SYNs at 1000 pps, 5 s in. Built from 192.168.10.100 and moved to
+# .101 by a rewrite, so the router's NAT table sees a second client.
+[[stream]]
+name = "syn"
+packet = "eth(dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.100,dst=192.168.20.50,df=1)/tcp(sport=40000,dport=80,flags=S,mss=1460)"
+rate = "1000pps"
+loops = 0
+limit = 20000
+delay = "5s"
+rewrite = ["ip_src=192.168.10.101"]

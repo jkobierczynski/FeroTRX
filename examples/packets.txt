@@ -1,0 +1,34 @@
+# Packets for `ferotrx build -f examples/packets.txt`, one per line.
+# A line ending in '/' continues on the next. Change the addresses to your lab:
+#   02:00:00:00:00:01  the router's MAC on VLAN 10
+#   192.168.10.100     a VLAN 10 address to send from
+#   192.168.20.50      a host on VLAN 20
+#
+#   ferotrx build -f examples/packets.txt -v                 # look at them
+#   ferotrx build -f examples/packets.txt -o built.pcap      # save them
+#   sudo ferotrx build -f examples/packets.txt -i enp0s3 --pps 10 --loop 0
+
+# Who has the router's VLAN 10 address?
+eth(dst=ff:ff:ff:ff:ff:ff)/vlan(id=10)/arp(sip=192.168.10.100,tip=192.168.10.1)
+
+# Ping a VLAN 20 host through the router, with a 56 byte payload like ping's
+eth(dst=02:00:00:00:00:01)/vlan(id=10)/
+  ipv4(src=192.168.10.100,dst=192.168.20.50)/icmp(id=1,seq=1)/raw(len=56)
+
+# DNS query, then a TCP SYN to port 80 with the usual options
+eth(dst=02:00:00:00:00:01)/vlan(id=10)/
+  ipv4(src=192.168.10.100,dst=192.168.20.50)/udp/dns(id=0x1234,q=example.com)
+eth(dst=02:00:00:00:00:01)/vlan(id=10)/
+  ipv4(src=192.168.10.100,dst=192.168.20.50,df=1)/
+  tcp(sport=40000,dport=80,seq=1000,flags=S,mss=1460,wscale=7,sackok=1)
+
+# An HTTP request riding on that connection
+eth(dst=02:00:00:00:00:01)/vlan(id=10)/
+  ipv4(src=192.168.10.100,dst=192.168.20.50,df=1)/
+  tcp(sport=40000,dport=80,seq=1001,ack=1,flags=PA)/
+  raw(text="GET / HTTP/1.1\r\nHost: 192.168.20.50\r\n\r\n")
+
+# IPv6 ping and a deliberately wrong UDP checksum, to see what the router does with it
+eth(dst=02:00:00:00:00:01)/vlan(id=10)/ipv6(src=2001:db8:10::100,dst=2001:db8:20::50)/icmp(id=2,seq=1)
+eth(dst=02:00:00:00:00:01)/vlan(id=10)/
+  ipv4(src=192.168.10.100,dst=192.168.20.50)/udp(dport=9,chksum=0xdead)/raw(text="bad checksum")

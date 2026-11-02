@@ -208,3 +208,29 @@ fn tree_and_hex_dump_render() {
         cap.packets[0].data.len().div_ceil(16)
     );
 }
+
+/// The builder's checksums agree with the core library's independent
+/// checksum code: `fix_checksums` leaves every built packet unchanged.
+#[test]
+fn built_packets_survive_fix_checksums() {
+    let specs = [
+        "eth/ipv4(src=10.0.0.1,dst=10.0.0.2)/udp(sport=1000,dport=2000)/raw(text=\"odd\")",
+        "eth/vlan(id=10)/ipv4/tcp(flags=PA,seq=99,ack=7,mss=1400)/raw(len=33,fill=0x5a)",
+        "eth/qinq(id=100)/vlan(id=20)/ipv6(src=2001:db8::a,dst=2001:db8::b)/udp/dns(q=x.example)",
+        "eth/ipv6/icmp(id=7,seq=3)/raw(hex=0102030405)",
+        "eth/ipv6/tcp(sport=5,dport=6,flags=S)",
+        "ipv4/udp/dns(qr=1,q=example.com,a=192.0.2.80)",
+    ];
+    for text in specs {
+        let spec: ferotrx_packet::PacketSpec = text.parse().unwrap();
+        let data = spec.build().unwrap();
+        let d = decode(spec.linktype().unwrap(), &data);
+        assert!(d.problems.is_empty(), "{text}: {:?}", d.problems);
+        if spec.linktype().unwrap() == LINKTYPE_ETHERNET {
+            assert_eq!(rewrite("fix_checksums", &data), data, "{text}");
+        } else {
+            assert_eq!(d.protocol, "DNS");
+            assert_eq!(spec.linktype().unwrap(), LINKTYPE_RAW);
+        }
+    }
+}

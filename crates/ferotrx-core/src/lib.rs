@@ -8,7 +8,8 @@
 //! PacketSource -> Transform... -> Pacer -> PacketSink
 //! ```
 //!
-//! * [`Capture`] loads a pcap or pcapng file; [`CaptureSource`] plays it in loops.
+//! * [`Capture`] loads a pcap or pcapng file, or builds packets from text
+//!   descriptions (feature `build`); [`CaptureSource`] plays it in loops.
 //! * [`Transform`]s change packets on the way; [`Rewrite`] has the built-in ones
 //!   (MAC, IP and port rewrites, VLAN tags, checksum repair).
 //! * [`Rate`] and [`Pacer`] decide when each packet should leave.
@@ -72,7 +73,7 @@ pub use error::{Error, Result};
 pub use net::{MacAddr, TPID_QINQ, TPID_VLAN};
 pub use pacer::{parse_duration, Pacer, Rate};
 #[cfg(feature = "profile")]
-pub use profile::{Profile, StreamSpec};
+pub use profile::{Profile, StreamSource, StreamSpec, DEFAULT_INTERVAL};
 pub use replay::{replay, replay_with_progress, ReplayConfig, ReplayStats};
 pub use sink::{NullSink, PacketSink, SinkError, VecSink};
 pub use source::{CaptureSource, PacketSource};

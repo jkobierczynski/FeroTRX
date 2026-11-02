@@ -72,6 +72,14 @@ impl<C: Borrow<Capture>> CaptureSource<C> {
         }
     }
 
+    /// Sets how long one pass over the capture lasts on the source's timeline,
+    /// so the next pass starts that long after the previous one did. By default
+    /// it is the capture's span plus one average gap between packets.
+    pub fn loop_period(mut self, period: Duration) -> Self {
+        self.loop_period = period;
+        self
+    }
+
     /// Plays the capture `loops` times; 0 loops forever.
     pub fn loops(mut self, loops: u64) -> Self {
         self.loops = loops;
@@ -134,5 +142,19 @@ mod tests {
         }
         // Period is span (2 s) + average gap (2 s).
         assert_eq!(seen, [(0, 1, 0), (2, 2, 1), (4, 1, 1), (6, 2, 2)]);
+    }
+
+    #[test]
+    fn single_packet_with_a_loop_period() {
+        let cap = Capture::new(1, vec![Packet::new(Duration::from_secs(3), vec![1])]);
+        let mut src = CaptureSource::new(&cap)
+            .loops(3)
+            .loop_period(Duration::from_millis(250));
+        let mut p = Packet::new(Duration::ZERO, Vec::new());
+        let mut seen = Vec::new();
+        while src.next_into(&mut p).unwrap() {
+            seen.push(p.timestamp.as_millis());
+        }
+        assert_eq!(seen, [0, 250, 500]);
     }
 }

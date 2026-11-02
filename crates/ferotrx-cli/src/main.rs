@@ -28,6 +28,8 @@ enum Command {
     Run(RunArgs),
     /// Decode a capture: one line per packet, or the full layers and bytes of chosen packets.
     Inspect(InspectArgs),
+    /// Build packets from a description of their layers; show, save or send them.
+    Build(BuildArgs),
     /// Show what a capture contains.
     Info {
         /// The pcap or pcapng file.
@@ -93,6 +95,53 @@ struct InspectArgs {
     /// Apply rewrites before decoding, to preview what `replay -r` would send.
     #[arg(short, long = "rewrite", value_name = "SPEC")]
     rewrites: Vec<Rewrite>,
+}
+
+#[derive(Args)]
+struct BuildArgs {
+    /// Packets to build, one argument each, layers joined by '/'. Example:
+    /// 'eth(dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.100,dst=192.168.20.50)/udp/dns(q=example.com)'.
+    /// Layers: eth, vlan, qinq, arp, ipv4, ipv6, tcp, udp, icmp, dns, raw.
+    /// Lengths and checksums are filled in unless set.
+    #[arg(value_name = "PACKET")]
+    specs: Vec<String>,
+
+    /// Read packets from a file, one per line; '#' starts a comment and a line
+    /// ending in '/' continues on the next one.
+    #[arg(short, long, value_name = "FILE")]
+    file: Option<PathBuf>,
+
+    /// Time between packets on the built timeline; with --loop, between the
+    /// last packet and the first one again. Sets the send rate when no rate is given.
+    #[arg(long, default_value = "1s", value_parser = parse_duration)]
+    interval: Duration,
+
+    /// Write the built packets to this pcap file.
+    #[arg(short, long)]
+    out: Option<PathBuf>,
+
+    /// Send the built packets on this network interface (see `ferotrx interfaces`).
+    #[cfg(feature = "pcap")]
+    #[arg(short, long)]
+    iface: Option<String>,
+
+    #[command(flatten)]
+    rate: RateArgs,
+
+    /// Times to send the packets; 0 loops until Ctrl-C. Only with --iface.
+    #[arg(short = 'l', long = "loop", default_value_t = 1)]
+    loops: u64,
+
+    /// Show the decoded layers of every packet.
+    #[arg(short, long)]
+    verbose: bool,
+
+    /// Add a hex dump of every packet.
+    #[arg(long)]
+    hex: bool,
+
+    #[command(flatten)]
+    common: CommonArgs,
 }
 
 /// `N` or `N-M`, numbered from 1.
@@ -191,6 +240,10 @@ struct RateArgs {
 }
 
 impl RateArgs {
+    fn is_set(&self) -> bool {
+        self.multiplier.is_some() || self.pps.is_some() || self.mbps.is_some() || self.topspeed
+    }
+
     fn rate(&self) -> Rate {
         if let Some(pps) = self.pps {
             Rate::Pps(pps)
@@ -222,6 +275,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Run(args) => cmd_run(args),
         Command::Info { file } => cmd_info(&file),
         Command::Inspect(args) => cmd_inspect(args),
+        Command::Build(args) => cmd_build(args),
         #[cfg(feature = "pcap")]
         Command::Interfaces => cmd_interfaces(),
     }
@@ -339,6 +393,133 @@ fn cmd_inspect(args: InspectArgs) -> Result<()> {
     Ok(())
 }
 
+/// Reads packet descriptions from a file: one per line, '#' comments, and a
+/// line ending in '/' continued on the next.
+fn read_specs(path: &PathBuf) -> Result<Vec<String>> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut specs = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        let line = match line.find('#') {
+            // Keep a '#' inside a quoted value.
+            Some(i) if line[..i].matches('"').count() % 2 == 0 => &line[..i],
+            _ => line,
+        }
+        .trim();
+        if line.is_empty() {
+            continue;
+        }
+        current.push_str(line);
+        if !line.ends_with('/') {
+            specs.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        bail!("{}: the last packet ends with '/'", path.display());
+    }
+    Ok(specs)
+}
+
+fn cmd_build(args: BuildArgs) -> Result<()> {
+    let mut specs = args.specs.clone();
+    if let Some(f) = &args.file {
+        specs.extend(read_specs(f)?);
+    }
+    if specs.is_empty() {
+        bail!("give a packet to build, e.g. 'eth/ipv4(dst=10.0.0.2)/icmp', or --file");
+    }
+    let cap = Capture::from_specs(&specs, args.interval)?;
+
+    let sending = {
+        #[cfg(feature = "pcap")]
+        {
+            args.iface.is_some()
+        }
+        #[cfg(not(feature = "pcap"))]
+        {
+            false
+        }
+    };
+    if !(sending && args.common.quiet) {
+        for (i, p) in cap.packets.iter().enumerate() {
+            let d = ferotrx_packet::decode(cap.linktype, &p.data);
+            println!(
+                "{:>4}  {:<24}  {:<24}  {:<8}  {:>5}  {}{}",
+                i + 1,
+                d.source,
+                d.destination,
+                d.protocol,
+                d.len,
+                d.info,
+                if d.problems.is_empty() { "" } else { " [!]" }
+            );
+            if !args.verbose {
+                for problem in &d.problems {
+                    println!("      !! {problem}");
+                }
+            }
+            if args.verbose {
+                for line in d.tree().lines() {
+                    println!("      {line}");
+                }
+            }
+            if args.hex {
+                for line in ferotrx_packet::hex_dump(&p.data).lines() {
+                    println!("      {line}");
+                }
+            }
+            if args.verbose || args.hex {
+                println!();
+            }
+        }
+    }
+
+    if let Some(out) = &args.out {
+        // Stamp the packets from now, so capture viewers show a sensible date.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let mut stamped = cap.clone();
+        for p in &mut stamped.packets {
+            p.timestamp += now;
+        }
+        stamped
+            .save(out)
+            .with_context(|| format!("cannot write {}", out.display()))?;
+        eprintln!("wrote {} packets to {}", cap.len(), out.display());
+    }
+
+    #[cfg(feature = "pcap")]
+    if let Some(iface) = &args.iface {
+        let rate = args.rate.rate();
+        rate.validate()?;
+        let period = args
+            .interval
+            .saturating_mul(u32::try_from(cap.len()).unwrap_or(u32::MAX));
+        let stream = Stream::new(
+            "built",
+            CaptureSource::new(&cap)
+                .loops(args.loops)
+                .loop_period(period),
+        )
+        .with_rate(rate);
+        let output = Output {
+            iface: Some(iface.clone()),
+            out: None,
+            null: false,
+        };
+        let mut sink = open_sink(&output, cap.linktype)?;
+        let stats = execute(&mut [stream], &mut sink, &args.common)?;
+        print_line(done_label(&stats.total), &stats.total);
+        return Ok(());
+    }
+    if args.out.is_none() && (args.loops != 1 || args.rate.is_set()) {
+        eprintln!("note: --loop and rates apply when sending with --iface");
+    }
+    Ok(())
+}
+
 #[cfg(feature = "pcap")]
 fn cmd_interfaces() -> Result<()> {
     let list = ferotrx_io::list_interfaces()
@@ -416,7 +597,7 @@ fn cmd_run(args: RunArgs) -> Result<()> {
             eprintln!(
                 "stream {}: {} at {}{}",
                 s.name,
-                spec.pcap.display(),
+                spec.source,
                 s.rate,
                 if rewrites.is_empty() {
                     String::new()
@@ -483,4 +664,29 @@ fn print_line(label: &str, s: &ReplayStats) {
         line.push_str(&format!(", {} send errors", s.send_errors));
     }
     eprintln!("{line}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example_packet_file_builds() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/packets.txt"
+        ));
+        let specs = read_specs(&path).unwrap();
+        assert_eq!(specs.len(), 7);
+        assert!(specs[4].contains("Host: 192.168.20.50"));
+        let cap = Capture::from_specs(&specs, Duration::from_secs(1)).unwrap();
+        let problems: Vec<_> = cap
+            .packets
+            .iter()
+            .map(|p| ferotrx_packet::decode(cap.linktype, &p.data).problems)
+            .collect();
+        // Only the packet with the deliberately wrong checksum has a problem.
+        assert!(problems[..6].iter().all(Vec::is_empty), "{problems:?}");
+        assert_eq!(problems[6], ["UDP checksum is incorrect"]);
+    }
 }

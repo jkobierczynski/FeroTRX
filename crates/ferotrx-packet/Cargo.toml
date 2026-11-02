@@ -1,6 +1,6 @@
 [package]
 name = "ferotrx-packet"
-description = "Packet decoding for FeroTRX: Ethernet, VLAN, ARP, IPv4, IPv6, TCP, UDP, ICMP, DNS"
+description = "Packet decoding and building for FeroTRX: Ethernet, VLAN, ARP, IPv4, IPv6, TCP, UDP, ICMP, DNS"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
