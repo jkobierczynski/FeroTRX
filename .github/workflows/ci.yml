@@ -62,6 +62,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo ip link add xt0 type veth peer name xt1
+          # No IPv6 on the pair: router solicitations and MLD reports sent after
+          # link up would show in the tx counters the tests compare.
+          sudo sysctl -qw net.ipv6.conf.xt0.disable_ipv6=1 net.ipv6.conf.xt1.disable_ipv6=1
           sudo ip link set xt0 up
           sudo ip link set xt1 up
           bin=$(cargo test -p ferotrx-io --lib --no-run --message-format=json \
@@ -94,6 +97,9 @@ jobs:
       - name: Send through DPDK
         run: |
           sudo ip link add dt0 type veth peer name dt1
+          # No IPv6 on the pair: router solicitations and MLD reports sent after
+          # link up would show in the tx counters the tests compare.
+          sudo sysctl -qw net.ipv6.conf.dt0.disable_ipv6=1 net.ipv6.conf.dt1.disable_ipv6=1
           sudo ip link set dt0 up
           sudo ip link set dt1 up
           eal='--no-huge -m 256 --no-pci -l 0 --log-level=warning'
