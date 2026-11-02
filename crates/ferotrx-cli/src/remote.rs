@@ -7,7 +7,7 @@ use clap::{Args, Subcommand};
 use ferotrx_core::Profile;
 use ferotrx_ctl::protocol::{
     Counters, LoadProfileParams, OutputSpec, ProfileInfo, RunInfo, RunState, StartParams,
-    DEFAULT_PORT,
+    TcpStartParams, DEFAULT_PORT,
 };
 use ferotrx_ctl::{Client, Controller, Server};
 use serde_json::Value;
@@ -139,6 +139,33 @@ enum CtlCommand {
     },
     /// Forget a run, stopping it first if it is still running.
     Remove { id: u64 },
+    /// Start a stateful TCP run from a TCP profile (see `ferotrx tcp --help`).
+    /// PATH is on the server, unless --upload sends the local file.
+    TcpStart {
+        path: PathBuf,
+        /// Send this machine's file to the server.
+        #[arg(short, long)]
+        upload: bool,
+        /// With --upload: folder on the server that a relative `pcap` path is in.
+        #[arg(long, requires = "upload")]
+        base_dir: Option<PathBuf>,
+        /// Interface of the server for hosts whose table names none.
+        #[arg(short, long)]
+        iface: Option<String>,
+        /// New connections per second instead of the profile's.
+        #[arg(long)]
+        cps: Option<f64>,
+        /// Connections in all instead of the profile's; 0 = until stopped.
+        #[arg(short = 'n', long)]
+        connections: Option<u64>,
+        /// Stop after this long, e.g. 30s.
+        #[arg(short, long)]
+        duration: Option<String>,
+    },
+    /// Show the counters of one TCP run, or of every TCP run.
+    TcpStats { id: Option<u64> },
+    /// Stop a TCP run and show its final counters.
+    TcpStop { id: u64 },
     /// Call any method with JSON parameters and print the JSON result.
     Call {
         method: String,
@@ -357,6 +384,63 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                 return print_json(&run);
             }
             print_run(&run);
+        }
+        CtlCommand::TcpStart {
+            path,
+            upload,
+            base_dir,
+            iface,
+            cps,
+            connections,
+            duration,
+        } => {
+            let mut params = TcpStartParams {
+                iface,
+                cps,
+                connections,
+                duration,
+                ..Default::default()
+            };
+            if upload {
+                params.toml = Some(
+                    std::fs::read_to_string(&path)
+                        .with_context(|| format!("cannot read {}", path.display()))?,
+                );
+                params.base_dir = base_dir;
+            } else {
+                params.path = Some(path);
+            }
+            let run = c.tcp_start(&params)?;
+            if json {
+                return print_json(&run);
+            }
+            crate::tcp::print_tcp_run(&run);
+        }
+        CtlCommand::TcpStats { id: Some(id) } => {
+            let run = c.tcp_stats(id)?;
+            if json {
+                return print_json(&run);
+            }
+            crate::tcp::print_tcp_run(&run);
+        }
+        CtlCommand::TcpStats { id: None } => {
+            let runs = c.tcp_runs()?;
+            if json {
+                return print_json(&runs);
+            }
+            if runs.is_empty() {
+                println!("no TCP runs");
+            }
+            for r in &runs {
+                crate::tcp::print_tcp_run(r);
+            }
+        }
+        CtlCommand::TcpStop { id } => {
+            let run = c.tcp_stop(id)?;
+            if json {
+                return print_json(&run);
+            }
+            crate::tcp::print_tcp_run(&run);
         }
         CtlCommand::Call { method, params } => {
             let params: Value = match params {

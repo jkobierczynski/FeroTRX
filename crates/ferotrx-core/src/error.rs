@@ -15,6 +15,8 @@ pub enum Error {
     InvalidRate(String),
     #[error("{0}")]
     InvalidSpec(String),
+    #[error("tcp: {0}")]
+    Tcp(String),
     #[error("profile: {0}")]
     Profile(String),
     #[error("sending packet {index} failed: {source}")]

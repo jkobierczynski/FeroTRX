@@ -1,4 +1,5 @@
 mod remote;
+mod tcp;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -32,6 +33,10 @@ enum Command {
     Inspect(InspectArgs),
     /// Build packets from a description of their layers; show, save or send them.
     Build(BuildArgs),
+    /// Stateful TCP: replay a TCP session from a capture as real connections,
+    /// playing the client, the server or both (handshakes, sequence and
+    /// acknowledgement tracking, retransmits), e.g. through a NAT router.
+    Tcp(tcp::TcpArgs),
     /// Show what a capture contains.
     Info {
         /// The pcap or pcapng file.
@@ -364,6 +369,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Info { file } => cmd_info(&file),
         Command::Inspect(args) => cmd_inspect(args),
         Command::Build(args) => cmd_build(args),
+        Command::Tcp(args) => tcp::cmd_tcp(args),
         #[cfg(feature = "pcap")]
         Command::Interfaces => cmd_interfaces(),
         Command::Backends => cmd_backends(),

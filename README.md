@@ -4,7 +4,8 @@ FeroTRX is a traffic replay tool written in Rust, inspired by
 [Cisco TRex](https://trex-tgn.cisco.com/). It replays pcap and pcapng captures
 at a controlled rate on Linux, macOS and Windows, rewrites them on the way
 (addresses, ports, VLAN tags), varies fields from packet to packet, builds packets from scratch, runs several streams
-at once from a profile, and its engine is a library you can use from your own programs.
+at once from a profile, replays TCP sessions statefully (real connections, both ends emulated, through NAT
+routers and firewalls), and its engine is a library you can use from your own programs.
 
 ## Status
 
@@ -14,15 +15,16 @@ at once from a profile, and its engine is a library you can use from your own pr
 * **M4, packet building (`ferotrx build`, built packets in profiles):** done.
 * **M5, remote control (`ferotrx-ctl`, `ferotrx serve`, `ferotrx ctl`):** done.
 * **M6, fast send backends (AF_XDP on Linux, DPDK as an option):** done.
-* **M7, field engine (per-packet field ranges, `--vary`, `vary` in profiles):** this release.
+* **M7, field engine (per-packet field ranges, `--vary`, `vary` in profiles):** done.
+* **M8, stateful TCP (`ferotrx tcp`, TCP profiles, `tcp.*` control methods):** this release.
 
 ## Crates
 
 | Crate | What it is |
 | --- | --- |
-| `ferotrx-core` | The core API: captures, rewrites, streams, profiles, pacing and the scheduler. No platform code. |
+| `ferotrx-core` | The core API: captures, rewrites, streams, profiles, pacing, the scheduler and the stateful TCP engine. No platform code. |
 | `ferotrx-packet` | Packet decoding (layers, fields with byte ranges, checksum checks, summaries) and building. No dependencies. |
-| `ferotrx-io` | Packet sinks: network interfaces through libpcap/Npcap, AF_XDP or DPDK; pcap files. |
+| `ferotrx-io` | Packet sinks: network interfaces through libpcap/Npcap, AF_XDP or DPDK; pcap files. Send-and-receive ports for stateful TCP. |
 | `ferotrx-ctl` | Remote control: a JSON-RPC server and client to load profiles, start and stop runs, and read live counters. |
 | `ferotrx-cli` | The `ferotrx` command line tool. |
 
@@ -351,6 +353,10 @@ no extra packages, or `ferotrx_ctl::Client` from Rust.
 | `run.stop` | `id`, `wait` (default true) | the run, final counters |
 | `run.stats`, `run.remove` | `id` | the run |
 | `run.list` | | every run |
+| `tcp.start` | a TCP profile as `path` (on the server) or `toml` (+ `base_dir`); optional `iface`, `cps`, `connections`, `concurrency`, `duration` | the TCP run |
+| `tcp.stop` | `id`, `wait` (default true) | the TCP run, final counters |
+| `tcp.stats`, `tcp.remove` | `id` | the TCP run |
+| `tcp.list` | | every TCP run |
 | `stats.subscribe` | optional `id`, `interval_ms` (default 1000) | `{subscription}` |
 | `stats.unsubscribe` | `subscription` | `true` |
 
@@ -372,6 +378,116 @@ The server listens on 127.0.0.1 unless told otherwise. It sends traffic and
 reads and writes files with its own privileges, so on a shared network give it
 a `--token` (or `FEROTRX_TOKEN`); the token travels in clear text, so keep the
 control port on a lab or management network.
+
+### Stateful TCP
+
+A replay sends captured packets as they are. That is fine for a switch, but a
+NAT router or a stateful firewall drops them or rewrites them into nonsense:
+their sequence numbers belong to no connection it knows, and nobody answers.
+`ferotrx tcp` replays a TCP session as real connections instead, like TRex's
+advanced stateful mode: FeroTRX emulates the client and the server hosts,
+opens connections at a set rate with real handshakes, tracks sequence and
+acknowledgement numbers on both sides, retransmits what gets lost, plays what
+each end sent in the capture, and closes with FINs. The router in between can
+translate addresses and ports as it likes; each end only answers what it sees.
+
+```sh
+ferotrx tcp --list capture.pcap                   # the TCP connections in a capture
+ferotrx tcp capture.pcap --flow 2 --show          # what each end will send
+sudo ferotrx tcp -p examples/lab-tcp.toml -i enp0s3            # the lab profile
+sudo ferotrx tcp examples/http.pcap -i enp0s3 \
+     --client-ip 192.168.10.100/24 --client-ips 10 --client-gw 192.168.10.1 --client-vlan 10 \
+     --server-ip 192.168.20.50/24 --server-gw 192.168.20.1 --server-vlan 20 \
+     --cps 50 -n 1000 --concurrency 100
+```
+
+A run through the namespace router of `scripts/tcp-nat-netns.sh` (below), with
+the client and server on links `c0` and `s0`:
+
+```text
+session: 10.1.2.30:51000 -> 10.1.2.80:80: 4 messages, 144 bytes from the client, 6198 from the server, client closes
+client: 192.168.10.100/24 mac 02:00:c0:a8:0a:64 on c0 (10 addresses), gateway 192.168.10.1
+server: 192.168.20.50/24 mac 02:00:c0:a8:14:32 on s0, gateway 192.168.20.1
+opening 1000 connections at 50 per second
+done in 19.980 s: 17012 frames (7314720 bytes) sent, 17012 (7268504 bytes) received
+  client: 1000 connections, 1000 established, 1000 completed; 144000 bytes sent, 6198000 received, 0 retransmits
+  server: 1000 connections, 1000 established, 1000 completed; 6198000 bytes sent, 144000 received, 0 retransmits
+  50.0 connections per second
+```
+
+How it works:
+
+* **The session.** The chosen connection is reassembled in both directions
+  by sequence number (retransmissions and reordering in the capture do not
+  matter) and turned into messages: the client sends its first request, the
+  server waits for all of it and answers, and so on; then the end that closed
+  first in the capture sends its FIN. If only one direction was captured, the
+  other side's byte counts come from the acknowledgements and are sent as zeros
+  (`--show` says so). `examples/http.pcap` has both directions of an HTTP/1.1
+  connection with two requests.
+* **The hosts.** Each emulated host has its own IP address (or a range of
+  them with `--client-ips`), a MAC address (02:00 followed by its IPv4 address,
+  or `--client-mac`), an optional VLAN tag and a gateway. It answers ARP and
+  ping, so the router can reach it, and the interface is opened in promiscuous
+  mode. Use addresses that are free in each subnet, not addresses of the machine
+  FeroTRX runs on, or its own TCP stack answers with resets.
+* **Where they run.** Client and server can share one interface (a trunk
+  with a VLAN each, as in the lab profile), use one interface each
+  (`--client-iface`, `--server-iface`), or run on different machines: run
+  `ferotrx tcp ... --server-ip ...` on one and `ferotrx tcp ... --client-ip ...
+  --connect 192.168.20.50:80` on the other. Behind a port forward, `--connect`
+  is the router's outside address.
+* **Rates.** `--cps` new connections per second, `-n` connections in all (0
+  until Ctrl-C or `--duration`), `--concurrency` most open at once, client
+  source ports from `--source-ports` (1024-65534) on each client address.
+* **Checks.** Each end compares every byte it receives with the capture.
+  The summary counts completed, reset, timed out and mismatched connections and
+  retransmits per side, and the command exits with an error if any connection
+  failed or carried other bytes, so it can gate a test.
+
+A TCP profile holds all of this in a TOML file; see
+[`examples/lab-tcp.toml`](examples/lab-tcp.toml):
+
+```toml
+pcap = "http.pcap"
+cps = 20
+connections = 200
+concurrency = 50
+
+[client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.50/24"
+gateway = "192.168.20.1"
+vlan = 20
+
+[tcp]
+rto = "250ms"
+verify = true
+```
+
+Instead of `pcap`, a session can be written out as `[[message]]` tables
+(`from = "client"`, `text = "..."` or `hex = "..."`, plus `port`). Over the
+control API, `tcp.start` takes the same profile (`ferotrx ctl tcp-start
+lab-tcp.toml --upload -i enp0s3`), and `tcp.stats` reports the counters.
+
+To try it without a lab, `sudo scripts/tcp-nat-netns.sh` builds a router in
+a Linux network namespace (VLANs 10 and 20 on a trunk, routing, connection
+tracking, masquerading and a rule that drops packets conntrack finds invalid)
+and runs the sample session `examples/http.pcap` through it (with its own addresses, so your edits to the lab profile do not matter). `LOSS=0.03` makes the router drop 3% of
+what it forwards. Here it completed 20,000 connections at 2,000 per second, and
+with 3% loss every connection still completed thanks to retransmits.
+
+Limits of this release: IPv4 only; one session per run (several flows of a
+capture, as templates chosen per connection, would be a next step); libpcap or
+Npcap for sending and receiving (AF_XDP and DPDK are for stateless runs);
+no TCP window scaling, SACK or timestamps, so each connection keeps at most
+64 KB in flight; and the program is replayed by bytes and order, not by the
+timing between messages.
 
 ## Library
 
@@ -464,6 +580,41 @@ Packets flow `PacketSource -> Transform... -> Pacer -> PacketSink`. Implement
 `PacketSource` to generate packets, `Transform` to change them, and `PacketSink`
 to send them anywhere else. `Profile::from_path(...)?.load()?` builds the streams
 of a TOML profile.
+
+Stateful TCP in code, here with the client and the server on two in-memory
+ports (`ferotrx_io::open_port("eth0")` opens a real one):
+
+```rust
+use std::sync::Arc;
+use ferotrx_core::*;
+
+let program = TcpProgram::from_capture(&Capture::from_path("http.pcap")?, None)?;
+let mut client = TcpClientConfig::new(
+    TcpEndpoint::new(0, "02:00:00:00:00:01".parse()?, "10.0.0.1".parse()?),
+    "10.0.0.2:80".parse()?,
+);
+client.cps = 100.0;
+client.connections = 1000;
+let server = TcpServerConfig {
+    endpoint: TcpEndpoint::new(1, "02:00:00:00:00:02".parse()?, "10.0.0.2".parse()?),
+    port: 80,
+};
+let engine = TcpEngine::new(TcpConfig {
+    program: Arc::new(program),
+    client: Some(client),
+    server: Some(server),
+    options: TcpOptions::default(),
+})?;
+let (a, b) = memory_ports();
+let job = TcpJob::spawn(engine, vec![Box::new(a), Box::new(b)], TcpRunConfig::default())?;
+let stats = job.join()?;
+println!("{} connections completed", stats.client.completed);
+```
+
+`TcpEngine` does no I/O and reads no clock: it takes received frames and the
+time, and returns frames to send, so it can also run on a simulated network
+(see `crates/ferotrx-core/tests/tcp.rs`, which puts it behind a simulated
+lossy NAT router).
 
 ## License
 

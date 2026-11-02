@@ -215,6 +215,28 @@ impl Client {
         self.call("run.remove", &RunId { id })
     }
 
+    /// Starts a stateful TCP run.
+    pub fn tcp_start(&mut self, params: &TcpStartParams) -> Result<TcpRunInfo, ClientError> {
+        self.call("tcp.start", params)
+    }
+
+    /// Stops a TCP run and waits for it to end.
+    pub fn tcp_stop(&mut self, id: u64) -> Result<TcpRunInfo, ClientError> {
+        self.call("tcp.stop", &StopParams { id, wait: true })
+    }
+
+    pub fn tcp_stats(&mut self, id: u64) -> Result<TcpRunInfo, ClientError> {
+        self.call("tcp.stats", &RunId { id })
+    }
+
+    pub fn tcp_runs(&mut self) -> Result<Vec<TcpRunInfo>, ClientError> {
+        self.call("tcp.list", &Value::Null)
+    }
+
+    pub fn tcp_remove(&mut self, id: u64) -> Result<TcpRunInfo, ClientError> {
+        self.call("tcp.remove", &RunId { id })
+    }
+
     /// Asks for `stats` notifications about one run, or all running runs.
     /// Read them with [`next_stats`](Client::next_stats).
     pub fn subscribe(&mut self, id: Option<u64>, interval_ms: u64) -> Result<u64, ClientError> {

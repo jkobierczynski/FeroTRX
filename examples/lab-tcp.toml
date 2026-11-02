@@ -1,0 +1,53 @@
+# FeroTRX stateful TCP profile for a small lab: one switch, a NAT router between two VLANs.
+#
+#   FeroTRX host --- switch (trunk) --- router --- VLAN 10: 192.168.10.0/24 (clients)
+#                                              \-- VLAN 20: 192.168.20.0/24 (server)
+#
+# Run it with:
+#   sudo ferotrx tcp -p examples/lab-tcp.toml -i <interface>
+#
+# FeroTRX plays both ends of the HTTP session in http.pcap: emulated clients on
+# VLAN 10 open real TCP connections through the router to an emulated server on
+# VLAN 20, with handshakes, sequence and acknowledgement numbers that the
+# router's NAT and connection tracking accept. Each connection is checked:
+# both ends must receive exactly the bytes the capture has.
+#
+# Change the addresses to your lab:
+#   * The client and server `ip`s must be free addresses in each VLAN, not
+#     addresses of the FeroTRX machine (its own TCP stack would reset the
+#     connections). FeroTRX answers ARP and ping for them.
+#   * `gateway`: the router's address in each VLAN.
+#
+# The emulated hosts use their own MAC addresses (02:00 and the four bytes of
+# the IP address), so the interface is put in promiscuous mode. VirtualBox:
+# set the adapter's "Promiscuous Mode" to "Allow All".
+#
+# Sender on an access port instead of a trunk: remove the `vlan` lines and run
+# the client and server on two interfaces, one in each VLAN (`iface` below).
+
+pcap = "http.pcap"   # both directions of one HTTP connection
+cps = 20             # new connections per second
+connections = 200    # in all; 0 keeps going until Ctrl-C or --duration
+concurrency = 50     # most connections open at once
+
+[client]
+# iface = "enp0s3"   # default: the -i interface
+ip = "192.168.10.100/24"
+ips = 10             # clients 192.168.10.100 - 192.168.10.109
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+# iface = "enp0s3"
+ip = "192.168.20.50/24"
+gateway = "192.168.20.1"
+vlan = 20
+# port = 80          # default: the server port in the capture
+
+# To run the client and the server on two machines, give each machine only its
+# own table, and on the client machine say where to connect:
+# connect = "192.168.20.50:80"
+
+[tcp]
+rto = "250ms"        # first retransmission timeout
+verify = true        # check every byte received against the capture

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use ferotrx_core::{ReplayStats, RunStats};
+use ferotrx_core::{ReplayStats, RunStats, TcpSideStats, TcpStats};
 
 /// Version of the method set below. Bumped when a method changes incompatibly.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -374,6 +374,104 @@ impl RunInfo {
             })
             .collect();
         ((&stats.total).into(), streams)
+    }
+}
+
+// ----- tcp.* -----
+
+/// Parameters of `tcp.start`: a TCP profile (see `ferotrx_core::TcpProfile`)
+/// as a file or as TOML text, and values that replace the profile's.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TcpStartParams {
+    /// A TCP profile file on the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// The profile's text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toml: Option<String>,
+    /// Folder that `pcap` paths in `toml` are relative to (default: the server's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_dir: Option<PathBuf>,
+    /// Interface for hosts whose table names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iface: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<usize>,
+    /// Stop after this long, e.g. `30s`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+}
+
+/// A stateful TCP run, as `tcp.start`, `tcp.stats`, `tcp.stop` and `tcp.list` report it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TcpRunInfo {
+    /// Run id; ids are shared with `run.*` runs, so they never clash.
+    pub id: u64,
+    /// The session played, e.g. `10.1.2.30:51000 -> 10.1.2.80:80: 4 messages, ...`.
+    pub program: String,
+    /// The interfaces the run uses.
+    pub interfaces: Vec<String>,
+    pub state: RunState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub client: TcpCounters,
+    pub server: TcpCounters,
+    pub tx_packets: u64,
+    pub tx_bytes: u64,
+    pub rx_packets: u64,
+    pub rx_bytes: u64,
+    pub elapsed_s: f64,
+    /// Completed client connections per second.
+    pub cps: f64,
+}
+
+/// Connection counters of one side of a [`TcpRunInfo`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TcpCounters {
+    pub started: u64,
+    pub established: u64,
+    pub completed: u64,
+    pub reset: u64,
+    pub timed_out: u64,
+    pub mismatched: u64,
+    pub active: u64,
+    pub payload_tx: u64,
+    pub payload_rx: u64,
+    pub retransmits: u64,
+}
+
+impl From<&TcpSideStats> for TcpCounters {
+    fn from(s: &TcpSideStats) -> Self {
+        Self {
+            started: s.started,
+            established: s.established,
+            completed: s.completed,
+            reset: s.reset,
+            timed_out: s.timed_out,
+            mismatched: s.mismatched,
+            active: s.active,
+            payload_tx: s.payload_tx,
+            payload_rx: s.payload_rx,
+            retransmits: s.retransmits,
+        }
+    }
+}
+
+impl TcpRunInfo {
+    pub(crate) fn fill(&mut self, s: &TcpStats) {
+        self.client = (&s.client).into();
+        self.server = (&s.server).into();
+        self.tx_packets = s.tx_packets;
+        self.tx_bytes = s.tx_bytes;
+        self.rx_packets = s.rx_packets;
+        self.rx_bytes = s.rx_bytes;
+        self.elapsed_s = s.elapsed.as_secs_f64();
+        self.cps = s.cps();
     }
 }
 

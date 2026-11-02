@@ -340,3 +340,114 @@ fn token_is_required_when_set() {
     let mut d = client(addr);
     assert_eq!(rpc_code(d.runs().unwrap_err()), RpcError::UNAUTHORIZED);
 }
+
+/// A TCP profile whose client and server talk over an in-memory cable
+/// ("a" to "b"), so the test needs no interfaces.
+const TCP_PROFILE: &str = r#"
+port = 7
+connections = 20
+cps = 500
+[[message]]
+from = "client"
+text = "hello"
+[[message]]
+from = "server"
+text = "hello yourself"
+[client]
+iface = "a"
+ip = "10.9.0.1"
+[server]
+iface = "b"
+ip = "10.9.0.2"
+"#;
+
+fn tcp_server() -> SocketAddr {
+    use std::sync::Mutex;
+    let spare: Mutex<Option<ferotrx_core::MemoryPort>> = Mutex::new(None);
+    let controller = Controller::new().with_port_opener(move |name| {
+        let mut spare = spare.lock().unwrap();
+        match name {
+            "a" => {
+                let (a, b) = ferotrx_core::memory_ports();
+                *spare = Some(b);
+                Ok(Box::new(a))
+            }
+            "b" => Ok(Box::new(spare.take().ok_or("open a first")?)),
+            other => Err(format!("no interface {other}").into()),
+        }
+    });
+    Server::bind("127.0.0.1:0", controller, None)
+        .unwrap()
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn tcp_runs_start_finish_and_report() {
+    let addr = tcp_server();
+    let mut c = client(addr);
+    let info = c
+        .tcp_start(&TcpStartParams {
+            toml: Some(TCP_PROFILE.into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(info.interfaces, ["a", "b"]);
+    assert!(info.program.contains("2 messages"), "{}", info.program);
+    let id = info.id;
+    let mut last = info;
+    for _ in 0..100 {
+        last = c.tcp_stats(id).unwrap();
+        if !last.state.is_running() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(last.state, RunState::Finished, "{last:?}");
+    assert_eq!(last.client.completed, 20);
+    assert_eq!(last.server.completed, 20);
+    assert_eq!(last.client.payload_rx, 20 * 14);
+    assert_eq!(last.client.mismatched, 0);
+    assert_eq!(c.tcp_runs().unwrap().len(), 1);
+
+    // An endless run, stopped on request.
+    let endless = c
+        .tcp_start(&TcpStartParams {
+            toml: Some(TCP_PROFILE.into()),
+            connections: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(endless.id > id);
+    let stopped = c.tcp_stop(endless.id).unwrap();
+    assert_eq!(stopped.state, RunState::Stopped);
+    c.tcp_remove(endless.id).unwrap();
+    assert_eq!(
+        rpc_code(c.tcp_stats(endless.id).unwrap_err()),
+        RpcError::NOT_FOUND
+    );
+}
+
+#[test]
+fn tcp_start_reports_bad_profiles_and_interfaces() {
+    let mut c = client(tcp_server());
+    let bad = c
+        .tcp_start(&TcpStartParams {
+            toml: Some("port = 7".into()),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_eq!(rpc_code(bad), RpcError::FAILED);
+    let no_iface = c
+        .tcp_start(&TcpStartParams {
+            toml: Some(TCP_PROFILE.replace("iface = \"b\"", "iface = \"zz\"")),
+            ..Default::default()
+        })
+        .unwrap_err();
+    match no_iface {
+        ClientError::Rpc(e) => assert!(e.message.contains("no interface zz"), "{e}"),
+        other => panic!("{other}"),
+    }
+    let neither = c.tcp_start(&TcpStartParams::default()).unwrap_err();
+    assert_eq!(rpc_code(neither), RpcError::INVALID_PARAMS);
+}
