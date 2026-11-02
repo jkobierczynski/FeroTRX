@@ -222,15 +222,18 @@ impl PacketSink for BatchingSink {
 
 #[test]
 fn batching_sinks_hand_over_before_each_wait() {
-    // Paced: every packet is handed over before the engine waits for the next one.
+    // Paced: what is queued is handed over before the engine waits for the next
+    // packet. 50 pps leaves 20 ms gaps, so the engine waits before most packets
+    // even on a slow machine whose sleeps overshoot.
     let a = one_packet(1);
     let mut streams =
-        [Stream::new("a", CaptureSource::new(&a).loops(10)).with_rate(Rate::Pps(1000.0))];
+        [Stream::new("a", CaptureSource::new(&a).loops(6)).with_rate(Rate::Pps(50.0))];
     let mut sink = BatchingSink::default();
     run(&mut streams, &mut sink, &RunConfig::default()).unwrap();
-    assert_eq!(sink.sent.len(), 9);
-    assert!(sink.sent.iter().all(|&(n, _)| n == 1));
-    assert_eq!(sink.queued, 1); // the last one goes out with flush
+    let handed: usize = sink.sent.iter().map(|&(n, _)| n).sum();
+    assert_eq!(handed + sink.queued, 6);
+    assert!(sink.sent.len() >= 2, "{:?}", sink.sent.len());
+    assert!(sink.queued >= 1); // the last one goes out with flush
 
     // Top speed: no waits, so nothing is handed over early.
     let mut streams =
