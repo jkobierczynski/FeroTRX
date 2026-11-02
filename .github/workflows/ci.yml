@@ -28,7 +28,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libpcap-dev
 
       # macOS ships libpcap. Windows links against the Npcap SDK; running the
-      # binary needs Npcap installed, so on Windows only the core crate's tests run.
+      # binary needs Npcap installed, so on Windows only the core and packet tests run.
       - name: Install Npcap SDK (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -51,4 +51,4 @@ jobs:
         run: cargo test --workspace
       - name: Test core (Windows)
         if: runner.os == 'Windows'
-        run: cargo test -p ferotrx-core
+        run: cargo test -p ferotrx-core -p ferotrx-packet

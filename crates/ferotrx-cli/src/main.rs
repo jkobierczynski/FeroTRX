@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use ferotrx_core::{
     parse_duration, run_with_progress, Capture, CaptureSource, NullSink, PacketSink, Profile, Rate,
-    ReplayStats, Rewrite, RunConfig, Stream, LINKTYPE_ETHERNET,
+    ReplayStats, Rewrite, RunConfig, Stream, Transform, LINKTYPE_ETHERNET,
 };
 use ferotrx_io::PcapFileSink;
 
@@ -26,6 +26,8 @@ enum Command {
     Replay(ReplayArgs),
     /// Run a traffic profile: several streams at once, each with its own rate and rewrites.
     Run(RunArgs),
+    /// Decode a capture: one line per packet, or the full layers and bytes of chosen packets.
+    Inspect(InspectArgs),
     /// Show what a capture contains.
     Info {
         /// The pcap or pcapng file.
@@ -60,6 +62,64 @@ struct ReplayArgs {
 
     #[command(flatten)]
     common: CommonArgs,
+}
+
+#[derive(Args)]
+struct InspectArgs {
+    /// The pcap or pcapng file.
+    file: PathBuf,
+
+    /// Show the decoded layers and a hex dump of this packet (numbered from 1).
+    /// Repeat or use a range: -p 3 -p 10-12.
+    #[arg(short, long = "packet", value_name = "N[-M]")]
+    packets: Vec<PacketRange>,
+
+    /// Show at most this many packets.
+    #[arg(short = 'c', long)]
+    count: Option<usize>,
+
+    /// Show the decoded layers of every listed packet, not just a summary line.
+    #[arg(short, long)]
+    verbose: bool,
+
+    /// Add a hex dump to every listed packet.
+    #[arg(short = 'x', long)]
+    hex: bool,
+
+    /// Only list packets with problems (bad checksums, truncated headers).
+    #[arg(long)]
+    problems: bool,
+
+    /// Apply rewrites before decoding, to preview what `replay -r` would send.
+    #[arg(short, long = "rewrite", value_name = "SPEC")]
+    rewrites: Vec<Rewrite>,
+}
+
+/// `N` or `N-M`, numbered from 1.
+#[derive(Clone, Copy, Debug)]
+struct PacketRange(usize, usize);
+
+impl std::str::FromStr for PacketRange {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        let num = |t: &str| {
+            t.trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|&n| n > 0)
+                .ok_or_else(|| format!("'{t}' is not a packet number (they start at 1)"))
+        };
+        match s.split_once('-') {
+            Some((a, b)) => {
+                let (a, b) = (num(a)?, num(b)?);
+                if a > b {
+                    return Err(format!("range {s} is backwards"));
+                }
+                Ok(PacketRange(a, b))
+            }
+            None => num(s).map(|n| PacketRange(n, n)),
+        }
+    }
 }
 
 #[derive(Args)]
@@ -161,6 +221,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Replay(args) => cmd_replay(args),
         Command::Run(args) => cmd_run(args),
         Command::Info { file } => cmd_info(&file),
+        Command::Inspect(args) => cmd_inspect(args),
         #[cfg(feature = "pcap")]
         Command::Interfaces => cmd_interfaces(),
     }
@@ -185,6 +246,96 @@ fn cmd_info(file: &PathBuf) -> Result<()> {
             cap.total_bytes() as f64 * 8.0 / 1e6 / secs
         );
     }
+    Ok(())
+}
+
+fn cmd_inspect(args: InspectArgs) -> Result<()> {
+    let mut cap = load(&args.file)?;
+    if !args.rewrites.is_empty() {
+        if cap.linktype != LINKTYPE_ETHERNET {
+            bail!(
+                "rewrites need Ethernet frames, capture has link type {}",
+                cap.linktype
+            );
+        }
+        let mut rewrites = args.rewrites.clone();
+        for p in &mut cap.packets {
+            for r in &mut rewrites {
+                r.apply(p);
+            }
+        }
+    }
+    let first_ts = cap.packets.first().map_or(Duration::ZERO, |p| p.timestamp);
+    let chosen = |n: usize| args.packets.iter().any(|r| (r.0..=r.1).contains(&n));
+    let detail_only = !args.packets.is_empty();
+
+    let mut shown = 0usize;
+    let mut with_problems = 0usize;
+    let mut protocols: Vec<(&'static str, usize)> = Vec::new();
+    if !detail_only {
+        println!(
+            "{:>6}  {:>11}  {:<24}  {:<24}  {:<8}  {:>5}  Info",
+            "No.", "Time", "Source", "Destination", "Protocol", "Len"
+        );
+    }
+    for (i, p) in cap.packets.iter().enumerate() {
+        let n = i + 1;
+        let d = ferotrx_packet::decode(cap.linktype, &p.data);
+        if !d.problems.is_empty() {
+            with_problems += 1;
+        }
+        match protocols.iter_mut().find(|(name, _)| *name == d.protocol) {
+            Some((_, c)) => *c += 1,
+            None => protocols.push((d.protocol, 1)),
+        }
+        if (detail_only && !chosen(n)) || (args.problems && d.problems.is_empty()) {
+            continue;
+        }
+        if args.count.is_some_and(|c| shown >= c) {
+            continue;
+        }
+        shown += 1;
+        let t = p.timestamp.saturating_sub(first_ts).as_secs_f64();
+        let mut info = d.info.clone();
+        if !d.problems.is_empty() {
+            info.push_str(" [!]");
+        }
+        if detail_only {
+            println!("Packet {n}: {} bytes, time {t:.6} s", d.len);
+        } else {
+            println!(
+                "{n:>6}  {t:>11.6}  {:<24}  {:<24}  {:<8}  {:>5}  {info}",
+                d.source, d.destination, d.protocol, d.len
+            );
+        }
+        if detail_only || args.verbose {
+            for line in d.tree().lines() {
+                println!("    {line}");
+            }
+        }
+        if detail_only || args.hex {
+            for line in ferotrx_packet::hex_dump(&p.data).lines() {
+                println!("    {line}");
+            }
+        }
+        if detail_only || args.verbose || args.hex {
+            println!();
+        }
+    }
+    if detail_only && shown == 0 {
+        bail!(
+            "{} has {} packets; none matched",
+            args.file.display(),
+            cap.len()
+        );
+    }
+    protocols.sort_by_key(|p| std::cmp::Reverse(p.1));
+    let list: Vec<String> = protocols.iter().map(|(p, c)| format!("{p} {c}")).collect();
+    eprintln!(
+        "{} packets ({}), {with_problems} with problems",
+        cap.len(),
+        list.join(", ")
+    );
     Ok(())
 }
 

@@ -241,6 +241,7 @@ dependencies = [
  "ctrlc",
  "ferotrx-core",
  "ferotrx-io",
+ "ferotrx-packet",
 ]
 
 [[package]]
@@ -259,6 +260,13 @@ version = "0.1.0"
 dependencies = [
  "ferotrx-core",
  "pcap",
+]
+
+[[package]]
+name = "ferotrx-packet"
+version = "0.1.0"
+dependencies = [
+ "ferotrx-core",
 ]
 
 [[package]]
