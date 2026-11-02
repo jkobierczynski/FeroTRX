@@ -410,6 +410,7 @@ fn profile_info(name: &str, p: &Profile) -> ProfileInfo {
                 limit: s.limit,
                 delay_s: s.delay.as_secs_f64(),
                 rewrite: s.rewrite.iter().map(ToString::to_string).collect(),
+                vary: s.vary.iter().map(ToString::to_string).collect(),
             })
             .collect(),
     }

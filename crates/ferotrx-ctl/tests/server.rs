@@ -18,6 +18,7 @@ name = "dns"
 packet = "eth/vlan(id=20)/ipv4(dst=192.168.20.53)/udp/dns(q=example.com)"
 rate = "1000pps"
 loops = 0
+vary = ["ip_src=192.168.20.100..192.168.20.199", "port_src=1024..65535,random"]
 "#;
 
 fn server(token: Option<&str>) -> SocketAddr {
@@ -67,6 +68,14 @@ fn load_start_watch_and_finish() {
     let profile = load(&mut c);
     assert_eq!(profile.streams.len(), 2);
     assert_eq!(profile.streams[0].rate, "2000pps");
+    assert!(profile.streams[0].vary.is_empty());
+    assert_eq!(
+        profile.streams[1].vary,
+        [
+            "ip_src=192.168.20.100..192.168.20.199",
+            "port_src=1024..65535,random"
+        ]
+    );
     assert_eq!(c.profiles().unwrap(), vec![profile]);
 
     let run = c

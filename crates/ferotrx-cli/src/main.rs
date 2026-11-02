@@ -9,8 +9,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use ferotrx_core::{
-    parse_duration, Backend, Capture, CaptureSource, Job, PacketSink, Profile, Rate, ReplayStats,
-    Rewrite, RunConfig, RunStats, SendSettings, Stream, Transform, XdpMode, LINKTYPE_ETHERNET,
+    parse_duration, Backend, Capture, CaptureSource, FieldEngine, FieldVar, Job, PacketSink,
+    Profile, Rate, ReplayStats, Rewrite, RunConfig, RunStats, SendSettings, Stream, Transform,
+    XdpMode, LINKTYPE_ETHERNET,
 };
 
 /// FeroTRX: replay captured traffic at a controlled rate.
@@ -73,6 +74,15 @@ struct ReplayArgs {
     #[arg(short, long = "rewrite", value_name = "SPEC")]
     rewrites: Vec<Rewrite>,
 
+    /// Change a field from packet to packet (field engine); repeat for more
+    /// fields. FIELD=MIN..MAX[,inc|dec|random][,step=N][,every=N][,seed=N], e.g.
+    /// ip_src=10.0.0.1..10.0.0.254, ip_dst=192.168.20.0/24,random,
+    /// port_src=1024..65535, vlan=10..20, mac_src+=0..99, payload@0:4=0..1000,
+    /// len=64..1518,random. Fields: mac_src/dst, ip_src/dst, port_src/dst, vlan,
+    /// ip_id, ttl, payload@OFFSET[:SIZE], len. Runs after the rewrites.
+    #[arg(long = "vary", value_name = "SPEC")]
+    vary: Vec<FieldVar>,
+
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -106,6 +116,11 @@ struct InspectArgs {
     /// Apply rewrites before decoding, to preview what `replay -r` would send.
     #[arg(short, long = "rewrite", value_name = "SPEC")]
     rewrites: Vec<Rewrite>,
+
+    /// Apply field engine variables before decoding, to preview what
+    /// `replay --vary` would send (see `ferotrx replay --help`).
+    #[arg(long = "vary", value_name = "SPEC")]
+    vary: Vec<FieldVar>,
 }
 
 #[derive(Args)]
@@ -152,6 +167,17 @@ struct BuildArgs {
     /// Add a hex dump of every packet.
     #[arg(long)]
     hex: bool,
+
+    /// Change fields from packet to packet (see `ferotrx replay --help`), e.g.
+    /// --vary ip_src=10.0.0.1..10.0.0.100 --count 100. When sending, the values
+    /// keep moving from loop to loop.
+    #[arg(long = "vary", value_name = "SPEC")]
+    vary: Vec<FieldVar>,
+
+    /// Make this many packets, going round the given ones (default: one each).
+    /// Shown and written packets get the --vary values in turn.
+    #[arg(short = 'n', long, value_name = "N")]
+    count: Option<usize>,
 
     #[command(flatten)]
     common: CommonArgs,
@@ -370,18 +396,20 @@ fn cmd_info(file: &PathBuf) -> Result<()> {
 
 fn cmd_inspect(args: InspectArgs) -> Result<()> {
     let mut cap = load(&args.file)?;
-    if !args.rewrites.is_empty() {
+    if !args.rewrites.is_empty() || !args.vary.is_empty() {
         if cap.linktype != LINKTYPE_ETHERNET {
             bail!(
-                "rewrites need Ethernet frames, capture has link type {}",
+                "rewrites and vary need Ethernet frames, capture has link type {}",
                 cap.linktype
             );
         }
         let mut rewrites = args.rewrites.clone();
+        let mut engine = FieldEngine::new(args.vary.iter().cloned());
         for p in &mut cap.packets {
             for r in &mut rewrites {
                 r.apply(p);
             }
+            engine.apply(p);
         }
     }
     let first_ts = cap.packets.first().map_or(Duration::ZERO, |p| p.timestamp);
@@ -494,12 +522,36 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
     if specs.is_empty() {
         bail!("give a packet to build, e.g. 'eth/ipv4(dst=10.0.0.2)/icmp', or --file");
     }
-    let cap = Capture::from_specs(&specs, args.interval)?;
+    let mut cap = Capture::from_specs(&specs, args.interval)?;
+    if let Some(n) = args.count {
+        if n == 0 {
+            bail!("--count must be at least 1");
+        }
+        let built = cap.packets.clone();
+        cap.packets = (0..n)
+            .map(|i| {
+                let mut p = built[i % built.len()].clone();
+                p.timestamp = args
+                    .interval
+                    .saturating_mul(u32::try_from(i).unwrap_or(u32::MAX));
+                p
+            })
+            .collect();
+    }
+    if !args.vary.is_empty() && cap.linktype != LINKTYPE_ETHERNET {
+        bail!("vary needs Ethernet frames; start the packets with eth, not ipv4 or ipv6");
+    }
+    // What is shown and written: the packets with the field engine applied.
+    let mut shown = cap.clone();
+    let mut engine = FieldEngine::new(args.vary.iter().cloned());
+    for p in &mut shown.packets {
+        engine.apply(p);
+    }
 
     let sending = args.iface.is_some();
     if !(sending && args.common.quiet) {
-        for (i, p) in cap.packets.iter().enumerate() {
-            let d = ferotrx_packet::decode(cap.linktype, &p.data);
+        for (i, p) in shown.packets.iter().enumerate() {
+            let d = ferotrx_packet::decode(shown.linktype, &p.data);
             println!(
                 "{:>4}  {:<24}  {:<24}  {:<8}  {:>5}  {}{}",
                 i + 1,
@@ -536,7 +588,7 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        let mut stamped = cap.clone();
+        let mut stamped = shown.clone();
         for p in &mut stamped.packets {
             p.timestamp += now;
         }
@@ -553,13 +605,17 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
             .interval
             .saturating_mul(u32::try_from(cap.len()).unwrap_or(u32::MAX));
         let linktype = cap.linktype;
-        let stream = Stream::new(
+        let mut stream = Stream::new(
             "built",
             CaptureSource::new(Arc::new(cap))
                 .loops(args.loops)
                 .loop_period(period),
         )
         .with_rate(rate);
+        if !args.vary.is_empty() {
+            // A fresh engine, so the first loop sends what was shown above.
+            stream.push_transform(FieldEngine::new(args.vary.iter().cloned()));
+        }
         let output = Output {
             iface: Some(iface.clone()),
             out: None,
@@ -662,9 +718,9 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
     if cap.is_empty() {
         bail!("{} has no packets", args.file.display());
     }
-    if !args.rewrites.is_empty() && cap.linktype != LINKTYPE_ETHERNET {
+    if (!args.rewrites.is_empty() || !args.vary.is_empty()) && cap.linktype != LINKTYPE_ETHERNET {
         bail!(
-            "rewrites need Ethernet frames, {} has link type {}",
+            "rewrites and vary need Ethernet frames, {} has link type {}",
             args.file.display(),
             cap.linktype
         );
@@ -678,6 +734,9 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
     for r in args.rewrites {
         stream.push_transform(r);
     }
+    if !args.vary.is_empty() {
+        stream.push_transform(FieldEngine::new(args.vary));
+    }
     let sink = open_sink(&args.output, &args.send, linktype, args.common.quiet)?;
     let job = Job::spawn(vec![stream], sink, run_config(&args.common)?)?;
     let stats = watch(job, &args.common)?;
@@ -690,18 +749,16 @@ fn cmd_run(args: RunArgs) -> Result<()> {
         .with_context(|| format!("cannot read {}", args.profile.display()))?;
     if !args.common.quiet {
         for spec in &profile.streams {
-            let rewrites: Vec<String> = spec.rewrite.iter().map(ToString::to_string).collect();
-            eprintln!(
-                "stream {}: {} at {}{}",
-                spec.name,
-                spec.source,
-                spec.rate,
-                if rewrites.is_empty() {
-                    String::new()
-                } else {
-                    format!(", rewrite {}", rewrites.join(" "))
-                }
-            );
+            let mut line = format!("stream {}: {} at {}", spec.name, spec.source, spec.rate);
+            if !spec.rewrite.is_empty() {
+                let r: Vec<String> = spec.rewrite.iter().map(ToString::to_string).collect();
+                line.push_str(&format!(", rewrite {}", r.join(" ")));
+            }
+            if !spec.vary.is_empty() {
+                let v: Vec<String> = spec.vary.iter().map(ToString::to_string).collect();
+                line.push_str(&format!(", vary {}", v.join(" ")));
+            }
+            eprintln!("{line}");
         }
     }
     let output = args.output.to_io(&args.send)?;

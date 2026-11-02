@@ -3,7 +3,7 @@
 FeroTRX is a traffic replay tool written in Rust, inspired by
 [Cisco TRex](https://trex-tgn.cisco.com/). It replays pcap and pcapng captures
 at a controlled rate on Linux, macOS and Windows, rewrites them on the way
-(addresses, ports, VLAN tags), builds packets from scratch, runs several streams
+(addresses, ports, VLAN tags), varies fields from packet to packet, builds packets from scratch, runs several streams
 at once from a profile, and its engine is a library you can use from your own programs.
 
 ## Status
@@ -13,8 +13,8 @@ at once from a profile, and its engine is a library you can use from your own pr
 * **M3, packet inspection (`ferotrx-packet`, `ferotrx inspect`):** done.
 * **M4, packet building (`ferotrx build`, built packets in profiles):** done.
 * **M5, remote control (`ferotrx-ctl`, `ferotrx serve`, `ferotrx ctl`):** done.
-* **M6, fast send backends (AF_XDP on Linux, DPDK as an option):** this release.
-* Next: flow multiplication (field ranges).
+* **M6, fast send backends (AF_XDP on Linux, DPDK as an option):** done.
+* **M7, field engine (per-packet field ranges, `--vary`, `vary` in profiles):** this release.
 
 ## Crates
 
@@ -150,10 +150,58 @@ ferotrx replay capture.pcap -i eth0 \
 
 Without `_src` or `_dst`, a rewrite changes both.
 
+### Field engine
+
+`--vary` changes a field from packet to packet, like TRex's field engine: one
+packet gets the first value of the range, the next packet the next value, and
+so on. Repeat it for more fields. It runs after the rewrites and works on
+`replay`, `build` and `inspect` (to preview), and as `vary` in profiles.
+IPv4, TCP, UDP, ICMP and ICMPv6 checksums are kept right; a length change also
+fixes the IP and UDP length fields.
+
+```sh
+# 20000 SYNs from 200 clients and random source ports, through the NAT router
+sudo ferotrx build 'eth(dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(dst=192.168.20.50)/tcp(dport=80,flags=S)' \
+  -i enp0s3 --pps 1000 --loop 0 --limit 20000 \
+  --vary ip_src=192.168.10.1..192.168.10.200 --vary port_src=1024..65535,random
+
+# See what that sends: 10 packets, decoded
+ferotrx build 'eth/ipv4/udp(dport=9)/raw(len=20)' -n 10 \
+  --vary ip_src=10.0.0.0/24,random --vary len=64..1518,random
+
+# Replay a capture as 100 different clients, one per loop (web.pcap has 21 packets)
+sudo ferotrx replay examples/web.pcap -i enp0s3 --loop 100 --vary ip_src+=0..99,every=21
+```
+
+The form is `FIELD=MIN..MAX`, then options separated by commas:
+
+| Field | Values |
+| --- | --- |
+| `mac_src`, `mac_dst` | MAC addresses: `02:00:00:00:00:01..02:00:00:00:00:ff` |
+| `ip_src`, `ip_dst` | IPv4 or IPv6 addresses, `A..B` or a prefix `10.0.0.0/24`; packets of the other IP version are left alone |
+| `port_src`, `port_dst` | TCP and UDP ports |
+| `vlan` | ID of the outer VLAN tag (priority kept); untagged frames are left alone |
+| `ip_id`, `ttl` | IPv4 identification; IPv4 TTL or IPv6 hop limit |
+| `payload@OFFSET[:SIZE]` | SIZE bytes (1 to 16, default 1), big endian, OFFSET bytes after the TCP, UDP or ICMP header |
+| `len` | Frame length without FCS: the payload is cut or padded with zeros, never the headers |
+
+| Option | Effect |
+| --- | --- |
+| `inc` (default) | Count up by `step`; after `MAX` start again at `MIN`. |
+| `dec` | Count down from `MAX`. |
+| `random` | Any value from `MIN` to `MAX`. `seed=N` repeats the same values every run. |
+| `step=N` | Count by N (default 1). |
+| `every=N` | Keep each value for N packets. Give a second variable `every=` the first one's range size to go through every combination. |
+
+`FIELD+=MIN..MAX` adds the value to what the packet already has instead of
+setting it (also for `mac`, `ip` and `port` without `_src`/`_dst`, which shift
+both sides). Numbers can be decimal or `0x` hex. Every variable moves on once
+per packet, whether or not that packet has its field.
+
 ### Profiles
 
 A profile runs several streams at once into one output, each with its own
-capture, rate, loops, start delay and rewrites. The scheduler always sends the
+capture, rate, loops, start delay, rewrites and field engine (`vary`). The scheduler always sends the
 packet with the earliest deadline, so paced streams keep their rate and top
 speed streams fill the gaps.
 
@@ -164,6 +212,7 @@ pcap = "dns.pcap"            # relative to the profile
 rate = "500pps"              # 1000pps, 10kpps, 100mbps, 1gbps, 2x, topspeed
 loops = 0                    # 0 = until the run ends
 rewrite = ["vlan_push=10", "ip_dst=192.168.20.50"]
+vary = ["ip_src=192.168.10.1..192.168.10.254", "port_src=1024..65535,random"]
 
 [[stream]]
 pcap = "web.pcap"
@@ -353,6 +402,19 @@ let mut streams = [
 ];
 let config = RunConfig { duration: Some(std::time::Duration::from_secs(30)), ..Default::default() };
 let stats = run(&mut streams, &mut sink, &config)?;
+```
+
+The field engine in code:
+
+```rust
+use ferotrx_core::{FieldEngine, FieldVar, VarField, Side};
+
+let engine = FieldEngine::parse(["ip_src=10.0.0.1..10.0.0.254", "port_src=1024..65535,random"])?;
+let stream = Stream::new("many-clients", CaptureSource::new(&capture).loops(0)).with_transform(engine);
+
+// Or without text:
+let var = FieldVar::new(VarField::Port(Side::Dst), 5000, 5099)?;
+let engine = FieldEngine::new([var]);
 ```
 
 Building packets in code:

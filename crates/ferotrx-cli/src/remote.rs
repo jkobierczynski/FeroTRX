@@ -412,6 +412,9 @@ fn print_profile(p: &ProfileInfo) {
         if !s.rewrite.is_empty() {
             line.push_str(&format!(", rewrite {}", s.rewrite.join(" ")));
         }
+        if !s.vary.is_empty() {
+            line.push_str(&format!(", vary {}", s.vary.join(" ")));
+        }
         println!("{line}");
     }
 }
