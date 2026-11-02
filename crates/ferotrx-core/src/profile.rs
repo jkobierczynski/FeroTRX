@@ -6,8 +6,8 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::{
-    parse_duration, Capture, CaptureSource, Error, Rate, Result, Rewrite, SendSettings, Stream,
-    LINKTYPE_ETHERNET,
+    parse_duration, Capture, CaptureSource, Error, FieldEngine, FieldVar, Rate, Result, Rewrite,
+    SendSettings, Stream, LINKTYPE_ETHERNET,
 };
 
 /// A traffic profile: several streams that run together, read from a TOML file.
@@ -21,6 +21,8 @@ use crate::{
 /// limit = 10000                # optional packet limit for this stream
 /// delay = "2s"                 # optional start delay
 /// rewrite = ["vlan_push=20", "ip_dst=10.0.0.0/8->192.168.20.0"]
+/// # Field engine: change fields from packet to packet, after the rewrites.
+/// vary = ["ip_src=192.168.10.1..192.168.10.254", "port_src=1024..65535,random"]
 ///
 /// [[stream]]
 /// name = "ping"
@@ -39,8 +41,8 @@ use crate::{
 /// dpdk_args = ["-l", "0-1"]    # DPDK EAL arguments
 /// ```
 ///
-/// See [`Rewrite`] for the rewrite syntax and `ferotrx_packet::PacketSpec` for
-/// the packet syntax.
+/// See [`Rewrite`] for the rewrite syntax, [`FieldVar`] for the `vary` syntax
+/// and `ferotrx_packet::PacketSpec` for the packet syntax.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
     pub streams: Vec<StreamSpec>,
@@ -58,6 +60,8 @@ pub struct StreamSpec {
     pub limit: Option<u64>,
     pub delay: Duration,
     pub rewrite: Vec<Rewrite>,
+    /// Field engine variables, applied after the rewrites.
+    pub vary: Vec<FieldVar>,
 }
 
 /// Where a [`StreamSpec`] gets its packets.
@@ -145,6 +149,8 @@ struct StreamFile {
     delay: Option<String>,
     #[serde(default)]
     rewrite: Vec<String>,
+    #[serde(default)]
+    vary: Vec<String>,
 }
 
 impl Profile {
@@ -226,6 +232,12 @@ impl Profile {
                         .map(|r| r.parse())
                         .collect::<Result<_>>()
                         .map_err(ctx)?,
+                    vary: s
+                        .vary
+                        .iter()
+                        .map(|v| v.parse())
+                        .collect::<Result<_>>()
+                        .map_err(ctx)?,
                     source,
                     loops: s.loops.unwrap_or(1),
                     limit: s.limit,
@@ -269,9 +281,11 @@ impl Profile {
                     }
                 };
                 let linktype = source.capture().linktype;
-                if !spec.rewrite.is_empty() && linktype != LINKTYPE_ETHERNET {
+                if (!spec.rewrite.is_empty() || !spec.vary.is_empty())
+                    && linktype != LINKTYPE_ETHERNET
+                {
                     return Err(ctx(Error::InvalidSpec(format!(
-                        "rewrites need Ethernet frames, packets have link type {linktype}"
+                        "rewrites and vary need Ethernet frames, packets have link type {linktype}"
                     ))));
                 }
                 let mut stream = Stream::new(&spec.name, source.loops(spec.loops))
@@ -280,6 +294,10 @@ impl Profile {
                     .with_delay(spec.delay);
                 for r in &spec.rewrite {
                     stream.push_transform(r.clone());
+                }
+                if !spec.vary.is_empty() {
+                    // A fresh engine per load: every run starts its ranges from the top.
+                    stream.push_transform(FieldEngine::new(spec.vary.iter().cloned()));
                 }
                 Ok(stream)
             })
@@ -357,6 +375,48 @@ mod tests {
         assert!(err("[[stream]]\npcap = \"a.pcap\"\npacket = \"eth\"").contains("not both"));
         assert!(err("[[stream]]\npacket = \"eth/tcp\"").contains("tcp cannot follow eth"));
         assert!(err("[[stream]]\npacket = \"eth\"\npackets = [\"ipv4\"]").contains("link types"));
+    }
+
+    #[test]
+    fn vary_list() {
+        let text = r#"
+            [[stream]]
+            packet = "eth/ipv4(dst=10.0.0.2)/udp(sport=1000,dport=53)/raw(len=4)"
+            interval = "1ms"
+            loops = 5
+            rewrite = ["ip_dst=192.168.20.50"]
+            vary = ["ip_src=192.168.10.1..192.168.10.3", "port_src=1000..1001,every=2"]
+        "#;
+        let p = Profile::from_toml(text, Path::new("")).unwrap();
+        assert_eq!(p.streams[0].vary.len(), 2);
+        assert_eq!(
+            p.streams[0].vary[1].to_string(),
+            "port_src=1000..1001,every=2"
+        );
+        let mut streams = p.load().unwrap();
+        let mut sink = crate::VecSink::default();
+        let mut s = streams.remove(0).with_rate(Rate::TopSpeed);
+        crate::run(std::slice::from_mut(&mut s), &mut sink, &Default::default()).unwrap();
+        let srcs: Vec<u8> = sink.packets.iter().map(|p| p[29]).collect();
+        assert_eq!(srcs, [1, 2, 3, 1, 2]);
+        let ports: Vec<u8> = sink.packets.iter().map(|p| p[35]).collect();
+        assert_eq!(ports, [0xe8, 0xe8, 0xe9, 0xe9, 0xe8]);
+        assert!(sink.packets.iter().all(|p| p[30..34] == [192, 168, 20, 50]));
+        assert!(sink
+            .packets
+            .iter()
+            .all(|p| ferotrx_packet::decode(1, p).problems.is_empty()));
+
+        let err = Profile::from_toml(
+            "[[stream]]\npcap = \"a.pcap\"\nvary = [\"ip_src=1..2\"]",
+            Path::new(""),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("stream 'a'") && err.contains("invalid address"),
+            "{err}"
+        );
     }
 
     #[test]

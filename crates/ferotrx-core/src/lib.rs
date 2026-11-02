@@ -11,7 +11,9 @@
 //! * [`Capture`] loads a pcap or pcapng file, or builds packets from text
 //!   descriptions (feature `build`); [`CaptureSource`] plays it in loops.
 //! * [`Transform`]s change packets on the way; [`Rewrite`] has the built-in ones
-//!   (MAC, IP and port rewrites, VLAN tags, checksum repair).
+//!   (MAC, IP and port rewrites, VLAN tags, checksum repair), and
+//!   [`FieldEngine`] changes fields from packet to packet (address, port, VLAN
+//!   and payload ranges, packet sizes), keeping checksums and lengths right.
 //! * [`Rate`] and [`Pacer`] decide when each packet should leave.
 //! * A [`Stream`] ties a source, its transforms and a rate together, and [`run`]
 //!   plays several streams at once into one [`PacketSink`].
@@ -62,6 +64,7 @@
 
 mod capture;
 mod error;
+mod field_engine;
 mod job;
 mod net;
 mod pacer;
@@ -76,6 +79,7 @@ mod transform;
 
 pub use capture::{Capture, Packet, LINKTYPE_ETHERNET};
 pub use error::{Error, Result};
+pub use field_engine::{FieldEngine, FieldVar, Side, VarField, VarOp};
 pub use job::{Job, JobState, JOB_STATS_INTERVAL};
 pub use net::{MacAddr, TPID_QINQ, TPID_VLAN};
 pub use pacer::{parse_duration, Pacer, Rate};

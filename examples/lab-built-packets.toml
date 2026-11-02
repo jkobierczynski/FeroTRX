@@ -28,7 +28,8 @@ loops = 0
 delay = "2s"
 
 # 20000 TCP SYNs at 1000 pps, 5 s in. Built from 192.168.10.100 and moved to
-# .101 by a rewrite, so the router's NAT table sees a second client.
+# .101 by a rewrite, so the router's NAT table sees a second client. The field
+# engine gives every SYN its own source port, so each one opens a NAT entry.
 [[stream]]
 name = "syn"
 packet = "eth(dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.100,dst=192.168.20.50,df=1)/tcp(sport=40000,dport=80,flags=S,mss=1460)"
@@ -37,3 +38,4 @@ loops = 0
 limit = 20000
 delay = "5s"
 rewrite = ["ip_src=192.168.10.101"]
+vary = ["port_src=40000..59999"]

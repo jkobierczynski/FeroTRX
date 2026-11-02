@@ -211,6 +211,9 @@ pub struct StreamInfo {
     pub limit: Option<u64>,
     pub delay_s: f64,
     pub rewrite: Vec<String>,
+    /// Field engine variables (the profile's `vary` list).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vary: Vec<String>,
 }
 
 // ----- run.* -----

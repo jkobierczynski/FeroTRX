@@ -280,6 +280,41 @@ pub(crate) fn replace(data: &mut [u8], range: Range<usize>, new: &[u8], checksum
     data[range].copy_from_slice(new);
 }
 
+/// Like [`replace`], for any byte range: the checksums are adjusted over the
+/// 16-bit words around it. Headers start at even offsets in the frame, so word
+/// boundaries are the even offsets.
+pub(crate) fn replace_any(
+    data: &mut [u8],
+    range: Range<usize>,
+    new: &[u8],
+    checksums: &[(u8, usize)],
+) {
+    if data[range.clone()] == *new {
+        return;
+    }
+    let start = range.start & !1;
+    let end = (range.end + 1) & !1;
+    let mut old_words = vec![0u8; end - start];
+    let have = end.min(data.len()) - start;
+    old_words[..have].copy_from_slice(&data[start..start + have]);
+    let mut new_words = old_words.clone();
+    new_words[range.start - start..range.end - start].copy_from_slice(new);
+    for &(proto, at) in checksums {
+        let Some(old_sum) = be16(data, at) else {
+            continue;
+        };
+        if proto == IPPROTO_UDP && old_sum == 0 {
+            continue;
+        }
+        let mut sum = adjust_checksum(old_sum, &old_words, &new_words);
+        if proto == IPPROTO_UDP && sum == 0 {
+            sum = 0xffff;
+        }
+        put16(data, at, sum);
+    }
+    data[range].copy_from_slice(new);
+}
+
 /// Recomputes the IPv4 header checksum and the TCP, UDP or ICMPv6 checksum.
 /// Fragments and truncated packets keep their transport checksum.
 pub(crate) fn fix_checksums(data: &mut [u8]) {
