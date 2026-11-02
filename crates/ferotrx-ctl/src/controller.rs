@@ -10,11 +10,12 @@ use serde_json::Value;
 
 use ferotrx_core::{
     parse_duration, Job, JobState, Profile, Rate, RunConfig, SendSettings, StreamSource,
-    LINKTYPE_ETHERNET,
+    TcpProfile, TcpRunConfig, LINKTYPE_ETHERNET,
 };
 use ferotrx_io::Output;
 
 use crate::protocol::*;
+use crate::tcp::{start_tcp_with, PortOpener, TcpRun};
 
 /// Error from [`start_run`].
 pub type StartError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -79,8 +80,10 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct Controller {
     profiles: Mutex<BTreeMap<String, Profile>>,
     runs: Mutex<BTreeMap<u64, Arc<Run>>>,
+    tcp_runs: Mutex<BTreeMap<u64, Arc<TcpRun>>>,
     next_run: AtomicU64,
     auth_required: bool,
+    open_port: Box<PortOpener>,
 }
 
 struct Run {
@@ -103,9 +106,24 @@ impl Controller {
         Self {
             profiles: Mutex::default(),
             runs: Mutex::default(),
+            tcp_runs: Mutex::default(),
             next_run: AtomicU64::new(1),
             auth_required: false,
+            open_port: Box::new(ferotrx_io::open_port),
         }
+    }
+
+    /// Opens the interfaces of TCP runs with `open` instead of libpcap/Npcap,
+    /// for example to run on in-memory ports in tests.
+    pub fn with_port_opener(
+        mut self,
+        open: impl Fn(&str) -> Result<Box<dyn ferotrx_core::PacketPort>, ferotrx_core::SinkError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.open_port = Box::new(open);
+        self
     }
 
     pub(crate) fn set_auth_required(&mut self, yes: bool) {
@@ -144,6 +162,22 @@ impl Controller {
             "run.remove" => {
                 let p: RunId = parse(params)?;
                 to_value(self.remove(p.id)?)
+            }
+            "tcp.start" => to_value(self.tcp_start(parse(params)?)?),
+            "tcp.stop" => {
+                let p: StopParams = parse(params)?;
+                to_value(self.tcp_stop(p.id, p.wait)?)
+            }
+            "tcp.stats" => {
+                let p: RunId = parse(params)?;
+                to_value(self.tcp_run(p.id)?.info())
+            }
+            "tcp.list" => to_value(self.tcp_runs()),
+            "tcp.remove" => {
+                let p: RunId = parse(params)?;
+                let info = self.tcp_stop(p.id, true)?;
+                lock(&self.tcp_runs).remove(&p.id);
+                to_value(info)
             }
             _ => Err(RpcError::new(
                 RpcError::METHOD_NOT_FOUND,
@@ -351,12 +385,84 @@ impl Controller {
     /// Stops every run and waits for them, e.g. when the server shuts down.
     pub fn stop_all(&self) {
         let runs: Vec<Arc<Run>> = lock(&self.runs).values().cloned().collect();
+        let tcp: Vec<Arc<TcpRun>> = lock(&self.tcp_runs).values().cloned().collect();
         for r in &runs {
+            r.job.stop();
+        }
+        for r in &tcp {
             r.job.stop();
         }
         for r in &runs {
             r.job.wait(Some(STOP_TIMEOUT));
         }
+        for r in &tcp {
+            r.job.wait(Some(STOP_TIMEOUT));
+        }
+    }
+
+    /// Starts a stateful TCP run from a TCP profile.
+    pub fn tcp_start(&self, p: TcpStartParams) -> Result<TcpRunInfo, RpcError> {
+        let failed = |e: ferotrx_core::Error| RpcError::failed(e);
+        let mut profile = match (p.path, p.toml) {
+            (Some(path), None) => TcpProfile::from_path(&path)
+                .map_err(|e| RpcError::failed(format!("{}: {e}", path.display())))?,
+            (None, Some(text)) => {
+                let base = p.base_dir.unwrap_or_else(|| PathBuf::from("."));
+                TcpProfile::from_toml(&text, &base).map_err(failed)?
+            }
+            _ => return Err(RpcError::invalid_params("give either path or toml")),
+        };
+        if let Some(v) = p.cps {
+            profile.cps = v;
+        }
+        if let Some(v) = p.connections {
+            profile.connections = v;
+        }
+        if let Some(v) = p.concurrency {
+            profile.concurrency = v;
+        }
+        let duration = p
+            .duration
+            .as_deref()
+            .map(parse_duration)
+            .transpose()
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let config = TcpRunConfig {
+            duration,
+            stop: None,
+        };
+        let started = start_tcp_with(&profile, p.iface.as_deref(), config, &*self.open_port)
+            .map_err(RpcError::failed)?;
+        let id = self.next_run.fetch_add(1, Ordering::Relaxed);
+        let run = Arc::new(TcpRun {
+            id,
+            program: started.program,
+            interfaces: started.interfaces,
+            job: started.job,
+            stopped_by_request: Default::default(),
+        });
+        let info = run.info();
+        lock(&self.tcp_runs).insert(id, run);
+        Ok(info)
+    }
+
+    /// Stops a TCP run. With `wait`, answers once it has ended (or after 10 s).
+    pub fn tcp_stop(&self, id: u64, wait: bool) -> Result<TcpRunInfo, RpcError> {
+        let run = self.tcp_run(id)?;
+        run.stop(wait.then_some(STOP_TIMEOUT));
+        Ok(run.info())
+    }
+
+    pub fn tcp_runs(&self) -> Vec<TcpRunInfo> {
+        let runs: Vec<Arc<TcpRun>> = lock(&self.tcp_runs).values().cloned().collect();
+        runs.iter().map(|r| r.info()).collect()
+    }
+
+    fn tcp_run(&self, id: u64) -> Result<Arc<TcpRun>, RpcError> {
+        lock(&self.tcp_runs)
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| RpcError::not_found(format!("no TCP run {id}")))
     }
 
     fn get_run(&self, id: u64) -> Result<Arc<Run>, RpcError> {

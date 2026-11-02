@@ -8,6 +8,8 @@
 //!   the default `af-xdp` feature, on Linux only; needs no system libraries.
 //! * `DpdkSink` sends through DPDK. Enabled by the `dpdk` feature, which needs
 //!   DPDK installed to build.
+//! * [`PcapPort`] sends and receives on an interface through libpcap/Npcap,
+//!   for stateful TCP (`ferotrx_core::TcpEngine`); [`open_port`] opens one.
 //! * [`Output`] names one of these (or [`NullSink`]) and opens it; the CLI and
 //!   the control server both choose outputs this way. Which interface sender is
 //!   used is a [`Backend`], chosen with [`SendSettings`].
@@ -28,8 +30,13 @@ pub use afxdp::{AfXdpConfig, AfXdpSink};
 
 #[cfg(feature = "dpdk")]
 mod dpdk;
+
+mod port;
 #[cfg(feature = "dpdk")]
 pub use dpdk::{DpdkConfig, DpdkSink};
+#[cfg(feature = "pcap")]
+pub use port::PcapPort;
+pub use port::{interface_mac, open_port};
 
 /// Writes every packet to a pcap file with nanosecond timestamps of when it was sent.
 pub struct PcapFileSink {

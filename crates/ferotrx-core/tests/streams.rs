@@ -173,7 +173,8 @@ fn profile_loads_and_runs() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// Every profile in `examples/` must load (its pcaps exist) and run.
+/// Every stream profile in `examples/` must load (its pcaps exist) and run.
+/// TCP profiles (no `[[stream]]`) are checked by the TCP profile tests.
 #[cfg(feature = "profile")]
 #[test]
 fn example_profiles_run() {
@@ -181,7 +182,12 @@ fn example_profiles_run() {
     let mut found = 0;
     for entry in std::fs::read_dir(&dir).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension().is_some_and(|e| e == "toml") {
+        let is_streams = || {
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("[[stream]]")
+        };
+        if path.extension().is_some_and(|e| e == "toml") && is_streams() {
             found += 1;
             let mut streams = Profile::from_path(&path)
                 .and_then(|p| p.load())

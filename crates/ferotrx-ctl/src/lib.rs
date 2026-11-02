@@ -36,11 +36,16 @@
 //! | `run.stop` | `id`, `wait` (true) | `RunInfo` |
 //! | `run.stats` / `run.remove` | `id` | `RunInfo` |
 //! | `run.list` | | `RunInfo[]` |
+//! | `tcp.start` | [`TcpStartParams`](protocol::TcpStartParams): a TCP profile as `path` or `toml`, `iface`, overrides | [`TcpRunInfo`](protocol::TcpRunInfo) |
+//! | `tcp.stop` | `id`, `wait` (true) | `TcpRunInfo` |
+//! | `tcp.stats` / `tcp.remove` | `id` | `TcpRunInfo` |
+//! | `tcp.list` | | `TcpRunInfo[]` |
 //! | `stats.subscribe` | `id` (optional), `interval_ms` (1000) | `{"subscription": n}` |
 //! | `stats.unsubscribe` | `subscription` | `true` |
 //!
 //! After `stats.subscribe` the server sends `stats` notifications
-//! ([`StatsUpdate`](protocol::StatsUpdate)) on the same connection.
+//! ([`StatsUpdate`](protocol::StatsUpdate)) on the same connection. They cover
+//! `run.*` runs; poll `tcp.stats` for stateful TCP runs.
 //!
 //! # One engine
 //!
@@ -60,8 +65,10 @@ mod client;
 mod controller;
 pub mod protocol;
 mod server;
+mod tcp;
 
 pub use client::{Client, ClientError};
 pub use controller::{start_run, start_run_detailed, Controller, StartError, Started};
 pub use protocol::RpcError;
 pub use server::{Server, MAX_LINE};
+pub use tcp::{start_tcp, start_tcp_with, PortOpener, TcpStarted};

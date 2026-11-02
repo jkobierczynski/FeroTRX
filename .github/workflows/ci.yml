@@ -77,6 +77,17 @@ jobs:
           echo "xt1 received $((after - before)) packets"
           test $((after - before)) -ge 2100
 
+      # Stateful TCP through a real NAT router: a network namespace with the
+      # kernel's routing, conntrack and masquerading between two VLANs on a
+      # trunk, as in a small lab. Then without VLANs, with 3% packet loss.
+      - name: Stateful TCP through a NAT router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo modprobe 8021q || true
+          sudo scripts/tcp-nat-netns.sh ./target/debug/ferotrx -n 300 --cps 100
+          sudo NO_VLAN=1 LOSS=0.03 scripts/tcp-nat-netns.sh ./target/debug/ferotrx -n 300 --cps 100
+
   # DPDK is an optional feature: build it against Ubuntu's DPDK and send
   # through DPDK's af_packet driver on a veth pair, without hugepages.
   dpdk:

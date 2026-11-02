@@ -21,6 +21,11 @@
 //! * [`replay`] is the one-capture shortcut.
 //! * [`Job`] runs streams on a background thread that can be watched and stopped;
 //!   the CLI and the `ferotrx-ctl` control server both run traffic this way.
+//! * Stateful TCP: [`TcpProgram`] turns a TCP session in a capture into what
+//!   each end sends, and [`TcpEngine`] replays it over real connections, as an
+//!   emulated client and server with handshakes, sequence and acknowledgement
+//!   tracking and retransmits, so it passes NAT routers and stateful firewalls.
+//!   [`TcpJob`] runs it on [`PacketPort`]s, ports that send and receive.
 //!
 //! Sinks that talk to real interfaces or files live in the `ferotrx-io` crate,
 //! so this crate has no platform specific code. [`SendSettings`] names the
@@ -75,6 +80,7 @@ mod send;
 mod sink;
 mod source;
 mod stream;
+mod tcp;
 mod transform;
 
 pub use capture::{Capture, Packet, LINKTYPE_ETHERNET};
@@ -90,6 +96,13 @@ pub use send::{Backend, SendSettings, XdpMode, DEFAULT_BATCH};
 pub use sink::{NullSink, PacketSink, SinkError, VecSink};
 pub use source::{CaptureSource, PacketSource};
 pub use stream::{run, run_with_progress, RunConfig, RunStats, Stream};
+pub use tcp::{
+    memory_ports, run_tcp, MemoryPort, PacketPort, TcpClientConfig, TcpConfig, TcpEndpoint,
+    TcpEngine, TcpFlow, TcpJob, TcpMessage, TcpOptions, TcpProgram, TcpRole, TcpRunConfig,
+    TcpServerConfig, TcpSideStats, TcpStats,
+};
+#[cfg(feature = "profile")]
+pub use tcp::{parse_ip_prefix, parse_port_range, TcpHostSpec, TcpProfile, TcpSource};
 pub use transform::{
     Field, FixChecksums, IpRewrite, MacRewrite, PortRewrite, Rewrite, Transform, VlanPop, VlanPush,
     VlanSet,
