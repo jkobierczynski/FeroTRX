@@ -81,14 +81,17 @@ fi
 # firewalls do: a stateless replay of a TCP session would not get through.
 r iptables -A FORWARD -m conntrack --ctstate INVALID -j DROP
 
+# The addresses are given here rather than taken from examples/lab-tcp.toml,
+# so editing that profile for a real lab does not break this script.
 if [ $vlan = yes ]; then
-    "$BIN" tcp -p examples/lab-tcp.toml -i t0 "$@"
+    set -- -i t0 --client-vlan 10 --server-vlan 20 "$@"
 else
-    "$BIN" tcp examples/http.pcap \
-        --client-iface c0 --client-ip 192.168.10.100/24 --client-ips 10 --client-gw 192.168.10.1 \
-        --server-iface s0 --server-ip 192.168.20.50/24 --server-gw 192.168.20.1 \
-        --cps 20 -n 200 --concurrency 50 "$@"
+    set -- --client-iface c0 --server-iface s0 "$@"
 fi
+"$BIN" tcp examples/http.pcap \
+    --client-ip 192.168.10.100/24 --client-ips 10 --client-gw 192.168.10.1 \
+    --server-ip 192.168.20.50/24 --server-gw 192.168.20.1 \
+    --cps 20 -n 200 --concurrency 50 "$@"
 status=$?
 
 echo "router: connections masqueraded, and packets dropped:"

@@ -478,7 +478,7 @@ lab-tcp.toml --upload -i enp0s3`), and `tcp.stats` reports the counters.
 To try it without a lab, `sudo scripts/tcp-nat-netns.sh` builds a router in
 a Linux network namespace (VLANs 10 and 20 on a trunk, routing, connection
 tracking, masquerading and a rule that drops packets conntrack finds invalid)
-and runs the lab profile through it. `LOSS=0.03` makes the router drop 3% of
+and runs the sample session `examples/http.pcap` through it (with its own addresses, so your edits to the lab profile do not matter). `LOSS=0.03` makes the router drop 3% of
 what it forwards. Here it completed 20,000 connections at 2,000 per second, and
 with 3% loss every connection still completed thanks to retransmits.
 
