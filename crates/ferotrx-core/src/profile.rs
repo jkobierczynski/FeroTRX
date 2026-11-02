@@ -6,7 +6,8 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::{
-    parse_duration, Capture, CaptureSource, Error, Rate, Result, Rewrite, Stream, LINKTYPE_ETHERNET,
+    parse_duration, Capture, CaptureSource, Error, Rate, Result, Rewrite, SendSettings, Stream,
+    LINKTYPE_ETHERNET,
 };
 
 /// A traffic profile: several streams that run together, read from a TOML file.
@@ -27,6 +28,15 @@ use crate::{
 /// packets = ["eth(dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.100,dst=192.168.20.50)/icmp(id=1)"]
 /// interval = "1s"              # time between built packets at rate 1x (default 1s)
 /// loops = 0
+///
+/// # Optional: how to send when the run goes to an interface. The command line
+/// # and the control API can override each value.
+/// [output]
+/// backend = "af_xdp"           # pcap (default), af_xdp (Linux) or dpdk
+/// xdp_mode = "copy"            # auto (default), copy or zerocopy
+/// queue = 0                    # transmit queue (default 0)
+/// batch = 64                   # packets handed over at once (default 64)
+/// dpdk_args = ["-l", "0-1"]    # DPDK EAL arguments
 /// ```
 ///
 /// See [`Rewrite`] for the rewrite syntax and `ferotrx_packet::PacketSpec` for
@@ -34,6 +44,8 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
     pub streams: Vec<StreamSpec>,
+    /// The `[output]` table: send settings for interface outputs.
+    pub output: SendSettings,
 }
 
 /// One `[[stream]]` entry of a [`Profile`].
@@ -80,6 +92,42 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
 struct ProfileFile {
     #[serde(default)]
     stream: Vec<StreamFile>,
+    output: Option<OutputFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutputFile {
+    backend: Option<String>,
+    xdp_mode: Option<String>,
+    queue: Option<u16>,
+    batch: Option<u32>,
+    dpdk_args: Option<Vec<String>>,
+}
+
+impl OutputFile {
+    fn settings(self) -> Result<SendSettings> {
+        let ctx = |e: Error| Error::Profile(format!("[output]: {e}"));
+        let settings = SendSettings {
+            backend: self
+                .backend
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(ctx)?,
+            xdp_mode: self
+                .xdp_mode
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(ctx)?,
+            queue: self.queue,
+            batch: self.batch,
+            dpdk_args: self.dpdk_args,
+        };
+        settings.validate().map_err(ctx)?;
+        Ok(settings)
+    }
 }
 
 #[derive(Deserialize)]
@@ -185,7 +233,10 @@ impl Profile {
                 })
             })
             .collect::<Result<_>>()?;
-        Ok(Self { streams })
+        let output = file
+            .output
+            .map_or(Ok(SendSettings::default()), OutputFile::settings)?;
+        Ok(Self { streams, output })
     }
 
     /// Loads the captures, builds the packets and makes the streams, ready for
@@ -306,6 +357,41 @@ mod tests {
         assert!(err("[[stream]]\npcap = \"a.pcap\"\npacket = \"eth\"").contains("not both"));
         assert!(err("[[stream]]\npacket = \"eth/tcp\"").contains("tcp cannot follow eth"));
         assert!(err("[[stream]]\npacket = \"eth\"\npackets = [\"ipv4\"]").contains("link types"));
+    }
+
+    #[test]
+    fn output_table() {
+        let text = r#"
+            [output]
+            backend = "af_xdp"
+            xdp_mode = "skb"
+            batch = 32
+            dpdk_args = ["--no-huge"]
+
+            [[stream]]
+            pcap = "a.pcap"
+        "#;
+        let p = Profile::from_toml(text, Path::new("")).unwrap();
+        assert_eq!(p.output.backend, Some(crate::Backend::AfXdp));
+        assert_eq!(p.output.xdp_mode, Some(crate::XdpMode::Copy));
+        assert_eq!(p.output.batch(), 32);
+        assert_eq!(p.output.queue, None);
+        assert_eq!(p.output.dpdk_args(), ["--no-huge"]);
+
+        let p = Profile::from_toml("[[stream]]\npcap = \"a.pcap\"", Path::new("")).unwrap();
+        assert!(p.output.is_empty());
+
+        let err = |t: &str| {
+            Profile::from_toml(
+                &format!("{t}\n[[stream]]\npcap = \"a.pcap\""),
+                Path::new(""),
+            )
+            .unwrap_err()
+            .to_string()
+        };
+        assert!(err("[output]\nbackend = \"netmap\"").contains("unknown backend"));
+        assert!(err("[output]\nbatch = 0").contains("batch"));
+        assert!(err("[output]\niface = \"eth0\"").contains("iface"));
     }
 
     #[test]

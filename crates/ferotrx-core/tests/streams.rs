@@ -196,3 +196,79 @@ fn example_profiles_run() {
     }
     assert!(found > 0);
 }
+
+/// Records what the engine asks of a batching sink.
+#[derive(Default)]
+struct BatchingSink {
+    queued: usize,
+    sent: Vec<(usize, Instant)>,
+    idles: usize,
+}
+
+impl PacketSink for BatchingSink {
+    fn send(&mut self, _data: &[u8]) -> std::result::Result<(), SinkError> {
+        self.queued += 1;
+        Ok(())
+    }
+    fn idle(&mut self) -> std::result::Result<(), SinkError> {
+        self.idles += 1;
+        if self.queued > 0 {
+            self.sent.push((self.queued, Instant::now()));
+            self.queued = 0;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn batching_sinks_hand_over_before_each_wait() {
+    // Paced: what is queued is handed over before the engine waits for the next
+    // packet. 50 pps leaves 20 ms gaps, so the engine waits before most packets
+    // even on a slow machine whose sleeps overshoot.
+    let a = one_packet(1);
+    let mut streams =
+        [Stream::new("a", CaptureSource::new(&a).loops(6)).with_rate(Rate::Pps(50.0))];
+    let mut sink = BatchingSink::default();
+    run(&mut streams, &mut sink, &RunConfig::default()).unwrap();
+    let handed: usize = sink.sent.iter().map(|&(n, _)| n).sum();
+    assert_eq!(handed + sink.queued, 6);
+    assert!(sink.sent.len() >= 2, "{:?}", sink.sent.len());
+    assert!(sink.queued >= 1); // the last one goes out with flush
+
+    // Top speed: no waits, so nothing is handed over early.
+    let mut streams =
+        [Stream::new("a", CaptureSource::new(&a).loops(100)).with_rate(Rate::TopSpeed)];
+    let mut sink = BatchingSink::default();
+    run(&mut streams, &mut sink, &RunConfig::default()).unwrap();
+    assert_eq!((sink.idles, sink.queued), (0, 100));
+}
+
+struct FailingIdle;
+
+impl PacketSink for FailingIdle {
+    fn send(&mut self, _data: &[u8]) -> std::result::Result<(), SinkError> {
+        Ok(())
+    }
+    fn idle(&mut self) -> std::result::Result<(), SinkError> {
+        Err("link down".into())
+    }
+}
+
+#[test]
+fn idle_errors_stop_the_run_unless_ignored() {
+    let a = one_packet(1);
+    let paced = || [Stream::new("a", CaptureSource::new(&a).loops(3)).with_rate(Rate::Pps(1000.0))];
+    let err = run(&mut paced(), &mut FailingIdle, &RunConfig::default()).unwrap_err();
+    assert!(err.to_string().contains("link down"), "{err}");
+    let cfg = RunConfig {
+        ignore_send_errors: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        run(&mut paced(), &mut FailingIdle, &cfg)
+            .unwrap()
+            .total
+            .packets,
+        3
+    );
+}

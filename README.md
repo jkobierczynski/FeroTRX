@@ -12,8 +12,9 @@ at once from a profile, and its engine is a library you can use from your own pr
 * **M2, rewriting and multi-stream profiles:** done.
 * **M3, packet inspection (`ferotrx-packet`, `ferotrx inspect`):** done.
 * **M4, packet building (`ferotrx build`, built packets in profiles):** done.
-* **M5, remote control (`ferotrx-ctl`, `ferotrx serve`, `ferotrx ctl`):** this release.
-* Next: flow multiplication (field ranges), faster Linux backends (AF_XDP, DPDK).
+* **M5, remote control (`ferotrx-ctl`, `ferotrx serve`, `ferotrx ctl`):** done.
+* **M6, fast send backends (AF_XDP on Linux, DPDK as an option):** this release.
+* Next: flow multiplication (field ranges).
 
 ## Crates
 
@@ -21,7 +22,7 @@ at once from a profile, and its engine is a library you can use from your own pr
 | --- | --- |
 | `ferotrx-core` | The core API: captures, rewrites, streams, profiles, pacing and the scheduler. No platform code. |
 | `ferotrx-packet` | Packet decoding (layers, fields with byte ranges, checksum checks, summaries) and building. No dependencies. |
-| `ferotrx-io` | Packet sinks: network interfaces through libpcap/Npcap, pcap files. |
+| `ferotrx-io` | Packet sinks: network interfaces through libpcap/Npcap, AF_XDP or DPDK; pcap files. |
 | `ferotrx-ctl` | Remote control: a JSON-RPC server and client to load profiles, start and stop runs, and read live counters. |
 | `ferotrx-cli` | The `ferotrx` command line tool. |
 
@@ -40,6 +41,11 @@ cargo build --release
 
 To build without libpcap (file and null output only):
 `cargo build -p ferotrx-cli --no-default-features`.
+
+AF_XDP support is built in on Linux and needs no extra libraries. DPDK support
+is optional: install DPDK 21.11 or newer with its pkg-config file
+(`sudo apt install dpdk-dev` on Debian and Ubuntu) and build with
+`cargo build --release --features dpdk`. `ferotrx backends` shows what a build has.
 
 ## Usage
 
@@ -196,6 +202,66 @@ loops = 0
 Sending on an interface needs root or `CAP_NET_RAW` on Linux, access to
 `/dev/bpf*` on macOS, and Npcap on Windows.
 
+### Fast send backends
+
+By default packets go out through libpcap (Npcap on Windows), one system call
+per packet, which works everywhere. On Linux two faster senders sit behind the
+same engine; pick one with `--backend` (`-B`):
+
+| Backend | What it is | Needs |
+| --- | --- | --- |
+| `pcap` (default) | libpcap/Npcap | Linux, macOS or Windows |
+| `af_xdp` | AF_XDP socket: packets are copied into shared memory and handed to the kernel in batches. No XDP program is loaded; sending needs none. | Linux 5.4+, root (or `CAP_NET_RAW` + `CAP_NET_ADMIN`) |
+| `dpdk` | DPDK user space drivers, packets handed to the NIC in bursts | a build with `--features dpdk`; a NIC bound to `vfio-pci` and hugepages, or a DPDK virtual device |
+
+```sh
+ferotrx backends                                                  # what this build has
+sudo ferotrx replay capture.pcap -i enp0s3 -B af_xdp -t --loop 0  # AF_XDP, top speed
+sudo ferotrx run lab.toml -i enp0s3 -B af_xdp --xdp-mode copy     # force copy mode
+sudo ferotrx replay capture.pcap -B dpdk -i 0000:03:00.0 --dpdk-args '-l 0-1' -t
+sudo ferotrx replay capture.pcap -B dpdk -i net_af_packet0,iface=enp0s3 \
+     --dpdk-args '--no-huge -m 512 --no-pci -l 0' -t              # DPDK without a DPDK NIC
+```
+
+Options for `af_xdp` and `dpdk`:
+
+* `--xdp-mode auto|copy|zerocopy` (AF_XDP): `auto` tries zero-copy and falls
+  back to copy mode. Copy mode (also called SKB or generic mode) works on every
+  interface, including VirtualBox and other virtual NICs, veth pairs and
+  bridges; zero-copy needs a driver that supports it (i40e, ice, mlx5, ixgbe, ...).
+* `--queue N`: the transmit queue (default 0). One AF_XDP socket per queue.
+* `--batch N`: packets handed to the kernel or NIC at once (default 64). Paced
+  streams are never held back to fill a batch: whatever is queued goes out
+  before the engine waits for the next packet's time.
+* `--dpdk-args '...'` (DPDK): arguments for DPDK's EAL, such as cores (`-l 0-1`),
+  memory (`--no-huge -m 512`) or allowed devices (`-a 0000:03:00.0`). With
+  `-B dpdk`, `-i` names a DPDK device: a PCI address, a virtual device such
+  as `net_af_packet0,iface=eth0` or `net_pcap0,iface=eth0`, or a port number.
+
+Packets sent through AF_XDP or DPDK skip the kernel's packet taps, so tcpdump
+or Wireshark on the sending machine does not show them. Capture on the receiver
+or the router, or watch `/sys/class/net/<iface>/statistics/tx_packets`.
+
+Packets can be up to 4096 bytes with either fast backend. The line printed at
+the start says what was opened, e.g. `sending with af_xdp on enp0s3 queue 0, copy mode`.
+
+A profile can choose the sender in an `[output]` table; command line flags and
+control requests override it value by value:
+
+```toml
+[output]
+backend = "af_xdp"           # pcap (default), af_xdp or dpdk
+xdp_mode = "copy"            # auto (default), copy or zerocopy
+queue = 0
+batch = 64
+dpdk_args = ["--no-huge", "-m", "512"]
+```
+
+On a VirtualBox VM such as the lab's Debian host, the virtual NIC has no
+zero-copy support, so AF_XDP runs in copy mode; it still saves the per-packet
+system call of libpcap. On a veth pair here it sends about 1.0 Mpps against
+0.66 Mpps for libpcap. Bridged adapters need promiscuous mode "Allow all" as before.
+
 ### Remote control
 
 `ferotrx serve` runs a control server; other programs load profiles, start and
@@ -213,6 +279,7 @@ ferotrx ctl load /srv/profiles/voip.toml               # a file on the server
 ferotrx ctl load my-test.toml --upload                 # or send a local one
 ferotrx ctl start lab-two-vlans -i enp0s3 -d 60s --watch   # live counters until it ends
 ferotrx ctl start voip -i enp0s3 --rate 10kpps         # override every stream's rate
+ferotrx ctl start voip -i enp0s3 -B af_xdp             # send through AF_XDP on the server
 ferotrx ctl stats                                      # every run
 ferotrx ctl stop 2
 ferotrx ctl --json stats 2                             # JSON for scripts
@@ -225,13 +292,13 @@ no extra packages, or `ferotrx_ctl::Client` from Rust.
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `server.info` | | name, version, protocol, interfaces, auth_required |
+| `server.info` | | name, version, protocol, interfaces, backends, auth_required |
 | `auth` | `token` | `true` |
 | `interfaces.list` | | `[{name, description}]` |
 | `profile.load` | `path` (on the server) or `toml` (+ `base_dir`), optional `name` | the profile's streams |
 | `profile.get`, `profile.unload` | `name` | profile / `true` |
 | `profile.list` | | loaded profiles |
-| `run.start` | `profile`, `output` (`{"iface": ..}`, `{"file": ..}` or `{"null": true}`), optional `rate`, `limit`, `duration`, `ignore_errors` | the run |
+| `run.start` | `profile`, `output` (`{"iface": ..}`, `{"file": ..}` or `{"null": true}`; with `iface` also optional `backend`, `xdp_mode`, `queue`, `batch`, `dpdk_args`), optional `rate`, `limit`, `duration`, `ignore_errors` | the run |
 | `run.stop` | `id`, `wait` (default true) | the run, final counters |
 | `run.stats`, `run.remove` | `id` | the run |
 | `run.list` | | every run |
@@ -311,11 +378,24 @@ use ferotrx_core::{Job, Profile, RunConfig};
 use ferotrx_io::Output;
 
 let profile = Profile::from_path("lab.toml")?;
-let job = ferotrx_ctl::start_run(&profile, &Output::Interface("eth0".into()), None, RunConfig::default())?;
+let job = ferotrx_ctl::start_run(&profile, &Output::interface("eth0"), None, RunConfig::default())?;
 std::thread::sleep(std::time::Duration::from_secs(5));
 println!("{} packets so far", job.stats().total.packets);
 job.stop();
 let stats = job.join()?;
+```
+
+Sending through AF_XDP from code:
+
+```rust
+use ferotrx_core::{Backend, SendSettings, XdpMode};
+use ferotrx_io::Output;
+
+let output = Output::Interface {
+    name: "enp0s3".into(),
+    send: SendSettings { backend: Some(Backend::AfXdp), xdp_mode: Some(XdpMode::Copy), ..Default::default() },
+};
+let mut sink = output.open(ferotrx_core::LINKTYPE_ETHERNET)?;
 ```
 
 Packets flow `PacketSource -> Transform... -> Pacer -> PacketSink`. Implement

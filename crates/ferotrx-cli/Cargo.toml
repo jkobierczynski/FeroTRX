@@ -12,8 +12,10 @@ name = "ferotrx"
 path = "src/main.rs"
 
 [features]
-default = ["pcap"]
+default = ["pcap", "af-xdp"]
 pcap = ["ferotrx-io/pcap", "ferotrx-ctl/pcap"]
+af-xdp = ["ferotrx-io/af-xdp", "ferotrx-ctl/af-xdp"]
+dpdk = ["ferotrx-io/dpdk", "ferotrx-ctl/dpdk"]
 
 [dependencies]
 ferotrx-core.workspace = true

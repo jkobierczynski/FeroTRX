@@ -12,6 +12,15 @@ pub trait PacketSink {
     fn flush(&mut self) -> Result<(), SinkError> {
         Ok(())
     }
+
+    /// Called when the engine is about to wait for the next packet's send time.
+    ///
+    /// Sinks that queue packets and hand them over in batches (AF_XDP, DPDK)
+    /// hand over what they have here, so batching never holds a paced packet
+    /// back. Sinks that send every packet right away ignore it.
+    fn idle(&mut self) -> Result<(), SinkError> {
+        Ok(())
+    }
 }
 
 impl<S: PacketSink + ?Sized> PacketSink for &mut S {
@@ -21,6 +30,9 @@ impl<S: PacketSink + ?Sized> PacketSink for &mut S {
     fn flush(&mut self) -> Result<(), SinkError> {
         (**self).flush()
     }
+    fn idle(&mut self) -> Result<(), SinkError> {
+        (**self).idle()
+    }
 }
 
 impl<S: PacketSink + ?Sized> PacketSink for Box<S> {
@@ -29,6 +41,9 @@ impl<S: PacketSink + ?Sized> PacketSink for Box<S> {
     }
     fn flush(&mut self) -> Result<(), SinkError> {
         (**self).flush()
+    }
+    fn idle(&mut self) -> Result<(), SinkError> {
+        (**self).idle()
     }
 }
 

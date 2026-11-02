@@ -1,17 +1,30 @@
 [package]
 name = "ferotrx-io"
-description = "Packet sinks for FeroTRX: libpcap/Npcap interfaces, pcap files, null"
+description = "Packet sinks for FeroTRX: libpcap/Npcap, AF_XDP and DPDK interfaces, pcap files, null"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+build = "build.rs"
 
 [features]
-default = ["pcap"]
+default = ["pcap", "af-xdp"]
 # Send on real interfaces through libpcap (Linux, macOS) or Npcap (Windows).
 pcap = ["dep:pcap"]
+# Send through Linux AF_XDP sockets. Needs no system libraries; does nothing
+# on other systems.
+af-xdp = []
+# Send through DPDK. Needs DPDK 21.11+ installed (libdpdk.pc) and a C compiler.
+dpdk = ["dep:cc", "dep:pkg-config"]
 
 [dependencies]
 ferotrx-core.workspace = true
 pcap = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[build-dependencies]
+cc = { workspace = true, optional = true }
+pkg-config = { workspace = true, optional = true }
