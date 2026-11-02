@@ -4,6 +4,7 @@ members = [
     "crates/ferotrx-core",
     "crates/ferotrx-io",
     "crates/ferotrx-packet",
+    "crates/ferotrx-ctl",
     "crates/ferotrx-cli",
 ]
 
@@ -17,12 +18,14 @@ rust-version = "1.75"
 [workspace.dependencies]
 ferotrx-core = { path = "crates/ferotrx-core", version = "0.1.0" }
 ferotrx-packet = { path = "crates/ferotrx-packet", version = "0.1.0" }
+ferotrx-ctl = { path = "crates/ferotrx-ctl", version = "0.1.0", default-features = false }
 ferotrx-io = { path = "crates/ferotrx-io", version = "0.1.0", default-features = false }
 pcap-file = "2.0"
 pcap = "2.2"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+serde_json = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"

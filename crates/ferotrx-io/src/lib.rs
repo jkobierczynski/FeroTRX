@@ -4,10 +4,12 @@
 //!   It works everywhere and needs no privileges.
 //! * [`InterfaceSink`] sends packets on a network interface through libpcap
 //!   (Linux, macOS) or Npcap (Windows). Enabled by the default `pcap` feature.
+//! * [`Output`] names one of these (or [`NullSink`]) and opens it; the CLI and
+//!   the control server both choose outputs this way.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ferotrx_core::{PacketSink, SinkError};
@@ -35,6 +37,51 @@ impl PcapFileSink {
 }
 
 const SNAPLEN: u32 = 262_144;
+
+/// Where a run sends its packets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Output {
+    /// A network interface (needs the `pcap` feature to open).
+    Interface(String),
+    /// A pcap file, stamped with each packet's send time.
+    File(PathBuf),
+    /// Nowhere: packets are discarded.
+    Null,
+}
+
+impl Output {
+    /// Opens the output for packets of `linktype`.
+    pub fn open(&self, linktype: u32) -> Result<Box<dyn PacketSink + Send>, SinkError> {
+        match self {
+            #[cfg(feature = "pcap")]
+            Output::Interface(name) => {
+                Ok(Box::new(InterfaceSink::open(name).map_err(|e| {
+                    format!("cannot open interface {name}: {e}")
+                })?))
+            }
+            #[cfg(not(feature = "pcap"))]
+            Output::Interface(name) => Err(format!(
+                "cannot send on {name}: this build has no interface support (feature `pcap`)"
+            )
+            .into()),
+            Output::File(path) => Ok(Box::new(
+                PcapFileSink::create(path, linktype)
+                    .map_err(|e| format!("cannot create {}: {e}", path.display()))?,
+            )),
+            Output::Null => Ok(Box::new(NullSink)),
+        }
+    }
+}
+
+impl std::fmt::Display for Output {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Output::Interface(name) => write!(f, "interface {name}"),
+            Output::File(path) => write!(f, "file {}", path.display()),
+            Output::Null => f.write_str("null"),
+        }
+    }
+}
 
 impl PacketSink for PcapFileSink {
     fn send(&mut self, data: &[u8]) -> Result<(), SinkError> {

@@ -13,12 +13,15 @@ path = "src/main.rs"
 
 [features]
 default = ["pcap"]
-pcap = ["ferotrx-io/pcap"]
+pcap = ["ferotrx-io/pcap", "ferotrx-ctl/pcap"]
 
 [dependencies]
 ferotrx-core.workspace = true
 ferotrx-io.workspace = true
 ferotrx-packet.workspace = true
+ferotrx-ctl.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
