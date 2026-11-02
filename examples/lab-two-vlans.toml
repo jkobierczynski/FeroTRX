@@ -16,8 +16,10 @@
 # VirtualBox: use a bridged adapter and set "Promiscuous Mode: Allow All", or the
 # host drops frames whose source MAC is not the VM's.
 #
-# The pcap paths are relative to this file. Any Ethernet capture works: the
-# rewrites below point its traffic at your lab whatever addresses it had.
+# The pcap paths are relative to this file. dns.pcap and web.pcap are small
+# samples that ship next to it (examples/make-sample-pcaps.py writes them).
+# To replay your own traffic, change `pcap` to any Ethernet capture: the
+# rewrites below point it at your lab whatever addresses it had.
 
 # Steady DNS-like traffic from VLAN 10 to a host on VLAN 20, looping until the run ends.
 [[stream]]

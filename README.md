@@ -101,7 +101,13 @@ sudo ferotrx run lab.toml -i eth0 --duration 60s
 ```
 
 [`examples/lab-two-vlans.toml`](examples/lab-two-vlans.toml) is a commented
-profile for a lab with a NAT router between two VLANs.
+profile for a lab with a NAT router between two VLANs. It uses the small
+sample captures `examples/dns.pcap` and `examples/web.pcap`, so it runs as is:
+
+```sh
+sudo ferotrx run examples/lab-two-vlans.toml -i eth0 --duration 60s
+ferotrx run examples/lab-two-vlans.toml --out lab.pcap --duration 15s   # dry run to a file
+```
 
 Sending on an interface needs root or `CAP_NET_RAW` on Linux, access to
 `/dev/bpf*` on macOS, and Npcap on Windows.
