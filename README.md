@@ -238,6 +238,10 @@ Options for `af_xdp` and `dpdk`:
   `-B dpdk`, `-i` names a DPDK device: a PCI address, a virtual device such
   as `net_af_packet0,iface=eth0` or `net_pcap0,iface=eth0`, or a port number.
 
+Packets sent through AF_XDP or DPDK skip the kernel's packet taps, so tcpdump
+or Wireshark on the sending machine does not show them. Capture on the receiver
+or the router, or watch `/sys/class/net/<iface>/statistics/tx_packets`.
+
 Packets can be up to 4096 bytes with either fast backend. The line printed at
 the start says what was opened, e.g. `sending with af_xdp on enp0s3 queue 0, copy mode`.
 
