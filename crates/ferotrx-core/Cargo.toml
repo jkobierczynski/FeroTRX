@@ -10,9 +10,12 @@ rust-version.workspace = true
 [features]
 default = ["profile"]
 # Load multi-stream traffic profiles from TOML files.
-profile = ["dep:serde", "dep:toml"]
+profile = ["dep:serde", "dep:toml", "build"]
+# Build packets from text descriptions (ferotrx-packet), as a capture or stream source.
+build = ["dep:ferotrx-packet"]
 
 [dependencies]
+ferotrx-packet = { workspace = true, optional = true }
 pcap-file.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, optional = true }

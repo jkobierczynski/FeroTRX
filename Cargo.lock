@@ -248,6 +248,7 @@ dependencies = [
 name = "ferotrx-core"
 version = "0.1.0"
 dependencies = [
+ "ferotrx-packet",
  "pcap-file",
  "serde",
  "thiserror",

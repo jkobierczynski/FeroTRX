@@ -1,4 +1,4 @@
-//! Packet decoding for FeroTRX.
+//! Packet decoding and building for FeroTRX.
 //!
 //! [`decode`] turns the bytes of one captured packet into a list of [`Layer`]s,
 //! each with named [`Field`]s and the byte range every field came from, plus a
@@ -11,6 +11,11 @@
 //!
 //! The decoder never panics on malformed or truncated input; it stops at the
 //! first layer it cannot read and records a problem instead.
+//!
+//! [`PacketSpec`] goes the other way: describe a packet layer by layer
+//! (Ethernet, VLAN, ARP, IPv4, IPv6, TCP, UDP, ICMP, DNS, raw bytes) in code or
+//! as text like `eth/vlan(id=10)/ipv4(dst=10.0.0.2)/udp/dns(q=example.com)`,
+//! and build its bytes with lengths and checksums filled in.
 //!
 //! ```
 //! let frame = [
@@ -28,10 +33,17 @@
 use std::fmt::Write as _;
 use std::ops::Range;
 
+mod build;
 mod dns;
 mod l2;
 mod l3;
 mod l4;
+mod spec;
+
+pub use build::{
+    Arp, BuildError, Dns, Ethernet, Icmp, Ipv4, Ipv6, LayerSpec, PacketSpec, Tcp, Udp, Vlan,
+    ETHERTYPE_EXPERIMENTAL, ETH_MIN_FRAME, IPPROTO_EXPERIMENTAL,
+};
 
 /// Ethernet (DLT_EN10MB).
 pub const LINKTYPE_ETHERNET: u32 = 1;
