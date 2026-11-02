@@ -17,6 +17,8 @@
 //!   plays several streams at once into one [`PacketSink`].
 //! * A [`Profile`] describes streams in a TOML file (feature `profile`, on by default).
 //! * [`replay`] is the one-capture shortcut.
+//! * [`Job`] runs streams on a background thread that can be watched and stopped;
+//!   the CLI and the `ferotrx-ctl` control server both run traffic this way.
 //!
 //! Sinks that talk to real interfaces or files live in the `ferotrx-io` crate,
 //! so this crate has no platform specific code.
@@ -58,6 +60,7 @@
 
 mod capture;
 mod error;
+mod job;
 mod net;
 mod pacer;
 #[cfg(feature = "profile")]
@@ -70,6 +73,7 @@ mod transform;
 
 pub use capture::{Capture, Packet, LINKTYPE_ETHERNET};
 pub use error::{Error, Result};
+pub use job::{Job, JobState, JOB_STATS_INTERVAL};
 pub use net::{MacAddr, TPID_QINQ, TPID_VLAN};
 pub use pacer::{parse_duration, Pacer, Rate};
 #[cfg(feature = "profile")]

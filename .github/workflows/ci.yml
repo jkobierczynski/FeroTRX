@@ -52,3 +52,7 @@ jobs:
       - name: Test core (Windows)
         if: runner.os == 'Windows'
         run: cargo test -p ferotrx-core -p ferotrx-packet
+      # The control server tests need no interfaces, so they run without libpcap/Npcap.
+      - name: Test control API (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test -p ferotrx-ctl --no-default-features

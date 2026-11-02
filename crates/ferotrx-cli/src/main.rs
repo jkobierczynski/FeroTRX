@@ -1,3 +1,5 @@
+mod remote;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,10 +9,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use ferotrx_core::{
-    parse_duration, run_with_progress, Capture, CaptureSource, NullSink, PacketSink, Profile, Rate,
-    ReplayStats, Rewrite, RunConfig, Stream, Transform, LINKTYPE_ETHERNET,
+    parse_duration, Capture, CaptureSource, Job, PacketSink, Profile, Rate, ReplayStats, Rewrite,
+    RunConfig, RunStats, Stream, Transform, LINKTYPE_ETHERNET,
 };
-use ferotrx_io::PcapFileSink;
 
 /// FeroTRX: replay captured traffic at a controlled rate.
 #[derive(Parser)]
@@ -38,6 +39,11 @@ enum Command {
     /// List the interfaces packets can be sent on.
     #[cfg(feature = "pcap")]
     Interfaces,
+    /// Run a control server: other programs load profiles, start and stop runs
+    /// and read live counters over JSON-RPC (see `ferotrx ctl`).
+    Serve(remote::ServeArgs),
+    /// Control a `ferotrx serve` server, on this machine or another one.
+    Ctl(remote::CtlArgs),
 }
 
 #[derive(Args)]
@@ -278,6 +284,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Build(args) => cmd_build(args),
         #[cfg(feature = "pcap")]
         Command::Interfaces => cmd_interfaces(),
+        Command::Serve(args) => remote::cmd_serve(args),
+        Command::Ctl(args) => remote::cmd_ctl(args),
     }
 }
 
@@ -497,9 +505,10 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
         let period = args
             .interval
             .saturating_mul(u32::try_from(cap.len()).unwrap_or(u32::MAX));
+        let linktype = cap.linktype;
         let stream = Stream::new(
             "built",
-            CaptureSource::new(&cap)
+            CaptureSource::new(Arc::new(cap))
                 .loops(args.loops)
                 .loop_period(period),
         )
@@ -509,8 +518,9 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
             out: None,
             null: false,
         };
-        let mut sink = open_sink(&output, cap.linktype)?;
-        let stats = execute(&mut [stream], &mut sink, &args.common)?;
+        let sink = open_sink(&output, linktype)?;
+        let job = Job::spawn(vec![stream], sink, run_config(&args.common)?)?;
+        let stats = watch(job, &args.common)?;
         print_line(done_label(&stats.total), &stats.total);
         return Ok(());
     }
@@ -537,27 +547,34 @@ fn cmd_interfaces() -> Result<()> {
     Ok(())
 }
 
-fn open_sink(output: &Output, linktype: u32) -> Result<Box<dyn PacketSink>> {
-    #[cfg(feature = "pcap")]
-    if let Some(name) = &output.iface {
+impl Output {
+    fn to_io(&self) -> Result<ferotrx_io::Output> {
+        #[cfg(feature = "pcap")]
+        if let Some(name) = &self.iface {
+            return Ok(ferotrx_io::Output::Interface(name.clone()));
+        }
+        if let Some(path) = &self.out {
+            return Ok(ferotrx_io::Output::File(path.clone()));
+        }
+        if self.null {
+            return Ok(ferotrx_io::Output::Null);
+        }
+        bail!("choose an output")
+    }
+}
+
+fn open_sink(output: &Output, linktype: u32) -> Result<Box<dyn PacketSink + Send>> {
+    let output = output.to_io()?;
+    warn_linktype(&output, linktype);
+    output.open(linktype).map_err(|e| anyhow::anyhow!(e))
+}
+
+fn warn_linktype(output: &ferotrx_io::Output, linktype: u32) {
+    if let ferotrx_io::Output::Interface(name) = output {
         if linktype != LINKTYPE_ETHERNET {
             eprintln!("warning: capture link type is {linktype}, not Ethernet; frames may not be valid on {name}");
         }
-        let sink = ferotrx_io::InterfaceSink::open(name)
-            .map_err(|e| anyhow::anyhow!(e))
-            .with_context(|| format!("cannot open interface {name}"))?;
-        return Ok(Box::new(sink));
     }
-    if let Some(path) = &output.out {
-        let sink = PcapFileSink::create(path, linktype)
-            .map_err(|e| anyhow::anyhow!(e))
-            .with_context(|| format!("cannot create {}", path.display()))?;
-        return Ok(Box::new(sink));
-    }
-    if output.null {
-        return Ok(Box::new(NullSink));
-    }
-    bail!("choose an output")
 }
 
 fn cmd_replay(args: ReplayArgs) -> Result<()> {
@@ -574,13 +591,18 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
             cap.linktype
         );
     }
-    let mut stream =
-        Stream::new("capture", CaptureSource::new(&cap).loops(args.loops)).with_rate(rate);
+    let linktype = cap.linktype;
+    let mut stream = Stream::new(
+        "capture",
+        CaptureSource::new(Arc::new(cap)).loops(args.loops),
+    )
+    .with_rate(rate);
     for r in args.rewrites {
         stream.push_transform(r);
     }
-    let mut sink = open_sink(&args.output, cap.linktype)?;
-    let stats = execute(&mut [stream], &mut sink, &args.common)?;
+    let sink = open_sink(&args.output, linktype)?;
+    let job = Job::spawn(vec![stream], sink, run_config(&args.common)?)?;
+    let stats = watch(job, &args.common)?;
     print_line(done_label(&stats.total), &stats.total);
     Ok(())
 }
@@ -588,17 +610,14 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
 fn cmd_run(args: RunArgs) -> Result<()> {
     let profile = Profile::from_path(&args.profile)
         .with_context(|| format!("cannot read {}", args.profile.display()))?;
-    let mut streams = profile.load()?;
-    let linktype = streams.first().map_or(LINKTYPE_ETHERNET, Stream::linktype);
-    let mut sink = open_sink(&args.output, linktype)?;
     if !args.common.quiet {
-        for (s, spec) in streams.iter().zip(&profile.streams) {
+        for spec in &profile.streams {
             let rewrites: Vec<String> = spec.rewrite.iter().map(ToString::to_string).collect();
             eprintln!(
                 "stream {}: {} at {}{}",
-                s.name,
+                spec.name,
                 spec.source,
-                s.rate,
+                spec.rate,
                 if rewrites.is_empty() {
                     String::new()
                 } else {
@@ -607,40 +626,43 @@ fn cmd_run(args: RunArgs) -> Result<()> {
             );
         }
     }
-    let stats = execute(&mut streams, &mut sink, &args.common)?;
-    for (s, st) in streams.iter().zip(&stats.streams) {
-        print_line(&format!("  {}", s.name), st);
+    let output = args.output.to_io()?;
+    // The same function starts `run.start` runs on the control server.
+    let job = ferotrx_ctl::start_run(&profile, &output, None, run_config(&args.common)?)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let names = job.stream_names().to_vec();
+    let stats = watch(job, &args.common)?;
+    for (name, st) in names.iter().zip(&stats.streams) {
+        print_line(&format!("  {name}"), st);
     }
     print_line(done_label(&stats.total), &stats.total);
     Ok(())
 }
 
-/// Runs the streams with Ctrl-C handling and once-a-second progress lines.
-fn execute(
-    streams: &mut [Stream<'_>],
-    sink: &mut Box<dyn PacketSink>,
-    common: &CommonArgs,
-) -> Result<ferotrx_core::RunStats> {
+/// Run settings from the command line, stopped by Ctrl-C.
+fn run_config(common: &CommonArgs) -> Result<RunConfig> {
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = stop.clone();
         ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed))
             .context("cannot install Ctrl-C handler")?;
     }
-    let config = RunConfig {
+    Ok(RunConfig {
         limit: common.limit,
         duration: common.duration,
         ignore_send_errors: common.ignore_errors,
         stop: Some(stop),
-    };
-    let interval = if common.quiet {
-        Duration::MAX
-    } else {
-        Duration::from_secs(1)
-    };
-    Ok(run_with_progress(streams, sink, &config, interval, |s| {
-        print_line("progress", &s.total)
-    })?)
+    })
+}
+
+/// Waits for a job, printing a progress line every second unless quiet.
+fn watch(job: Job, common: &CommonArgs) -> Result<RunStats> {
+    while !job.wait(Some(Duration::from_secs(1))) {
+        if !common.quiet {
+            print_line("progress", &job.stats().total);
+        }
+    }
+    Ok(job.join()?)
 }
 
 fn done_label(s: &ReplayStats) -> &'static str {

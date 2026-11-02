@@ -11,9 +11,9 @@ at once from a profile, and its engine is a library you can use from your own pr
 * **M1, pcap replay:** done.
 * **M2, rewriting and multi-stream profiles:** done.
 * **M3, packet inspection (`ferotrx-packet`, `ferotrx inspect`):** done.
-* **M4, packet building (`ferotrx build`, built packets in profiles):** this release.
-* Next: a control API (`ferotrx-ctl`), flow multiplication (field ranges),
-  faster Linux backends (AF_XDP, DPDK).
+* **M4, packet building (`ferotrx build`, built packets in profiles):** done.
+* **M5, remote control (`ferotrx-ctl`, `ferotrx serve`, `ferotrx ctl`):** this release.
+* Next: flow multiplication (field ranges), faster Linux backends (AF_XDP, DPDK).
 
 ## Crates
 
@@ -22,6 +22,7 @@ at once from a profile, and its engine is a library you can use from your own pr
 | `ferotrx-core` | The core API: captures, rewrites, streams, profiles, pacing and the scheduler. No platform code. |
 | `ferotrx-packet` | Packet decoding (layers, fields with byte ranges, checksum checks, summaries) and building. No dependencies. |
 | `ferotrx-io` | Packet sinks: network interfaces through libpcap/Npcap, pcap files. |
+| `ferotrx-ctl` | Remote control: a JSON-RPC server and client to load profiles, start and stop runs, and read live counters. |
 | `ferotrx-cli` | The `ferotrx` command line tool. |
 
 ## Build
@@ -195,6 +196,67 @@ loops = 0
 Sending on an interface needs root or `CAP_NET_RAW` on Linux, access to
 `/dev/bpf*` on macOS, and Npcap on Windows.
 
+### Remote control
+
+`ferotrx serve` runs a control server; other programs load profiles, start and
+stop runs and read live counters over it. `ferotrx ctl` is its command line client.
+Runs started remotely go through the same engine code as `ferotrx run`.
+
+```sh
+# On the traffic box (here the lab's Debian host), reachable from the lab network:
+sudo ferotrx serve --listen 0.0.0.0:4510 --token s3cret -p examples/lab-two-vlans.toml
+
+# From anywhere that can reach it:
+export FEROTRX_CTL=192.168.56.10 FEROTRX_TOKEN=s3cret
+ferotrx ctl info
+ferotrx ctl load /srv/profiles/voip.toml               # a file on the server
+ferotrx ctl load my-test.toml --upload                 # or send a local one
+ferotrx ctl start lab-two-vlans -i enp0s3 -d 60s --watch   # live counters until it ends
+ferotrx ctl start voip -i enp0s3 --rate 10kpps         # override every stream's rate
+ferotrx ctl stats                                      # every run
+ferotrx ctl stop 2
+ferotrx ctl --json stats 2                             # JSON for scripts
+```
+
+The protocol is [JSON-RPC 2.0](https://www.jsonrpc.org/specification) over TCP,
+one JSON object per line, on port 4510. Any language with sockets and JSON can
+use it; see [`examples/ctl-client.py`](examples/ctl-client.py) for Python with
+no extra packages, or `ferotrx_ctl::Client` from Rust.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `server.info` | | name, version, protocol, interfaces, auth_required |
+| `auth` | `token` | `true` |
+| `interfaces.list` | | `[{name, description}]` |
+| `profile.load` | `path` (on the server) or `toml` (+ `base_dir`), optional `name` | the profile's streams |
+| `profile.get`, `profile.unload` | `name` | profile / `true` |
+| `profile.list` | | loaded profiles |
+| `run.start` | `profile`, `output` (`{"iface": ..}`, `{"file": ..}` or `{"null": true}`), optional `rate`, `limit`, `duration`, `ignore_errors` | the run |
+| `run.stop` | `id`, `wait` (default true) | the run, final counters |
+| `run.stats`, `run.remove` | `id` | the run |
+| `run.list` | | every run |
+| `stats.subscribe` | optional `id`, `interval_ms` (default 1000) | `{subscription}` |
+| `stats.unsubscribe` | `subscription` | `true` |
+
+A run has a `state` (`running`, `finished`, `stopped`, `failed` with `error`),
+`total` counters (`packets`, `bytes`, `send_errors`, `loops_completed`,
+`elapsed_s`, `pps`, `mbps`) and the same counters per stream. After
+`stats.subscribe`, the server pushes `stats` notifications on the connection:
+
+```json
+{"jsonrpc":"2.0","method":"stats","params":{"subscription":1,"run":{"id":1,"state":"running","total":{"packets":51200,"pps":5000.1,...},"streams":[...]}}}
+```
+
+A subscription to one run ends with an update marked `"last": true` when the
+run ends. Error codes are the JSON-RPC ones plus -32001 (send `auth` first),
+-32002 (no such profile, run or subscription) and -32003 (could not be done,
+e.g. a profile that does not parse or an interface that will not open).
+
+The server listens on 127.0.0.1 unless told otherwise. It sends traffic and
+reads and writes files with its own privileges, so on a shared network give it
+a `--token` (or `FEROTRX_TOKEN`); the token travels in clear text, so keep the
+control port on a lab or management network.
+
 ## Library
 
 ```rust
@@ -240,6 +302,20 @@ let frame = PacketSpec::new()
 
 // Or from text, straight into a capture that streams can play:
 let capture = ferotrx_core::Capture::from_specs(&["eth/ipv4/udp/dns(q=example.com)"], Duration::from_millis(10))?;
+```
+
+Running in the background, as the CLI and the control server do:
+
+```rust
+use ferotrx_core::{Job, Profile, RunConfig};
+use ferotrx_io::Output;
+
+let profile = Profile::from_path("lab.toml")?;
+let job = ferotrx_ctl::start_run(&profile, &Output::Interface("eth0".into()), None, RunConfig::default())?;
+std::thread::sleep(std::time::Duration::from_secs(5));
+println!("{} packets so far", job.stats().total.packets);
+job.stop();
+let stats = job.join()?;
 ```
 
 Packets flow `PacketSource -> Transform... -> Pacer -> PacketSink`. Implement
