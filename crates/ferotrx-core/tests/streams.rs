@@ -172,3 +172,27 @@ fn profile_loads_and_runs() {
     assert!(err.to_string().contains("missing"), "{err}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Every profile in `examples/` must load (its pcaps exist) and run.
+#[cfg(feature = "profile")]
+#[test]
+fn example_profiles_run() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let mut found = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "toml") {
+            found += 1;
+            let mut streams = Profile::from_path(&path)
+                .and_then(|p| p.load())
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let cfg = RunConfig {
+                limit: Some(20),
+                ..Default::default()
+            };
+            let stats = run(&mut streams, &mut NullSink, &cfg).unwrap();
+            assert_eq!(stats.total.packets, 20, "{}", path.display());
+        }
+    }
+    assert!(found > 0);
+}
