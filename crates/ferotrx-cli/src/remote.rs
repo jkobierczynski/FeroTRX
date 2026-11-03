@@ -1,43 +1,162 @@
 //! `ferotrx serve` and `ferotrx ctl`: the control server and its command line client.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
-use ferotrx_core::Profile;
+use ferotrx_core::{parse_duration, parse_size, Profile};
 use ferotrx_ctl::protocol::{
     Counters, LoadProfileParams, OutputSpec, ProfileInfo, RunInfo, RunState, RxRunInfo, RxSpec,
     RxStartParams, StartParams, TcpStartParams, DEFAULT_PORT,
 };
-use ferotrx_ctl::{Client, Controller, Server};
+use ferotrx_ctl::{
+    AuditLog, Client, ClientTls, Controller, FilePolicy, LabPki, Role, Server, ServerConfig,
+    ServerTls, Token,
+};
 use serde_json::Value;
 
 const TOKEN_ENV: &str = "FEROTRX_TOKEN";
+const READ_TOKEN_ENV: &str = "FEROTRX_READ_TOKEN";
 const ADDR_ENV: &str = "FEROTRX_CTL";
+const CA_ENV: &str = "FEROTRX_CA";
+const CERT_ENV: &str = "FEROTRX_CERT";
+const KEY_ENV: &str = "FEROTRX_KEY";
 
 #[derive(Args)]
 pub struct ServeArgs {
     /// Address to listen on. Use 0.0.0.0:4510 (or the lab-facing address) to
-    /// accept other machines, and set a token when you do.
+    /// accept other machines; that needs a token or client certificates
+    /// (or --insecure).
     #[arg(short, long, default_value_t = format!("127.0.0.1:{DEFAULT_PORT}"))]
     listen: String,
 
-    /// Shared secret clients must send with `auth` before anything else.
+    /// Token that logs in as operator (load profiles, start and stop runs).
     /// Also read from FEROTRX_TOKEN.
     #[arg(long)]
     token: Option<String>,
+
+    /// Token that logs in read-only (info, lists, stats, subscriptions).
+    /// Also read from FEROTRX_READ_TOKEN.
+    #[arg(long)]
+    read_token: Option<String>,
+
+    /// TOML file of named tokens: [[token]] tables with name, role
+    /// ("read" or "operator") and secret, or sha256 of the secret.
+    #[arg(long, value_name = "FILE")]
+    tokens: Option<PathBuf>,
+
+    /// Serve TLS with this certificate (PEM, chain with the server's first).
+    #[arg(long, value_name = "FILE", requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+
+    /// The private key of --tls-cert (PEM).
+    #[arg(long, value_name = "FILE", requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
+
+    /// Client certificates from this CA log in as operator (mutual TLS).
+    #[arg(long, value_name = "FILE", requires = "tls_cert")]
+    client_ca: Option<PathBuf>,
+
+    /// Client certificates from this CA log in read-only.
+    #[arg(long, value_name = "FILE", requires = "tls_cert")]
+    read_client_ca: Option<PathBuf>,
+
+    /// Clients may only name profiles, pcaps and output files inside this
+    /// directory; relative paths start from the first one. Repeatable.
+    /// Default: the directory the server was started in.
+    #[arg(long = "data-dir", value_name = "DIR")]
+    data_dirs: Vec<PathBuf>,
+
+    /// Largest profile a client may upload, e.g. 1M.
+    #[arg(long, value_name = "SIZE", default_value = "1M")]
+    max_upload: String,
+
+    /// Longest request, e.g. 4M.
+    #[arg(long, value_name = "SIZE", default_value = "4M")]
+    max_request: String,
+
+    /// Connections open at once.
+    #[arg(long, value_name = "N", default_value_t = 64)]
+    max_connections: usize,
+
+    /// Close connections that send nothing for this long (and watch no
+    /// stats), e.g. 5m; 0 = never.
+    #[arg(long, value_name = "TIME", default_value = "5m")]
+    idle_timeout: String,
+
+    /// Append the audit log (JSON lines: logins, refusals, profile loads,
+    /// run starts and stops) to this file instead of standard error.
+    #[arg(long, value_name = "FILE")]
+    audit_log: Option<PathBuf>,
+
+    /// Listen on a non-loopback address even without a token or client
+    /// certificates: anyone who reaches it can send traffic from this machine.
+    #[arg(long)]
+    insecure: bool,
 
     /// Load this profile at start, under its file name (or NAME=PATH). Repeatable.
     #[arg(short, long = "profile", value_name = "[NAME=]PATH")]
     profiles: Vec<String>,
 }
 
+fn env_or(arg: Option<String>, env: &str) -> Option<String> {
+    arg.or_else(|| std::env::var(env).ok())
+        .filter(|t| !t.is_empty())
+}
+
 pub fn cmd_serve(args: ServeArgs) -> Result<()> {
-    let token = args
-        .token
-        .or_else(|| std::env::var(TOKEN_ENV).ok())
-        .filter(|t| !t.is_empty());
-    let controller = Controller::new();
+    let mut tokens = Vec::new();
+    if let Some(t) = env_or(args.token, TOKEN_ENV) {
+        tokens.push(Token::new("operator", Role::Operator, t));
+    }
+    if let Some(t) = env_or(args.read_token, READ_TOKEN_ENV) {
+        tokens.push(Token::new("read", Role::Read, t));
+    }
+    if let Some(f) = &args.tokens {
+        tokens.extend(Token::from_file(f)?);
+    }
+    let tls = match (&args.tls_cert, &args.tls_key) {
+        (Some(cert), Some(key)) => {
+            let mut t = ServerTls::from_files(cert, key)?;
+            if let Some(ca) = &args.client_ca {
+                t = t.with_client_ca_file(Role::Operator, ca)?;
+            }
+            if let Some(ca) = &args.read_client_ca {
+                t = t.with_client_ca_file(Role::Read, ca)?;
+            }
+            Some(t)
+        }
+        _ => None,
+    };
+    let dirs = if args.data_dirs.is_empty() {
+        vec![std::env::current_dir()?]
+    } else {
+        args.data_dirs
+    };
+    let max_upload = parse_size(&args.max_upload)?;
+    let files = FilePolicy::dirs(&dirs)?.with_max_upload(max_upload as usize);
+    let idle = parse_duration(&args.idle_timeout)?;
+    let audit = match &args.audit_log {
+        Some(p) => AuditLog::to_file(p)
+            .with_context(|| format!("cannot open audit log {}", p.display()))?,
+        None => AuditLog::to_stderr(),
+    };
+    let config = ServerConfig {
+        tokens,
+        tls,
+        insecure: args.insecure,
+        max_connections: args.max_connections,
+        max_request: parse_size(&args.max_request)? as usize,
+        idle_timeout: (idle > Duration::ZERO).then_some(idle),
+        audit: Some(audit),
+        ..Default::default()
+    };
+    let login = config.login_required();
+    let tls_on = config.tls.is_some();
+    let has_tokens = !config.tokens.is_empty();
+
+    let controller = Controller::new().with_file_policy(files.clone());
     for p in &args.profiles {
         let (name, path) = match p.split_once('=') {
             Some((n, path)) => (n.to_string(), PathBuf::from(path)),
@@ -55,11 +174,17 @@ pub fn cmd_serve(args: ServeArgs) -> Result<()> {
         let info = controller.add_profile(&name, profile);
         eprintln!("loaded profile {name} ({} streams)", info.streams.len());
     }
-    let server = Server::bind(&args.listen, controller, token.clone())
+    let server = Server::with_config(&args.listen, controller, config)
         .with_context(|| format!("cannot listen on {}", args.listen))?;
     let addr = server.local_addr()?;
-    if !addr.ip().is_loopback() && token.is_none() {
-        eprintln!("warning: listening on {addr} without a token; anyone who can reach it can send traffic from this machine");
+    if !addr.ip().is_loopback() {
+        if !login {
+            eprintln!("warning: listening on {addr} without a token or client certificates (--insecure); anyone who can reach it can send traffic from this machine");
+        } else if has_tokens && !tls_on {
+            eprintln!(
+                "warning: tokens travel in clear text without TLS; give --tls-cert and --tls-key"
+            );
+        }
     }
     {
         let controller = server.controller().clone();
@@ -70,14 +195,28 @@ pub fn cmd_serve(args: ServeArgs) -> Result<()> {
         })
         .context("cannot install Ctrl-C handler")?;
     }
+    let mut notes = Vec::new();
+    if tls_on {
+        notes.push("TLS");
+    }
+    if login {
+        notes.push("login required");
+    }
     eprintln!(
         "ferotrx control server on {addr}{}; Ctrl-C to stop",
-        if token.is_some() {
-            " (token required)"
+        if notes.is_empty() {
+            String::new()
         } else {
-            ""
+            format!(" ({})", notes.join(", "))
         }
     );
+    let dirs: Vec<String> = files
+        .allowed_dirs()
+        .unwrap_or_default()
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect();
+    eprintln!("data directories: {}", dirs.join(", "));
     server.serve()?;
     Ok(())
 }
@@ -88,9 +227,29 @@ pub struct CtlArgs {
     #[arg(short, long, value_name = "HOST:PORT")]
     connect: Option<String>,
 
-    /// Token for a server started with --token. Also read from FEROTRX_TOKEN.
+    /// Token to log in with (--token or --read-token of the server, or one
+    /// of its --tokens). Also read from FEROTRX_TOKEN.
     #[arg(long)]
     token: Option<String>,
+
+    /// Connect with TLS and check the server's certificate against this CA
+    /// (PEM). Also read from FEROTRX_CA.
+    #[arg(long, value_name = "FILE")]
+    ca: Option<PathBuf>,
+
+    /// Log in with this client certificate (PEM; needs --ca and --key).
+    /// Also read from FEROTRX_CERT.
+    #[arg(long, value_name = "FILE")]
+    cert: Option<PathBuf>,
+
+    /// The private key of --cert. Also read from FEROTRX_KEY.
+    #[arg(long, value_name = "FILE")]
+    key: Option<PathBuf>,
+
+    /// Check the server's certificate for this name instead of the host in
+    /// --connect.
+    #[arg(long, value_name = "NAME")]
+    server_name: Option<String>,
 
     /// Print the server's JSON answers instead of text.
     #[arg(long, global = true)]
@@ -257,12 +416,32 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
     } else {
         format!("{addr}:{DEFAULT_PORT}")
     };
-    let mut c = Client::connect(&addr).with_context(|| format!("cannot connect to {addr}"))?;
-    if let Some(token) = args
-        .token
-        .or_else(|| std::env::var(TOKEN_ENV).ok())
-        .filter(|t| !t.is_empty())
-    {
+    let path_env =
+        |arg: Option<PathBuf>, env: &str| arg.or_else(|| env_or(None, env).map(PathBuf::from));
+    let ca = path_env(args.ca, CA_ENV);
+    let cert = path_env(args.cert, CERT_ENV);
+    let key = path_env(args.key, KEY_ENV);
+    let mut c = match ca {
+        Some(ca) => {
+            let mut tls = ClientTls::from_ca_file(&ca)?;
+            match (cert, key) {
+                (Some(cert), Some(key)) => tls = tls.with_client_cert_files(&cert, &key)?,
+                (None, None) => {}
+                _ => bail!("--cert and --key go together"),
+            }
+            if let Some(n) = args.server_name {
+                tls = tls.with_server_name(n);
+            }
+            Client::connect_tls(&addr, &tls).with_context(|| format!("cannot connect to {addr}"))?
+        }
+        None => {
+            if cert.is_some() || key.is_some() || args.server_name.is_some() {
+                bail!("--cert, --key and --server-name need --ca (TLS)");
+            }
+            Client::connect(&addr).with_context(|| format!("cannot connect to {addr}"))?
+        }
+    };
+    if let Some(token) = env_or(args.token, TOKEN_ENV) {
         c.auth(&token)?;
     }
     let json = args.json;
@@ -284,10 +463,16 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
             if !i.backends.is_empty() {
                 println!("backends: {}", i.backends.join(", "));
             }
+            println!("tls: {}", if i.tls { "yes" } else { "no" });
             println!(
-                "token required: {}",
+                "login required: {}",
                 if i.auth_required { "yes" } else { "no" }
             );
+            match (&i.role, &i.user) {
+                (Some(r), Some(u)) => println!("logged in as: {u} ({r})"),
+                (Some(r), None) => println!("access: {r}"),
+                _ => println!("logged in: no"),
+            }
         }
         CtlCommand::Interfaces => {
             let list = c.interfaces()?;
@@ -625,4 +810,72 @@ fn print_counters(label: &str, s: &Counters) {
         line.push_str(&format!(", {} send errors", s.send_errors));
     }
     println!("{line}");
+}
+
+#[derive(Args)]
+pub struct CertsArgs {
+    /// Directory for the certificates and keys; the CAs in it are reused
+    /// when they are there already.
+    dir: PathBuf,
+
+    /// Issue the server's certificate for these names and addresses (the
+    /// ones clients give to --connect), comma separated or repeated.
+    #[arg(long, value_name = "HOST", value_delimiter = ',')]
+    server: Vec<String>,
+
+    /// Issue an operator client certificate with this name. Repeatable.
+    #[arg(long, value_name = "NAME", value_delimiter = ',')]
+    client: Vec<String>,
+
+    /// Issue a read-only client certificate with this name. Repeatable.
+    #[arg(long, value_name = "NAME", value_delimiter = ',')]
+    read_client: Vec<String>,
+}
+
+pub fn cmd_certs(args: CertsArgs) -> Result<()> {
+    if args.server.is_empty() && args.client.is_empty() && args.read_client.is_empty() {
+        bail!("say what to issue: --server HOST, --client NAME or --read-client NAME");
+    }
+    let pki = LabPki::new(&args.dir);
+    let mut files = Vec::new();
+    if !args.server.is_empty() {
+        files.extend(pki.issue_server(&args.server)?.files);
+    }
+    for n in &args.client {
+        files.extend(pki.issue_client(n, Role::Operator)?.files);
+    }
+    for n in &args.read_client {
+        files.extend(pki.issue_client(n, Role::Read)?.files);
+    }
+    for f in &files {
+        println!("wrote {}", f.display());
+    }
+    let d = args.dir.display();
+    println!();
+    let read_ca = if pki.path("read-ca.pem").exists() {
+        format!(" --read-client-ca {d}/read-ca.pem")
+    } else {
+        String::new()
+    };
+    println!("server: ferotrx serve -l 0.0.0.0:{DEFAULT_PORT} --tls-cert {d}/server.pem --tls-key {d}/server-key.pem --client-ca {d}/ca.pem{read_ca}");
+    let host = args
+        .server
+        .first()
+        .map(|h| {
+            if h.contains(':') {
+                format!("[{h}]")
+            } else {
+                h.clone()
+            }
+        })
+        .unwrap_or_else(|| "<server address>".into());
+    let names: Vec<&String> = args.client.iter().chain(&args.read_client).collect();
+    if names.is_empty() {
+        println!("client: ferotrx ctl -c {host} --ca {d}/ca.pem --cert {d}/<name>.pem --key {d}/<name>-key.pem info");
+    }
+    for n in names {
+        println!("client: ferotrx ctl -c {host} --ca {d}/ca.pem --cert {d}/{n}.pem --key {d}/{n}-key.pem info");
+    }
+    println!("Keep the *-key.pem files private; copy only ca.pem and a client's own pair to it.");
+    Ok(())
 }

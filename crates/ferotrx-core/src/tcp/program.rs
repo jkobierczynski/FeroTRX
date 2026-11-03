@@ -378,7 +378,7 @@ impl Flow {
             .segments
             .iter()
             .find(|s| s.flags & SYN != 0)
-            .map_or(true, |s| s.from_a == (s.flags & wire::ACK == 0));
+            .is_none_or(|s| s.from_a == (s.flags & wire::ACK == 0));
         let (client, server) = if a_is_client {
             (self.a, self.b)
         } else {

@@ -15,7 +15,7 @@ struct Impaired {
 impl PacketSink for Impaired {
     fn send(&mut self, data: &[u8]) -> std::result::Result<(), SinkError> {
         self.n += 1;
-        if self.n % 10 == 0 {
+        if self.n.is_multiple_of(10) {
             return Ok(()); // lost
         }
         if self.n % 25 == 1 {
@@ -27,7 +27,7 @@ impl PacketSink for Impaired {
         if let Some(h) = self.held.take() {
             PacketPort::send(&mut self.port, &h)?;
         }
-        if self.n % 33 == 0 {
+        if self.n.is_multiple_of(33) {
             PacketPort::send(&mut self.port, data)?; // duplicated
         }
         Ok(())

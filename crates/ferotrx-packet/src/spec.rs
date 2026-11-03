@@ -199,7 +199,7 @@ fn hex_bytes(v: &str) -> Option<Vec<u8>> {
         .chars()
         .filter(|c| !matches!(c, ' ' | ':' | '-' | '_'))
         .collect();
-    if h.len() % 2 != 0 {
+    if !h.len().is_multiple_of(2) {
         return None;
     }
     (0..h.len())

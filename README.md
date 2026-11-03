@@ -20,7 +20,8 @@ routers and firewalls, many sessions at once from templates), measures loss and 
 * **M9, receive side: loss and latency per stream (`--rx`, `ferotrx rx`, `rx.*` control methods):** done (0.2.0).
 * **M10, multi-flow TCP templates (`[[template]]` in TCP profiles, server address ranges, per-template counters):** done (0.3.0).
 * **M11, IPv6 everywhere (stateful TCP with neighbor discovery, IPv6 extension headers and neighbor discovery in the packet builder, IPv6 lab scripts):** done (0.4.0).
-* **M12, TCP maturity (window scaling, timestamps and PAWS, SACK, RTT-based timeouts, windows and timeouts in profiles, per-template rates):** this release (0.5.0).
+* **M12, TCP maturity (window scaling, timestamps and PAWS, SACK, RTT-based timeouts, windows and timeouts in profiles, per-template rates):** done (0.5.0).
+* **M13, secure remote control (TLS and mutual TLS, read-only and operator roles, data directories, limits, audit log, `ferotrx certs`):** this release (0.6.0).
 
 ## Crates
 
@@ -341,11 +342,16 @@ stop runs and read live counters over it. `ferotrx ctl` is its command line clie
 Runs started remotely go through the same engine code as `ferotrx run`.
 
 ```sh
-# On the traffic box (here the lab's Debian host), reachable from the lab network:
-sudo ferotrx serve --listen 0.0.0.0:4510 --token s3cret -p examples/lab-two-vlans.toml
+# On the traffic box (here the lab's Debian host): certificates once, then the
+# server, reachable from the lab network over TLS.
+ferotrx certs /etc/ferotrx/pki --server 192.168.56.10 --client alice --read-client dashboard
+sudo ferotrx serve --listen 0.0.0.0:4510 --data-dir /srv/profiles \
+     --tls-cert /etc/ferotrx/pki/server.pem --tls-key /etc/ferotrx/pki/server-key.pem \
+     --client-ca /etc/ferotrx/pki/ca.pem --read-client-ca /etc/ferotrx/pki/read-ca.pem \
+     -p examples/lab-two-vlans.toml
 
-# From anywhere that can reach it:
-export FEROTRX_CTL=192.168.56.10 FEROTRX_TOKEN=s3cret
+# From anywhere that can reach it, with ca.pem and alice's certificate and key copied over:
+export FEROTRX_CTL=192.168.56.10 FEROTRX_CA=ca.pem FEROTRX_CERT=alice.pem FEROTRX_KEY=alice-key.pem
 ferotrx ctl info
 ferotrx ctl load /srv/profiles/voip.toml               # a file on the server
 ferotrx ctl load my-test.toml --upload                 # or send a local one
@@ -364,8 +370,8 @@ no extra packages, or `ferotrx_ctl::Client` from Rust.
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `server.info` | | name, version, protocol, interfaces, backends, auth_required |
-| `auth` | `token` | `true` |
+| `server.info` | | name, version, protocol, interfaces, backends, auth_required, tls, and this connection's role and user |
+| `auth` | `token` | `true`; the connection now has the token's role |
 | `interfaces.list` | | `[{name, description}]` |
 | `profile.load` | `path` (on the server) or `toml` (+ `base_dir`), optional `name` | the profile's streams |
 | `profile.get`, `profile.unload` | `name` | profile / `true` |
@@ -395,14 +401,100 @@ A run has a `state` (`running`, `finished`, `stopped`, `failed` with `error`),
 ```
 
 A subscription to one run ends with an update marked `"last": true` when the
-run ends. Error codes are the JSON-RPC ones plus -32001 (send `auth` first),
--32002 (no such profile, run or subscription) and -32003 (could not be done,
-e.g. a profile that does not parse or an interface that will not open).
+run ends. Error codes are the JSON-RPC ones plus -32001 (log in first),
+-32002 (no such profile, run or subscription), -32003 (could not be done,
+e.g. a profile that does not parse or an interface that will not open) and
+-32004 (forbidden: a read-only login changing something, or a path outside
+the data directories).
 
-The server listens on 127.0.0.1 unless told otherwise. It sends traffic and
-reads and writes files with its own privileges, so on a shared network give it
-a `--token` (or `FEROTRX_TOKEN`); the token travels in clear text, so keep the
-control port on a lab or management network.
+#### Security
+
+**What is at stake.** The control server sends traffic from the machine's
+interfaces, often as root (pcap, AF_XDP and DPDK need it), and reads profiles
+and pcaps and writes pcap files with the server's privileges. Whoever can
+call `run.start` can flood a network the box is attached to; whoever can
+call `profile.load` with any path could read files. So the server keeps
+everyone out who has not logged in, keeps read-only users from changing
+anything, and keeps everyone inside its data directories.
+
+**What it protects against:** someone on the lab or management network who
+can reach the port but has no token or certificate (they get `server.info`
+and nothing else; the server refuses to listen on such a network without a
+login unless you say `--insecure`); someone who can watch or tamper with that
+network (TLS, so tokens and traffic no longer go in clear text); a dashboard
+or colleague who should only look (read-only role); a client naming
+`/etc/shadow` or `../../` (data directories, symbolic links followed);
+clients that hog the server (connection, request and upload limits, idle and
+login timeouts, a pause and in the end a closed connection after wrong
+tokens). Every login, refusal and change is in the audit log.
+
+**What it does not protect against:** an operator, who by design can send
+any traffic the profiles allow and write pcap files anywhere in the data
+directories; anyone who has a token or key file (keep them private: `ferotrx
+certs` writes keys readable only by their owner); local users of the box
+(listen on 127.0.0.1, the default, when you do not need the network); and
+denial of service by a client that is allowed in. The server checks paths
+when a profile is loaded, so a file swapped for a symbolic link afterwards is
+not caught. There is no rate limit per client and no certificate revocation:
+to lock someone out, issue new CAs (or tokens) and restart.
+
+**Logins and roles.** `read` may call `server.info`, `interfaces.list`, the
+`*.get`, `*.list` and `*.stats` methods and `stats.subscribe`; `operator` may
+also load and unload profiles and start, stop and remove runs. Log in with a
+token (`auth`) or a client certificate:
+
+| `ferotrx serve` option | Logs in as |
+| --- | --- |
+| `--token T` (or `FEROTRX_TOKEN`) | operator |
+| `--read-token T` (or `FEROTRX_READ_TOKEN`) | read |
+| `--tokens FILE`: `[[token]]` tables with `name`, `role` and `secret` (or `sha256` of it) | the token's role, under its name in the audit log |
+| `--client-ca FILE` (needs TLS) | operator, for certificates from that CA |
+| `--read-client-ca FILE` (needs TLS) | read, for certificates from that CA |
+
+With client CAs and no tokens, a client without a certificate cannot connect;
+with both, it can and logs in with a token. With none of these, every
+connection may do everything, which is fine on 127.0.0.1.
+
+**TLS.** `--tls-cert` and `--tls-key` (PEM) turn on TLS (rustls; TLS 1.2 and
+1.3). `ferotrx certs DIR --server NAMES --client NAME --read-client NAME`
+makes what a lab needs: a CA (`ca.pem`) that signs the server certificate (for
+those names plus `localhost`, `127.0.0.1` and `::1`) and
+operator client certificates, a second CA (`read-ca.pem`) for read-only
+client certificates, and a certificate and key per name; run it again to add
+clients, it reuses the CAs. Clients check the server against `--ca` (or
+`FEROTRX_CA`), for the host in `--connect` (or `--server-name`); in Python,
+`ssl.create_default_context(cafile="ca.pem")` (see `examples/ctl-client.py`).
+Certificates from your own PKI work as well: any PEM certificate and key.
+
+**Files.** Profiles, the pcaps they name, `base_dir` and pcap outputs must be
+inside the `--data-dir` directories (repeatable; default: the directory the
+server was started in); relative paths start from the first one. Uploaded
+profiles may be at most `--max-upload` (1M); a request at most
+`--max-request` (4M). Profiles given with `-p` at start are not checked.
+
+**Limits.** `--max-connections` (64), `--idle-timeout` (5m; connections
+watching stats are never idle), 30 s to log in, half a second after each
+wrong token and the connection closed after five.
+
+**Audit log.** JSON lines on standard error, or appended to `--audit-log
+FILE`: `connect`, `refused`, `tls_error`, `login` (by token or certificate,
+with the certificate's SHA-256), `login_failed`, `denied`, `call` (every
+operator method with its parameters, uploaded profiles by size, and whether
+it worked) and `disconnect` (with the reason). Tokens are never written.
+
+```json
+{"by":"certificate","cert_sha256":"f265cc3d…","conn":3,"event":"login","peer":"192.168.56.1:43846","role":"operator","time":"2026-11-03T18:13:04.415Z","user":"alice"}
+{"conn":3,"event":"call","id":1,"method":"run.start","ok":true,"params":{"output":{"iface":"enp0s3"},"profile":"lab"},"peer":"192.168.56.1:43846","role":"operator","time":"2026-11-03T18:13:04.416Z","user":"alice"}
+```
+
+**Deploying.** Put the control port on a management network or VLAN, not the
+network under test. Use TLS with client certificates for people and scripts
+that start traffic, a read-only certificate or token for dashboards, and give
+each person or system their own so the audit log tells them apart. Keep
+profiles and pcaps in a directory of their own and make it the only
+`--data-dir`. Under systemd, send standard error (and so the audit log) to the
+journal, or give `--audit-log` a file on a disk that is backed up. Leave the
+server on 127.0.0.1 (the default) when only local scripts use it.
 
 ### Loss and latency
 

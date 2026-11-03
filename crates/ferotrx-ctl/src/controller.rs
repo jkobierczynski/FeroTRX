@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -15,6 +15,7 @@ use ferotrx_core::{
 };
 use ferotrx_io::Output;
 
+use crate::files::FilePolicy;
 use crate::protocol::*;
 use crate::tcp::{start_tcp_with, PortOpener, TcpRun};
 
@@ -108,6 +109,7 @@ pub struct Controller {
     rx_runs: Mutex<BTreeMap<u64, Arc<RxRun>>>,
     next_run: AtomicU64,
     auth_required: bool,
+    files: FilePolicy,
     open_port: Box<PortOpener>,
     open_receiver: Box<ReceiverOpener>,
 }
@@ -145,6 +147,7 @@ impl Controller {
             rx_runs: Mutex::default(),
             next_run: AtomicU64::new(1),
             auth_required: false,
+            files: FilePolicy::unrestricted(),
             open_port: Box::new(ferotrx_io::open_port),
             open_receiver: Box::new(ferotrx_io::open_receiver),
         }
@@ -171,6 +174,17 @@ impl Controller {
     ) -> Self {
         self.open_port = Box::new(open);
         self
+    }
+
+    /// Restricts the files clients may name (see [`FilePolicy`]). Profiles
+    /// added with [`add_profile`](Controller::add_profile) are not checked.
+    pub fn with_file_policy(mut self, files: FilePolicy) -> Self {
+        self.files = files;
+        self
+    }
+
+    pub fn file_policy(&self) -> &FilePolicy {
+        &self.files
     }
 
     pub(crate) fn set_auth_required(&mut self, yes: bool) {
@@ -260,6 +274,9 @@ impl Controller {
                 .map(|b| b.name().to_string())
                 .collect(),
             auth_required: self.auth_required,
+            tls: false,
+            role: None,
+            user: None,
         }
     }
 
@@ -299,7 +316,8 @@ impl Controller {
                         .map(|s| s.to_string_lossy().into_owned())
                         .ok_or_else(|| RpcError::invalid_params("path has no file name"))?,
                 };
-                let profile = Profile::from_path(&path).map_err(|e| {
+                let file = self.files.readable(&path)?;
+                let profile = Profile::from_path(&file).map_err(|e| {
                     RpcError::failed(format!("cannot load {}: {e}", path.display()))
                 })?;
                 (name, profile)
@@ -308,7 +326,8 @@ impl Controller {
                 let name = p.name.ok_or_else(|| {
                     RpcError::invalid_params("a profile given as toml needs a name")
                 })?;
-                let base = p.base_dir.unwrap_or_else(|| PathBuf::from("."));
+                self.files.upload(&text)?;
+                let base = self.files.base_dir(p.base_dir.as_deref())?;
                 let profile = Profile::from_toml(&text, &base).map_err(RpcError::failed)?;
                 (name, profile)
             }
@@ -316,6 +335,11 @@ impl Controller {
         };
         if name.trim().is_empty() {
             return Err(RpcError::invalid_params("profile name is empty"));
+        }
+        for s in &profile.streams {
+            if let StreamSource::Pcap(path) = &s.source {
+                self.files.readable(path)?;
+            }
         }
         let info = profile_info(&name, &profile);
         lock(&self.profiles).insert(name, profile);
@@ -361,7 +385,7 @@ impl Controller {
         let send = p.output.send_settings()?;
         let output = match (p.output.iface, p.output.file, p.output.null) {
             (Some(name), None, false) => Output::Interface { name, send },
-            (None, Some(f), false) if send.is_empty() => Output::File(f),
+            (None, Some(f), false) if send.is_empty() => Output::File(self.files.writable(&f)?),
             (None, None, true) if send.is_empty() => Output::Null,
             (None, Some(_), false) | (None, None, true) => {
                 return Err(RpcError::invalid_params(
@@ -492,14 +516,20 @@ impl Controller {
     pub fn tcp_start(&self, p: TcpStartParams) -> Result<TcpRunInfo, RpcError> {
         let failed = |e: ferotrx_core::Error| RpcError::failed(e);
         let mut profile = match (p.path, p.toml) {
-            (Some(path), None) => TcpProfile::from_path(&path)
+            (Some(path), None) => TcpProfile::from_path(self.files.readable(&path)?)
                 .map_err(|e| RpcError::failed(format!("{}: {e}", path.display())))?,
             (None, Some(text)) => {
-                let base = p.base_dir.unwrap_or_else(|| PathBuf::from("."));
+                self.files.upload(&text)?;
+                let base = self.files.base_dir(p.base_dir.as_deref())?;
                 TcpProfile::from_toml(&text, &base).map_err(failed)?
             }
             _ => return Err(RpcError::invalid_params("give either path or toml")),
         };
+        for t in &profile.templates {
+            if let ferotrx_core::TcpSource::Pcap { path, .. } = &t.source {
+                self.files.readable(path)?;
+            }
+        }
         if let Some(v) = p.cps {
             profile.cps = v;
         }

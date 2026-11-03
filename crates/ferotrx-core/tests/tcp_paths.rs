@@ -229,7 +229,7 @@ fn run_from(
                     if d == 0
                         && s.flags & 0x10 != 0
                         && w.client_ack
-                            .map_or(true, |a| (s.ack.wrapping_sub(a) as i32) > 0)
+                            .is_none_or(|a| (s.ack.wrapping_sub(a) as i32) > 0)
                     {
                         w.client_ack = Some(s.ack);
                     }
@@ -548,11 +548,11 @@ fn survives_reordering_duplication_and_loss_both_ways() {
                 return (Fate::Pass, Vec::new());
             }
             n += 1;
-            let fate = if n % 41 == 0 {
+            let fate = if n.is_multiple_of(41) {
                 Fate::Drop
-            } else if n % 13 == 0 {
+            } else if n.is_multiple_of(13) {
                 Fate::Duplicate
-            } else if n % 7 == 0 {
+            } else if n.is_multiple_of(7) {
                 Fate::Delay(Duration::from_millis(3))
             } else {
                 Fate::Pass

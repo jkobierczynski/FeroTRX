@@ -27,7 +27,7 @@
 //! | Method | Params | Result |
 //! | --- | --- | --- |
 //! | `server.info` | | [`ServerInfo`](protocol::ServerInfo) |
-//! | `auth` | `token` | `true` |
+//! | `auth` | `token` | `true` (the connection now has the token's role) |
 //! | `interfaces.list` | | [`InterfaceEntry`](protocol::InterfaceEntry)`[]` |
 //! | `profile.load` | `path` or `toml` (+ `base_dir`), `name` | [`ProfileInfo`](protocol::ProfileInfo) |
 //! | `profile.get` / `profile.unload` | `name` | `ProfileInfo` / `true` |
@@ -73,23 +73,51 @@
 //!
 //! # Security
 //!
-//! The server can send traffic on the machine's interfaces and read and write
-//! files with its own privileges. It listens on 127.0.0.1 unless told
-//! otherwise; when it listens on a lab network, give it a token (the client
-//! then sends `auth` first) and keep it off networks you do not control.
-//! The token is sent in clear text.
+//! The server can send traffic on the machine's interfaces and read and
+//! write files with its own privileges, so [`ServerConfig`] controls who
+//! gets in and what they may do:
+//!
+//! * **TLS** ([`ServerTls`], rustls): the server's certificate and key; the
+//!   client checks it against a CA ([`ClientTls`], [`Client::connect_tls`]).
+//!   Tokens then no longer travel in clear text.
+//! * **Logins**: [`Token`]s sent with `auth`, or client certificates (mutual
+//!   TLS) from a CA given per role. With neither, every connection may do
+//!   everything, and the server refuses to listen on a non-loopback address
+//!   unless `insecure` is set.
+//! * **Roles** ([`Role`]): `read` may call `server.info`,
+//!   `interfaces.list`, the `*.get`, `*.list` and `*.stats` methods and
+//!   `stats.subscribe`; `operator` may also load profiles and start, stop and
+//!   remove runs. Anything else answers `FORBIDDEN` (-32004).
+//! * **Files** ([`FilePolicy`], set on the [`Controller`]): profiles, the
+//!   pcaps they name and pcap outputs only inside the data directories;
+//!   uploaded profiles size-limited.
+//! * **Limits**: connections at once, request size, idle and login timeouts,
+//!   a pause and in the end a closed connection after wrong tokens.
+//! * **Audit log** ([`AuditLog`]): logins, refusals and every operator call,
+//!   as JSON lines.
+//!
+//! [`LabPki`] makes the certificates for a lab (`ferotrx certs`). The
+//! README has the threat model and deployment notes.
 
+mod audit;
+mod auth;
 mod client;
 mod controller;
+mod files;
 pub mod protocol;
 mod server;
 mod tcp;
+mod tls;
 
+pub use audit::AuditLog;
+pub use auth::{Token, TokenError};
 pub use client::{Client, ClientError};
 pub use controller::{
     start_run, start_run_detailed, start_run_with_rx, Controller, ReceiverOpener, StartError,
     Started,
 };
-pub use protocol::RpcError;
-pub use server::{Server, MAX_LINE};
+pub use files::{FilePolicy, DEFAULT_MAX_UPLOAD};
+pub use protocol::{Role, RpcError};
+pub use server::{Server, ServerConfig, MAX_LINE};
 pub use tcp::{start_tcp, start_tcp_with, PortOpener, TcpStarted};
+pub use tls::{common_name, fingerprint, ClientTls, Issued, LabPki, ServerTls, TlsError};

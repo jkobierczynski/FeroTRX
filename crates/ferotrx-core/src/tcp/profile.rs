@@ -499,7 +499,7 @@ fn hex(s: &str) -> Result<Vec<u8>> {
         .bytes()
         .filter(|b| !b.is_ascii_whitespace() && *b != b':')
         .collect();
-    if digits.len() % 2 != 0 {
+    if !digits.len().is_multiple_of(2) {
         return Err(Error::Profile(format!(
             "hex '{s}' has an odd number of digits"
         )));
