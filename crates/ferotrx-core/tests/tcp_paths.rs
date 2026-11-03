@@ -64,14 +64,17 @@ fn csum(data: &[u8], mut sum: u32) -> u16 {
     !(sum as u16)
 }
 
-/// Recomputes the TCP checksum of an untagged IPv4 frame.
+/// Recomputes the TCP checksum of an untagged IPv4 or IPv6 frame.
 fn fix_tcp_checksum(f: &mut [u8]) {
     let s = tcp_of(f).unwrap();
-    let total = usize::from(u16::from_be_bytes([f[16], f[17]]));
-    let end = 14 + total;
+    let (addrs, end) = if u16::from_be_bytes([f[12], f[13]]) == 0x86dd {
+        (22..54, 54 + usize::from(u16::from_be_bytes([f[18], f[19]])))
+    } else {
+        (26..34, 14 + usize::from(u16::from_be_bytes([f[16], f[17]])))
+    };
     f[s.tcp + 16..s.tcp + 18].fill(0);
     let mut pseudo = 0u32;
-    for c in f[26..34].chunks(2) {
+    for c in f[addrs].chunks(2) {
         pseudo += u32::from(u16::from_be_bytes([c[0], c[1]]));
     }
     pseudo += 6 + (end - s.tcp) as u32;
@@ -740,4 +743,112 @@ fn templates_keep_their_own_rates_and_limits() {
     assert_eq!(most_slow_open, 1);
     // Ten at 20 per second take about half a second.
     assert!(took >= Duration::from_millis(450), "{took:?}");
+}
+
+/// An echo of one line; the server closes.
+fn echo() -> TcpProgram {
+    TcpProgram::new(
+        80,
+        vec![
+            TcpMessage::new(TcpRole::Client, "hello from FeroTRX\r\n"),
+            TcpMessage::new(TcpRole::Server, "hello from FeroTRX\r\n"),
+        ],
+    )
+    .with_closer(TcpRole::Server)
+}
+
+/// `f` with its TCP sequence number and flags replaced, checksum fixed.
+fn rewrite(f: &[u8], seq: u32, flags: u8) -> Vec<u8> {
+    let mut f = f.to_vec();
+    let s = tcp_of(&f).unwrap();
+    f[s.tcp + 4..s.tcp + 8].copy_from_slice(&seq.to_be_bytes());
+    f[s.tcp + 13] = flags;
+    fix_tcp_checksum(&mut f);
+    f
+}
+
+#[test]
+fn a_reset_does_not_end_time_wait() {
+    // The server closes first and waits in TIME_WAIT; its last ACK is lost,
+    // and a router answers it with a reset of its own, as Linux does when
+    // conntrack finds a packet INVALID and leaves it addressed to the router.
+    // The server stays (RFC 1337), answers the client's repeated FIN, and the
+    // client completes instead of getting a reset.
+    for v6 in [false, true] {
+        let mut server_fin = false;
+        let mut client_fin: Option<Vec<u8>> = None;
+        let mut rst: Option<Vec<u8>> = None;
+        let mut injected = false;
+        let mut impair = |d: usize, f: &[u8], _: &mut Watch, _: Duration| {
+            let Some(s) = tcp_of(f) else {
+                return (Fate::Pass, Vec::new());
+            };
+            if d == 1 && s.flags & 0x01 != 0 {
+                server_fin = true;
+            }
+            if d == 0 && s.flags & 0x01 != 0 && s.payload == 0 {
+                client_fin.get_or_insert_with(|| f.to_vec());
+            }
+            if d == 1 && server_fin && rst.is_none() && s.flags == 0x10 && s.payload == 0 {
+                if let Some(fin) = &client_fin {
+                    // The router's RST in reply to that ACK: its sequence
+                    // number is the ACK's. It goes to the server, ahead of
+                    // the client's next segment.
+                    rst = Some(rewrite(fin, s.ack, 0x04));
+                    return (Fate::Drop, Vec::new());
+                }
+            }
+            if d == 0 && !injected {
+                if let Some(r) = rst.take() {
+                    injected = true;
+                    return (Fate::Pass, vec![r]);
+                }
+            }
+            (Fate::Pass, Vec::new())
+        };
+        let (mut client, mut server) =
+            engines(echo(), 1, v6, TcpOptions::default(), TcpOptions::default());
+        run(
+            &mut client,
+            &mut server,
+            &mut Link::new(Duration::from_millis(5), 100, 100),
+            Duration::from_secs(20),
+            &mut impair,
+        );
+        assert!(injected, "v6 {v6}");
+        assert_clean(&client, &server, 1);
+    }
+}
+
+#[test]
+fn resets_outside_the_window_are_ignored() {
+    // A stray reset, far from what the client expects, in the middle of a
+    // download: the connection goes on.
+    let mut injected = false;
+    let mut impair = |d: usize, f: &[u8], w: &mut Watch, now: Duration| {
+        let mut inject = Vec::new();
+        if let (Some(s), Some(ack)) = (tcp_of(f), w.client_ack) {
+            if d == 1 && s.payload > 0 && !injected && now > Duration::from_millis(50) {
+                injected = true;
+                inject.push(rewrite(f, ack.wrapping_add(1 << 30), 0x04));
+            }
+        }
+        (Fate::Pass, inject)
+    };
+    let (mut client, mut server) = engines(
+        download(MB),
+        1,
+        false,
+        TcpOptions::default(),
+        TcpOptions::default(),
+    );
+    run(
+        &mut client,
+        &mut server,
+        &mut Link::new(Duration::from_millis(10), 100, 2000),
+        Duration::from_secs(20),
+        &mut impair,
+    );
+    assert!(injected);
+    assert_clean(&client, &server, 1);
 }

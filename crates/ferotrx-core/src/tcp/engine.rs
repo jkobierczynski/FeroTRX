@@ -1191,11 +1191,34 @@ impl Conn {
         }
     }
 
+    /// Whether a reset ends this connection (RFC 793, RFC 1337).
+    fn rst_acceptable(&self, o: &TcpOptions, seg: &Segment) -> bool {
+        match self.state {
+            // Only one that answers our SYN.
+            State::SynSent => seg.has(ACK) && seg.ack == self.iss.wrapping_add(1),
+            // RFC 1337: a reset does not cut TIME_WAIT short. The other end
+            // may still be resending its FIN because our last ACK was lost;
+            // a router that drops the state of a closing connection (or
+            // answers one of its packets itself) would otherwise make us
+            // answer that FIN with a reset.
+            State::TimeWait => false,
+            // In the window, so a stray reset from an old connection on the
+            // same ports does not end this one.
+            _ => {
+                let off = seg.seq.wrapping_sub(self.rcv_nxt) as usize;
+                off < self.rcv_window(o).max(1)
+            }
+        }
+    }
+
     /// Handles a segment for this connection.
     fn on_segment(&mut self, sh: &Shared, out: &mut Out, seg: &Segment, now: Duration) -> Fate {
         let o = &sh.options;
         self.last_rx = now;
         if seg.has(RST) {
+            if !self.rst_acceptable(o, seg) {
+                return Fate::Keep;
+            }
             if !self.counted {
                 out.add(self.role, self.tpl, |s| s.reset += 1);
             }
