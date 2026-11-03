@@ -6,7 +6,7 @@
 #   ferotrx (this namespace)          router (namespace ferotrx-rtr)
 #   t0 trunk --- veth --------------- rt: rt.10 192.168.10.1/24  (clients)
 #     client 192.168.10.100-109 vlan 10   rt.20 192.168.20.1/24  (server)
-#     server 192.168.20.50 vlan 20        masquerade out of rt.20
+#     server 192.168.20.50(-53) vlan 20   masquerade out of rt.20
 #
 # Usage: sudo scripts/tcp-nat-netns.sh [path/to/ferotrx] [extra ferotrx tcp options]
 # Needs root, ip (iproute2) and iptables (or iptables-nft). Removes the lab
@@ -14,6 +14,11 @@
 #
 # LOSS=0.03 makes the router drop 3% of the packets it forwards, to see
 # retransmits at work.
+#
+# MIX=1 plays a mix of templates instead of one session, like
+# examples/lab-tcp-mix.toml: the HTTP session, a download on port 8080 and an
+# echo on port 7, weighted 3:1:1, from the ten clients to four servers
+# (192.168.20.50-53). It checks that every template completed connections.
 #
 # Without VLAN support in the kernel (no 8021q module), or with NO_VLAN=1, the
 # client and the server get a link each instead of sharing a trunk:
@@ -103,11 +108,69 @@ if [ $vlan = yes ]; then
 else
     set -- --client-iface c0 --server-iface s0 "$@"
 fi
-"$BIN" tcp examples/http.pcap \
-    --client-ip 192.168.10.100/24 --client-ips 10 --client-gw 192.168.10.1 \
-    --server-ip 192.168.20.50/24 --server-gw 192.168.20.1 \
-    --cps 20 -n 200 --concurrency 50 "$@"
-status=$?
+hosts="--client-ip 192.168.10.100/24 --client-ips 10 --client-gw 192.168.10.1
+       --server-ip 192.168.20.50/24 --server-gw 192.168.20.1"
+if [ "${MIX:-}" = 1 ]; then
+    examples=$(cd "$(dirname "$0")/../examples" && pwd)
+    profile=$(mktemp /tmp/ferotrx-mix.XXXXXX)
+    out=$(mktemp /tmp/ferotrx-mix-out.XXXXXX)
+    cat >"$profile" <<EOT
+[[template]]
+name = "http"
+pcap = "$examples/http.pcap"
+weight = 3
+
+[[template]]
+name = "download"
+pcap = "$examples/web.pcap"
+port = 8080
+weight = 1
+
+[[template]]
+name = "echo"
+port = 7
+closer = "server"
+[[template.message]]
+from = "client"
+text = "hello from FeroTRX\r\n"
+[[template.message]]
+from = "server"
+text = "hello from FeroTRX\r\n"
+
+# Addresses come from the command line.
+[client]
+ip = "0.0.0.0"
+[server]
+ip = "0.0.0.0"
+EOT
+    # shellcheck disable=SC2086
+    "$BIN" tcp -p "$profile" $hosts --server-ips 4 \
+        --cps 50 -n 500 --concurrency 50 "$@" >"$out" 2>&1
+    status=$?
+    cat "$out"
+    # Every template must have completed connections, on both sides.
+    for t in http download echo; do
+        for side in client server; do
+            if ! grep -Eq "^    $t $side: .* [1-9][0-9]* completed" "$out"; then
+                echo "FAIL: template $t has no completed $side connections" >&2
+                status=1
+            fi
+        done
+    done
+    # The router must have reached all four servers.
+    servers=$(r ip neigh show | grep -c '^192\.168\.20\.5[0-3] .*lladdr')
+    echo "router knows $servers of the 4 servers"
+    if [ "$servers" -ne 4 ]; then
+        echo "FAIL: the clients did not connect to all four servers" >&2
+        status=1
+    fi
+    rm -f "$profile" "$out"
+else
+    # shellcheck disable=SC2086
+    "$BIN" tcp examples/http.pcap $hosts \
+        --cps 20 -n 200 --concurrency 50 "$@"
+    status=$?
+fi
 
 echo "router: connections masqueraded, and packets dropped:"
 r iptables -t nat -L POSTROUTING -v -n | sed -n '3p'

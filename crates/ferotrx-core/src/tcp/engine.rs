@@ -133,14 +133,76 @@ impl TcpEndpoint {
     }
 }
 
-/// The client side: opens connections to the server and plays the client's part.
+/// One kind of connection: a program, where clients connect to play it, and
+/// the port servers accept it on.
+///
+/// Like a TRex ASTF template. A run can mix several: the client picks the
+/// template of each new connection by weight, and the server picks the
+/// program by the port the SYN arrives on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TcpTemplate {
+    /// A short name for reports, e.g. `http`.
+    pub name: String,
+    pub program: Arc<TcpProgram>,
+    /// Where clients connect: the first server address, and the port. Behind
+    /// a port forward, the router's address and the forwarded port.
+    pub connect: SocketAddrV4,
+    /// How many consecutive server addresses from `connect`'s the client
+    /// connects to, in turn (default 1).
+    pub connect_ips: u32,
+    /// The port servers accept this template's connections on (default:
+    /// `connect`'s port).
+    pub listen_port: u16,
+    /// Share of the new connections the client opens with this template,
+    /// relative to the others (default 1). 0: the client never opens it,
+    /// but the server still accepts it.
+    pub weight: u32,
+}
+
+impl TcpTemplate {
+    /// A template that connects to `connect` and listens on its port, weight 1.
+    pub fn new(program: Arc<TcpProgram>, connect: SocketAddrV4) -> Self {
+        Self {
+            name: "default".into(),
+            program,
+            connect,
+            connect_ips: 1,
+            listen_port: connect.port(),
+            weight: 1,
+        }
+    }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    pub fn with_weight(mut self, weight: u32) -> Self {
+        self.weight = weight;
+        self
+    }
+
+    pub fn with_connect_ips(mut self, count: u32) -> Self {
+        self.connect_ips = count;
+        self
+    }
+
+    pub fn with_listen_port(mut self, port: u16) -> Self {
+        self.listen_port = port;
+        self
+    }
+
+    fn nth_server(&self, n: u64) -> Ipv4Addr {
+        let k = (n % u64::from(self.connect_ips.max(1))) as u32;
+        Ipv4Addr::from(u32::from(*self.connect.ip()).wrapping_add(k))
+    }
+}
+
+/// The client side: opens connections to the servers and plays the client's part.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TcpClientConfig {
     pub endpoint: TcpEndpoint,
-    /// Where the client connects to. Usually the server host's address and
-    /// the program's port; behind a port forward, the router's address.
-    pub connect: SocketAddrV4,
-    /// New connections per second.
+    /// New connections per second, all templates together.
     pub cps: f64,
     /// Connections to open in all; 0 keeps opening them until the run stops.
     pub connections: u64,
@@ -151,10 +213,9 @@ pub struct TcpClientConfig {
 }
 
 impl TcpClientConfig {
-    pub fn new(endpoint: TcpEndpoint, connect: SocketAddrV4) -> Self {
+    pub fn new(endpoint: TcpEndpoint) -> Self {
         Self {
             endpoint,
-            connect,
             cps: 1.0,
             connections: 1,
             concurrency: 0,
@@ -163,12 +224,17 @@ impl TcpClientConfig {
     }
 }
 
-/// The server side: accepts connections and plays the server's part.
+/// The server side: accepts connections on the templates' ports and plays the
+/// server's part.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TcpServerConfig {
     pub endpoint: TcpEndpoint,
-    /// The port to listen on.
-    pub port: u16,
+}
+
+impl TcpServerConfig {
+    pub fn new(endpoint: TcpEndpoint) -> Self {
+        Self { endpoint }
+    }
 }
 
 /// TCP settings shared by both sides.
@@ -209,10 +275,10 @@ impl Default for TcpOptions {
     }
 }
 
-/// Everything a [`TcpEngine`] does: the program, and a client, a server or both.
+/// Everything a [`TcpEngine`] does: the templates, and a client, a server or both.
 #[derive(Clone, Debug)]
 pub struct TcpConfig {
-    pub program: Arc<TcpProgram>,
+    pub templates: Vec<TcpTemplate>,
     pub client: Option<TcpClientConfig>,
     pub server: Option<TcpServerConfig>,
     pub options: TcpOptions,
@@ -250,11 +316,22 @@ impl TcpSideStats {
     }
 }
 
+/// Counters of one template in a TCP run.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TcpTemplateStats {
+    pub name: String,
+    pub client: TcpSideStats,
+    pub server: TcpSideStats,
+}
+
 /// Counters of a TCP run.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TcpStats {
+    /// All templates together.
     pub client: TcpSideStats,
     pub server: TcpSideStats,
+    /// Each template's share, in the order of [`TcpConfig::templates`].
+    pub templates: Vec<TcpTemplateStats>,
     /// Frames and bytes sent and received on the ports, all kinds.
     pub tx_packets: u64,
     pub tx_bytes: u64,
@@ -333,6 +410,8 @@ enum State {
 
 struct Conn {
     role: TcpRole,
+    /// Index of the connection's template.
+    tpl: usize,
     port: usize,
     path: Path,
     lport: u16,
@@ -381,12 +460,25 @@ struct Out<'a> {
     stats: &'a mut TcpStats,
 }
 
-impl Out<'_> {
-    fn side(&mut self, role: TcpRole) -> &mut TcpSideStats {
-        match role {
-            TcpRole::Client => &mut self.stats.client,
-            TcpRole::Server => &mut self.stats.server,
+impl TcpStats {
+    /// Applies `f` to `role`'s counters, overall and of template `tpl`.
+    fn add(&mut self, role: TcpRole, tpl: usize, f: impl Fn(&mut TcpSideStats)) {
+        let pick = |c: &mut TcpSideStats, s: &mut TcpSideStats, f: &dyn Fn(&mut TcpSideStats)| {
+            match role {
+                TcpRole::Client => f(c),
+                TcpRole::Server => f(s),
+            }
+        };
+        pick(&mut self.client, &mut self.server, &f);
+        if let Some(t) = self.templates.get_mut(tpl) {
+            pick(&mut t.client, &mut t.server, &f);
         }
+    }
+}
+
+impl Out<'_> {
+    fn add(&mut self, role: TcpRole, tpl: usize, f: impl Fn(&mut TcpSideStats)) {
+        self.stats.add(role, tpl, f);
     }
 
     fn segment(&mut self, port: usize, path: &Path, h: &TcpHeader, data: &[u8]) {
@@ -460,7 +552,8 @@ impl Conn {
             match sh.actions[me].get(self.step) {
                 Some(Action::Send(r)) => {
                     self.snd_buf.extend(&sh.streams[me][r.clone()]);
-                    out.side(self.role).payload_tx += r.len() as u64;
+                    let n = r.len() as u64;
+                    out.add(self.role, self.tpl, |s| s.payload_tx += n);
                     self.step += 1;
                 }
                 Some(Action::Recv(n)) => {
@@ -544,7 +637,7 @@ impl Conn {
         self.last_rx = now;
         if seg.has(RST) {
             if !self.counted {
-                out.side(self.role).reset += 1;
+                out.add(self.role, self.tpl, |s| s.reset += 1);
             }
             return Fate::Remove;
         }
@@ -642,7 +735,7 @@ impl Conn {
         self.rto = sh.options.rto;
         self.deadline = None;
         self.last_rx = now;
-        out.side(self.role).established += 1;
+        out.add(self.role, self.tpl, |s| s.established += 1);
     }
 
     fn on_ack(&mut self, sh: &Shared, out: &mut Out, seg: &Segment, now: Duration) {
@@ -667,7 +760,7 @@ impl Conn {
             self.dup_acks += 1;
             if self.dup_acks == 3 {
                 // Fast retransmit of the first unacknowledged segment.
-                out.side(self.role).retransmits += 1;
+                out.add(self.role, self.tpl, |s| s.retransmits += 1);
                 if self.snd_buf.is_empty() {
                     if let Some(f) = self.fin_seq {
                         let h = self.header(f, FIN | ACK);
@@ -682,7 +775,8 @@ impl Conn {
     }
 
     fn receive(&mut self, sh: &Shared, out: &mut Out, data: &[u8]) {
-        out.side(self.role).payload_rx += data.len() as u64;
+        let n = data.len() as u64;
+        out.add(self.role, self.tpl, |s| s.payload_rx += n);
         if sh.options.verify && !self.mismatched {
             let expected = &sh.streams[idx(self.role.peer())];
             let start = self.rx_total;
@@ -714,13 +808,12 @@ impl Conn {
             return;
         }
         self.counted = true;
-        let mismatched = self.mismatched;
-        let side = out.side(self.role);
-        side.completed += 1;
-        side.active = side.active.saturating_sub(1);
-        if mismatched {
-            side.mismatched += 1;
-        }
+        let mismatched = u64::from(self.mismatched);
+        out.add(self.role, self.tpl, |s| {
+            s.completed += 1;
+            s.active = s.active.saturating_sub(1);
+            s.mismatched += mismatched;
+        });
     }
 
     /// Runs timers. Returns `Remove` when the connection is over.
@@ -729,7 +822,7 @@ impl Conn {
             && now.saturating_sub(self.last_rx) >= sh.options.idle_timeout
         {
             self.send_rst(out);
-            out.side(self.role).timed_out += 1;
+            out.add(self.role, self.tpl, |s| s.timed_out += 1);
             return Fate::Remove;
         }
         let Some(deadline) = self.deadline else {
@@ -744,10 +837,10 @@ impl Conn {
         self.retries += 1;
         if self.retries > sh.options.max_retries {
             self.send_rst(out);
-            out.side(self.role).timed_out += 1;
+            out.add(self.role, self.tpl, |s| s.timed_out += 1);
             return Fate::Remove;
         }
-        out.side(self.role).retransmits += 1;
+        out.add(self.role, self.tpl, |s| s.retransmits += 1);
         self.rto = (self.rto * 2).min(Duration::from_secs(8));
         self.deadline = Some(now + self.rto);
         match self.state {
@@ -782,9 +875,9 @@ impl Rng {
 struct Host {
     ep: TcpEndpoint,
     role: TcpRole,
-    /// The client's next hop and its MAC, once known.
-    next_hop: Option<Ipv4Addr>,
-    next_hop_mac: Option<MacAddr>,
+    /// The client's next hops (the gateway, or servers on its link) and
+    /// their MACs, once known.
+    hops: Vec<(Ipv4Addr, Option<MacAddr>)>,
     arp_next: Duration,
     arp_since: Option<Duration>,
     /// A reply from the next hop seen on the right port but another VLAN
@@ -798,7 +891,11 @@ struct Host {
 /// [`poll`](Self::poll) often, and send what [`take_output`](Self::take_output)
 /// returns. [`run_tcp`](super::run_tcp) does this on real ports.
 pub struct TcpEngine {
-    shared: Arc<Shared>,
+    /// Each template's program as both ends play it.
+    shared: Arc<[Shared]>,
+    templates: Vec<TcpTemplate>,
+    /// Template index by the port the server accepts it on.
+    listen: HashMap<u16, usize>,
     client: Option<TcpClientConfig>,
     server: Option<TcpServerConfig>,
     hosts: Vec<Host>,
@@ -809,6 +906,10 @@ pub struct TcpEngine {
     rng: Rng,
     next_conn_at: Duration,
     port_cursor: u64,
+    /// Smooth weighted round robin over the templates.
+    wrr: Vec<i64>,
+    /// Connections each template has opened, to step through its servers.
+    opened: Vec<u64>,
     next_timer_scan: Duration,
     error: Option<String>,
     started: bool,
@@ -818,11 +919,13 @@ pub struct TcpEngine {
 const TIMER_TICK: Duration = Duration::from_millis(1);
 /// How often an unanswered ARP request is repeated.
 const ARP_RETRY: Duration = Duration::from_millis(500);
+/// Most next hops a client resolves: servers on its own link, without a gateway.
+const MAX_HOPS: usize = 1024;
 
 impl TcpEngine {
     pub fn new(config: TcpConfig) -> Result<Self> {
         let TcpConfig {
-            program,
+            templates,
             client,
             server,
             options,
@@ -830,11 +933,40 @@ impl TcpEngine {
         if client.is_none() && server.is_none() {
             return Err(Error::Tcp("give a client, a server or both".into()));
         }
+        if templates.is_empty() {
+            return Err(Error::Tcp("give at least one template".into()));
+        }
         if options.mss < 64 {
             return Err(Error::Tcp("mss must be at least 64".into()));
         }
         if options.rto.is_zero() {
             return Err(Error::Tcp("rto must be more than zero".into()));
+        }
+        let mut listen = HashMap::new();
+        for (i, t) in templates.iter().enumerate() {
+            let what = format!("template {}", t.name);
+            if t.connect_ips == 0 {
+                return Err(Error::Tcp(format!(
+                    "{what}: connect_ips must be at least 1"
+                )));
+            }
+            if u64::from(u32::from(*t.connect.ip())) + u64::from(t.connect_ips) > 1 << 32 {
+                return Err(Error::Tcp(format!(
+                    "{what}: server address range runs past 255.255.255.255"
+                )));
+            }
+            if client.is_some() && t.connect.port() == 0 {
+                return Err(Error::Tcp(format!("{what}: connect to port 0")));
+            }
+            if server.is_some() {
+                if let Some(j) = listen.insert(t.listen_port, i) {
+                    return Err(Error::Tcp(format!(
+                        "templates {} and {} both listen on port {}; the server tells \
+                         templates apart by port",
+                        templates[j].name, t.name, t.listen_port
+                    )));
+                }
+            }
         }
         let mut hosts = Vec::new();
         if let Some(c) = &client {
@@ -848,11 +980,30 @@ impl TcpEngine {
             if c.source_ports.is_empty() || c.source_ports.start == 0 {
                 return Err(Error::Tcp("the source port range is empty".into()));
             }
-            let hop = c.endpoint.next_hop(*c.connect.ip());
+            if templates.iter().all(|t| t.weight == 0) {
+                return Err(Error::Tcp(
+                    "every template has weight 0: the client has nothing to open".into(),
+                ));
+            }
+            // The next hops to resolve: the gateway, or the servers on the link.
+            let mut hops: Vec<(Ipv4Addr, Option<MacAddr>)> = Vec::new();
+            for t in templates.iter().filter(|t| t.weight > 0) {
+                for n in 0..u64::from(t.connect_ips) {
+                    let hop = c.endpoint.next_hop(t.nth_server(n));
+                    if !hops.iter().any(|(h, _)| *h == hop) {
+                        if hops.len() == MAX_HOPS {
+                            return Err(Error::Tcp(format!(
+                                "the client reaches more than {MAX_HOPS} servers directly; \
+                                 give it a gateway"
+                            )));
+                        }
+                        hops.push((hop, c.endpoint.next_hop_mac));
+                    }
+                }
+            }
             hosts.push(Host {
                 role: TcpRole::Client,
-                next_hop: Some(hop),
-                next_hop_mac: c.endpoint.next_hop_mac,
+                hops,
                 ep: c.endpoint.clone(),
                 arp_next: Duration::ZERO,
                 arp_since: None,
@@ -874,8 +1025,7 @@ impl TcpEngine {
             }
             hosts.push(Host {
                 role: TcpRole::Server,
-                next_hop: None,
-                next_hop_mac: None,
+                hops: Vec::new(),
                 ep: s.endpoint.clone(),
                 arp_next: Duration::ZERO,
                 arp_since: None,
@@ -883,15 +1033,33 @@ impl TcpEngine {
             });
         }
         let seed = options.seed | 1;
+        let shared: Vec<Shared> = templates
+            .iter()
+            .map(|t| Shared::new(&t.program, options.clone()))
+            .collect();
+        let stats = TcpStats {
+            templates: templates
+                .iter()
+                .map(|t| TcpTemplateStats {
+                    name: t.name.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
         Ok(Self {
-            shared: Arc::new(Shared::new(&program, options)),
+            shared: shared.into(),
+            wrr: vec![0; templates.len()],
+            opened: vec![0; templates.len()],
+            templates,
+            listen,
             client,
             server,
             hosts,
             conns: HashMap::new(),
             out: Vec::new(),
             ip_id: 0,
-            stats: TcpStats::default(),
+            stats,
             rng: Rng(seed),
             next_conn_at: Duration::ZERO,
             port_cursor: 0,
@@ -899,6 +1067,11 @@ impl TcpEngine {
             error: None,
             started: false,
         })
+    }
+
+    /// The templates, in the order of [`TcpStats::templates`].
+    pub fn templates(&self) -> &[TcpTemplate] {
+        &self.templates
     }
 
     pub fn stats(&self) -> &TcpStats {
@@ -970,13 +1143,17 @@ impl TcpEngine {
                 continue;
             }
             if host.ep.vlan != link.vlan {
-                if host.next_hop == Some(arp.sender_ip) && arp.op == 2 {
+                if arp.op == 2 && host.hops.iter().any(|(h, _)| *h == arp.sender_ip) {
                     host.arp_elsewhere = Some(link.vlan);
                 }
                 continue;
             }
-            if host.next_hop == Some(arp.sender_ip) && host.ep.next_hop_mac.is_none() {
-                host.next_hop_mac = Some(arp.sender_mac);
+            if host.ep.next_hop_mac.is_none() {
+                for (hop, mac) in host.hops.iter_mut() {
+                    if *hop == arp.sender_ip {
+                        *mac = Some(arp.sender_mac);
+                    }
+                }
             }
             if arp.op == 1 && host.ep.owns(arp.target_ip) {
                 self.out.push((
@@ -1048,23 +1225,25 @@ impl TcpEngine {
             }
         }
         if let Some(conn) = self.conns.get_mut(&key) {
-            if conn.on_segment(&shared, &mut out, seg, now) == Fate::Remove {
+            if conn.on_segment(&shared[conn.tpl], &mut out, seg, now) == Fate::Remove {
                 if let Some(c) = self.conns.remove(&key) {
                     if !c.counted {
-                        let side = out.side(c.role);
-                        side.active = side.active.saturating_sub(1);
+                        out.add(c.role, c.tpl, |s| s.active = s.active.saturating_sub(1));
                     }
                 }
             }
             return;
         }
-        let listening =
-            matches!(&self.server, Some(s) if role == TcpRole::Server && s.port == seg.dport);
-        if listening && seg.has(SYN) && !seg.has(ACK) && !seg.has(RST) {
+        let listening = match &self.server {
+            Some(_) if role == TcpRole::Server => self.listen.get(&seg.dport).copied(),
+            _ => None,
+        };
+        if let (Some(tpl), true) = (listening, seg.has(SYN) && !seg.has(ACK) && !seg.has(RST)) {
             let iss = self.rng.next();
-            let opts = &shared.options;
+            let opts = &shared[tpl].options;
             let conn = Conn {
                 role,
+                tpl,
                 port,
                 path,
                 lport: seg.dport,
@@ -1096,9 +1275,10 @@ impl TcpEngine {
                 counted: false,
             };
             conn.send_syn(&mut out, opts.mss);
-            let side = out.side(role);
-            side.started += 1;
-            side.active += 1;
+            out.add(role, tpl, |s| {
+                s.started += 1;
+                s.active += 1;
+            });
             self.conns.insert(key, conn);
             return;
         }
@@ -1150,19 +1330,28 @@ impl TcpEngine {
     }
 
     fn resolve(&mut self, now: Duration) {
-        let timeout = self.shared.options.arp_timeout;
+        let timeout = self.shared[0].options.arp_timeout;
         for host in &mut self.hosts {
-            let Some(hop) = host.next_hop else { continue };
-            if host.next_hop_mac.is_some() {
+            let pending: Vec<Ipv4Addr> = host
+                .hops
+                .iter()
+                .filter(|(_, mac)| mac.is_none())
+                .map(|(h, _)| *h)
+                .collect();
+            let Some(&hop) = pending.first() else {
                 continue;
-            }
+            };
             let since = *host.arp_since.get_or_insert(now);
             if now.saturating_sub(since) >= timeout {
                 let vlan =
                     |v: Option<u16>| v.map_or("untagged".to_string(), |v| format!("on VLAN {v}"));
+                let more = match pending.len() {
+                    1 => String::new(),
+                    n => format!(" (nor from {} other next hops)", n - 1),
+                };
                 self.error = Some(match host.arp_elsewhere {
                     Some(seen) => format!(
-                        "no ARP reply from {hop} (the {}'s next hop) {} within {:?}, but its replies \
+                        "no ARP reply from {hop} (the {}'s next hop) {} within {:?}{more}, but its replies \
                          arrive {}: the switch or interface changes the tag; set the {}'s VLAN to match, \
                          or use a VLAN the switch keeps tagged (VLAN 1 is often sent untagged)",
                         host.role,
@@ -1172,7 +1361,7 @@ impl TcpEngine {
                         host.role
                     ),
                     None => format!(
-                        "no ARP reply from {hop} (the {}'s next hop) {} within {:?}; \
+                        "no ARP reply from {hop} (the {}'s next hop) {} within {:?}{more}; \
                          check the gateway address, the VLAN, and that the port can receive",
                         host.role,
                         vlan(host.ep.vlan),
@@ -1183,18 +1372,20 @@ impl TcpEngine {
             }
             if now >= host.arp_next {
                 host.arp_next = now + ARP_RETRY;
-                self.out.push((
-                    host.ep.port,
-                    wire::arp_frame(
-                        BROADCAST,
-                        host.ep.vlan,
-                        1,
-                        host.ep.mac,
-                        host.ep.ip,
-                        MacAddr([0; 6]),
-                        hop,
-                    ),
-                ));
+                for hop in pending {
+                    self.out.push((
+                        host.ep.port,
+                        wire::arp_frame(
+                            BROADCAST,
+                            host.ep.vlan,
+                            1,
+                            host.ep.mac,
+                            host.ep.ip,
+                            MacAddr([0; 6]),
+                            hop,
+                        ),
+                    ));
+                }
             }
         }
     }
@@ -1207,10 +1398,9 @@ impl TcpEngine {
             stats: &mut self.stats,
         };
         self.conns.retain(|_, c| {
-            let keep = c.on_timer(&shared, &mut out, now) == Fate::Keep;
+            let keep = c.on_timer(&shared[c.tpl], &mut out, now) == Fate::Keep;
             if !keep && !c.counted {
-                let side = out.side(c.role);
-                side.active = side.active.saturating_sub(1);
+                out.add(c.role, c.tpl, |s| s.active = s.active.saturating_sub(1));
             }
             keep
         });
@@ -1221,11 +1411,12 @@ impl TcpEngine {
         let Some(host) = self.hosts.iter().find(|h| h.role == TcpRole::Client) else {
             return;
         };
-        let Some(mac) = host.next_hop_mac else { return };
+        if host.hops.iter().any(|(_, mac)| mac.is_none()) {
+            return;
+        }
         let interval = Duration::from_secs_f64(1.0 / client.cps);
         let ep = host.ep.clone();
-        let (connect, connections, concurrency) =
-            (client.connect, client.connections, client.concurrency);
+        let (connections, concurrency) = (client.connections, client.concurrency);
         let ports = client.source_ports.clone();
         let mut opened = 0;
         while self.next_conn_at <= now && opened < 256 {
@@ -1237,7 +1428,10 @@ impl TcpEngine {
                 self.next_conn_at = self.next_conn_at.max(now.saturating_sub(interval));
                 return;
             }
-            if !self.open_one(&ep, mac, connect, &ports, now) {
+            let tpl = self.pick_template();
+            if !self.open_one(tpl, &ep, &ports, now) {
+                // Undo the pick, so the mix stays as weighted.
+                self.unpick_template(tpl);
                 return;
             }
             self.next_conn_at += interval;
@@ -1245,14 +1439,47 @@ impl TcpEngine {
         }
     }
 
+    /// The template of the next connection: smooth weighted round robin, so
+    /// the weights hold over any stretch of connections, not only on average.
+    fn pick_template(&mut self) -> usize {
+        let total: i64 = self.templates.iter().map(|t| i64::from(t.weight)).sum();
+        let mut best = 0;
+        for (i, t) in self.templates.iter().enumerate() {
+            self.wrr[i] += i64::from(t.weight);
+            if self.wrr[i] > self.wrr[best] {
+                best = i;
+            }
+        }
+        self.wrr[best] -= total;
+        best
+    }
+
+    fn unpick_template(&mut self, tpl: usize) {
+        let total: i64 = self.templates.iter().map(|t| i64::from(t.weight)).sum();
+        self.wrr[tpl] += total;
+        for (i, t) in self.templates.iter().enumerate() {
+            self.wrr[i] -= i64::from(t.weight);
+        }
+    }
+
     fn open_one(
         &mut self,
+        tpl: usize,
         ep: &TcpEndpoint,
-        mac: MacAddr,
-        connect: SocketAddrV4,
         ports: &Range<u16>,
         now: Duration,
     ) -> bool {
+        let t = &self.templates[tpl];
+        let connect = SocketAddrV4::new(t.nth_server(self.opened[tpl]), t.connect.port());
+        let hop = ep.next_hop(*connect.ip());
+        let Some(mac) = self.hosts[0]
+            .hops
+            .iter()
+            .find(|(h, _)| *h == hop)
+            .and_then(|(_, m)| *m)
+        else {
+            return false;
+        };
         let span = u64::from(ports.end - ports.start);
         let count = u64::from(ep.ip_count);
         let mut found = None;
@@ -1271,10 +1498,12 @@ impl TcpEngine {
             // Every source address and port is in use.
             return false;
         };
-        let opts = &self.shared.options;
+        self.opened[tpl] += 1;
+        let opts = &self.shared[tpl].options;
         let iss = self.rng.next();
         let conn = Conn {
             role: TcpRole::Client,
+            tpl,
             port: ep.port,
             path: Path {
                 src_mac: ep.mac,
@@ -1317,8 +1546,10 @@ impl TcpEngine {
             stats: &mut self.stats,
         };
         conn.send_syn(&mut out, opts.mss);
-        self.stats.client.started += 1;
-        self.stats.client.active += 1;
+        out.add(TcpRole::Client, tpl, |s| {
+            s.started += 1;
+            s.active += 1;
+        });
         self.conns.insert(key, conn);
         true
     }

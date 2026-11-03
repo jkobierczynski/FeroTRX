@@ -9,10 +9,10 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use ferotrx_core::{
-    parse_duration, parse_port_range, Capture, MacAddr, TcpHostSpec, TcpProfile, TcpProgram,
-    TcpRole, TcpRunConfig, TcpSource, TcpStats,
+    parse_connect_addr, parse_duration, parse_port_range, Capture, MacAddr, TcpHostSpec,
+    TcpProfile, TcpProgram, TcpRole, TcpRunConfig, TcpSource, TcpStats, TcpTemplateSpec,
 };
-use ferotrx_ctl::protocol::{RunState, TcpCounters, TcpRunInfo};
+use ferotrx_ctl::protocol::{RunState, TcpCounters, TcpRunInfo, TcpTemplateCounters};
 
 #[derive(Args)]
 #[command(args_override_self = true)]
@@ -22,8 +22,9 @@ pub struct TcpArgs {
     #[arg(required_unless_present = "profile")]
     file: Option<PathBuf>,
 
-    /// A TCP profile (TOML) with the session, the hosts and the rates; the
-    /// options below replace its values. See examples/lab-tcp.toml.
+    /// A TCP profile (TOML) with the session (or several `[[template]]`s), the
+    /// hosts and the rates; the options below replace its values. See
+    /// examples/lab-tcp.toml and examples/lab-tcp-mix.toml.
     #[arg(short, long, conflicts_with = "file")]
     profile: Option<PathBuf>,
 
@@ -48,12 +49,18 @@ pub struct TcpArgs {
     #[command(flatten)]
     hosts: HostArgs,
 
-    /// Where the client connects, IP:PORT. Default: the server's address and port.
-    /// Needed when this machine runs only the client.
-    #[arg(long, value_name = "IP:PORT")]
+    /// Where the client connects, IP:PORT, or IP for each template's port.
+    /// Default: the server's address and port. Needed when this machine runs
+    /// only the client.
+    #[arg(long, value_name = "IP[:PORT]", value_parser = parse_connect)]
     connect: Option<SocketAddrV4>,
 
-    /// New connections per second (default 1, or the profile's).
+    /// Connect to this many consecutive server addresses from --connect's (or
+    /// the server's), in turn. Default: --server-ips.
+    #[arg(long, value_name = "N")]
+    connect_ips: Option<u32>,
+
+    /// New connections per second, all templates together (default 1, or the profile's).
     #[arg(long)]
     cps: Option<f64>,
 
@@ -130,8 +137,17 @@ struct HostArgs {
     #[arg(long, value_name = "IFACE")]
     server_iface: Option<String>,
     /// Port the server listens on (default: the server port in the capture).
+    /// Only with one template; templates in a profile each have a `port`.
     #[arg(long, value_name = "PORT")]
     server_port: Option<u16>,
+    /// The server owns this many consecutive addresses from --server-ip;
+    /// clients connect to each in turn.
+    #[arg(long, value_name = "N")]
+    server_ips: Option<u32>,
+}
+
+fn parse_connect(s: &str) -> std::result::Result<SocketAddrV4, String> {
+    parse_connect_addr(s).map_err(|e| e.to_string())
 }
 
 impl HostArgs {
@@ -149,6 +165,7 @@ impl HostArgs {
             || self.server_mac.is_some()
             || self.server_iface.is_some()
             || self.server_port.is_some()
+            || self.server_ips.is_some()
     }
 
     /// Applies the client and server options to the profile's hosts, creating
@@ -179,6 +196,7 @@ impl HostArgs {
             opt(&mut s.mac, self.server_mac);
             opt(&mut s.iface, self.server_iface.clone());
             opt(&mut s.port, self.server_port);
+            set(&mut s.ips, self.server_ips);
         } else if self.any_server() {
             bail!("server options need --server-ip (or a [server] table in the profile)");
         }
@@ -250,10 +268,10 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
         (Some(path), _) => TcpProfile::from_path(path)
             .with_context(|| format!("cannot read {}", path.display()))?,
         (None, Some(file)) => TcpProfile {
-            source: TcpSource::Pcap {
+            templates: vec![TcpTemplateSpec::new(TcpSource::Pcap {
                 path: file.clone(),
                 flow: None,
-            },
+            })],
             ..Default::default()
         },
         (None, None) => bail!("give a capture file or --profile"),
@@ -262,7 +280,10 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
         if n == 0 {
             bail!("flows are numbered from 1");
         }
-        match &mut profile.source {
+        let [t] = profile.templates.as_mut_slice() else {
+            bail!("--flow needs a single session; set `flow` in each [[template]] instead");
+        };
+        match &mut t.source {
             TcpSource::Pcap { flow, .. } => *flow = Some(n - 1),
             TcpSource::Program(_) => bail!("--flow needs a capture, not [[message]] tables"),
         }
@@ -272,6 +293,10 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
     set(&mut profile.connections, args.connections);
     set(&mut profile.concurrency, args.concurrency);
     opt(&mut profile.connect, args.connect);
+    opt(&mut profile.connect_ips, args.connect_ips);
+    if profile.templates.len() > 1 && args.hosts.server_port.is_some() {
+        bail!("--server-port needs a single session; set `port` in each [[template]] instead");
+    }
     if let Some(r) = &args.source_ports {
         profile.source_ports = parse_port_range(r)?;
     }
@@ -285,7 +310,13 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
     }
 
     if args.show {
-        show(&profile.program()?);
+        let many = profile.templates.len() > 1;
+        for (i, t) in profile.templates.iter().enumerate() {
+            if many {
+                println!("template {} (weight {}):", t.name(i), t.weight);
+            }
+            show(&t.program()?);
+        }
         return Ok(());
     }
     if profile.client.is_none() && profile.server.is_none() {
@@ -308,6 +339,11 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
     )
     .map_err(|e| anyhow::anyhow!(e))?;
     if !args.quiet {
+        if profile.templates.len() > 1 {
+            for (i, t) in profile.templates.iter().enumerate() {
+                eprintln!("template {} (weight {})", t.name(i), t.weight);
+            }
+        }
         eprintln!("session: {}", started.program);
         for (what, h) in [("client", &profile.client), ("server", &profile.server)] {
             if let Some(h) = h {
@@ -319,7 +355,8 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
                     h.iface.as_deref().or(args.iface.as_deref()).unwrap_or("?")
                 );
                 if h.ips > 1 {
-                    line.push_str(&format!(" ({} addresses)", h.ips));
+                    let last = std::net::Ipv4Addr::from(u32::from(h.ip).wrapping_add(h.ips - 1));
+                    line.push_str(&format!(" ({} addresses, to {last})", h.ips));
                 }
                 if let Some(v) = h.vlan {
                     line.push_str(&format!(", vlan {v}"));
@@ -388,9 +425,30 @@ fn print_summary(s: &TcpStats) {
         }
         eprintln!("  {what}: {}", side_line(&side.into()));
     }
+    if s.templates.len() > 1 {
+        for t in &s.templates {
+            let t = TcpTemplateCounters {
+                name: t.name.clone(),
+                client: (&t.client).into(),
+                server: (&t.server).into(),
+            };
+            for line in template_lines(&t) {
+                eprintln!("{line}");
+            }
+        }
+    }
     if s.client.completed > 0 {
         eprintln!("  {:.1} connections per second", s.cps());
     }
+}
+
+/// A template's counters, one line per side that did anything.
+fn template_lines(t: &TcpTemplateCounters) -> Vec<String> {
+    [("client", &t.client), ("server", &t.server)]
+        .into_iter()
+        .filter(|(_, c)| c.started > 0 || c.payload_rx > 0)
+        .map(|(what, c)| format!("    {} {what}: {}", t.name, side_line(c)))
+        .collect()
 }
 
 fn side_line(c: &TcpCounters) -> String {
@@ -439,6 +497,13 @@ pub fn print_tcp_run(r: &TcpRunInfo) {
     for (what, c) in [("client", &r.client), ("server", &r.server)] {
         if c.started > 0 || c.payload_rx > 0 {
             println!("  {what}: {}", side_line(c));
+        }
+    }
+    if r.templates.len() > 1 {
+        for t in &r.templates {
+            for line in template_lines(t) {
+                println!("{line}");
+            }
         }
     }
     println!(

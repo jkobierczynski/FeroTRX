@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::engine::{TcpClientConfig, TcpConfig, TcpEndpoint, TcpOptions, TcpServerConfig};
+use super::engine::{
+    TcpClientConfig, TcpConfig, TcpEndpoint, TcpOptions, TcpServerConfig, TcpTemplate,
+};
 use super::program::{TcpMessage, TcpProgram, TcpRole};
 use crate::{parse_duration, Capture, Error, MacAddr, Result};
 
@@ -49,13 +51,59 @@ use crate::{parse_duration, Capture, Error, MacAddr, Result};
 /// Instead of `pcap`, a session can be written out as `[[message]]` tables,
 /// each with `from = "client"` or `"server"` and `text` (with `\r\n` escapes)
 /// or `hex`, plus `port` for the server port and optionally `closer`.
+///
+/// To mix several kinds of connections, give `[[template]]` tables instead of
+/// `pcap` or `[[message]]`, like TRex ASTF templates. `cps`, `connections` and
+/// `concurrency` are for all templates together; each new connection gets a
+/// template by `weight`. The server tells templates apart by port, so each
+/// needs its own.
+///
+/// ```toml
+/// cps = 100
+/// connections = 0
+/// concurrency = 500
+///
+/// [[template]]
+/// name = "web"                # for the counters (default: the capture's name)
+/// pcap = "http.pcap"
+/// weight = 3                  # 3 of every 4 connections
+/// # port = 80                 # the server's port (default: the capture's)
+/// # connect = "192.168.20.1:8080"  # where clients connect (default: the servers)
+///
+/// [[template]]
+/// name = "echo"
+/// port = 7
+/// [[template.message]]
+/// from = "client"
+/// text = "ping\r\n"
+/// [[template.message]]
+/// from = "server"
+/// text = "pong\r\n"
+///
+/// [client]
+/// ip = "192.168.10.100/24"
+/// ips = 250                   # client addresses, used in turn
+/// gateway = "192.168.10.1"
+///
+/// [server]
+/// ip = "192.168.20.50/24"
+/// ips = 10                    # servers 192.168.20.50-59; clients connect to each in turn
+/// gateway = "192.168.20.1"
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct TcpProfile {
-    pub source: TcpSource,
+    /// What the connections play: one template, or several mixed by weight.
+    pub templates: Vec<TcpTemplateSpec>,
     pub client: Option<TcpHostSpec>,
     pub server: Option<TcpHostSpec>,
-    /// Where the client connects; defaults to the server host and port.
+    /// Where the client connects, for templates without their own `connect`;
+    /// defaults to the server host. The port may be left out (0): then each
+    /// template's port.
     pub connect: Option<SocketAddrV4>,
+    /// How many consecutive server addresses from `connect`'s the client
+    /// connects to, in turn. Default: the server host's `ips` when connecting
+    /// to it, else 1.
+    pub connect_ips: Option<u32>,
     pub cps: f64,
     pub connections: u64,
     pub concurrency: usize,
@@ -64,7 +112,71 @@ pub struct TcpProfile {
     pub options: TcpOptions,
 }
 
-/// What a [`TcpProfile`] plays.
+/// One template of a [`TcpProfile`]: a kind of connection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TcpTemplateSpec {
+    /// Name for the counters; default: the capture's file name, or `tN`.
+    pub name: Option<String>,
+    pub source: TcpSource,
+    /// Share of the client's new connections (default 1; 0: server only).
+    pub weight: u32,
+    /// The port the server accepts this template on; default: the program's.
+    pub port: Option<u16>,
+    /// Where clients connect for this template; default: the profile's.
+    /// Port 0 means the template's port.
+    pub connect: Option<SocketAddrV4>,
+    /// Server addresses from `connect`'s, in turn; default: the profile's.
+    pub connect_ips: Option<u32>,
+}
+
+impl TcpTemplateSpec {
+    /// A template playing `source`, weight 1, everything else by default.
+    pub fn new(source: TcpSource) -> Self {
+        Self {
+            name: None,
+            source,
+            weight: 1,
+            port: None,
+            connect: None,
+            connect_ips: None,
+        }
+    }
+
+    /// The template's name: the one given, the capture's file name, or `tN`
+    /// for the `index`th template (from 0).
+    pub fn name(&self, index: usize) -> String {
+        if let Some(n) = &self.name {
+            return n.clone();
+        }
+        match &self.source {
+            TcpSource::Pcap { path, flow } => {
+                let stem = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("t{}", index + 1));
+                match flow {
+                    Some(f) => format!("{stem}#{}", f + 1),
+                    None => stem,
+                }
+            }
+            TcpSource::Program(_) => format!("t{}", index + 1),
+        }
+    }
+
+    /// Loads the program the template plays.
+    pub fn program(&self) -> Result<TcpProgram> {
+        match &self.source {
+            TcpSource::Pcap { path, flow } => {
+                let cap = Capture::from_path(path)
+                    .map_err(|e| Error::Tcp(format!("cannot read {}: {e}", path.display())))?;
+                TcpProgram::from_capture(&cap, *flow)
+            }
+            TcpSource::Program(p) => Ok(p.clone()),
+        }
+    }
+}
+
+/// What a [`TcpTemplateSpec`] plays.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TcpSource {
     /// A TCP connection in a capture: `flow` is its index (from 0), or `None`
@@ -174,10 +286,14 @@ pub fn parse_port_range(s: &str) -> Result<Range<u16>> {
 impl Default for TcpProfile {
     fn default() -> Self {
         Self {
-            source: TcpSource::Program(TcpProgram::new(80, Vec::new())),
+            templates: vec![TcpTemplateSpec::new(TcpSource::Program(TcpProgram::new(
+                80,
+                Vec::new(),
+            )))],
             client: None,
             server: None,
             connect: None,
+            connect_ips: None,
             cps: 1.0,
             connections: 1,
             concurrency: 0,
@@ -197,15 +313,33 @@ struct RawProfile {
     closer: Option<String>,
     #[serde(default)]
     message: Vec<RawMessage>,
+    #[serde(default)]
+    template: Vec<RawTemplate>,
     cps: Option<f64>,
     connections: Option<u64>,
     concurrency: Option<usize>,
     source_ports: Option<String>,
     connect: Option<String>,
+    connect_ips: Option<u32>,
     duration: Option<String>,
     client: Option<RawHost>,
     server: Option<RawHost>,
     tcp: Option<RawOptions>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTemplate {
+    name: Option<String>,
+    pcap: Option<String>,
+    flow: Option<usize>,
+    port: Option<u16>,
+    closer: Option<String>,
+    #[serde(default)]
+    message: Vec<RawMessage>,
+    weight: Option<u32>,
+    connect: Option<String>,
+    connect_ips: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -271,6 +405,71 @@ fn hex(s: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
+/// Parses where clients connect: `IP:PORT`, or `IP` (port 0: each template's).
+pub fn parse_connect_addr(c: &str) -> Result<SocketAddrV4> {
+    let bad = || Error::Profile(format!("invalid connect address '{c}' (use IP:PORT or IP)"));
+    match c.parse::<SocketAddrV4>() {
+        Ok(a) => Ok(a),
+        Err(_) => Ok(SocketAddrV4::new(c.trim().parse().map_err(|_| bad())?, 0)),
+    }
+}
+
+/// What a profile or template plays: `pcap` (and `flow`), or `[[message]]`
+/// tables with `port` and `closer`. In a template, `port` may go with `pcap`.
+fn source(
+    pcap: Option<String>,
+    flow: Option<usize>,
+    port: Option<u16>,
+    closer: Option<String>,
+    messages: Vec<RawMessage>,
+    base_dir: &Path,
+    template: bool,
+) -> Result<TcpSource> {
+    match (pcap, messages.is_empty()) {
+        (Some(path), true) => {
+            if closer.is_some() || (port.is_some() && !template) {
+                return Err(Error::Profile(
+                    "`port` and `closer` go with [[message]]; with `pcap`, set [server] port"
+                        .into(),
+                ));
+            }
+            Ok(TcpSource::Pcap {
+                path: base_dir.join(path),
+                flow: match flow {
+                    Some(0) => return Err(Error::Profile("flows are numbered from 1".into())),
+                    f => f.map(|f| f - 1),
+                },
+            })
+        }
+        (None, false) => {
+            if flow.is_some() {
+                return Err(Error::Profile("`flow` goes with `pcap`".into()));
+            }
+            let port = port
+                .ok_or_else(|| Error::Profile("a profile with [[message]] needs `port`".into()))?;
+            let mut out = Vec::new();
+            for (i, m) in messages.into_iter().enumerate() {
+                let ctx = |e: Error| Error::Profile(format!("message {}: {e}", i + 1));
+                let data = match (m.text, m.hex) {
+                    (Some(t), None) => t.into_bytes(),
+                    (None, Some(h)) => hex(&h).map_err(ctx)?,
+                    _ => return Err(ctx(Error::Profile("give `text` or `hex`".into()))),
+                };
+                out.push(TcpMessage::new(role(&m.from).map_err(ctx)?, data));
+            }
+            let mut program = TcpProgram::new(port, out);
+            if let Some(c) = closer {
+                program.closer = role(&c)?;
+            }
+            Ok(TcpSource::Program(program))
+        }
+        (Some(_), false) => Err(Error::Profile(
+            "give `pcap` or [[message]], not both".into(),
+        )),
+        (None, true) => Err(Error::Profile("give `pcap` or [[message]] tables".into())),
+    }
+}
+
 impl RawHost {
     fn spec(self, what: &str) -> Result<TcpHostSpec> {
         let ctx = |e: Error| Error::Profile(format!("[{what}]: {e}"));
@@ -306,63 +505,66 @@ impl TcpProfile {
     /// Parses a profile; `pcap` paths are relative to `base_dir`.
     pub fn from_toml(text: &str, base_dir: &Path) -> Result<Self> {
         let raw: RawProfile = toml::from_str(text).map_err(|e| Error::Profile(e.to_string()))?;
-        let source = match (raw.pcap, raw.message.is_empty()) {
-            (Some(path), true) => {
-                if raw.port.is_some() || raw.closer.is_some() {
-                    return Err(Error::Profile(
-                        "`port` and `closer` go with [[message]]; with `pcap`, set [server] port"
-                            .into(),
-                    ));
-                }
-                TcpSource::Pcap {
-                    path: base_dir.join(path),
-                    flow: match raw.flow {
-                        Some(0) => return Err(Error::Profile("flows are numbered from 1".into())),
-                        f => f.map(|f| f - 1),
-                    },
-                }
-            }
-            (None, false) => {
-                let port = raw.port.ok_or_else(|| {
-                    Error::Profile("a profile with [[message]] needs `port`".into())
-                })?;
-                let mut messages = Vec::new();
-                for (i, m) in raw.message.into_iter().enumerate() {
-                    let ctx = |e: Error| Error::Profile(format!("message {}: {e}", i + 1));
-                    let data = match (m.text, m.hex) {
-                        (Some(t), None) => t.into_bytes(),
-                        (None, Some(h)) => hex(&h).map_err(ctx)?,
-                        _ => return Err(ctx(Error::Profile("give `text` or `hex`".into()))),
-                    };
-                    messages.push(TcpMessage::new(role(&m.from).map_err(ctx)?, data));
-                }
-                let mut program = TcpProgram::new(port, messages);
-                if let Some(c) = raw.closer {
-                    program.closer = role(&c)?;
-                }
-                TcpSource::Program(program)
-            }
-            (Some(_), false) => {
+        let top_level = raw.pcap.is_some()
+            || raw.flow.is_some()
+            || raw.port.is_some()
+            || raw.closer.is_some()
+            || !raw.message.is_empty();
+        let templates = if raw.template.is_empty() {
+            let source = source(
+                raw.pcap,
+                raw.flow,
+                raw.port,
+                raw.closer,
+                raw.message,
+                base_dir,
+                false,
+            )?;
+            vec![TcpTemplateSpec::new(source)]
+        } else {
+            if top_level {
                 return Err(Error::Profile(
-                    "give `pcap` or [[message]], not both".into(),
-                ))
+                    "give `pcap` or [[message]] at the top, or [[template]] tables, not both"
+                        .into(),
+                ));
             }
-            (None, true) => return Err(Error::Profile("give `pcap` or [[message]] tables".into())),
+            let mut out = Vec::new();
+            for (i, t) in raw.template.into_iter().enumerate() {
+                let label = t.name.clone().unwrap_or_else(|| (i + 1).to_string());
+                let ctx = |e: Error| match e {
+                    Error::Profile(m) => Error::Profile(format!("template {label}: {m}")),
+                    e => Error::Profile(format!("template {label}: {e}")),
+                };
+                let src = source(t.pcap, t.flow, t.port, t.closer, t.message, base_dir, true)
+                    .map_err(ctx)?;
+                out.push(TcpTemplateSpec {
+                    name: t.name,
+                    source: src,
+                    weight: t.weight.unwrap_or(1),
+                    port: t.port,
+                    connect: t
+                        .connect
+                        .map(|c| parse_connect_addr(&c))
+                        .transpose()
+                        .map_err(ctx)?,
+                    connect_ips: t.connect_ips,
+                });
+            }
+            out
         };
         let mut p = TcpProfile {
-            source,
+            templates,
             ..Default::default()
         };
         p.client = raw.client.map(|h| h.spec("client")).transpose()?;
         p.server = raw.server.map(|h| h.spec("server")).transpose()?;
-        p.connect = raw
-            .connect
-            .map(|c| {
-                c.parse().map_err(|_| {
-                    Error::Profile(format!("invalid connect address '{c}' (use IP:PORT)"))
-                })
-            })
-            .transpose()?;
+        p.connect = raw.connect.map(|c| parse_connect_addr(&c)).transpose()?;
+        p.connect_ips = raw.connect_ips;
+        if p.templates.len() > 1 && p.server.as_ref().is_some_and(|s| s.port.is_some()) {
+            return Err(Error::Profile(
+                "with several templates, give each its `port` instead of [server] port".into(),
+            ));
+        }
         if let Some(cps) = raw.cps {
             p.cps = cps;
         }
@@ -400,16 +602,16 @@ impl TcpProfile {
         Ok(p)
     }
 
-    /// Loads the program the profile plays.
-    pub fn program(&self) -> Result<TcpProgram> {
-        match &self.source {
-            TcpSource::Pcap { path, flow } => {
-                let cap = Capture::from_path(path)
-                    .map_err(|e| Error::Tcp(format!("cannot read {}: {e}", path.display())))?;
-                TcpProgram::from_capture(&cap, *flow)
-            }
-            TcpSource::Program(p) => Ok(p.clone()),
-        }
+    /// Loads the programs the templates play, in order.
+    pub fn programs(&self) -> Result<Vec<TcpProgram>> {
+        self.templates
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                t.program()
+                    .map_err(|e| Error::Tcp(format!("template {}: {e}", t.name(i))))
+            })
+            .collect()
     }
 
     /// The interfaces the hosts use, without repeats: port `i` of the engine
@@ -431,12 +633,21 @@ impl TcpProfile {
     }
 
     /// The engine configuration, with ports numbered as in `interfaces`.
+    /// `programs` are the templates' programs, as [`programs`](Self::programs)
+    /// loads them.
     pub fn config(
         &self,
-        program: Arc<TcpProgram>,
+        programs: &[Arc<TcpProgram>],
         interfaces: &[String],
         default: Option<&str>,
     ) -> Result<TcpConfig> {
+        if programs.len() != self.templates.len() {
+            return Err(Error::Tcp(format!(
+                "{} programs for {} templates",
+                programs.len(),
+                self.templates.len()
+            )));
+        }
         let port = |h: &TcpHostSpec| -> Result<usize> {
             let name = h.iface.as_deref().or(default).unwrap_or_default();
             interfaces
@@ -444,25 +655,64 @@ impl TcpProfile {
                 .position(|n| n == name)
                 .ok_or_else(|| Error::Tcp(format!("interface {name} is not open")))
         };
+        let single = self.templates.len() == 1;
+        if !single
+            && self.connect.is_some_and(|c| c.port() != 0)
+            && self.templates.iter().any(|t| t.connect.is_none())
+        {
+            return Err(Error::Tcp(
+                "with several templates, `connect` takes an address without a port \
+                 (each template's port is used), or give each template its own `connect`"
+                    .into(),
+            ));
+        }
+        let mut templates = Vec::new();
+        for (i, (t, program)) in self.templates.iter().zip(programs).enumerate() {
+            let name = t.name(i);
+            let listen = t
+                .port
+                .or(if single {
+                    self.server.as_ref().and_then(|s| s.port)
+                } else {
+                    None
+                })
+                .unwrap_or(program.server_port);
+            // Where clients connect: the template's, the profile's, or the server.
+            let (connect, ips) = match (t.connect, self.connect, &self.server) {
+                (Some(c), _, _) => (c, t.connect_ips.or(self.connect_ips).unwrap_or(1)),
+                (None, Some(c), _) => (c, t.connect_ips.or(self.connect_ips).unwrap_or(1)),
+                (None, None, Some(s)) => (
+                    SocketAddrV4::new(s.ip, 0),
+                    t.connect_ips.or(self.connect_ips).unwrap_or(s.ips),
+                ),
+                (None, None, None) if self.client.is_some() => {
+                    return Err(Error::Tcp(
+                        "a client without a server needs the address to connect to".into(),
+                    ))
+                }
+                (None, None, None) => (SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0), 1),
+            };
+            let connect = if connect.port() == 0 {
+                SocketAddrV4::new(*connect.ip(), listen)
+            } else {
+                connect
+            };
+            templates.push(TcpTemplate {
+                name,
+                program: program.clone(),
+                connect,
+                connect_ips: ips,
+                listen_port: listen,
+                weight: t.weight,
+            });
+        }
         let server = match &self.server {
-            Some(h) => Some(TcpServerConfig {
-                endpoint: h.endpoint(port(h)?),
-                port: h.port.unwrap_or(program.server_port),
-            }),
+            Some(h) => Some(TcpServerConfig::new(h.endpoint(port(h)?))),
             None => None,
         };
         let client = match &self.client {
             Some(h) => {
-                let connect = match (self.connect, &server) {
-                    (Some(c), _) => c,
-                    (None, Some(s)) => SocketAddrV4::new(s.endpoint.ip, s.port),
-                    (None, None) => {
-                        return Err(Error::Tcp(
-                            "a client without a server needs the address to connect to".into(),
-                        ))
-                    }
-                };
-                let mut c = TcpClientConfig::new(h.endpoint(port(h)?), connect);
+                let mut c = TcpClientConfig::new(h.endpoint(port(h)?));
                 c.cps = self.cps;
                 c.connections = self.connections;
                 c.concurrency = self.concurrency;
@@ -472,7 +722,7 @@ impl TcpProfile {
             None => None,
         };
         Ok(TcpConfig {
-            program,
+            templates,
             client,
             server,
             options: self.options.clone(),
@@ -509,12 +759,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            p.source,
+            p.templates[0].source,
             TcpSource::Pcap {
                 path: "/lab/web.pcap".into(),
                 flow: Some(1)
             }
         );
+        assert_eq!(p.templates[0].name(0), "web#2");
         let c = p.client.as_ref().unwrap();
         assert_eq!((c.ips, c.vlan, c.prefix), (5, Some(10), 24));
         assert_eq!(c.mac().to_string(), "02:00:c0:a8:0a:64");
@@ -525,10 +776,11 @@ mod tests {
 
         let program = Arc::new(TcpProgram::new(8080, Vec::new()));
         let cfg = p
-            .config(program, &["eth0".into(), "eth1".into()], Some("eth0"))
+            .config(&[program], &["eth0".into(), "eth1".into()], Some("eth0"))
             .unwrap();
+        assert_eq!(cfg.templates[0].connect.to_string(), "192.168.20.50:8080");
+        assert_eq!(cfg.templates[0].listen_port, 8080);
         let client = cfg.client.unwrap();
-        assert_eq!(client.connect.to_string(), "192.168.20.50:8080");
         assert_eq!(
             (client.endpoint.port, cfg.server.unwrap().endpoint.port),
             (0, 1)
@@ -554,7 +806,7 @@ mod tests {
             Path::new("."),
         )
         .unwrap();
-        let prog = p.program().unwrap();
+        let prog = p.programs().unwrap().remove(0);
         assert_eq!(prog.messages[1].data, b"hello");
         assert_eq!(prog.closer, TcpRole::Server);
         assert_eq!(p.connect.unwrap().port(), 7);
@@ -588,11 +840,128 @@ mod tests {
     }
 
     #[test]
+    fn parses_templates() {
+        let p = TcpProfile::from_toml(
+            r#"
+            cps = 100
+            connect_ips = 4
+            [[template]]
+            pcap = "http.pcap"
+            weight = 3
+            [[template]]
+            name = "echo"
+            port = 7
+            weight = 0
+            [[template.message]]
+            from = "client"
+            text = "ping"
+            [[template]]
+            name = "fwd"
+            pcap = "http.pcap"
+            port = 8080
+            connect = "192.168.20.1:18080"
+            connect_ips = 1
+            [client]
+            ip = "192.168.10.100"
+            [server]
+            ip = "192.168.20.50"
+            ips = 10
+            "#,
+            Path::new("/lab"),
+        )
+        .unwrap();
+        assert_eq!(p.templates.len(), 3);
+        let names: Vec<String> = p
+            .templates
+            .iter()
+            .enumerate()
+            .map(|(i, t)| t.name(i))
+            .collect();
+        assert_eq!(names, ["http", "echo", "fwd"]);
+        let programs = [
+            Arc::new(TcpProgram::new(80, Vec::new())),
+            Arc::new(p.templates[1].program().unwrap()),
+            Arc::new(TcpProgram::new(80, Vec::new())),
+        ];
+        let cfg = p.config(&programs, &["eth0".into()], Some("eth0")).unwrap();
+        let t: Vec<(String, u32, u16, u32)> = cfg
+            .templates
+            .iter()
+            .map(|t| {
+                (
+                    t.connect.to_string(),
+                    t.connect_ips,
+                    t.listen_port,
+                    t.weight,
+                )
+            })
+            .collect();
+        assert_eq!(
+            t,
+            [
+                ("192.168.20.50:80".to_string(), 4, 80, 3),
+                ("192.168.20.50:7".to_string(), 4, 7, 0),
+                ("192.168.20.1:18080".to_string(), 1, 8080, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_bad_templates() {
+        for (text, want) in [
+            (
+                "pcap = \"a.pcap\"\n[[template]]\npcap = \"b.pcap\"\n[client]\nip = \"10.0.0.1\"",
+                "not both",
+            ),
+            (
+                "[[template]]\npcap = \"a.pcap\"\n[[template]]\nflow = 2\n[client]\nip = \"10.0.0.1\"",
+                "template 2: give `pcap`",
+            ),
+            (
+                "[[template]]\npcap = \"a.pcap\"\n[[template]]\npcap = \"b.pcap\"\n[server]\nip = \"10.0.0.1\"\nport = 80",
+                "each its `port`",
+            ),
+        ] {
+            let err = TcpProfile::from_toml(text, Path::new("."))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(want), "{text}: {err}");
+        }
+        let p = TcpProfile::from_toml(
+            "connect = \"10.0.0.9:80\"\n[[template]]\npcap = \"a.pcap\"\n[[template]]\npcap = \"b.pcap\"\n[client]\nip = \"10.0.0.1\"",
+            Path::new("."),
+        )
+        .unwrap();
+        let progs = [
+            Arc::new(TcpProgram::new(80, Vec::new())),
+            Arc::new(TcpProgram::new(81, Vec::new())),
+        ];
+        let err = p.config(&progs, &["e".into()], Some("e")).unwrap_err();
+        assert!(err.to_string().contains("without a port"), "{err}");
+    }
+
+    #[test]
     fn example_tcp_profile_parses() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/lab-tcp.toml");
         let p = TcpProfile::from_path(path).unwrap();
-        let program = p.program().unwrap();
+        let program = p.programs().unwrap().remove(0);
         assert!(program.bytes(TcpRole::Server) > 0);
         assert!(p.client.is_some() && p.server.is_some());
+
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/lab-tcp-mix.toml"
+        );
+        let p = TcpProfile::from_path(path).unwrap();
+        let programs: Vec<Arc<TcpProgram>> =
+            p.programs().unwrap().into_iter().map(Arc::new).collect();
+        let cfg = p.config(&programs, &["eth0".into()], Some("eth0")).unwrap();
+        let ports: Vec<(u16, u32)> = cfg
+            .templates
+            .iter()
+            .map(|t| (t.listen_port, t.connect_ips))
+            .collect();
+        assert_eq!(ports, [(80, 4), (8080, 4), (7, 4)]);
+        crate::TcpEngine::new(cfg).unwrap();
     }
 }

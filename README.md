@@ -5,7 +5,7 @@ FeroTRX is a traffic replay tool written in Rust, inspired by
 at a controlled rate on Linux, macOS and Windows, rewrites them on the way
 (addresses, ports, VLAN tags), varies fields from packet to packet, builds packets from scratch, runs several streams
 at once from a profile, replays TCP sessions statefully (real connections, both ends emulated, through NAT
-routers and firewalls), measures loss and latency on the receive side, and its engine is a library you can use from your own programs.
+routers and firewalls, many sessions at once from templates), measures loss and latency on the receive side, and its engine is a library you can use from your own programs.
 
 ## Status
 
@@ -17,7 +17,8 @@ routers and firewalls), measures loss and latency on the receive side, and its e
 * **M6, fast send backends (AF_XDP on Linux, DPDK as an option):** done.
 * **M7, field engine (per-packet field ranges, `--vary`, `vary` in profiles):** done.
 * **M8, stateful TCP (`ferotrx tcp`, TCP profiles, `tcp.*` control methods):** done.
-* **M9, receive side: loss and latency per stream (`--rx`, `ferotrx rx`, `rx.*` control methods):** this release (0.2.0).
+* **M9, receive side: loss and latency per stream (`--rx`, `ferotrx rx`, `rx.*` control methods):** done (0.2.0).
+* **M10, multi-flow TCP templates (`[[template]]` in TCP profiles, server address ranges, per-template counters):** this release (0.3.0).
 
 ## Crates
 
@@ -499,7 +500,7 @@ the client and server on links `c0` and `s0`:
 
 ```text
 session: 10.1.2.30:51000 -> 10.1.2.80:80: 4 messages, 144 bytes from the client, 6198 from the server, client closes
-client: 192.168.10.100/24 mac 02:00:c0:a8:0a:64 on c0 (10 addresses), gateway 192.168.10.1
+client: 192.168.10.100/24 mac 02:00:c0:a8:0a:64 on c0 (10 addresses, to 192.168.10.109), gateway 192.168.10.1
 server: 192.168.20.50/24 mac 02:00:c0:a8:14:32 on s0, gateway 192.168.20.1
 opening 1000 connections at 50 per second
 done in 19.980 s: 17012 frames (7314720 bytes) sent, 17012 (7268504 bytes) received
@@ -533,6 +534,9 @@ How it works:
 * **Rates.** `--cps` new connections per second, `-n` connections in all (0
   until Ctrl-C or `--duration`), `--concurrency` most open at once, client
   source ports from `--source-ports` (1024-65534) on each client address.
+* **Servers.** `--server-ips 4` gives the server four consecutive addresses,
+  and the clients connect to each in turn (`--connect-ips` when the server
+  runs elsewhere).
 * **Checks.** Each end compares every byte it receives with the capture.
   The summary counts completed, reset, timed out and mismatched connections and
   retransmits per side, and the command exits with an error if any connection
@@ -575,8 +579,81 @@ and runs the sample session `examples/http.pcap` through it (with its own addres
 what it forwards. Here it completed 20,000 connections at 2,000 per second, and
 with 3% loss every connection still completed thanks to retransmits.
 
-Limits of this release: IPv4 only; one session per run (several flows of a
-capture, as templates chosen per connection, would be a next step); libpcap or
+#### Templates: many kinds of connections at once
+
+Like TRex ASTF templates, a TCP profile can mix several sessions in one run:
+give `[[template]]` tables instead of a top-level `pcap` or `[[message]]`.
+Each new connection gets a template by `weight` (a smooth weighted round
+robin, so a 3:1:1 mix holds over every five connections, not only on
+average). `cps`, `connections` and `concurrency` count all templates
+together. The server tells templates apart by the port the SYN arrives on, so
+each template has its own `port` (default: the capture's). See
+[`examples/lab-tcp-mix.toml`](examples/lab-tcp-mix.toml):
+
+```toml
+cps = 100
+connections = 2000
+concurrency = 200
+
+[[template]]
+name = "http"
+pcap = "http.pcap"
+weight = 3
+
+[[template]]
+name = "download"
+pcap = "web.pcap"
+flow = 1
+port = 8080          # the capture's port 80 is taken by "http"
+
+[[template]]
+name = "echo"
+port = 7
+[[template.message]]
+from = "client"
+text = "hello\r\n"
+[[template.message]]
+from = "server"
+text = "hello\r\n"
+
+[client]
+ip = "192.168.10.100/24"
+ips = 100            # 100 client addresses, used in turn
+gateway = "192.168.10.1"
+
+[server]
+ip = "192.168.20.50/24"
+ips = 4              # 4 servers; each template connects to each in turn
+gateway = "192.168.20.1"
+```
+
+A template can also say where its clients connect (`connect = "IP:PORT"`,
+for a port forward) and to how many servers (`connect_ips`); `weight = 0`
+makes a template the server accepts but the client never opens, for when
+the client runs on another machine. The summary, `tcp.stats` (`templates`)
+and `ferotrx ctl tcp-stats` show each template's counters under the totals:
+
+```text
+done in 9.981 s: 7015 frames (2718100 bytes) sent, 7015 (2697830 bytes) received
+  client: 500 connections, 500 established, 500 completed; 53800 bytes sent, 2261400 received, 0 retransmits
+  server: 500 connections, 500 established, 500 completed; 2261400 bytes sent, 53800 received, 0 retransmits
+    http client: 300 connections, 300 established, 300 completed; 43200 bytes sent, 1859400 received, 0 retransmits
+    http server: 300 connections, 300 established, 300 completed; 1859400 bytes sent, 43200 received, 0 retransmits
+    download client: 100 connections, 100 established, 100 completed; 8600 bytes sent, 400000 received, 0 retransmits
+    download server: 100 connections, 100 established, 100 completed; 400000 bytes sent, 8600 received, 0 retransmits
+    echo client: 100 connections, 100 established, 100 completed; 2000 bytes sent, 2000 received, 0 retransmits
+    echo server: 100 connections, 100 established, 100 completed; 2000 bytes sent, 2000 received, 0 retransmits
+  50.1 connections per second
+```
+
+`sudo MIX=1 scripts/tcp-nat-netns.sh` runs such a mix (the HTTP session, a
+download on port 8080 and an echo, 3:1:1, from ten clients to four servers)
+through the namespace router and checks that every template completed
+connections on both sides and that the router reached all four servers. CI
+runs it on the VLAN trunk, and on two links with 3% loss.
+
+Limits of this release: IPv4 only; one rate and concurrency limit for all
+templates together (no per-template rates); libpcap or
 Npcap for sending and receiving (AF_XDP and DPDK are for stateless runs);
 no TCP window scaling, SACK or timestamps, so each connection keeps at most
 64 KB in flight; and the program is replayed by bytes and order, not by the
@@ -706,16 +783,18 @@ use ferotrx_core::*;
 let program = TcpProgram::from_capture(&Capture::from_path("http.pcap")?, None)?;
 let mut client = TcpClientConfig::new(
     TcpEndpoint::new(0, "02:00:00:00:00:01".parse()?, "10.0.0.1".parse()?),
-    "10.0.0.2:80".parse()?,
 );
 client.cps = 100.0;
 client.connections = 1000;
-let server = TcpServerConfig {
-    endpoint: TcpEndpoint::new(1, "02:00:00:00:00:02".parse()?, "10.0.0.2".parse()?),
-    port: 80,
-};
+let server = TcpServerConfig::new(
+    TcpEndpoint::new(1, "02:00:00:00:00:02".parse()?, "10.0.0.2".parse()?).with_ip_count(4),
+);
+// One template; add more, each with its own port, and weights to mix them.
+let web = TcpTemplate::new(Arc::new(program), "10.0.0.2:80".parse()?)
+    .with_name("web")
+    .with_connect_ips(4);
 let engine = TcpEngine::new(TcpConfig {
-    program: Arc::new(program),
+    templates: vec![web],
     client: Some(client),
     server: Some(server),
     options: TcpOptions::default(),
@@ -724,6 +803,9 @@ let (a, b) = memory_ports();
 let job = TcpJob::spawn(engine, vec![Box::new(a), Box::new(b)], TcpRunConfig::default())?;
 let stats = job.join()?;
 println!("{} connections completed", stats.client.completed);
+for t in &stats.templates {
+    println!("  {}: {}", t.name, t.client.completed);
+}
 ```
 
 `TcpEngine` does no I/O and reads no clock: it takes received frames and the

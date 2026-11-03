@@ -429,6 +429,65 @@ fn tcp_runs_start_finish_and_report() {
 }
 
 #[test]
+fn tcp_runs_report_each_template() {
+    let mut c = client(tcp_server());
+    let mix = r#"
+connections = 30
+cps = 1000
+[[template]]
+name = "short"
+port = 7
+weight = 2
+[[template.message]]
+from = "client"
+text = "hi"
+[[template]]
+name = "long"
+port = 8
+[[template.message]]
+from = "client"
+text = "hello there"
+[[template.message]]
+from = "server"
+text = "general"
+[client]
+iface = "a"
+ip = "10.9.0.1"
+[server]
+iface = "b"
+ip = "10.9.0.2"
+ips = 3
+"#;
+    let info = c
+        .tcp_start(&TcpStartParams {
+            toml: Some(mix.into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(
+        info.program.contains("short (weight 2)"),
+        "{}",
+        info.program
+    );
+    let mut last = info;
+    for _ in 0..100 {
+        last = c.tcp_stats(last.id).unwrap();
+        if !last.state.is_running() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(last.state, RunState::Finished, "{last:?}");
+    let done: Vec<(&str, u64, u64)> = last
+        .templates
+        .iter()
+        .map(|t| (t.name.as_str(), t.client.completed, t.server.completed))
+        .collect();
+    assert_eq!(done, [("short", 20, 20), ("long", 10, 10)]);
+    assert_eq!(last.templates[1].client.payload_rx, 10 * 7);
+}
+
+#[test]
 fn tcp_start_reports_bad_profiles_and_interfaces() {
     let mut c = client(tcp_server());
     let bad = c
