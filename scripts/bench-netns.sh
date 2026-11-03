@@ -73,8 +73,10 @@ r ip neigh replace 10.9.2.2 lladdr 02:00:00:00:02:02 dev rs nud permanent
 # Answers from the router (ICMP errors, redirects) would only add noise.
 r sysctl -qw net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.rc.send_redirects=0
 
-# The bottleneck: RATE Mbit/s, a 16 KB bucket and at most 10 ms of queue.
-tbf="tbf rate ${RATE}mbit burst 16kb latency 10ms"
+# The bottleneck: RATE Mbit/s, a 16 KB bucket and at most 25 ms of queue, so
+# a sender that stalls for a few ms in a VM and then catches up does not
+# overflow it at loads below RATE.
+tbf="tbf rate ${RATE}mbit burst 16kb latency 25ms"
 delay_us=0
 if r tc qdisc add dev rs root handle 1: netem delay "$DELAY" 2>/dev/null; then
     r tc qdisc add dev rs parent 1: handle 2: $tbf
@@ -97,7 +99,7 @@ trial_duration = "$TRIAL"
 warmup = "200ms"
 resolution = 1.0
 max_trials = 8
-frame_loss_step = 20
+frame_loss_step = 10
 burst_max = 5000
 rx_wait = "300ms"
 EOF

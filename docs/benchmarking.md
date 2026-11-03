@@ -187,7 +187,13 @@ VM far less. When the sender falls more than 3% behind the offered rate, the
 trial is flagged (`sender_limited`, "sender slow" in the text) and a
 throughput built on such a trial measured the sender, not the device. Watch
 the achieved rates. Frames are evenly spaced at the rate asked for; a
-back-to-back burst at 100% is spaced at line rate, not sent faster.
+back-to-back burst at 100% is spaced at line rate, not sent faster. When the
+sender is held up (a VM whose virtual CPU is descheduled for a few
+milliseconds, a busy host), it then sends the frames that are due at once to
+keep the average rate, and that burst can overflow a small buffer in the
+device at a load it would otherwise forward: a throughput found on a VM is a
+lower bound. Build with `--release`, and on a VM expect lower and less
+repeatable results than on bare metal.
 
 **The receiver.** Receiving goes through libpcap or Npcap, one frame at a
 time. At high rates it drops frames in the kernel's capture buffer before

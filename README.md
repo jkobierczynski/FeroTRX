@@ -603,7 +603,7 @@ loss_threshold = 0.0           # percent
 ```
 
 Through the namespace router of `scripts/bench-netns.sh`, which forwards
-20 Mbit/s (a token bucket) with a 10 ms queue, on a 100 Mbit/s line rate:
+20 Mbit/s (a token bucket) with a 25 ms queue, on a 100 Mbit/s line rate:
 
 ```text
 Throughput (highest load losing at most 0%, searched to 1%):
@@ -618,8 +618,8 @@ Frame loss:
   ...
 Back-to-back (longest burst without loss):
   size   load %     frames      burst  note
-  1020   100.00         39     3.26ms
-  imix   100.00        195     6.05ms
+  1020   100.00         78     6.51ms
+  imix   100.00        312     9.68ms
 ```
 
 Sizes are frame lengths without the 4-byte FCS (RFC 2544's 64 to 1518 bytes
