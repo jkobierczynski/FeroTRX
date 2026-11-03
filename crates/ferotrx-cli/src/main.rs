@@ -140,7 +140,7 @@ struct InspectArgs {
 struct BuildArgs {
     /// Packets to build, one argument each, layers joined by '/'. Example:
     /// 'eth(dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.100,dst=192.168.20.50)/udp/dns(q=example.com)'.
-    /// Layers: eth, vlan, qinq, arp, ipv4, ipv6, tcp, udp, icmp, dns, raw.
+    /// Layers: eth, vlan, qinq, arp, ipv4, ipv6 (and its hbh, dstopt, frag), tcp, udp, icmp, dns, raw.
     /// Lengths and checksums are filled in unless set.
     #[arg(value_name = "PACKET")]
     specs: Vec<String>,

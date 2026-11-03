@@ -13,7 +13,8 @@
 //! first layer it cannot read and records a problem instead.
 //!
 //! [`PacketSpec`] goes the other way: describe a packet layer by layer
-//! (Ethernet, VLAN, ARP, IPv4, IPv6, TCP, UDP, ICMP, DNS, raw bytes) in code or
+//! (Ethernet, VLAN, ARP, IPv4, IPv6 and its extension headers, TCP, UDP, ICMP,
+//! ICMPv6 with neighbor discovery, DNS, raw bytes) in code or
 //! as text like `eth/vlan(id=10)/ipv4(dst=10.0.0.2)/udp/dns(q=example.com)`,
 //! and build its bytes with lengths and checksums filled in.
 //!
@@ -41,8 +42,8 @@ mod l4;
 mod spec;
 
 pub use build::{
-    Arp, BuildError, Dns, Ethernet, Icmp, Ipv4, Ipv6, LayerSpec, PacketSpec, Tcp, Udp, Vlan,
-    ETHERTYPE_EXPERIMENTAL, ETH_MIN_FRAME, IPPROTO_EXPERIMENTAL,
+    Arp, BuildError, Dns, Ethernet, Icmp, Ipv4, Ipv6, Ipv6Ext, Ipv6ExtKind, LayerSpec, PacketSpec,
+    Tcp, Udp, Vlan, ETHERTYPE_EXPERIMENTAL, ETH_MIN_FRAME, IPPROTO_EXPERIMENTAL,
 };
 
 /// Ethernet (DLT_EN10MB).

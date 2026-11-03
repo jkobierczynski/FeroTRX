@@ -352,6 +352,28 @@ fn layer(name: &str, args: &[(String, String)]) -> Result<LayerSpec, BuildError>
             }
             l.into()
         }
+        "hbh" | "dstopt" | "frag" => {
+            let mut l = Ipv6Ext::new(match name {
+                "hbh" => Ipv6ExtKind::HopByHop,
+                "dstopt" => Ipv6ExtKind::DestOpts,
+                _ => Ipv6ExtKind::Fragment,
+            });
+            let frag = l.kind == Ipv6ExtKind::Fragment;
+            for (k, v) in args {
+                match k.as_str() {
+                    "nh" => l.next_header = Some(val(n, k, v, num)?),
+                    "len" if !frag => l.len = val(n, k, v, num)?,
+                    "ra" if name == "hbh" => l.router_alert = Some(val(n, k, v, num)?),
+                    "offset" if frag => l.frag_offset = val(n, k, v, num)?,
+                    "mf" if frag => l.more = val(n, k, v, boolean)?,
+                    "id" if frag => l.id = val(n, k, v, num)?,
+                    _ if frag => return unknown(n, k, "offset, mf, id, nh"),
+                    _ if name == "hbh" => return unknown(n, k, "len, ra, nh"),
+                    _ => return unknown(n, k, "len, nh"),
+                }
+            }
+            l.into()
+        }
         "tcp" => {
             let mut l = Tcp::default();
             for (k, v) in args {
@@ -395,12 +417,37 @@ fn layer(name: &str, args: &[(String, String)]) -> Result<LayerSpec, BuildError>
             let mut l = Icmp::default();
             for (k, v) in args {
                 match k.as_str() {
-                    "type" => l.icmp_type = Some(val(n, k, v, num)?),
+                    "type" => {
+                        l.icmp_type = Some(val(n, k, v, |v| match v {
+                            "ns" => Some(135),
+                            "na" => Some(136),
+                            _ => num(v),
+                        })?)
+                    }
                     "code" => l.code = val(n, k, v, num)?,
                     "id" => l.id = val(n, k, v, num)?,
                     "seq" => l.seq = val(n, k, v, num)?,
                     "chksum" | "checksum" => l.checksum = Some(val(n, k, v, num)?),
-                    _ => return unknown(n, k, "type, code, id, seq, chksum"),
+                    "target" => l.target = Some(val(n, k, v, |v| v.parse::<Ipv6Addr>().ok())?),
+                    "lladdr" => l.lladdr = Some(val(n, k, v, mac)?),
+                    "flags" => {
+                        let f: u16 = val(n, k, v, |v| {
+                            v.chars().try_fold(0u16, |f, c| {
+                                Some(
+                                    f | match c.to_ascii_uppercase() {
+                                        'R' => 0x8000,
+                                        'S' => 0x4000,
+                                        'O' => 0x2000,
+                                        _ => return None,
+                                    },
+                                )
+                            })
+                        })?;
+                        l.id = (l.id & 0x1fff) | f;
+                    }
+                    _ => {
+                        return unknown(n, k, "type, code, id, seq, chksum, target, lladdr, flags")
+                    }
                 }
             }
             l.into()
@@ -460,7 +507,7 @@ fn layer(name: &str, args: &[(String, String)]) -> Result<LayerSpec, BuildError>
         }
         _ => {
             return err(format!(
-                "unknown layer '{name}' (layers: eth, vlan, qinq, arp, ipv4, ipv6, tcp, udp, icmp, dns, raw)"
+                "unknown layer '{name}' (layers: eth, vlan, qinq, arp, ipv4, ipv6, hbh, dstopt, frag, tcp, udp, icmp, dns, raw)"
             ))
         }
     })

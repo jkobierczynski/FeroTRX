@@ -6,19 +6,73 @@
 //! on a simulated network with a simulated clock.
 
 use std::collections::{HashMap, VecDeque};
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::program::{TcpProgram, TcpRole};
 use super::wire::{self, Path, Segment, TcpHeader, ACK, BROADCAST, FIN, PSH, RST, SYN};
-use crate::net::ETHERTYPE_IPV4;
+use crate::net::{ETHERTYPE_IPV4, ETHERTYPE_IPV6, IPPROTO_ICMPV6};
 use crate::{Error, MacAddr, Result};
+
+/// An address as a number, for address ranges of either IP version.
+fn ip_num(ip: IpAddr) -> u128 {
+    match ip {
+        IpAddr::V4(a) => u128::from(u32::from(a)),
+        IpAddr::V6(a) => u128::from(a),
+    }
+}
+
+/// Address bits of `ip`'s version: 32 or 128.
+fn ip_bits(ip: IpAddr) -> u32 {
+    if ip.is_ipv4() {
+        32
+    } else {
+        128
+    }
+}
+
+/// The highest address of `ip`'s version, as a number.
+fn ip_max(ip: IpAddr) -> u128 {
+    u128::MAX >> (128 - ip_bits(ip))
+}
+
+/// The address `n` after `ip`, wrapping around within its version.
+fn ip_add(ip: IpAddr, n: u128) -> IpAddr {
+    match ip {
+        IpAddr::V4(a) => Ipv4Addr::from(u32::from(a).wrapping_add(n as u32)).into(),
+        IpAddr::V6(a) => Ipv6Addr::from(u128::from(a).wrapping_add(n)).into(),
+    }
+}
+
+/// How far `ip` is after `first`, if both are of one version.
+fn ip_offset(first: IpAddr, ip: IpAddr) -> Option<u128> {
+    (first.is_ipv4() == ip.is_ipv4()).then(|| ip_num(ip).wrapping_sub(ip_num(first)) & ip_max(ip))
+}
+
+fn ip_version(ip: IpAddr) -> &'static str {
+    if ip.is_ipv4() {
+        "IPv4"
+    } else {
+        "IPv6"
+    }
+}
+
+/// The MSS for connections over `ip`'s version: `mss` is for IPv4, and IPv6
+/// headers are 20 bytes longer.
+fn mss_for(ip: IpAddr, mss: u16) -> u16 {
+    if ip.is_ipv4() {
+        mss
+    } else {
+        mss.saturating_sub(20)
+    }
+}
 
 /// An emulated host: the addresses one end of the connections uses.
 ///
-/// The host answers ARP and ping for its addresses, so routers can reach it.
+/// The host answers ARP (IPv4), neighbor solicitations (IPv6) and ping for
+/// its addresses, so routers can reach it.
 /// Its addresses must not belong to the machine FeroTRX runs on, or the
 /// machine's own TCP stack will answer the connections with resets.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,30 +80,32 @@ pub struct TcpEndpoint {
     /// Index of the port (interface) this host sends and receives on.
     pub port: usize,
     pub mac: MacAddr,
-    /// The host's (first) address.
-    pub ip: Ipv4Addr,
+    /// The host's (first) address, IPv4 or IPv6.
+    pub ip: IpAddr,
     /// How many consecutive addresses from `ip` the host owns. A client opens
     /// connections from each in turn.
     pub ip_count: u32,
     /// Prefix length of the host's subnet: other addresses in it are reached
     /// directly, the rest through `gateway`.
     pub prefix: u8,
-    pub gateway: Option<Ipv4Addr>,
-    /// The MAC address of the next hop, if known; skips ARP.
+    /// The router, of the same IP version as `ip`.
+    pub gateway: Option<IpAddr>,
+    /// The MAC address of the next hop, if known; skips ARP or neighbor discovery.
     pub next_hop_mac: Option<MacAddr>,
     /// 802.1Q tag on every frame, and the tag frames must carry to be ours.
     pub vlan: Option<u16>,
 }
 
 impl TcpEndpoint {
-    /// A host on `port` with one address in a /24, no gateway, no VLAN.
-    pub fn new(port: usize, mac: MacAddr, ip: Ipv4Addr) -> Self {
+    /// A host on `port` with one address in a /24 (IPv4) or /64 (IPv6), no
+    /// gateway, no VLAN.
+    pub fn new(port: usize, mac: MacAddr, ip: IpAddr) -> Self {
         Self {
             port,
             mac,
             ip,
             ip_count: 1,
-            prefix: 24,
+            prefix: if ip.is_ipv4() { 24 } else { 64 },
             gateway: None,
             next_hop_mac: None,
             vlan: None,
@@ -61,7 +117,7 @@ impl TcpEndpoint {
         self
     }
 
-    pub fn with_gateway(mut self, gateway: Ipv4Addr) -> Self {
+    pub fn with_gateway(mut self, gateway: IpAddr) -> Self {
         self.gateway = Some(gateway);
         self
     }
@@ -82,23 +138,25 @@ impl TcpEndpoint {
     }
 
     /// True if `ip` is one of the host's addresses.
-    pub fn owns(&self, ip: Ipv4Addr) -> bool {
-        let (first, ip) = (u32::from(self.ip), u32::from(ip));
-        ip.wrapping_sub(first) < self.ip_count
+    pub fn owns(&self, ip: IpAddr) -> bool {
+        ip_offset(self.ip, ip).is_some_and(|d| d < u128::from(self.ip_count))
     }
 
-    fn nth_ip(&self, n: u32) -> Ipv4Addr {
-        Ipv4Addr::from(u32::from(self.ip).wrapping_add(n % self.ip_count.max(1)))
+    fn nth_ip(&self, n: u32) -> IpAddr {
+        ip_add(self.ip, u128::from(n % self.ip_count.max(1)))
     }
 
     /// The address frames to `dst` go to first: `dst` itself or the gateway.
-    pub fn next_hop(&self, dst: Ipv4Addr) -> Ipv4Addr {
-        let mask = if self.prefix == 0 {
+    pub fn next_hop(&self, dst: IpAddr) -> IpAddr {
+        let bits = ip_bits(self.ip);
+        let prefix = u32::from(self.prefix).min(bits);
+        let mask = if prefix == 0 {
             0
         } else {
-            u32::MAX << (32 - u32::from(self.prefix.min(32)))
+            ip_max(self.ip) & !(ip_max(self.ip) >> prefix)
         };
-        let on_link = u32::from(dst) & mask == u32::from(self.ip) & mask;
+        let on_link =
+            dst.is_ipv4() == self.ip.is_ipv4() && ip_num(dst) & mask == ip_num(self.ip) & mask;
         match self.gateway {
             Some(gw) if !on_link => gw,
             _ => dst,
@@ -109,16 +167,33 @@ impl TcpEndpoint {
         if self.ip_count == 0 {
             return Err(Error::Tcp(format!("{what}: ip_count must be at least 1")));
         }
-        if self.prefix > 32 {
+        let bits = ip_bits(self.ip);
+        if u32::from(self.prefix) > bits {
             return Err(Error::Tcp(format!(
-                "{what}: prefix /{} is longer than 32",
+                "{what}: prefix /{} is longer than {bits}",
                 self.prefix
             )));
         }
-        if u64::from(u32::from(self.ip)) + u64::from(self.ip_count) > 1 << 32 {
+        if ip_max(self.ip) - ip_num(self.ip) < u128::from(self.ip_count - 1) {
             return Err(Error::Tcp(format!(
-                "{what}: address range runs past 255.255.255.255"
+                "{what}: address range from {} runs past the last {} address",
+                self.ip,
+                ip_version(self.ip)
             )));
+        }
+        if let Some(gw) = self.gateway {
+            if gw.is_ipv4() != self.ip.is_ipv4() {
+                return Err(Error::Tcp(format!(
+                    "{what}: the gateway {gw} is {} but the host is {}",
+                    ip_version(gw),
+                    ip_version(self.ip)
+                )));
+            }
+        }
+        if let IpAddr::V6(a) = self.ip {
+            if a.is_multicast() || a.is_unspecified() {
+                return Err(Error::Tcp(format!("{what}: {a} is not a unicast address")));
+            }
         }
         if matches!(self.vlan, Some(v) if v == 0 || v > 4094) {
             return Err(Error::Tcp(format!("{what}: VLAN must be 1-4094")));
@@ -145,8 +220,9 @@ pub struct TcpTemplate {
     pub name: String,
     pub program: Arc<TcpProgram>,
     /// Where clients connect: the first server address, and the port. Behind
-    /// a port forward, the router's address and the forwarded port.
-    pub connect: SocketAddrV4,
+    /// a port forward, the router's address and the forwarded port. Of the
+    /// client's IP version.
+    pub connect: SocketAddr,
     /// How many consecutive server addresses from `connect`'s the client
     /// connects to, in turn (default 1).
     pub connect_ips: u32,
@@ -161,7 +237,7 @@ pub struct TcpTemplate {
 
 impl TcpTemplate {
     /// A template that connects to `connect` and listens on its port, weight 1.
-    pub fn new(program: Arc<TcpProgram>, connect: SocketAddrV4) -> Self {
+    pub fn new(program: Arc<TcpProgram>, connect: SocketAddr) -> Self {
         Self {
             name: "default".into(),
             program,
@@ -192,9 +268,9 @@ impl TcpTemplate {
         self
     }
 
-    fn nth_server(&self, n: u64) -> Ipv4Addr {
-        let k = (n % u64::from(self.connect_ips.max(1))) as u32;
-        Ipv4Addr::from(u32::from(*self.connect.ip()).wrapping_add(k))
+    fn nth_server(&self, n: u64) -> IpAddr {
+        let k = n % u64::from(self.connect_ips.max(1));
+        ip_add(self.connect.ip(), u128::from(k))
     }
 }
 
@@ -240,7 +316,9 @@ impl TcpServerConfig {
 /// TCP settings shared by both sides.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TcpOptions {
-    /// Maximum segment size announced and used (default 1460).
+    /// Maximum segment size announced and used over IPv4 (default 1460).
+    /// IPv6 connections use 20 bytes less, for the longer IP header, so their
+    /// frames are as long.
     pub mss: u16,
     /// First retransmission timeout; doubles on each retry (default 250 ms).
     pub rto: Duration,
@@ -251,7 +329,8 @@ pub struct TcpOptions {
     pub time_wait: Duration,
     /// A connection with nothing received for this long is reset (default 30 s).
     pub idle_timeout: Duration,
-    /// How long the client waits for an ARP reply from its next hop (default 5 s).
+    /// How long the client waits for an ARP reply (IPv4) or a neighbor
+    /// advertisement (IPv6) from its next hop (default 5 s).
     pub arp_timeout: Duration,
     /// Check that the bytes each end receives are the ones the program says
     /// (default true). Connections that differ count as `mismatched`.
@@ -452,7 +531,7 @@ struct Conn {
     counted: bool,
 }
 
-type Key = (SocketAddrV4, SocketAddrV4);
+type Key = (SocketAddr, SocketAddr);
 
 struct Out<'a> {
     frames: &'a mut Vec<(usize, Vec<u8>)>,
@@ -509,6 +588,7 @@ impl Conn {
     }
 
     fn send_syn(&self, out: &mut Out, mss: u16) {
+        let mss = mss_for(self.path.src, mss);
         let mut h = self.header(
             self.iss,
             if self.state == State::SynRcvd {
@@ -877,7 +957,7 @@ struct Host {
     role: TcpRole,
     /// The client's next hops (the gateway, or servers on its link) and
     /// their MACs, once known.
-    hops: Vec<(Ipv4Addr, Option<MacAddr>)>,
+    hops: Vec<(IpAddr, Option<MacAddr>)>,
     arp_next: Duration,
     arp_since: Option<Duration>,
     /// A reply from the next hop seen on the right port but another VLAN
@@ -950,10 +1030,22 @@ impl TcpEngine {
                     "{what}: connect_ips must be at least 1"
                 )));
             }
-            if u64::from(u32::from(*t.connect.ip())) + u64::from(t.connect_ips) > 1 << 32 {
+            let ip = t.connect.ip();
+            if ip_max(ip) - ip_num(ip) < u128::from(t.connect_ips - 1) {
                 return Err(Error::Tcp(format!(
-                    "{what}: server address range runs past 255.255.255.255"
+                    "{what}: server address range from {ip} runs past the last {} address",
+                    ip_version(ip)
                 )));
+            }
+            if let Some(c) = &client {
+                if t.weight > 0 && ip.is_ipv4() != c.endpoint.ip.is_ipv4() {
+                    return Err(Error::Tcp(format!(
+                        "{what}: the client is {} ({}) but connects to {} address {ip}",
+                        ip_version(c.endpoint.ip),
+                        c.endpoint.ip,
+                        if ip.is_ipv4() { "IPv4" } else { "IPv6" }
+                    )));
+                }
             }
             if client.is_some() && t.connect.port() == 0 {
                 return Err(Error::Tcp(format!("{what}: connect to port 0")));
@@ -986,7 +1078,7 @@ impl TcpEngine {
                 ));
             }
             // The next hops to resolve: the gateway, or the servers on the link.
-            let mut hops: Vec<(Ipv4Addr, Option<MacAddr>)> = Vec::new();
+            let mut hops: Vec<(IpAddr, Option<MacAddr>)> = Vec::new();
             for t in templates.iter().filter(|t| t.weight > 0) {
                 for n in 0..u64::from(t.connect_ips) {
                     let hop = c.endpoint.next_hop(t.nth_server(n));
@@ -1021,6 +1113,13 @@ impl TcpEngine {
                         "the client and the server share an address on the same port and VLAN"
                             .into(),
                     ));
+                }
+                if a.port == b.port && a.vlan == b.vlan && a.mac == b.mac {
+                    return Err(Error::Tcp(format!(
+                        "the client and the server both use MAC {} on the same port and VLAN; \
+                         give one of them another MAC",
+                        a.mac
+                    )));
                 }
             }
             hosts.push(Host {
@@ -1129,7 +1228,7 @@ impl TcpEngine {
         let payload = &frame[link.payload..];
         match link.ethertype {
             wire::ETHERTYPE_ARP => self.on_arp(port, &link, payload),
-            ETHERTYPE_IPV4 => self.on_ipv4(port, &link, payload, now),
+            ETHERTYPE_IPV4 | ETHERTYPE_IPV6 => self.on_ip(port, &link, payload, now),
             _ => {}
         }
     }
@@ -1139,23 +1238,24 @@ impl TcpEngine {
             return;
         };
         for host in &mut self.hosts {
-            if host.ep.port != port {
+            if host.ep.port != port || !host.ep.ip.is_ipv4() {
                 continue;
             }
+            let sender_ip = IpAddr::V4(arp.sender_ip);
             if host.ep.vlan != link.vlan {
-                if arp.op == 2 && host.hops.iter().any(|(h, _)| *h == arp.sender_ip) {
+                if arp.op == 2 && host.hops.iter().any(|(h, _)| *h == sender_ip) {
                     host.arp_elsewhere = Some(link.vlan);
                 }
                 continue;
             }
             if host.ep.next_hop_mac.is_none() {
                 for (hop, mac) in host.hops.iter_mut() {
-                    if *hop == arp.sender_ip {
+                    if *hop == sender_ip {
                         *mac = Some(arp.sender_mac);
                     }
                 }
             }
-            if arp.op == 1 && host.ep.owns(arp.target_ip) {
+            if arp.op == 1 && host.ep.owns(arp.target_ip.into()) {
                 self.out.push((
                     port,
                     wire::arp_frame(
@@ -1172,10 +1272,61 @@ impl TcpEngine {
         }
     }
 
-    fn on_ipv4(&mut self, port: usize, link: &wire::Link, payload: &[u8], now: Duration) {
-        let Some(ip) = wire::parse_ipv4(payload, true) else {
+    /// Neighbor discovery: learns next hops' MACs from their advertisements
+    /// and solicitations, and answers solicitations for the hosts' addresses.
+    fn on_ndp(&mut self, port: usize, link: &wire::Link, ip: &wire::Ip, nd: &wire::Ndp) {
+        let advert = nd.kind == wire::NDP_ADVERT;
+        // Who the message tells about: the target of an advertisement, the
+        // sender of a solicitation.
+        let about = if advert { nd.target } else { ip.src };
+        let mac = nd.lladdr.or(advert.then_some(link.src));
+        for host in &mut self.hosts {
+            if host.ep.port != port || host.ep.ip.is_ipv4() {
+                continue;
+            }
+            if host.ep.vlan != link.vlan {
+                if advert && host.hops.iter().any(|(h, _)| *h == about) {
+                    host.arp_elsewhere = Some(link.vlan);
+                }
+                continue;
+            }
+            if let (None, Some(mac)) = (host.ep.next_hop_mac, mac) {
+                for (hop, m) in host.hops.iter_mut() {
+                    if *hop == about {
+                        *m = Some(mac);
+                    }
+                }
+            }
+            // Duplicate address detection (from ::) is not answered: the
+            // emulated addresses are not configured anywhere else.
+            if !advert && host.ep.owns(nd.target) && !ip.src.is_unspecified() {
+                let path = Path {
+                    src_mac: host.ep.mac,
+                    dst_mac: nd.lladdr.unwrap_or(link.src),
+                    vlan: host.ep.vlan,
+                    src: nd.target,
+                    dst: ip.src,
+                };
+                if let Some(f) = wire::ndp_advert(&path) {
+                    self.out.push((port, f));
+                }
+            }
+        }
+    }
+
+    fn on_ip(&mut self, port: usize, link: &wire::Link, payload: &[u8], now: Duration) {
+        let Some(ip) = wire::parse_ip(payload, true) else {
             return;
         };
+        if (link.ethertype == ETHERTYPE_IPV4) != ip.src.is_ipv4() {
+            return;
+        }
+        if ip.proto == IPPROTO_ICMPV6 && ip.src.is_ipv6() {
+            if let Some(nd) = wire::parse_ndp(&ip) {
+                self.on_ndp(port, link, &ip, &nd);
+                return;
+            }
+        }
         let Some(h) = self.hosts.iter().position(|h| {
             h.ep.port == port && h.ep.vlan == link.vlan && h.ep.mac == link.dst && h.ep.owns(ip.dst)
         }) else {
@@ -1189,7 +1340,7 @@ impl TcpEngine {
             dst: ip.src,
         };
         match ip.proto {
-            1 => {
+            1 | IPPROTO_ICMPV6 => {
                 self.ip_id = self.ip_id.wrapping_add(1);
                 if let Some(f) = wire::icmp_echo_reply(&path, ip.payload, self.ip_id) {
                     self.out.push((port, f));
@@ -1206,8 +1357,8 @@ impl TcpEngine {
 
     fn on_tcp(&mut self, host: usize, port: usize, path: Path, seg: &Segment, now: Duration) {
         let key = (
-            SocketAddrV4::new(path.src, seg.dport),
-            SocketAddrV4::new(path.dst, seg.sport),
+            SocketAddr::new(path.src, seg.dport),
+            SocketAddr::new(path.dst, seg.sport),
         );
         let shared = self.shared.clone();
         let mut out = Out {
@@ -1249,7 +1400,7 @@ impl TcpEngine {
                 lport: seg.dport,
                 rport: seg.sport,
                 state: State::SynRcvd,
-                mss: usize::from(opts.mss.min(seg.mss.unwrap_or(536))),
+                mss: usize::from(mss_for(path.src, opts.mss).min(seg.mss.unwrap_or(536))),
                 iss,
                 snd_una: iss,
                 snd_nxt: iss.wrapping_add(1),
@@ -1332,7 +1483,7 @@ impl TcpEngine {
     fn resolve(&mut self, now: Duration) {
         let timeout = self.shared[0].options.arp_timeout;
         for host in &mut self.hosts {
-            let pending: Vec<Ipv4Addr> = host
+            let pending: Vec<IpAddr> = host
                 .hops
                 .iter()
                 .filter(|(_, mac)| mac.is_none())
@@ -1349,9 +1500,14 @@ impl TcpEngine {
                     1 => String::new(),
                     n => format!(" (nor from {} other next hops)", n - 1),
                 };
+                let reply = if hop.is_ipv4() {
+                    "ARP reply"
+                } else {
+                    "neighbor advertisement"
+                };
                 self.error = Some(match host.arp_elsewhere {
                     Some(seen) => format!(
-                        "no ARP reply from {hop} (the {}'s next hop) {} within {:?}{more}, but its replies \
+                        "no {reply} from {hop} (the {}'s next hop) {} within {:?}{more}, but its replies \
                          arrive {}: the switch or interface changes the tag; set the {}'s VLAN to match, \
                          or use a VLAN the switch keeps tagged (VLAN 1 is often sent untagged)",
                         host.role,
@@ -1361,7 +1517,7 @@ impl TcpEngine {
                         host.role
                     ),
                     None => format!(
-                        "no ARP reply from {hop} (the {}'s next hop) {} within {:?}{more}; \
+                        "no {reply} from {hop} (the {}'s next hop) {} within {:?}{more}; \
                          check the gateway address, the VLAN, and that the port can receive",
                         host.role,
                         vlan(host.ep.vlan),
@@ -1373,18 +1529,22 @@ impl TcpEngine {
             if now >= host.arp_next {
                 host.arp_next = now + ARP_RETRY;
                 for hop in pending {
-                    self.out.push((
-                        host.ep.port,
-                        wire::arp_frame(
+                    let frame = match (host.ep.ip, hop) {
+                        (IpAddr::V4(me), IpAddr::V4(hop)) => wire::arp_frame(
                             BROADCAST,
                             host.ep.vlan,
                             1,
                             host.ep.mac,
-                            host.ep.ip,
+                            me,
                             MacAddr([0; 6]),
                             hop,
                         ),
-                    ));
+                        (IpAddr::V6(me), IpAddr::V6(hop)) => {
+                            wire::ndp_solicit(host.ep.mac, host.ep.vlan, me, hop)
+                        }
+                        _ => continue,
+                    };
+                    self.out.push((host.ep.port, frame));
                 }
             }
         }
@@ -1470,8 +1630,8 @@ impl TcpEngine {
         now: Duration,
     ) -> bool {
         let t = &self.templates[tpl];
-        let connect = SocketAddrV4::new(t.nth_server(self.opened[tpl]), t.connect.port());
-        let hop = ep.next_hop(*connect.ip());
+        let connect = SocketAddr::new(t.nth_server(self.opened[tpl]), t.connect.port());
+        let hop = ep.next_hop(connect.ip());
         let Some(mac) = self.hosts[0]
             .hops
             .iter()
@@ -1488,7 +1648,7 @@ impl TcpEngine {
             self.port_cursor = self.port_cursor.wrapping_add(1);
             let ip = ep.nth_ip((k % count) as u32);
             let port = ports.start + ((k / count) % span) as u16;
-            let key = (SocketAddrV4::new(ip, port), connect);
+            let key = (SocketAddr::new(ip, port), connect);
             if !self.conns.contains_key(&key) {
                 found = Some(key);
                 break;
@@ -1509,13 +1669,13 @@ impl TcpEngine {
                 src_mac: ep.mac,
                 dst_mac: mac,
                 vlan: ep.vlan,
-                src: *key.0.ip(),
-                dst: *connect.ip(),
+                src: key.0.ip(),
+                dst: connect.ip(),
             },
             lport: key.0.port(),
             rport: connect.port(),
             state: State::SynSent,
-            mss: usize::from(opts.mss),
+            mss: usize::from(mss_for(connect.ip(), opts.mss)),
             iss,
             snd_una: iss,
             snd_nxt: iss.wrapping_add(1),

@@ -20,6 +20,10 @@
 #             it the delay is left out and not checked)
 # LOSS=0.02   fraction of the packets the router drops (default 0)
 # DURATION=4s how long to send
+# IPV6=1      the same over IPv6: 10.9.1.x is fd00:9:1::x, 10.9.2.x is
+#             fd00:9:2::x; the bulk stream also varies its source address. The
+#             router masquerades with ip6tables when the kernel has IPv6 NAT,
+#             else it only routes.
 set -eu
 
 # The binary: the first argument, else a build in this checkout, else the
@@ -58,6 +62,22 @@ ip netns add $NS
 r() { ip netns exec $NS "$@"; }
 r ip link set lo up
 r sysctl -qw net.ipv4.ip_forward=1
+if [ "${IPV6:-}" = 1 ]; then
+    if ! [ -d /proc/sys/net/ipv6 ]; then
+        echo "IPV6=1, but this kernel has IPv6 disabled (ipv6.disable=1?)" >&2
+        exit 2
+    fi
+    r sysctl -qw net.ipv6.conf.all.forwarding=1
+    a() { echo "fd00:9:$1::$2"; }
+    plen=64
+    ipt() { r ip6tables "$@"; }
+    addr() { r ip -6 addr add "$1" dev "$2" nodad; }
+else
+    a() { echo "10.9.$1.$2"; }
+    plen=24
+    ipt() { r iptables "$@"; }
+    addr() { r ip addr add "$1" dev "$2"; }
+fi
 
 for side in c:1 s:2; do
     n=${side%%:*}; net=${side##*:}
@@ -67,15 +87,19 @@ for side in c:1 s:2; do
     sysctl -qw "net.ipv6.conf.${n}0.disable_ipv6=1" 2>/dev/null || true
     ip link set ${n}0 up
     r ip link set r$n address 02:00:00:00:0$net:01
-    r ip addr add 10.9.$net.1/24 dev r$n
+    addr "$(a $net 1)/$plen" r$n
     r ip link set r$n up
 done
 # The receiving host is ferotrx in promiscuous mode on s0; give the router
 # its MAC so it need not ask.
-r ip neigh replace 10.9.2.2 lladdr 02:00:00:00:02:02 dev rs nud permanent
-r iptables -t nat -A POSTROUTING -o rs -j MASQUERADE
+r ip neigh replace "$(a 2 2)" lladdr 02:00:00:00:02:02 dev rs nud permanent
+nat=yes
+if ! ipt -t nat -A POSTROUTING -o rs -j MASQUERADE 2>/dev/null; then
+    echo "no NAT for this IP version in the kernel: the router only routes"
+    nat=no
+fi
 if [ "$LOSS" != 0 ]; then
-    r iptables -A FORWARD -m statistic --mode random --probability "$LOSS" -j DROP
+    ipt -A FORWARD -m statistic --mode random --probability "$LOSS" -j DROP
 fi
 delay_us=0
 if r tc qdisc add dev rs root netem delay "$DELAY" 2>/dev/null; then
@@ -85,12 +109,22 @@ else
     echo "no netem in this kernel: no delay added, latency not checked"
 fi
 
-cat > "$WORK/lab.toml" <<'EOF'
+if [ "${IPV6:-}" = 1 ]; then
+    ip="ipv6(src=$(a 1 2),dst=$(a 2 2))"
+    voice_ip="ipv6(src=$(a 1 2),dst=$(a 2 2),tc=184)" # DSCP 46
+    vary_ip=", \"ip_src=$(a 1 100)..$(a 1 1ff)\""
+else
+    ip="ipv4(src=$(a 1 2),dst=$(a 2 2))"
+    voice_ip="ipv4(src=$(a 1 2),dst=$(a 2 2),dscp=46)"
+    vary_ip=
+fi
+eth="eth(src=02:00:00:00:01:02,dst=02:00:00:00:01:01)"
+cat > "$WORK/lab.toml" <<EOF
 # Sent on c0 to the router (rc, 02:00:00:00:01:01), routed and masqueraded
-# out of rs to 10.9.2.2, received on s0.
+# out of rs to $(a 2 2), received on s0.
 [[stream]]
 name = "voice"
-packet = "eth(src=02:00:00:00:01:02,dst=02:00:00:00:01:01)/ipv4(src=10.9.1.2,dst=10.9.2.2,dscp=46)/udp(sport=4000,dport=5004)/raw(len=160)"
+packet = "$eth/$voice_ip/udp(sport=4000,dport=5004)/raw(len=160)"
 interval = "1ms"
 rate = "1000pps"
 loops = 0
@@ -98,16 +132,16 @@ latency = true
 
 [[stream]]
 name = "bulk"
-packet = "eth(src=02:00:00:00:01:02,dst=02:00:00:00:01:01)/ipv4(src=10.9.1.2,dst=10.9.2.2)/udp(sport=4001,dport=9000)/raw(len=1200)"
+packet = "$eth/$ip/udp(sport=4001,dport=9000)/raw(len=1200)"
 rate = "2000pps"
 loops = 0
-vary = ["port_src=4001..4100"]
+vary = ["port_src=4001..4100"$vary_ip]
 latency = 7
 
 # No signature: shows up as untagged on the receiver.
 [[stream]]
 name = "background"
-packet = "eth(src=02:00:00:00:01:02,dst=02:00:00:00:01:01)/ipv4(src=10.9.1.2,dst=10.9.2.2)/udp(sport=4002,dport=9001)/raw(len=64)"
+packet = "$eth/$ip/udp(sport=4002,dport=9001)/raw(len=64)"
 rate = "200pps"
 loops = 0
 EOF
@@ -117,8 +151,8 @@ set +e
 status=$?
 set -e
 echo "router: connections masqueraded, and packets dropped:"
-r iptables -t nat -L POSTROUTING -v -n | sed -n '3p'
-r iptables -L FORWARD -v -n | sed -n '3,$p'
+[ $nat = no ] || ipt -t nat -L POSTROUTING -v -n | sed -n '3p'
+ipt -L FORWARD -v -n | sed -n '3,$p'
 [ $status -eq 0 ] || exit $status
 
 fail=0

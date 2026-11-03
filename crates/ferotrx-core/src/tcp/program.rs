@@ -2,12 +2,12 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::SocketAddr;
 use std::ops::Range;
 use std::time::Duration;
 
 use super::wire::{self, FIN, RST, SYN};
-use crate::net::ETHERTYPE_IPV4;
+use crate::net::{ETHERTYPE_IPV4, ETHERTYPE_IPV6};
 use crate::{Capture, Error, Result, LINKTYPE_ETHERNET};
 
 /// Which end of a TCP connection.
@@ -86,9 +86,9 @@ impl TcpMessage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TcpProgram {
     /// The client's address in the capture, if the program came from one.
-    pub client: Option<SocketAddrV4>,
+    pub client: Option<SocketAddr>,
     /// The server's address in the capture, if the program came from one.
-    pub server: Option<SocketAddrV4>,
+    pub server: Option<SocketAddr>,
     /// The port the server listens on.
     pub server_port: u16,
     pub messages: Vec<TcpMessage>,
@@ -191,8 +191,8 @@ impl TcpProgram {
 /// A TCP connection found in a capture.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TcpFlow {
-    pub client: SocketAddrV4,
-    pub server: SocketAddrV4,
+    pub client: SocketAddr,
+    pub server: SocketAddr,
     pub packets: u64,
     /// Payload bytes the client sent, inferred bytes included.
     pub client_bytes: u64,
@@ -236,8 +236,8 @@ struct Seen {
 
 struct Flow {
     /// The end that sent the first packet, as (ip, port).
-    a: SocketAddrV4,
-    b: SocketAddrV4,
+    a: SocketAddr,
+    b: SocketAddr,
     segments: Vec<Seen>,
     info: TcpFlow,
 }
@@ -248,12 +248,12 @@ fn collect(capture: &Capture) -> Result<Vec<Flow>> {
         .first()
         .map_or(Duration::ZERO, |p| p.timestamp);
     let mut flows: Vec<Flow> = Vec::new();
-    let mut index: HashMap<(SocketAddrV4, SocketAddrV4), usize> = HashMap::new();
+    let mut index: HashMap<(SocketAddr, SocketAddr), usize> = HashMap::new();
     for p in &capture.packets {
         let Some(ip_at) = ip_offset(capture.linktype, &p.data) else {
             continue;
         };
-        let Some(ip) = wire::parse_ipv4(&p.data[ip_at..], false) else {
+        let Some(ip) = wire::parse_ip(&p.data[ip_at..], false) else {
             continue;
         };
         if ip.proto != 6 {
@@ -262,13 +262,9 @@ fn collect(capture: &Capture) -> Result<Vec<Flow>> {
         let Some(seg) = wire::parse_tcp(&ip, false) else {
             continue;
         };
-        let src = SocketAddrV4::new(ip.src, seg.sport);
-        let dst = SocketAddrV4::new(ip.dst, seg.dport);
-        let key = if (src.ip().octets(), src.port()) <= (dst.ip().octets(), dst.port()) {
-            (src, dst)
-        } else {
-            (dst, src)
-        };
+        let src = SocketAddr::new(ip.src, seg.sport);
+        let dst = SocketAddr::new(ip.dst, seg.dport);
+        let key = if src <= dst { (src, dst) } else { (dst, src) };
         let i = *index.entry(key).or_insert_with(|| {
             flows.push(Flow {
                 a: src,
@@ -318,19 +314,20 @@ fn collect(capture: &Capture) -> Result<Vec<Flow>> {
     Ok(flows)
 }
 
-/// Where the IPv4 header starts, for the link types captures commonly use.
+/// Where the IPv4 or IPv6 header starts, for the link types captures commonly use.
 fn ip_offset(linktype: u32, data: &[u8]) -> Option<usize> {
+    let ip = |et: u16| et == ETHERTYPE_IPV4 || et == ETHERTYPE_IPV6;
     match linktype {
         LINKTYPE_ETHERNET => {
             let link = wire::parse_link(data)?;
-            (link.ethertype == ETHERTYPE_IPV4).then_some(link.payload)
+            ip(link.ethertype).then_some(link.payload)
         }
-        // Raw IP.
-        101 | 228 => Some(0),
+        // Raw IP, raw IPv4, raw IPv6.
+        101 | 228 | 229 => Some(0),
         // Linux cooked capture (SLL).
-        113 => (crate::net::be16(data, 14)? == ETHERTYPE_IPV4).then_some(16),
+        113 => ip(crate::net::be16(data, 14)?).then_some(16),
         // Linux cooked capture v2 (SLL2).
-        276 => (crate::net::be16(data, 0)? == ETHERTYPE_IPV4).then_some(20),
+        276 => ip(crate::net::be16(data, 0)?).then_some(20),
         _ => None,
     }
 }
@@ -565,16 +562,6 @@ impl fmt::Display for TcpProgram {
     }
 }
 
-/// Parses `a.b.c.d:port`.
-#[allow(dead_code)]
-pub(crate) fn parse_socket(s: &str) -> Option<SocketAddrV4> {
-    let (ip, port) = s.rsplit_once(':')?;
-    Some(SocketAddrV4::new(
-        ip.parse::<Ipv4Addr>().ok()?,
-        port.parse().ok()?,
-    ))
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -584,8 +571,13 @@ pub(crate) mod tests {
     /// A capture of one HTTP-like session: SYN, SYN-ACK, ACK, request,
     /// response in two segments (the second captured twice), FINs.
     pub fn session(both_ways: bool) -> Capture {
-        let c = Ipv4Addr::new(10, 1, 2, 20);
-        let s = Ipv4Addr::new(10, 1, 2, 80);
+        session_between("10.1.2.20", "10.1.2.80", both_ways)
+    }
+
+    /// [`session`] between two given addresses.
+    pub fn session_between(c: &str, s: &str, both_ways: bool) -> Capture {
+        let c: std::net::IpAddr = c.parse().unwrap();
+        let s: std::net::IpAddr = s.parse().unwrap();
         let to_s = Path {
             src_mac: MacAddr([2, 0, 0, 0, 0, 1]),
             dst_mac: MacAddr([2, 0, 0, 0, 0, 2]),
@@ -721,6 +713,19 @@ pub(crate) mod tests {
         );
         assert_eq!(p.closer, TcpRole::Server);
         assert_eq!(p.inferred_bytes, 0);
+    }
+
+    #[test]
+    fn extracts_an_ipv6_session() {
+        let cap = session_between("fd00::20", "fd00::80", true);
+        let flows = TcpProgram::flows(&cap).unwrap();
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0].client.to_string(), "[fd00::20]:40000");
+        assert_eq!(flows[0].server.to_string(), "[fd00::80]:80");
+        let p = TcpProgram::from_capture(&cap, None).unwrap();
+        let v4 = TcpProgram::from_capture(&session(true), None).unwrap();
+        assert_eq!(p.messages, v4.messages);
+        assert_eq!(p.closer, TcpRole::Server);
     }
 
     #[test]
