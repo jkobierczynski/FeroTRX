@@ -354,15 +354,22 @@ impl LabPki {
     }
 
     /// Issues the server's certificate for `hosts` (names or addresses the
-    /// clients connect to; the first is the common name), replacing any old one.
+    /// clients connect to; the first is the common name) and for `localhost`,
+    /// `127.0.0.1` and `::1`, replacing any old one.
     pub fn issue_server(&self, hosts: &[String]) -> Result<Issued, TlsError> {
         if hosts.is_empty() {
             return Err(TlsError::new(
                 "the server certificate needs at least one host name or address",
             ));
         }
+        let mut names = hosts.to_vec();
+        for local in ["localhost", "127.0.0.1", "::1"] {
+            if !names.iter().any(|n| n == local) {
+                names.push(local.to_string());
+            }
+        }
         let mut out = Issued::default();
-        let mut p = rcgen::CertificateParams::new(hosts.to_vec()).map_err(TlsError::new)?;
+        let mut p = rcgen::CertificateParams::new(names).map_err(TlsError::new)?;
         p.distinguished_name
             .push(rcgen::DnType::CommonName, hosts[0].clone());
         p.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];

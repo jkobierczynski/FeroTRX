@@ -457,7 +457,8 @@ connection may do everything, which is fine on 127.0.0.1.
 
 **TLS.** `--tls-cert` and `--tls-key` (PEM) turn on TLS (rustls; TLS 1.2 and
 1.3). `ferotrx certs DIR --server NAMES --client NAME --read-client NAME`
-makes what a lab needs: a CA (`ca.pem`) that signs the server certificate and
+makes what a lab needs: a CA (`ca.pem`) that signs the server certificate (for
+those names plus `localhost`, `127.0.0.1` and `::1`) and
 operator client certificates, a second CA (`read-ca.pem`) for read-only
 client certificates, and a certificate and key per name; run it again to add
 clients, it reuses the CAs. Clients check the server against `--ca` (or

@@ -31,8 +31,7 @@ fn tmp(name: &str) -> PathBuf {
 /// and read-only `dash`.
 fn pki(name: &str) -> LabPki {
     let pki = LabPki::new(tmp(name));
-    pki.issue_server(&["127.0.0.1".into(), "localhost".into()])
-        .unwrap();
+    pki.issue_server(&["lab1".into()]).unwrap();
     pki.issue_client("alice", Role::Operator).unwrap();
     pki.issue_client("dash", Role::Read).unwrap();
     pki
@@ -235,7 +234,7 @@ fn the_server_certificate_is_checked() {
     let r = tls_client(addr, &client_tls(&pki, None).with_server_name("lab9"));
     assert!(r.is_err());
     // The right CA and name.
-    let mut c = tls_client(addr, &client_tls(&pki, None).with_server_name("localhost")).unwrap();
+    let mut c = tls_client(addr, &client_tls(&pki, None).with_server_name("lab1")).unwrap();
     assert!(c.info().unwrap().tls);
 }
 

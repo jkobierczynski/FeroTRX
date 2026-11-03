@@ -858,7 +858,24 @@ pub fn cmd_certs(args: CertsArgs) -> Result<()> {
         String::new()
     };
     println!("server: ferotrx serve -l 0.0.0.0:{DEFAULT_PORT} --tls-cert {d}/server.pem --tls-key {d}/server-key.pem --client-ca {d}/ca.pem{read_ca}");
-    println!("client: ferotrx ctl -c HOST --ca {d}/ca.pem --cert {d}/NAME.pem --key {d}/NAME-key.pem info");
+    let host = args
+        .server
+        .first()
+        .map(|h| {
+            if h.contains(':') {
+                format!("[{h}]")
+            } else {
+                h.clone()
+            }
+        })
+        .unwrap_or_else(|| "<server address>".into());
+    let names: Vec<&String> = args.client.iter().chain(&args.read_client).collect();
+    if names.is_empty() {
+        println!("client: ferotrx ctl -c {host} --ca {d}/ca.pem --cert {d}/<name>.pem --key {d}/<name>-key.pem info");
+    }
+    for n in names {
+        println!("client: ferotrx ctl -c {host} --ca {d}/ca.pem --cert {d}/{n}.pem --key {d}/{n}-key.pem info");
+    }
     println!("Keep the *-key.pem files private; copy only ca.pem and a client's own pair to it.");
     Ok(())
 }
