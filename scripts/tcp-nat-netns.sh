@@ -77,7 +77,7 @@ quiet_v6() { sysctl -qw "net.ipv6.conf.$1.disable_ipv6=1" 2>/dev/null || true; }
 # A router link moved into the namespace: no duplicate address detection.
 no_dad() {
     [ "${IPV6:-}" = 1 ] || return 0
-    r sysctl -qw "net.ipv6.conf.$1.accept_dad=0"
+    r sysctl -qw "net/ipv6/conf/$1/accept_dad=0"
 }
 
 if [ "${IPV6:-}" = 1 ]; then

@@ -69,7 +69,7 @@ r sysctl -qw net.ipv4.ip_forward=1
 quiet_v6() { sysctl -qw "net.ipv6.conf.$1.disable_ipv6=1" 2>/dev/null || true; }
 no_dad() {
     [ "${IPV6:-}" = 1 ] || return 0
-    r sysctl -qw "net.ipv6.conf.$1.accept_dad=0"
+    r sysctl -qw "net/ipv6/conf/$1/accept_dad=0"
 }
 
 if [ "${IPV6:-}" = 1 ]; then
