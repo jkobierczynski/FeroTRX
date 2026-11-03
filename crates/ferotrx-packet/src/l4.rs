@@ -286,7 +286,12 @@ fn icmpv6(d: &mut Decoder, at: usize, end: usize, ip: &IpCtx) {
     d.layer(
         "ICMPv6",
         format!("Internet Control Message Protocol v6, {name}"),
-        at..(at + 8).min(end),
+        // Neighbor discovery messages are all header, options included.
+        at..if (133..=137).contains(&t) {
+            end
+        } else {
+            (at + 8).min(end)
+        },
     );
     d.field("Type", format!("{t} ({name})"), at..at + 1);
     d.field("Code", c.to_string(), at + 1..at + 2);
@@ -305,14 +310,89 @@ fn icmpv6(d: &mut Decoder, at: usize, end: usize, ip: &IpCtx) {
             info.push_str(&format!(" id={} seq={seq}", hex16(id)));
         }
         135 | 136 if d.need(at, 24, "ICMPv6 neighbor discovery") => {
+            if t == 136 {
+                let f = d.data[at + 4];
+                let names: Vec<&str> = [(0x80, "router"), (0x40, "solicited"), (0x20, "override")]
+                    .iter()
+                    .filter(|(bit, _)| f & bit != 0)
+                    .map(|(_, n)| *n)
+                    .collect();
+                let names = if names.is_empty() {
+                    "none".to_string()
+                } else {
+                    names.join(", ")
+                };
+                d.field("Flags", names, at + 4..at + 5);
+            }
             let mut a = [0u8; 16];
             a.copy_from_slice(&d.data[at + 8..at + 24]);
             let target = std::net::Ipv6Addr::from(a).to_string();
             d.field("Target", target.clone(), at + 8..at + 24);
-            info.push_str(&format!(" for {target}"));
+            if t == 135 {
+                info.push_str(&format!(" for {target}"));
+            } else {
+                info.push_str(&format!(" {target}"));
+            }
+            if let Some(mac) = nd_options(d, at + 24, end) {
+                info.push_str(&format!(" is at {mac}"));
+            }
+            d.summary("ICMPv6", info);
+            return;
+        }
+        133 | 134 => {
+            let first = if t == 133 { 8 } else { 16 };
+            if t == 134 && d.need(at, 16, "ICMPv6 router advertisement") {
+                d.field("Cur hop limit", d.data[at + 4].to_string(), at + 4..at + 5);
+                let life = d.u16(at + 6).unwrap_or(0);
+                d.field("Router lifetime", format!("{life} s"), at + 6..at + 8);
+            }
+            nd_options(d, at + first, end);
+            d.summary("ICMPv6", info);
+            return;
         }
         _ => {}
     }
     d.summary("ICMPv6", info);
     d.data_to(at + 8, end);
+}
+
+/// Neighbor discovery options from `at` to `end`, as fields of the ICMPv6
+/// layer. Returns the link-layer address option's address, if there is one.
+fn nd_options(d: &mut Decoder, mut at: usize, end: usize) -> Option<String> {
+    let end = end.min(d.data.len());
+    let mut lladdr = None;
+    while at + 2 <= end {
+        let (ty, units) = (d.data[at], usize::from(d.data[at + 1]));
+        let len = units * 8;
+        if len == 0 || at + len > end {
+            d.problem(format!("ICMPv6 option at offset {at} has a bad length"));
+            break;
+        }
+        let r = at..at + len;
+        match ty {
+            1 | 2 if len >= 8 => {
+                let mac = crate::mac(&d.data[at + 2..at + 8]);
+                let name = if ty == 1 {
+                    "Source link-layer address"
+                } else {
+                    "Target link-layer address"
+                };
+                d.field(name, mac.clone(), r);
+                lladdr = Some(mac);
+            }
+            3 if len >= 32 => {
+                let mut a = [0u8; 16];
+                a.copy_from_slice(&d.data[at + 16..at + 32]);
+                let p = std::net::Ipv6Addr::from(a);
+                d.field("Prefix", format!("{p}/{}", d.data[at + 2]), r);
+            }
+            5 if len >= 8 => {
+                let mtu = d.u32(at + 4).unwrap_or(0);
+                d.field("MTU", mtu.to_string(), r);
+            }
+            _ => d.field("Option", format!("type {ty}, {len} bytes"), r),
+        }
+        at += len;
+    }
+    lladdr
 }

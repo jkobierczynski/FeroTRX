@@ -1,0 +1,48 @@
+# FeroTRX stateful TCP profile over IPv6: the lab of lab-tcp.toml with IPv6
+# subnets on the two VLANs.
+#
+#   FeroTRX host --- switch (trunk) --- router --- VLAN 10: fd00:10::/64 (clients)
+#                                              \-- VLAN 20: fd00:20::/64 (server)
+#
+# Run it with:
+#   sudo ferotrx tcp -p examples/lab-tcp-v6.toml -i <interface>
+#
+# Everything works as over IPv4, except that the emulated hosts find the router
+# (and the router finds them) with neighbor discovery instead of ARP: they
+# send neighbor solicitations for the gateway and answer the router's for
+# their own addresses. They answer ping (ICMPv6 echo) too.
+#
+# Change the addresses to your lab:
+#   * The client and server `ip`s must be free addresses in each subnet, not
+#     addresses of the FeroTRX machine. The prefix defaults to /64.
+#   * `gateway`: the router's address in each VLAN. A link-local address
+#     (fe80::...) works if the router answers neighbor solicitations for it,
+#     but a global or unique local one is simpler.
+#
+# The emulated hosts use their own MAC addresses: 02:00 and the last four
+# bytes of the IPv6 address (02:00:00:00:01:00 for fd00:10::100), so the
+# interface is put in promiscuous mode. The MSS (default 1460 for IPv4) is
+# 20 bytes less over IPv6, so the frames are as long.
+#
+# Many consumer routers do not route IPv6 between their own VLANs, or do not
+# NAT it (NAT66 is rare); routing alone is enough here, as the client
+# connects to the server's own address.
+
+pcap = "http.pcap"   # the same capture works: the program has no addresses
+cps = 20
+connections = 200
+concurrency = 50
+
+[client]
+ip = "fd00:10::100/64"
+ips = 10             # clients fd00:10::100 - fd00:10::109
+gateway = "fd00:10::1"
+vlan = 10
+
+[server]
+ip = "fd00:20::50/64"
+gateway = "fd00:20::1"
+vlan = 20
+
+# On a client-only machine:
+# connect = "[fd00:20::50]:80"

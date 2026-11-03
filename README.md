@@ -5,7 +5,7 @@ FeroTRX is a traffic replay tool written in Rust, inspired by
 at a controlled rate on Linux, macOS and Windows, rewrites them on the way
 (addresses, ports, VLAN tags), varies fields from packet to packet, builds packets from scratch, runs several streams
 at once from a profile, replays TCP sessions statefully (real connections, both ends emulated, through NAT
-routers and firewalls, many sessions at once from templates), measures loss and latency on the receive side, and its engine is a library you can use from your own programs.
+routers and firewalls, many sessions at once from templates), measures loss and latency on the receive side, all over IPv4 and IPv6, and its engine is a library you can use from your own programs.
 
 ## Status
 
@@ -18,7 +18,8 @@ routers and firewalls, many sessions at once from templates), measures loss and 
 * **M7, field engine (per-packet field ranges, `--vary`, `vary` in profiles):** done.
 * **M8, stateful TCP (`ferotrx tcp`, TCP profiles, `tcp.*` control methods):** done.
 * **M9, receive side: loss and latency per stream (`--rx`, `ferotrx rx`, `rx.*` control methods):** done (0.2.0).
-* **M10, multi-flow TCP templates (`[[template]]` in TCP profiles, server address ranges, per-template counters):** this release (0.3.0).
+* **M10, multi-flow TCP templates (`[[template]]` in TCP profiles, server address ranges, per-template counters):** done (0.3.0).
+* **M11, IPv6 everywhere (stateful TCP with neighbor discovery, IPv6 extension headers and neighbor discovery in the packet builder, IPv6 lab scripts):** this release (0.4.0).
 
 ## Crates
 
@@ -134,9 +135,11 @@ line ending in `/` continues on the next. See
 | `arp` | `op` (request, reply or a number), `smac` (Ethernet source), `sip`, `tmac`, `tip` |
 | `ipv4` | `src` (192.0.2.1), `dst` (192.0.2.2), `ttl` (64), `dscp`, `ecn`, `tos`, `id` (1), `df`, `mf`, `frag` (bytes), `proto`, `len`, `chksum` |
 | `ipv6` | `src` (2001:db8::1), `dst` (2001:db8::2), `hlim` (64), `tc`, `flow`, `nh`, `plen` |
+| `hbh`, `dstopt` | IPv6 hop-by-hop and destination options headers, after `ipv6`: `len` (8 bytes, a multiple of 8, filled with padding), `nh`; `hbh` also `ra` (router alert value) |
+| `frag` | IPv6 fragment header, after `ipv6`: `offset` (bytes), `mf`, `id` (1), `nh` |
 | `tcp` | `sport` (49152), `dport` (80), `seq`, `ack`, `flags` (S; any of FSRPAUEC, or a number), `win` (64240), `urg`, `mss`, `wscale`, `sackok`, `chksum` |
 | `udp` | `sport`, `dport` (53 on the server side of DNS, else 49152 → 9), `len`, `chksum` |
-| `icmp` | `type` (echo request), `code`, `id`, `seq`, `chksum`; ICMPv6 after `ipv6` |
+| `icmp` | `type` (echo request), `code`, `id`, `seq`, `chksum`; ICMPv6 after `ipv6`, where `type=ns` and `type=na` (neighbor solicitation and advertisement) also take `target`, `lladdr` and, for `na`, `flags` (letters RSO); neighbor discovery wants `ipv6(hlim=255)` |
 | `dns` | `id` (1), `q` (name, repeatable), `qtype` (A, AAAA, MX, ... or a number), `qr`, `a` (answer address, repeatable; makes it a response), `ttl` (300), `rd` (1), `ra`, `aa`, `tc`, `opcode`, `rcode` |
 | `raw` | `hex=0a0b0c`, `text="..."` (quotes allow `,` `)` and `\"`), `len=N` with `fill` (0) |
 
@@ -521,9 +524,10 @@ How it works:
   connection with two requests.
 * **The hosts.** Each emulated host has its own IP address (or a range of
   them with `--client-ips`), a MAC address (02:00 followed by its IPv4 address,
-  or `--client-mac`), an optional VLAN tag and a gateway. It answers ARP and
-  ping, so the router can reach it, and the interface is opened in promiscuous
-  mode. Use addresses that are free in each subnet, not addresses of the machine
+  or the last four bytes of its IPv6 address, or `--client-mac`), an optional
+  VLAN tag and a gateway. It answers ARP and ping, or over IPv6 neighbor
+  solicitations and ICMPv6 ping, so the router can reach it, and the interface
+  is opened in promiscuous mode. Use addresses that are free in each subnet, not addresses of the machine
   FeroTRX runs on, or its own TCP stack answers with resets.
 * **Where they run.** Client and server can share one interface (a trunk
   with a VLAN each, as in the lab profile), use one interface each
@@ -541,6 +545,14 @@ How it works:
   The summary counts completed, reset, timed out and mismatched connections and
   retransmits per side, and the command exits with an error if any connection
   failed or carried other bytes, so it can gate a test.
+
+* **IPv6.** Give IPv6 addresses (`--client-ip fd00:10::100/64 --client-gw
+  fd00:10::1`, `--connect '[fd00:20::50]:80'`; the prefix defaults to /64) and
+  the hosts find their next hop with neighbor discovery instead of ARP. Client,
+  gateway and servers must all be of one IP version. The MSS is 20 bytes less
+  than over IPv4 (1440 by default), so frames stay as long. Captures of IPv6
+  sessions work as well as IPv4 ones, and either plays over either. See
+  [`examples/lab-tcp-v6.toml`](examples/lab-tcp-v6.toml).
 
 A TCP profile holds all of this in a TOML file; see
 [`examples/lab-tcp.toml`](examples/lab-tcp.toml):
@@ -578,6 +590,11 @@ tracking, masquerading and a rule that drops packets conntrack finds invalid)
 and runs the sample session `examples/http.pcap` through it (with its own addresses, so your edits to the lab profile do not matter). `LOSS=0.03` makes the router drop 3% of
 what it forwards. Here it completed 20,000 connections at 2,000 per second, and
 with 3% loss every connection still completed thanks to retransmits.
+`IPV6=1` builds the same lab over IPv6 (fd00:10::/64 and fd00:20::/64, with
+neighbor discovery between the router and the emulated hosts, and IPv6
+masquerading where the kernel has it); `MIX=1` and `NO_VLAN=1` combine with
+it. `IPV6=1 scripts/latency-netns.sh` measures loss and latency over IPv6, with
+the bulk stream varying its IPv6 source address.
 
 #### Templates: many kinds of connections at once
 

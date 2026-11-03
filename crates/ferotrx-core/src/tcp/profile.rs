@@ -1,6 +1,6 @@
 //! TCP profiles: a stateful TCP run described in a TOML file.
 
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -99,7 +99,7 @@ pub struct TcpProfile {
     /// Where the client connects, for templates without their own `connect`;
     /// defaults to the server host. The port may be left out (0): then each
     /// template's port.
-    pub connect: Option<SocketAddrV4>,
+    pub connect: Option<SocketAddr>,
     /// How many consecutive server addresses from `connect`'s the client
     /// connects to, in turn. Default: the server host's `ips` when connecting
     /// to it, else 1.
@@ -124,7 +124,7 @@ pub struct TcpTemplateSpec {
     pub port: Option<u16>,
     /// Where clients connect for this template; default: the profile's.
     /// Port 0 means the template's port.
-    pub connect: Option<SocketAddrV4>,
+    pub connect: Option<SocketAddr>,
     /// Server addresses from `connect`'s, in turn; default: the profile's.
     pub connect_ips: Option<u32>,
 }
@@ -204,10 +204,11 @@ impl std::fmt::Display for TcpSource {
 pub struct TcpHostSpec {
     /// The interface; the command line's `--iface` if left out.
     pub iface: Option<String>,
-    pub ip: Ipv4Addr,
+    /// IPv4 or IPv6.
+    pub ip: IpAddr,
     pub prefix: u8,
     pub ips: u32,
-    pub gateway: Option<Ipv4Addr>,
+    pub gateway: Option<IpAddr>,
     pub vlan: Option<u16>,
     pub mac: Option<MacAddr>,
     pub next_hop_mac: Option<MacAddr>,
@@ -216,7 +217,8 @@ pub struct TcpHostSpec {
 }
 
 impl TcpHostSpec {
-    /// A host at `ip`, written `a.b.c.d` or `a.b.c.d/prefix` (default /24).
+    /// A host at `ip`, written `a.b.c.d` or `a.b.c.d/prefix` (default /24),
+    /// or an IPv6 address with an optional prefix (default /64).
     pub fn new(ip: &str) -> Result<Self> {
         let (ip, prefix) = parse_ip_prefix(ip)?;
         Ok(Self {
@@ -232,12 +234,28 @@ impl TcpHostSpec {
         })
     }
 
-    /// The host's MAC address: the one given, or 02:00 followed by its IPv4 address.
+    /// The host's MAC address: the one given, or 02:00 followed by its IPv4
+    /// address, or by the last four bytes of its IPv6 address.
     pub fn mac(&self) -> MacAddr {
         self.mac.unwrap_or_else(|| {
-            let o = self.ip.octets();
+            let o = match self.ip {
+                IpAddr::V4(a) => a.octets(),
+                IpAddr::V6(a) => {
+                    let b = a.octets();
+                    [b[12], b[13], b[14], b[15]]
+                }
+            };
             MacAddr([0x02, 0x00, o[0], o[1], o[2], o[3]])
         })
+    }
+
+    /// The host's last address, when it has more than one.
+    pub fn last_ip(&self) -> IpAddr {
+        let n = u128::from(self.ips.max(1) - 1);
+        match self.ip {
+            IpAddr::V4(a) => Ipv4Addr::from(u32::from(a).wrapping_add(n as u32)).into(),
+            IpAddr::V6(a) => std::net::Ipv6Addr::from(u128::from(a).wrapping_add(n)).into(),
+        }
     }
 
     fn endpoint(&self, port: usize) -> TcpEndpoint {
@@ -254,21 +272,25 @@ impl TcpHostSpec {
     }
 }
 
-/// Parses `a.b.c.d` or `a.b.c.d/prefix`; the prefix defaults to 24.
-pub fn parse_ip_prefix(s: &str) -> Result<(Ipv4Addr, u8)> {
+/// Parses `ADDRESS` or `ADDRESS/PREFIX`, IPv4 or IPv6; the prefix defaults
+/// to 24 for IPv4 and 64 for IPv6.
+pub fn parse_ip_prefix(s: &str) -> Result<(IpAddr, u8)> {
     let bad = || {
         Error::InvalidSpec(format!(
-            "invalid IPv4 address '{s}' (use e.g. 192.168.10.100/24)"
+            "invalid address '{s}' (use e.g. 192.168.10.100/24 or fd00:10::100/64)"
         ))
     };
     let (ip, prefix) = match s.trim().split_once('/') {
-        Some((ip, p)) => (
-            ip,
-            p.parse::<u8>().ok().filter(|p| *p <= 32).ok_or_else(bad)?,
-        ),
-        None => (s.trim(), 24),
+        Some((ip, p)) => (ip, Some(p.parse::<u8>().map_err(|_| bad())?)),
+        None => (s.trim(), None),
     };
-    Ok((ip.parse().map_err(|_| bad())?, prefix))
+    let ip: IpAddr = ip.trim().parse().map_err(|_| bad())?;
+    let (max, default) = if ip.is_ipv4() { (32, 24) } else { (128, 64) };
+    let prefix = prefix.unwrap_or(default);
+    if prefix > max {
+        return Err(bad());
+    }
+    Ok((ip, prefix))
 }
 
 /// Parses `LOW-HIGH` (both included) into a source port range.
@@ -405,13 +427,23 @@ fn hex(s: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
-/// Parses where clients connect: `IP:PORT`, or `IP` (port 0: each template's).
-pub fn parse_connect_addr(c: &str) -> Result<SocketAddrV4> {
-    let bad = || Error::Profile(format!("invalid connect address '{c}' (use IP:PORT or IP)"));
-    match c.parse::<SocketAddrV4>() {
-        Ok(a) => Ok(a),
-        Err(_) => Ok(SocketAddrV4::new(c.trim().parse().map_err(|_| bad())?, 0)),
+/// Parses where clients connect: `IP:PORT` (`[IPv6]:PORT`), or `IP` (port 0:
+/// each template's).
+pub fn parse_connect_addr(c: &str) -> Result<SocketAddr> {
+    let bad = || {
+        Error::Profile(format!(
+            "invalid connect address '{c}' (use IP:PORT, [IPv6]:PORT or IP)"
+        ))
+    };
+    let c = c.trim();
+    if let Ok(a) = c.parse::<SocketAddr>() {
+        return Ok(a);
     }
+    let ip = c
+        .strip_prefix('[')
+        .and_then(|c| c.strip_suffix(']'))
+        .unwrap_or(c);
+    Ok(SocketAddr::new(ip.parse().map_err(|_| bad())?, 0))
 }
 
 /// What a profile or template plays: `pcap` (and `flow`), or `[[message]]`
@@ -682,7 +714,7 @@ impl TcpProfile {
                 (Some(c), _, _) => (c, t.connect_ips.or(self.connect_ips).unwrap_or(1)),
                 (None, Some(c), _) => (c, t.connect_ips.or(self.connect_ips).unwrap_or(1)),
                 (None, None, Some(s)) => (
-                    SocketAddrV4::new(s.ip, 0),
+                    SocketAddr::new(s.ip, 0),
                     t.connect_ips.or(self.connect_ips).unwrap_or(s.ips),
                 ),
                 (None, None, None) if self.client.is_some() => {
@@ -690,10 +722,10 @@ impl TcpProfile {
                         "a client without a server needs the address to connect to".into(),
                     ))
                 }
-                (None, None, None) => (SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0), 1),
+                (None, None, None) => (SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0), 1),
             };
             let connect = if connect.port() == 0 {
-                SocketAddrV4::new(*connect.ip(), listen)
+                SocketAddr::new(connect.ip(), listen)
             } else {
                 connect
             };
@@ -788,6 +820,64 @@ mod tests {
     }
 
     #[test]
+    fn parses_an_ipv6_profile() {
+        let p = TcpProfile::from_toml(
+            r#"
+            cps = 10
+            [[template]]
+            name = "web"
+            port = 80
+            [[template.message]]
+            from = "client"
+            text = "GET"
+            [[template]]
+            name = "alt"
+            port = 8080
+            connect = "[fd00:20::1]:18080"
+            [[template.message]]
+            from = "client"
+            text = "hi"
+            [client]
+            ip = "fd00:10::100"
+            ips = 300
+            gateway = "fd00:10::1"
+            [server]
+            ip = "fd00:20::50/120"
+            ips = 2
+            "#,
+            Path::new("."),
+        )
+        .unwrap();
+        let c = p.client.as_ref().unwrap();
+        assert_eq!(c.prefix, 64);
+        assert_eq!(c.mac().to_string(), "02:00:00:00:01:00");
+        assert_eq!(c.last_ip().to_string(), "fd00:10::22b");
+        assert_eq!(p.server.as_ref().unwrap().prefix, 120);
+        let programs = p
+            .programs()
+            .unwrap()
+            .into_iter()
+            .map(Arc::new)
+            .collect::<Vec<_>>();
+        let cfg = p.config(&programs, &["eth0".into()], Some("eth0")).unwrap();
+        assert_eq!(cfg.templates[0].connect.to_string(), "[fd00:20::50]:80");
+        assert_eq!(cfg.templates[0].connect_ips, 2);
+        assert_eq!(cfg.templates[1].connect.to_string(), "[fd00:20::1]:18080");
+        assert_eq!(
+            cfg.client.unwrap().endpoint.gateway,
+            Some("fd00:10::1".parse().unwrap())
+        );
+
+        assert_eq!(
+            parse_connect_addr("[fd00::1]").unwrap().to_string(),
+            "[fd00::1]:0"
+        );
+        assert_eq!(parse_connect_addr("fd00::1").unwrap().port(), 0);
+        assert!(parse_ip_prefix("fd00::1/129").is_err());
+        assert!(parse_ip_prefix("10.0.0.1/33").is_err());
+    }
+
+    #[test]
     fn parses_written_out_messages() {
         let p = TcpProfile::from_toml(
             r#"
@@ -823,7 +913,7 @@ mod tests {
             ),
             (
                 "pcap = \"a.pcap\"\n[client]\nip = \"10.0.0.300\"",
-                "invalid IPv4",
+                "invalid address",
             ),
             (
                 "pcap = \"a.pcap\"\nbogus = 1\n[client]\nip = \"10.0.0.1\"",

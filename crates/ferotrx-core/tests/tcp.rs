@@ -3,7 +3,7 @@
 //! frames between VLANs and drops some of them.
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +15,11 @@ const R10_MAC: MacAddr = MacAddr([0x02, 0, 0, 0, 0, 0x10]);
 const R20_MAC: MacAddr = MacAddr([0x02, 0, 0, 0, 0, 0x20]);
 
 fn ip(s: &str) -> Ipv4Addr {
+    s.parse().unwrap()
+}
+
+/// An address of either version, for endpoints.
+fn addr(s: &str) -> IpAddr {
     s.parse().unwrap()
 }
 
@@ -155,16 +160,161 @@ impl NatRouter {
     }
 }
 
+/// Something that takes the frames the engines send and puts frames back on
+/// the trunk.
+trait Router {
+    fn forward(&mut self, f: Vec<u8>) -> Vec<Vec<u8>>;
+}
+
+impl Router for NatRouter {
+    fn forward(&mut self, f: Vec<u8>) -> Vec<Vec<u8>> {
+        self.route(f).into_iter().collect()
+    }
+}
+
+/// An IPv6 router between VLAN 10 (fd00:10::/64) and VLAN 20 (fd00:20::/64),
+/// without NAT, that finds hosts with neighbor discovery as a real one does:
+/// it answers solicitations for its addresses fd00:10::1 and fd00:20::1, and
+/// solicits the hosts it forwards to, holding their frames meanwhile.
+struct Router6 {
+    neighbors: HashMap<Ipv6Addr, MacAddr>,
+    /// Frames waiting for their destination's MAC.
+    waiting: Vec<(Ipv6Addr, Vec<u8>)>,
+    drop_every: u64,
+    seen: u64,
+    dropped: u64,
+    /// Solicitations the router sent.
+    solicited: u64,
+}
+
+fn v6_at(f: &[u8], at: usize) -> Ipv6Addr {
+    let mut a = [0u8; 16];
+    a.copy_from_slice(&f[at..at + 16]);
+    Ipv6Addr::from(a)
+}
+
+fn built(spec: &str) -> Vec<u8> {
+    spec.parse::<ferotrx_packet::PacketSpec>()
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+impl Router6 {
+    fn new(drop_every: u64) -> Self {
+        Self {
+            neighbors: HashMap::new(),
+            waiting: Vec::new(),
+            drop_every,
+            seen: 0,
+            dropped: 0,
+            solicited: 0,
+        }
+    }
+
+    /// The router's address and MAC on a VLAN.
+    fn me(vlan: u16) -> (Ipv6Addr, MacAddr) {
+        match vlan {
+            10 => ("fd00:10::1".parse().unwrap(), R10_MAC),
+            _ => ("fd00:20::1".parse().unwrap(), R20_MAC),
+        }
+    }
+}
+
+impl Router for Router6 {
+    fn forward(&mut self, mut f: Vec<u8>) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        // The longest frame a 1500 byte MTU allows, with the VLAN tag.
+        assert!(f.len() <= 1518, "a {} byte frame", f.len());
+        let Some(vlan) = vlan_of(&f) else { return out };
+        if f[16..18] != [0x86, 0xdd] {
+            return out;
+        }
+        let (ip, l4) = (18, 58);
+        let (src, dst) = (v6_at(&f, ip + 8), v6_at(&f, ip + 24));
+        let (me, my_mac) = Self::me(vlan);
+        match f[ip + 6] {
+            58 if f[l4] == 135 && f[ip + 7] == 255 => {
+                let target = v6_at(&f, l4 + 8);
+                if target != me {
+                    return out;
+                }
+                assert_eq!(f[l4 + 24], 1, "a solicitation carries the source's MAC");
+                let mac = MacAddr(f[l4 + 26..l4 + 32].try_into().unwrap());
+                self.neighbors.insert(src, mac);
+                out.push(built(&format!(
+                    "eth(src={my_mac},dst={mac})/vlan(id={vlan})/ipv6(src={me},dst={src},hlim=255)\
+                     /icmp(type=na,flags=SO,target={me},lladdr={my_mac})"
+                )));
+            }
+            58 if f[l4] == 136 && f[ip + 7] == 255 => {
+                let target = v6_at(&f, l4 + 8);
+                assert_eq!(f[l4 + 24], 2, "an advertisement carries the target's MAC");
+                let mac = MacAddr(f[l4 + 26..l4 + 32].try_into().unwrap());
+                self.neighbors.insert(target, mac);
+                let (ready, still): (Vec<_>, Vec<_>) = std::mem::take(&mut self.waiting)
+                    .into_iter()
+                    .partition(|(d, _)| *d == target);
+                self.waiting = still;
+                for (_, mut w) in ready {
+                    w[0..6].copy_from_slice(&mac.0);
+                    out.push(w);
+                }
+            }
+            6 => {
+                self.seen += 1;
+                if self.drop_every > 0 && self.seen % self.drop_every == 0 {
+                    self.dropped += 1;
+                    return out;
+                }
+                if f[0..6] != my_mac.0 {
+                    return out;
+                }
+                let to = if dst.segments()[1] == 0x10 { 10 } else { 20 };
+                let (_, out_mac) = Self::me(to);
+                f[ip + 7] -= 1; // hop limit
+                f[6..12].copy_from_slice(&out_mac.0);
+                f[14..16].copy_from_slice(&to.to_be_bytes());
+                match self.neighbors.get(&dst) {
+                    Some(mac) => {
+                        f[0..6].copy_from_slice(&mac.0);
+                        out.push(f);
+                    }
+                    None => {
+                        let first = !self.waiting.iter().any(|(d, _)| *d == dst);
+                        self.waiting.push((dst, f));
+                        if first {
+                            self.solicited += 1;
+                            let (from, _) = Self::me(to);
+                            let o = dst.octets();
+                            let group =
+                                format!("ff02::1:ff{:02x}:{:02x}{:02x}", o[13], o[14], o[15]);
+                            out.push(built(&format!(
+                                "eth(src={out_mac},dst=33:33:ff:{:02x}:{:02x}:{:02x})/vlan(id={to})\
+                                 /ipv6(src={from},dst={group},hlim=255)\
+                                 /icmp(type=ns,target={dst},lladdr={out_mac})",
+                                o[13], o[14], o[15]
+                            )));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+}
+
 fn client_endpoint() -> TcpEndpoint {
-    TcpEndpoint::new(0, CLIENT_MAC, ip("192.168.10.100"))
-        .with_gateway(ip("192.168.10.1"))
+    TcpEndpoint::new(0, CLIENT_MAC, addr("192.168.10.100"))
+        .with_gateway(addr("192.168.10.1"))
         .with_vlan(10)
         .with_ip_count(3)
 }
 
 fn server_endpoint() -> TcpEndpoint {
-    TcpEndpoint::new(0, SERVER_MAC, ip("192.168.20.50"))
-        .with_gateway(ip("192.168.20.1"))
+    TcpEndpoint::new(0, SERVER_MAC, addr("192.168.20.50"))
+        .with_gateway(addr("192.168.20.1"))
         .with_vlan(20)
 }
 
@@ -200,7 +350,7 @@ fn client(connections: u64, cps: f64, concurrency: usize) -> TcpClientConfig {
 
 /// Runs engines on a simulated clock, 1 ms per step. Every engine's port 0
 /// is on the router's trunk. Returns the steps taken.
-fn simulate(engines: &mut [&mut TcpEngine], router: &mut NatRouter, max: Duration) -> Duration {
+fn simulate(engines: &mut [&mut TcpEngine], router: &mut impl Router, max: Duration) -> Duration {
     let step = Duration::from_millis(1);
     let mut now = Duration::ZERO;
     let mut wire: Vec<Vec<u8>> = Vec::new();
@@ -217,9 +367,7 @@ fn simulate(engines: &mut [&mut TcpEngine], router: &mut NatRouter, max: Duratio
             assert_eq!(e.error(), None);
             for (port, f) in e.take_output() {
                 assert_eq!(port, 0);
-                if let Some(r) = router.route(f) {
-                    wire.push(r);
-                }
+                wire.extend(router.forward(f));
             }
         }
         for e in engines.iter() {
@@ -370,7 +518,7 @@ fn gives_up_when_nobody_answers() {
 #[test]
 fn reports_a_missing_gateway() {
     let mut c = client(1, 1.0, 0);
-    c.endpoint.gateway = Some(ip("192.168.10.254"));
+    c.endpoint.gateway = Some(ip("192.168.10.254").into());
     let mut engine = TcpEngine::new(TcpConfig {
         templates: vec![tpl(Arc::new(web_program(10)))],
         client: Some(c),
@@ -600,11 +748,11 @@ fn servers_on_the_link_are_each_resolved() {
     // No router: four servers on the client's subnet, each found by ARP.
     let (a, b) = memory_ports();
     let mac = |s: &str| s.parse::<MacAddr>().unwrap();
-    let server = TcpEndpoint::new(1, mac("02:00:00:00:00:02"), ip("10.0.0.10")).with_ip_count(4);
+    let server = TcpEndpoint::new(1, mac("02:00:00:00:00:02"), addr("10.0.0.10")).with_ip_count(4);
     let mut client = TcpClientConfig::new(TcpEndpoint::new(
         0,
         mac("02:00:00:00:00:01"),
-        ip("10.0.0.1"),
+        addr("10.0.0.1"),
     ));
     client.connections = 8;
     client.cps = 1000.0;
@@ -633,7 +781,7 @@ fn rejects_templates_the_server_cannot_tell_apart() {
     let t = |port| {
         TcpTemplate::new(
             Arc::new(echo_program()),
-            SocketAddrV4::new(ip("192.168.20.50"), port),
+            SocketAddrV4::new(ip("192.168.20.50"), port).into(),
         )
     };
     let err = TcpEngine::new(TcpConfig {
@@ -652,4 +800,200 @@ fn rejects_templates_the_server_cannot_tell_apart() {
     })
     .unwrap_err();
     assert!(err.to_string().contains("weight 0"), "{err}");
+}
+
+#[test]
+fn two_engines_over_ipv6_through_a_lossy_router() {
+    let program = Arc::new(web_program(50_000));
+    let tpl6 = TcpTemplate::new(program.clone(), "[fd00:20::50]:80".parse().unwrap());
+    let mut c = TcpClientConfig::new(
+        TcpEndpoint::new(0, CLIENT_MAC, addr("fd00:10::100"))
+            .with_gateway(addr("fd00:10::1"))
+            .with_vlan(10)
+            .with_ip_count(3),
+    );
+    c.connections = 12;
+    c.cps = 200.0;
+    c.concurrency = 4;
+    let mut client = TcpEngine::new(TcpConfig {
+        templates: vec![tpl6.clone()],
+        client: Some(c),
+        server: None,
+        options: TcpOptions::default(),
+    })
+    .unwrap();
+    let mut server = TcpEngine::new(TcpConfig {
+        templates: vec![tpl6],
+        client: None,
+        server: Some(TcpServerConfig::new(
+            TcpEndpoint::new(0, SERVER_MAC, addr("fd00:20::50"))
+                .with_gateway(addr("fd00:20::1"))
+                .with_vlan(20),
+        )),
+        options: TcpOptions::default(),
+    })
+    .unwrap();
+    let mut router = Router6::new(31);
+    let took = simulate(
+        &mut [&mut client, &mut server],
+        &mut router,
+        Duration::from_secs(120),
+    );
+    let (c, s) = (&client.stats().client, &server.stats().server);
+    assert!(client.is_done(), "client not done after {took:?}: {c:?}");
+    assert_eq!((c.started, c.completed, c.mismatched), (12, 12, 0), "{c:?}");
+    assert_eq!((s.completed, s.mismatched), (12, 0), "{s:?}");
+    assert!(router.dropped > 0 && c.retransmits + s.retransmits > 0);
+    assert_eq!(c.payload_rx, program.bytes(TcpRole::Server) * 12);
+    // The router found the server and all three client addresses by asking.
+    for a in [
+        "fd00:20::50",
+        "fd00:10::100",
+        "fd00:10::101",
+        "fd00:10::102",
+    ] {
+        let a: Ipv6Addr = a.parse().unwrap();
+        assert!(
+            router.neighbors.contains_key(&a),
+            "router does not know {a}"
+        );
+    }
+    assert_eq!(
+        router.neighbors[&"fd00:20::50".parse::<Ipv6Addr>().unwrap()],
+        SERVER_MAC
+    );
+    // The server and the clients' second and third addresses: the first
+    // told the router its MAC when it asked for the router's.
+    assert_eq!(router.solicited, 3);
+}
+
+#[test]
+fn answers_neighbor_solicitations_and_ping6() {
+    let mut engine = TcpEngine::new(TcpConfig {
+        templates: vec![TcpTemplate::new(
+            Arc::new(web_program(10)),
+            "[fd00:20::50]:80".parse().unwrap(),
+        )],
+        client: None,
+        server: Some(TcpServerConfig::new(
+            TcpEndpoint::new(0, SERVER_MAC, addr("fd00:20::50")).with_ip_count(2),
+        )),
+        options: TcpOptions::default(),
+    })
+    .unwrap();
+    let ns = |src: &str, target: &str| {
+        format!(
+            "eth(src=02:00:00:00:00:20,dst=33:33:ff:00:00:51)/ipv6(src={src},dst=ff02::1:ff00:51,hlim=255)\
+             /icmp(type=ns,target={target},lladdr=02:00:00:00:00:20)"
+        )
+    };
+    let frames = [
+        ns("fd00:20::1", "fd00:20::51"),
+        // Duplicate address detection, and someone else's address: no answer.
+        ns("::", "fd00:20::51"),
+        ns("fd00:20::1", "fd00:20::99"),
+        // A solicitation with the wrong hop limit is not believed.
+        ns("fd00:20::1", "fd00:20::51").replace("hlim=255", "hlim=64"),
+        "eth(src=02:00:00:00:00:20,dst=02:00:00:00:14:32)/ipv6(src=fd00:20::1,dst=fd00:20::50)/icmp(id=7,seq=1)/raw(text=\"hi\")".to_string(),
+    ];
+    let specs: Vec<&str> = frames.iter().map(String::as_str).collect();
+    let cap = Capture::from_specs(&specs, Duration::ZERO).unwrap();
+    for p in &cap.packets {
+        engine.handle_frame(0, &p.data, Duration::ZERO);
+    }
+    let out = engine.take_output();
+    assert_eq!(
+        out.len(),
+        2,
+        "{:?}",
+        out.iter()
+            .map(|(_, f)| ferotrx_packet::decode(1, f).info)
+            .collect::<Vec<_>>()
+    );
+    let na = ferotrx_packet::decode(1, &out[0].1);
+    assert_eq!(
+        na.info,
+        "Neighbor advertisement fd00:20::51 is at 02:00:00:00:14:32"
+    );
+    assert_eq!(na.destination, "fd00:20::1");
+    assert!(na.problems.is_empty(), "{:?}", na.problems);
+    assert_eq!(&out[0].1[0..6], &[2, 0, 0, 0, 0, 0x20]);
+    let echo = ferotrx_packet::decode(1, &out[1].1);
+    assert!(echo.info.starts_with("Echo (ping) reply"), "{}", echo.info);
+    assert!(echo.problems.is_empty(), "{:?}", echo.problems);
+}
+
+#[test]
+fn reports_a_missing_ipv6_gateway() {
+    let mut c = TcpClientConfig::new(
+        TcpEndpoint::new(0, CLIENT_MAC, addr("fd00:10::100")).with_gateway(addr("fd00:10::fe")),
+    );
+    c.connections = 1;
+    let mut engine = TcpEngine::new(TcpConfig {
+        templates: vec![TcpTemplate::new(
+            Arc::new(web_program(10)),
+            "[fd00:20::50]:80".parse().unwrap(),
+        )],
+        client: Some(c),
+        server: None,
+        options: TcpOptions {
+            arp_timeout: Duration::from_secs(1),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    let mut now = Duration::ZERO;
+    let mut solicitations = 0;
+    while engine.error().is_none() && now < Duration::from_secs(5) {
+        engine.poll(now);
+        for (_, f) in engine.take_output() {
+            let d = ferotrx_packet::decode(1, &f);
+            assert_eq!(
+                d.info,
+                "Neighbor solicitation for fd00:10::fe is at 02:00:00:00:0a:64"
+            );
+            assert_eq!(d.destination, "ff02::1:ff00:fe");
+            solicitations += 1;
+        }
+        now += Duration::from_millis(10);
+    }
+    assert!(solicitations >= 2);
+    let err = engine.error().expect("neighbor discovery fails");
+    assert!(
+        err.starts_with("no neighbor advertisement from fd00:10::fe"),
+        "{err}"
+    );
+}
+
+#[test]
+fn rejects_mixed_ip_versions() {
+    let err = |client: &str, gw: Option<&str>, connect: &str| {
+        let mut ep = TcpEndpoint::new(0, CLIENT_MAC, addr(client));
+        if let Some(g) = gw {
+            ep = ep.with_gateway(addr(g));
+        }
+        TcpEngine::new(TcpConfig {
+            templates: vec![TcpTemplate::new(
+                Arc::new(echo_program()),
+                connect.parse().unwrap(),
+            )],
+            client: Some(TcpClientConfig::new(ep)),
+            server: None,
+            options: TcpOptions::default(),
+        })
+        .unwrap_err()
+        .to_string()
+    };
+    let e = err("10.0.0.1", None, "[fd00::1]:7");
+    assert!(
+        e.contains("the client is IPv4 (10.0.0.1) but connects to IPv6"),
+        "{e}"
+    );
+    let e = err("fd00::2", Some("10.0.0.1"), "[fd00::1]:7");
+    assert!(
+        e.contains("gateway 10.0.0.1 is IPv4 but the host is IPv6"),
+        "{e}"
+    );
+    let e = err("ff02::1", None, "[fd00::1]:7");
+    assert!(e.contains("not a unicast address"), "{e}");
 }

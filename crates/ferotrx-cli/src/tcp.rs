@@ -1,6 +1,6 @@
 //! `ferotrx tcp`: stateful TCP replay.
 
-use std::net::SocketAddrV4;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -49,11 +49,11 @@ pub struct TcpArgs {
     #[command(flatten)]
     hosts: HostArgs,
 
-    /// Where the client connects, IP:PORT, or IP for each template's port.
+    /// Where the client connects, IP:PORT ([IPv6]:PORT), or IP for each template's port.
     /// Default: the server's address and port. Needed when this machine runs
     /// only the client.
     #[arg(long, value_name = "IP[:PORT]", value_parser = parse_connect)]
-    connect: Option<SocketAddrV4>,
+    connect: Option<SocketAddr>,
 
     /// Connect to this many consecutive server addresses from --connect's (or
     /// the server's), in turn. Default: --server-ips.
@@ -100,8 +100,8 @@ pub struct TcpArgs {
 
 #[derive(Args)]
 struct HostArgs {
-    /// Run an emulated client at this address, IP[/PREFIX] (default /24). It
-    /// must not be an address of this machine.
+    /// Run an emulated client at this address, IP[/PREFIX], IPv4 (default
+    /// /24) or IPv6 (default /64). It must not be an address of this machine.
     #[arg(long, value_name = "IP[/PREFIX]")]
     client_ip: Option<String>,
     /// Use this many consecutive client addresses in turn.
@@ -109,28 +109,28 @@ struct HostArgs {
     client_ips: Option<u32>,
     /// The client's gateway (the router).
     #[arg(long, value_name = "IP")]
-    client_gw: Option<std::net::Ipv4Addr>,
+    client_gw: Option<IpAddr>,
     /// 802.1Q VLAN of the client.
     #[arg(long, value_name = "ID")]
     client_vlan: Option<u16>,
-    /// The client's MAC (default: 02:00 and the four bytes of its address).
+    /// The client's MAC (default: 02:00 and the last four bytes of its address).
     #[arg(long, value_name = "MAC")]
     client_mac: Option<MacAddr>,
     /// Interface of the client (default: --iface).
     #[arg(long, value_name = "IFACE")]
     client_iface: Option<String>,
 
-    /// Run an emulated server at this address, IP[/PREFIX] (default /24).
+    /// Run an emulated server at this address, IP[/PREFIX] (default /24 or /64).
     #[arg(long, value_name = "IP[/PREFIX]")]
     server_ip: Option<String>,
     /// The server's gateway. The server answers whoever sent the SYN, so this
-    /// only matters for ARP.
+    /// only matters for ARP and neighbor discovery.
     #[arg(long, value_name = "IP")]
-    server_gw: Option<std::net::Ipv4Addr>,
+    server_gw: Option<IpAddr>,
     /// 802.1Q VLAN of the server.
     #[arg(long, value_name = "ID")]
     server_vlan: Option<u16>,
-    /// The server's MAC (default: 02:00 and the four bytes of its address).
+    /// The server's MAC (default: 02:00 and the last four bytes of its address).
     #[arg(long, value_name = "MAC")]
     server_mac: Option<MacAddr>,
     /// Interface of the server (default: --iface).
@@ -146,7 +146,7 @@ struct HostArgs {
     server_ips: Option<u32>,
 }
 
-fn parse_connect(s: &str) -> std::result::Result<SocketAddrV4, String> {
+fn parse_connect(s: &str) -> std::result::Result<SocketAddr, String> {
     parse_connect_addr(s).map_err(|e| e.to_string())
 }
 
@@ -233,7 +233,7 @@ fn flows(file: &PathBuf) -> Result<()> {
         Capture::from_path(file).with_context(|| format!("cannot read {}", file.display()))?;
     let flows = TcpProgram::flows(&cap)?;
     if flows.is_empty() {
-        println!("no IPv4 TCP connections in {}", file.display());
+        println!("no TCP connections in {}", file.display());
     }
     for (i, f) in flows.iter().enumerate() {
         println!("{:>4}  {f}", i + 1);
@@ -355,7 +355,7 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
                     h.iface.as_deref().or(args.iface.as_deref()).unwrap_or("?")
                 );
                 if h.ips > 1 {
-                    let last = std::net::Ipv4Addr::from(u32::from(h.ip).wrapping_add(h.ips - 1));
+                    let last = h.last_ip();
                     line.push_str(&format!(" ({} addresses, to {last})", h.ips));
                 }
                 if let Some(v) = h.vlan {

@@ -195,6 +195,69 @@ impl Default for Ipv6 {
     }
 }
 
+/// Which IPv6 extension header an [`Ipv6Ext`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ipv6ExtKind {
+    /// Hop-by-hop options (next header 0).
+    HopByHop,
+    /// Destination options (60).
+    DestOpts,
+    /// Fragment header (44).
+    Fragment,
+}
+
+/// An IPv6 extension header, after an [`Ipv6`] layer or another extension.
+///
+/// Hop-by-hop and destination options headers are filled with padding (and,
+/// for hop-by-hop with `router_alert`, the router alert option MLD uses).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ipv6Ext {
+    pub kind: Ipv6ExtKind,
+    /// `None` takes it from the next layer.
+    pub next_header: Option<u8>,
+    /// Header length in bytes for the options headers: a multiple of 8, at
+    /// least 8 (the default).
+    pub len: usize,
+    /// Hop-by-hop: carry a router alert option (value `router_alert`).
+    pub router_alert: Option<u16>,
+    /// Fragment: offset in bytes, a multiple of 8.
+    pub frag_offset: u16,
+    /// Fragment: more fragments follow.
+    pub more: bool,
+    /// Fragment: identification.
+    pub id: u32,
+}
+
+impl Ipv6Ext {
+    pub fn new(kind: Ipv6ExtKind) -> Self {
+        Self {
+            kind,
+            next_header: None,
+            len: 8,
+            router_alert: None,
+            frag_offset: 0,
+            more: false,
+            id: 1,
+        }
+    }
+
+    fn proto(&self) -> u8 {
+        match self.kind {
+            Ipv6ExtKind::HopByHop => 0,
+            Ipv6ExtKind::DestOpts => 60,
+            Ipv6ExtKind::Fragment => 44,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self.kind {
+            Ipv6ExtKind::HopByHop => "hbh",
+            Ipv6ExtKind::DestOpts => "dstopt",
+            Ipv6ExtKind::Fragment => "frag",
+        }
+    }
+}
+
 /// TCP header.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tcp {
@@ -259,6 +322,13 @@ pub struct Icmp {
     pub seq: u16,
     /// `None` computes it.
     pub checksum: Option<u16>,
+    /// ICMPv6 neighbor solicitation (135) and advertisement (136): the target
+    /// address after the header. Neighbor advertisement flags (router 0x8000,
+    /// solicited 0x4000, override 0x2000) go in `id`.
+    pub target: Option<Ipv6Addr>,
+    /// Neighbor discovery: a source (135) or target (136) link-layer address
+    /// option after the target.
+    pub lladdr: Option<[u8; 6]>,
 }
 
 /// A DNS message with questions and A/AAAA answers.
@@ -310,6 +380,7 @@ pub enum LayerSpec {
     Arp(Arp),
     Ipv4(Ipv4),
     Ipv6(Ipv6),
+    Ipv6Ext(Ipv6Ext),
     Tcp(Tcp),
     Udp(Udp),
     Icmp(Icmp),
@@ -327,6 +398,7 @@ impl LayerSpec {
             LayerSpec::Arp(_) => "arp",
             LayerSpec::Ipv4(_) => "ipv4",
             LayerSpec::Ipv6(_) => "ipv6",
+            LayerSpec::Ipv6Ext(e) => e.name(),
             LayerSpec::Tcp(_) => "tcp",
             LayerSpec::Udp(_) => "udp",
             LayerSpec::Icmp(_) => "icmp",
@@ -349,6 +421,7 @@ impl LayerSpec {
         match self {
             LayerSpec::Ipv4(_) => Some(4),
             LayerSpec::Ipv6(_) => Some(41),
+            LayerSpec::Ipv6Ext(e) => Some(e.proto()),
             LayerSpec::Tcp(_) => Some(6),
             LayerSpec::Udp(_) => Some(17),
             LayerSpec::Icmp(_) => Some(if v6 { 58 } else { 1 }),
@@ -366,7 +439,7 @@ macro_rules! from_layer {
         }
     )*};
 }
-from_layer!(Ethernet, Vlan, Arp, Ipv4, Ipv6, Tcp, Udp, Icmp, Dns);
+from_layer!(Ethernet, Vlan, Arp, Ipv4, Ipv6, Ipv6Ext, Tcp, Udp, Icmp, Dns);
 
 /// A packet described layer by layer, outermost first.
 ///
@@ -388,10 +461,17 @@ from_layer!(Ethernet, Vlan, Arp, Ipv4, Ipv6, Tcp, Udp, Icmp, Dns);
 /// * `ipv4`: `src` [192.0.2.1], `dst` [192.0.2.2], `ttl` [64], `dscp`, `ecn`, `id` [1],
 ///   `df`, `mf`, `frag` (offset in bytes), `proto`, `len`, `chksum`
 /// * `ipv6`: `src` [2001:db8::1], `dst` [2001:db8::2], `hlim` [64], `tc`, `flow`, `nh`, `plen`
+/// * IPv6 extension headers, after `ipv6`: `hbh` (hop-by-hop options) and
+///   `dstopt` (destination options) with `len` [8, bytes, a multiple of 8], `nh`,
+///   and for `hbh` `ra` (router alert value); `frag` with `offset` (bytes), `mf`,
+///   `id` [1], `nh`
 /// * `tcp`: `sport` [49152], `dport` [80], `seq`, `ack`, `flags` [S; letters FSRPAUEC
 ///   or a number], `win` [64240], `urg`, `mss`, `wscale`, `sackok`, `chksum`
 /// * `udp`: `sport`, `dport` [53 around DNS, else 49152 and 9], `len`, `chksum`
-/// * `icmp`: `type` [echo request], `code`, `id`, `seq`, `chksum`; ICMPv6 after `ipv6`
+/// * `icmp`: `type` [echo request], `code`, `id`, `seq`, `chksum`; ICMPv6 after `ipv6`,
+///   where neighbor solicitations (`type=ns` or 135) and advertisements (`type=na`
+///   or 136) also take `target`, `lladdr` and, for advertisements, `flags`
+///   (letters RSO). Neighbor discovery wants `ipv6(hlim=255)`.
 /// * `dns`: `id` [1], `q` (repeatable), `qtype` [A], `qr` / `response`, `a` (answer
 ///   address, repeatable), `ttl` [300], `rd` [1], `ra`, `aa`, `tc`, `opcode`, `rcode`
 /// * `raw`: `hex=0a0b0c`, `text="..."`, or `len=N` with `fill` [0]
@@ -440,9 +520,10 @@ impl PacketSpec {
                     true
                 }
                 (
-                    L::Ipv4(_) | L::Ipv6(_),
+                    L::Ipv4(_) | L::Ipv6(_) | L::Ipv6Ext(_),
                     L::Ipv4(_) | L::Ipv6(_) | L::Tcp(_) | L::Udp(_) | L::Icmp(_),
                 ) => true,
+                (L::Ipv6(_) | L::Ipv6Ext(_), L::Ipv6Ext(_)) => true,
                 (L::Tcp(_) | L::Udp(_), L::Dns(_)) => true,
                 _ => false,
             };
@@ -561,6 +642,53 @@ impl PacketSpec {
                     out.extend(h.dst.octets());
                     out.extend(&payload);
                 }
+                LayerSpec::Ipv6Ext(e) => {
+                    let nh = e
+                        .next_header
+                        .or_else(|| next.and_then(|l| l.ip_proto(true)))
+                        .unwrap_or(59); // no next header
+                    out.push(nh);
+                    match e.kind {
+                        Ipv6ExtKind::Fragment => {
+                            if e.frag_offset % 8 != 0 {
+                                return err(format!(
+                                    "frag: offset {} is not a multiple of 8",
+                                    e.frag_offset
+                                ));
+                            }
+                            out.push(0);
+                            out.extend((e.frag_offset | u16::from(e.more)).to_be_bytes());
+                            out.extend(e.id.to_be_bytes());
+                        }
+                        Ipv6ExtKind::HopByHop | Ipv6ExtKind::DestOpts => {
+                            if e.len < 8 || e.len % 8 != 0 || e.len > 2048 {
+                                return err(format!(
+                                    "{}: len {} must be a multiple of 8 from 8 to 2048",
+                                    e.name(),
+                                    e.len
+                                ));
+                            }
+                            out.push((e.len / 8 - 1) as u8);
+                            if let Some(ra) = e.router_alert {
+                                if e.kind != Ipv6ExtKind::HopByHop {
+                                    return err("ra goes in hbh, not dstopt");
+                                }
+                                out.extend([5, 2]);
+                                out.extend(ra.to_be_bytes());
+                            }
+                            // Pad1 or PadN up to the length.
+                            match e.len - out.len() {
+                                0 => {}
+                                1 => out.push(0),
+                                n => {
+                                    out.extend([1, (n - 2) as u8]);
+                                    out.resize(e.len, 0);
+                                }
+                            }
+                        }
+                    }
+                    out.extend(&payload);
+                }
                 LayerSpec::Tcp(t) => {
                     let mut opts = Vec::new();
                     if let Some(mss) = t.mss {
@@ -630,6 +758,20 @@ impl PacketSpec {
                     out.extend([ty, m.code, 0, 0]);
                     out.extend(m.id.to_be_bytes());
                     out.extend(m.seq.to_be_bytes());
+                    let nd = v6 && matches!(ty, 135 | 136);
+                    if (m.target.is_some() || m.lladdr.is_some()) && !nd {
+                        return err(
+                            "icmp: target and lladdr are for ICMPv6 neighbor solicitations \
+                             and advertisements (type ns or na)",
+                        );
+                    }
+                    if nd {
+                        out.extend(m.target.unwrap_or(Ipv6Addr::UNSPECIFIED).octets());
+                        if let Some(mac) = m.lladdr {
+                            out.extend([if ty == 135 { 1 } else { 2 }, 1]);
+                            out.extend(mac);
+                        }
+                    }
                     out.extend(&payload);
                     let c = match m.checksum {
                         Some(c) => c,
@@ -825,5 +967,72 @@ mod tests {
         assert!(e("eth/tcp").contains("tcp cannot follow eth"));
         assert!(e("eth/raw/ipv4").contains("cannot follow raw"));
         assert!(e("eth/vlan(id=5000)").contains("0-4095"));
+    }
+
+    #[test]
+    fn ipv6_extension_headers() {
+        let (b, d) = built("eth/ipv6/hbh(ra=0)/dstopt(len=16)/udp(dport=7)/raw(len=4)");
+        assert_eq!(d.protocol, "UDP");
+        let exts: Vec<&str> = d
+            .layers
+            .iter()
+            .filter(|l| l.protocol == "IPv6 ext")
+            .map(|l| l.title.as_str())
+            .collect();
+        assert_eq!(exts, ["IPv6 Hop-by-Hop", "IPv6 Destination Options"]);
+        // 40 + 8 + 16 + 8 + 4, and the payload length counts the extensions.
+        assert_eq!(b.len(), 14 + 76);
+        assert_eq!(u16::from_be_bytes([b[18], b[19]]), 36);
+        // Router alert, then PadN.
+        assert_eq!(&b[54..62], &[60, 0, 5, 2, 0, 0, 1, 0]);
+
+        let (_, d) = built("eth/ipv6/frag(offset=0,mf=1,id=7)/icmp/raw(len=8)");
+        assert_eq!(d.protocol, "ICMPv6");
+        let (_, d) = built("eth/ipv6/frag(offset=1448,id=7)/raw(len=8)");
+        assert!(d.info.starts_with("Fragment of"), "{}", d.info);
+
+        let e = |s: &str| {
+            s.parse::<PacketSpec>()
+                .and_then(|p| p.build())
+                .unwrap_err()
+                .0
+        };
+        assert!(e("eth/ipv4/hbh").contains("hbh cannot follow ipv4"));
+        assert!(e("eth/ipv6/dstopt(len=12)").contains("multiple of 8"));
+        assert!(e("eth/ipv6/frag(offset=3)").contains("multiple of 8"));
+    }
+
+    #[test]
+    fn neighbor_discovery() {
+        let (b, d) = built(
+            "eth(dst=33:33:ff:00:00:01)/ipv6(src=fd00::2,dst=ff02::1:ff00:1,hlim=255)\
+             /icmp(type=ns,target=fd00::1,lladdr=02:00:00:00:00:02)",
+        );
+        assert_eq!(b.len(), 14 + 40 + 32);
+        assert_eq!(
+            d.info,
+            "Neighbor solicitation for fd00::1 is at 02:00:00:00:00:02"
+        );
+        let (b, d) = built(
+            "eth/ipv6(src=fd00::1,dst=fd00::2,hlim=255)\
+             /icmp(type=na,flags=SO,target=fd00::1,lladdr=02:00:00:00:00:01)",
+        );
+        assert_eq!(b[14 + 40 + 4], 0x60);
+        assert_eq!(
+            d.info,
+            "Neighbor advertisement fd00::1 is at 02:00:00:00:00:01"
+        );
+        let flags = d
+            .layer("ICMPv6")
+            .unwrap()
+            .fields
+            .iter()
+            .find(|f| f.name == "Flags");
+        assert_eq!(flags.unwrap().value, "solicited, override");
+        let e = "eth/ipv4/icmp(target=fd00::1)"
+            .parse::<PacketSpec>()
+            .unwrap()
+            .build();
+        assert!(e.unwrap_err().0.contains("neighbor"));
     }
 }

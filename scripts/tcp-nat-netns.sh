@@ -20,6 +20,12 @@
 # echo on port 7, weighted 3:1:1, from the ten clients to four servers
 # (192.168.20.50-53). It checks that every template completed connections.
 #
+# IPV6=1 does the same over IPv6: the client is fd00:10::100-109, the server
+# fd00:20::50(-53), the router fd00:10::1 and fd00:20::1, and the emulated
+# hosts find the router (and it them) with neighbor discovery instead of ARP.
+# The router masquerades with ip6tables when the kernel has IPv6 NAT, else it
+# only routes.
+#
 # Without VLAN support in the kernel (no 8021q module), or with NO_VLAN=1, the
 # client and the server get a link each instead of sharing a trunk:
 #   c0 --- rc 192.168.10.1/24 (router) rs 192.168.20.1/24 --- s0
@@ -57,6 +63,24 @@ r ip link set lo up
 r sysctl -qw net.ipv4.ip_forward=1
 quiet_v6() { sysctl -qw "net.ipv6.conf.$1.disable_ipv6=1" 2>/dev/null || true; }
 
+if [ "${IPV6:-}" = 1 ]; then
+    if ! [ -d /proc/sys/net/ipv6 ]; then
+        echo "IPV6=1, but this kernel has IPv6 disabled (ipv6.disable=1?)" >&2
+        exit 2
+    fi
+    r sysctl -qw net.ipv6.conf.all.forwarding=1
+    net() { echo "fd00:$1::"; }
+    plen=64
+    ipt() { r ip6tables "$@"; }
+    # No duplicate address detection: the addresses work at once.
+    addr() { r ip -6 addr add "$1" dev "$2" nodad; }
+else
+    net() { echo "192.168.$1."; }
+    plen=24
+    ipt() { r iptables "$@"; }
+    addr() { r ip addr add "$1" dev "$2"; }
+fi
+
 vlan=yes
 if [ "${NO_VLAN:-}" = 1 ]; then
     vlan=no
@@ -76,8 +100,8 @@ if [ $vlan = yes ]; then
     r ip link set rt up
     r ip link add link rt name rt.10 type vlan id 10
     r ip link add link rt name rt.20 type vlan id 20
-    r ip addr add 192.168.10.1/24 dev rt.10
-    r ip addr add 192.168.20.1/24 dev rt.20
+    addr "$(net 10)1/$plen" rt.10
+    addr "$(net 20)1/$plen" rt.20
     r ip link set rt.10 up
     r ip link set rt.20 up
     out=rt.20
@@ -88,18 +112,22 @@ else
         ip link set r$n netns $NS
         quiet_v6 ${n}0
         ip link set ${n}0 up
-        r ip addr add 192.168.$net.1/24 dev r$n
+        addr "$(net $net)1/$plen" r$n
         r ip link set r$n up
     done
     out=rs
 fi
-r iptables -t nat -A POSTROUTING -o $out -j MASQUERADE
+nat=yes
+if ! ipt -t nat -A POSTROUTING -o $out -j MASQUERADE 2>/dev/null; then
+    echo "no NAT for this IP version in the kernel: the router only routes"
+    nat=no
+fi
 if [ -n "${LOSS:-}" ]; then
-    r iptables -A FORWARD -m statistic --mode random --probability "$LOSS" -j DROP
+    ipt -A FORWARD -m statistic --mode random --probability "$LOSS" -j DROP
 fi
 # Drop what conntrack thinks is not part of a valid connection, as strict
 # firewalls do: a stateless replay of a TCP session would not get through.
-r iptables -A FORWARD -m conntrack --ctstate INVALID -j DROP
+ipt -A FORWARD -m conntrack --ctstate INVALID -j DROP
 
 # The addresses are given here rather than taken from examples/lab-tcp.toml,
 # so editing that profile for a real lab does not break this script.
@@ -108,8 +136,8 @@ if [ $vlan = yes ]; then
 else
     set -- --client-iface c0 --server-iface s0 "$@"
 fi
-hosts="--client-ip 192.168.10.100/24 --client-ips 10 --client-gw 192.168.10.1
-       --server-ip 192.168.20.50/24 --server-gw 192.168.20.1"
+hosts="--client-ip $(net 10)100/$plen --client-ips 10 --client-gw $(net 10)1
+       --server-ip $(net 20)50/$plen --server-gw $(net 20)1"
 if [ "${MIX:-}" = 1 ]; then
     examples=$(cd "$(dirname "$0")/../examples" && pwd)
     profile=$(mktemp /tmp/ferotrx-mix.XXXXXX)
@@ -158,7 +186,8 @@ EOT
         done
     done
     # The router must have reached all four servers.
-    servers=$(r ip neigh show | grep -c '^192\.168\.20\.5[0-3] .*lladdr')
+    servers=$(r ip neigh show | awk '/lladdr/ {print $1}' |
+        grep -Fxc -e "$(net 20)50" -e "$(net 20)51" -e "$(net 20)52" -e "$(net 20)53" || true)
     echo "router knows $servers of the 4 servers"
     if [ "$servers" -ne 4 ]; then
         echo "FAIL: the clients did not connect to all four servers" >&2
@@ -172,7 +201,12 @@ else
     status=$?
 fi
 
+if [ "${IPV6:-}" = 1 ]; then
+    # The router found the client addresses it answered by neighbor discovery.
+    echo "router's IPv6 neighbors:"
+    r ip -6 neigh show | grep -v '^fe80' || true
+fi
 echo "router: connections masqueraded, and packets dropped:"
-r iptables -t nat -L POSTROUTING -v -n | sed -n '3p'
-r iptables -L FORWARD -v -n | sed -n '3,$p'
+[ $nat = no ] || ipt -t nat -L POSTROUTING -v -n | sed -n '3p'
+ipt -L FORWARD -v -n | sed -n '3,$p'
 exit $status

@@ -98,6 +98,17 @@ jobs:
           sudo MIX=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
           sudo MIX=1 NO_VLAN=1 LOSS=0.03 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
 
+      # The same over IPv6: neighbor discovery between the router and the
+      # emulated hosts instead of ARP, one session on the trunk, then the
+      # template mix with 3% loss.
+      - name: Stateful TCP over IPv6 through a router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo modprobe 8021q || true
+          sudo IPV6=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx -n 300 --cps 100
+          sudo IPV6=1 MIX=1 NO_VLAN=1 LOSS=0.03 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
+
       # Loss and latency through a router in a network namespace: routing and
       # masquerading, a 5 ms delay (netem), then 3% packet loss on top.
       - name: Loss and latency through a router (Linux)
@@ -107,6 +118,7 @@ jobs:
           sudo modprobe sch_netem || true
           sudo scripts/latency-netns.sh ./target/debug/ferotrx
           sudo LOSS=0.03 scripts/latency-netns.sh ./target/debug/ferotrx
+          sudo IPV6=1 scripts/latency-netns.sh ./target/debug/ferotrx
 
   # DPDK is an optional feature: build it against Ubuntu's DPDK and send
   # through DPDK's af_packet driver on a veth pair, without hugepages.
