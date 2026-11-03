@@ -50,7 +50,10 @@ pub fn start_tcp_with(
         [one] => one.program.to_string(),
         many => many
             .iter()
-            .map(|t| format!("{} (weight {}): {}", t.name, t.weight, t.program))
+            .map(|t| match t.cps {
+                Some(cps) => format!("{} ({cps} cps): {}", t.name, t.program),
+                None => format!("{} (weight {}): {}", t.name, t.weight, t.program),
+            })
             .collect::<Vec<_>>()
             .join("; "),
     };

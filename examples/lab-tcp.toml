@@ -49,5 +49,15 @@ vlan = 20
 # connect = "192.168.20.50:80"
 
 [tcp]
-rto = "250ms"        # first retransmission timeout
+rto = "250ms"        # retransmission timeout until the round-trip time is known
 verify = true        # check every byte received against the capture
+# The defaults of the rest (see docs/tcp-engine.md):
+# min_rto = "200ms"
+# syn_retries = 6
+# max_retries = 8
+# idle_timeout = "30s"
+# send_window = "4M"      # most bytes in flight per connection
+# receive_window = "4M"   # above 64K needs window scaling
+# window_scaling = true
+# timestamps = true       # RTT from every ACK, and PAWS
+# sack = true

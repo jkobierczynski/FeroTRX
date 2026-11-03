@@ -9,8 +9,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use ferotrx_core::{
-    parse_connect_addr, parse_duration, parse_port_range, Capture, MacAddr, TcpHostSpec,
-    TcpProfile, TcpProgram, TcpRole, TcpRunConfig, TcpSource, TcpStats, TcpTemplateSpec,
+    parse_connect_addr, parse_duration, parse_port_range, parse_size, Capture, MacAddr,
+    TcpHostSpec, TcpProfile, TcpProgram, TcpRole, TcpRunConfig, TcpSource, TcpStats,
+    TcpTemplateSpec,
 };
 use ferotrx_ctl::protocol::{RunState, TcpCounters, TcpRunInfo, TcpTemplateCounters};
 
@@ -81,9 +82,47 @@ pub struct TcpArgs {
     #[arg(long)]
     mss: Option<u16>,
 
-    /// First retransmission timeout, e.g. 250ms (doubles on each retry).
+    /// Retransmission timeout until the round-trip time is measured, e.g.
+    /// 250ms (doubles on each retry).
     #[arg(long, value_parser = parse_duration)]
     rto: Option<Duration>,
+
+    /// Shortest retransmission timeout the round-trip time can give (default 200ms).
+    #[arg(long, value_parser = parse_duration)]
+    min_rto: Option<Duration>,
+
+    /// Retransmissions of data before a connection is reset (default 8).
+    #[arg(long, value_name = "N")]
+    max_retries: Option<u32>,
+
+    /// Retransmissions of a SYN or SYN-ACK before giving up (default 6).
+    #[arg(long, value_name = "N")]
+    syn_retries: Option<u32>,
+
+    /// Reset a connection with nothing received for this long (default 30s).
+    #[arg(long, value_parser = parse_duration)]
+    idle_timeout: Option<Duration>,
+
+    /// Most bytes in flight per connection, e.g. 4M (default 4M).
+    #[arg(long, value_name = "BYTES", value_parser = parse_window)]
+    send_window: Option<u32>,
+
+    /// The receive window announced, e.g. 64K or 4M (default 4M). Above 64K
+    /// needs window scaling.
+    #[arg(long, value_name = "BYTES", value_parser = parse_window)]
+    receive_window: Option<u32>,
+
+    /// Do not offer window scaling (RFC 7323): windows stay at most 64 KB.
+    #[arg(long)]
+    no_window_scaling: bool,
+
+    /// Do not offer timestamps (RFC 7323), and so no PAWS.
+    #[arg(long)]
+    no_timestamps: bool,
+
+    /// Do not offer selective acknowledgements (RFC 2018).
+    #[arg(long)]
+    no_sack: bool,
 
     /// Do not check the bytes received against the capture.
     #[arg(long)]
@@ -144,6 +183,11 @@ struct HostArgs {
     /// clients connect to each in turn.
     #[arg(long, value_name = "N")]
     server_ips: Option<u32>,
+}
+
+fn parse_window(s: &str) -> std::result::Result<u32, String> {
+    let n = parse_size(s).map_err(|e| e.to_string())?;
+    u32::try_from(n).map_err(|_| format!("{s} is too large"))
 }
 
 fn parse_connect(s: &str) -> std::result::Result<SocketAddr, String> {
@@ -301,7 +345,23 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
         profile.source_ports = parse_port_range(r)?;
     }
     set(&mut profile.options.mss, args.mss);
-    set(&mut profile.options.rto, args.rto);
+    let o = &mut profile.options;
+    set(&mut o.rto, args.rto);
+    set(&mut o.min_rto, args.min_rto);
+    set(&mut o.max_retries, args.max_retries);
+    set(&mut o.syn_retries, args.syn_retries);
+    set(&mut o.idle_timeout, args.idle_timeout);
+    set(&mut o.send_window, args.send_window);
+    set(&mut o.receive_window, args.receive_window);
+    if args.no_window_scaling {
+        o.window_scaling = false;
+    }
+    if args.no_timestamps {
+        o.timestamps = false;
+    }
+    if args.no_sack {
+        o.sack = false;
+    }
     if args.no_verify {
         profile.options.verify = false;
     }
@@ -313,7 +373,7 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
         let many = profile.templates.len() > 1;
         for (i, t) in profile.templates.iter().enumerate() {
             if many {
-                println!("template {} (weight {}):", t.name(i), t.weight);
+                println!("{}:", template_line(t, i));
             }
             show(&t.program()?);
         }
@@ -341,7 +401,7 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
     if !args.quiet {
         if profile.templates.len() > 1 {
             for (i, t) in profile.templates.iter().enumerate() {
-                eprintln!("template {} (weight {})", t.name(i), t.weight);
+                eprintln!("{}", template_line(t, i));
             }
         }
         eprintln!("session: {}", started.program);
@@ -392,6 +452,21 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
         bail!("{failed} connections failed, {mismatched} carried other bytes than the capture");
     }
     Ok(())
+}
+
+/// A template, its weight or own rate, and its own limits.
+fn template_line(t: &TcpTemplateSpec, i: usize) -> String {
+    let mut line = match t.cps {
+        Some(cps) => format!("template {} ({cps} per second of its own)", t.name(i)),
+        None => format!("template {} (weight {})", t.name(i), t.weight),
+    };
+    if let Some(n) = t.connections {
+        line.push_str(&format!(", {n} connections"));
+    }
+    if let Some(n) = t.concurrency {
+        line.push_str(&format!(", at most {n} open"));
+    }
+    line
 }
 
 fn progress_line(s: &TcpStats) -> String {
@@ -472,6 +547,18 @@ fn side_line(c: &TcpCounters) -> String {
         "; {} bytes sent, {} received, {} retransmits",
         c.payload_tx, c.payload_rx, c.retransmits
     ));
+    if c.timeouts > 0 {
+        line.push_str(&format!(" ({} after timeouts)", c.timeouts));
+    }
+    if c.paws_dropped > 0 {
+        line.push_str(&format!(
+            ", {} old duplicates dropped (PAWS)",
+            c.paws_dropped
+        ));
+    }
+    if c.max_in_flight > 0 {
+        line.push_str(&format!("; at most {} bytes in flight", c.max_in_flight));
+    }
     line
 }
 

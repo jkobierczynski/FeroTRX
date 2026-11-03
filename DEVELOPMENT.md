@@ -32,9 +32,11 @@ the same library.
 | M9, receive side | Loss, duplicates, reordering, latency (min/avg/p50/p99/p99.9/max) and RFC 3550 jitter per stream from a 28-byte signature; `--rx`, `ferotrx rx`, `--report` JSON, `rx.*` control methods; `scripts/latency-netns.sh` | #11 | 0.2.0 |
 | M10, multi-flow TCP templates | `[[template]]` tables with weights (smooth weighted round robin), per-template ports, server address ranges, per-template counters | #12 | 0.3.0 |
 | M11, IPv6 everywhere | Stateful TCP over IPv6 with neighbor discovery, IPv6 extension headers and ND in the packet builder, `IPV6=1` for both lab scripts | #13 | 0.4.0 |
+| M12, TCP maturity | Window scaling, timestamps and PAWS, SACK with out-of-order receive and hole-only retransmits, RTT-based timeouts (RFC 6298), NewReno/SACK recovery; windows, timeouts and SYN retries in profiles and on the command line; per-template `cps`, `connections`, `concurrency`; [docs/tcp-engine.md](docs/tcp-engine.md); simulated long-fat-pipe and impairment tests, `BDP=1` and `NETEM=` in the lab script | #15 | 0.5.0 |
 
 The lab scripts (`scripts/*.sh`) build a NAT router in network namespaces
-and run in CI, over IPv4 and IPv6, with and without loss.
+and run in CI, over IPv4 and IPv6, with and without loss, and for TCP also
+on a long fat pipe and with reordering and duplicates (netem).
 
 ## Still to do
 
@@ -44,7 +46,7 @@ checked against 0.4.0. Each issue has the full checklist.
 
 **P0: correctness and security**
 
-- [ ] **M12, TCP maturity (0.5.0)**, [#15](https://github.com/jkobierczynski/FeroTRX/issues/15):
+- [x] **M12, TCP maturity (0.5.0)**, [#15](https://github.com/jkobierczynski/FeroTRX/issues/15):
       window scaling, timestamps/PAWS, SACK; windows and timeouts in profiles;
       per-template rates; large bandwidth-delay and impairment tests
 - [ ] **M13, secure remote control (0.6.0)**, [#16](https://github.com/jkobierczynski/FeroTRX/issues/16):

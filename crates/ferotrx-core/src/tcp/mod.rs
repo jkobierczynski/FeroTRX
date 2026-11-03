@@ -13,7 +13,10 @@
 //! * [`TcpEngine`] emulates the client and server hosts. It answers ARP and
 //!   ping, opens connections at a set rate with real handshakes, tracks
 //!   sequence and acknowledgement numbers, retransmits lost segments, plays
-//!   the program and closes with FINs. A router in between can rewrite
+//!   the program and closes with FINs. It negotiates window scaling,
+//!   timestamps (with PAWS) and SACK, measures round-trip times for its
+//!   retransmission timeout, and does Reno/NewReno congestion control with
+//!   SACK-based recovery; `docs/tcp-engine.md` has the details. A router in between can rewrite
 //!   addresses and ports as it likes: each end only talks to what it sees.
 //! * [`run_tcp`] and [`TcpJob`] run the engine on [`PacketPort`]s, ports that
 //!   send and receive. `ferotrx-io` opens them on interfaces.
@@ -34,8 +37,8 @@ pub use engine::{
 };
 #[cfg(feature = "profile")]
 pub use profile::{
-    parse_connect_addr, parse_ip_prefix, parse_port_range, TcpHostSpec, TcpProfile, TcpSource,
-    TcpTemplateSpec,
+    parse_connect_addr, parse_ip_prefix, parse_port_range, parse_size, TcpHostSpec, TcpProfile,
+    TcpSource, TcpTemplateSpec,
 };
 pub use program::{TcpFlow, TcpMessage, TcpProgram, TcpRole};
 pub use run::{memory_ports, run_tcp, MemoryPort, PacketPort, TcpJob, TcpRunConfig};

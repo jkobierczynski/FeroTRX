@@ -42,9 +42,20 @@ use crate::{parse_duration, Capture, Error, MacAddr, Result};
 ///
 /// # connect = "192.168.20.50:80"  # where the client connects (default: the server)
 ///
-/// [tcp]                       # optional
+/// [tcp]                       # optional; the defaults are shown
 /// mss = 1460
-/// rto = "250ms"
+/// rto = "250ms"               # until the round-trip time is measured
+/// min_rto = "200ms"
+/// max_retries = 8             # retransmissions of data before giving up
+/// syn_retries = 6             # retransmissions of a SYN or SYN-ACK
+/// idle_timeout = "30s"        # reset a connection with nothing received this long
+/// time_wait = "4s"
+/// arp_timeout = "5s"
+/// send_window = "4M"          # most bytes in flight per connection
+/// receive_window = "4M"       # the window announced; above 64K needs window scaling
+/// window_scaling = true       # RFC 7323
+/// timestamps = true           # RFC 7323: RTT from every ACK, and PAWS
+/// sack = true                 # RFC 2018
 /// verify = true
 /// ```
 ///
@@ -56,7 +67,10 @@ use crate::{parse_duration, Capture, Error, MacAddr, Result};
 /// `pcap` or `[[message]]`, like TRex ASTF templates. `cps`, `connections` and
 /// `concurrency` are for all templates together; each new connection gets a
 /// template by `weight`. The server tells templates apart by port, so each
-/// needs its own.
+/// needs its own. A template can also have its own `cps`: then it opens
+/// connections at that rate on its own instead of sharing the top-level
+/// `cps` by weight. Its own `connections` and `concurrency` limit it further;
+/// the top-level ones still hold for all templates together.
 ///
 /// ```toml
 /// cps = 100
@@ -69,6 +83,14 @@ use crate::{parse_duration, Capture, Error, MacAddr, Result};
 /// weight = 3                  # 3 of every 4 connections
 /// # port = 80                 # the server's port (default: the capture's)
 /// # connect = "192.168.20.1:8080"  # where clients connect (default: the servers)
+///
+/// [[template]]
+/// name = "bulk"
+/// pcap = "download.pcap"
+/// port = 8080
+/// cps = 2                     # its own rate, besides the 100 per second above
+/// connections = 50            # at most 50 of these
+/// concurrency = 4             # at most 4 open at once
 ///
 /// [[template]]
 /// name = "echo"
@@ -127,6 +149,12 @@ pub struct TcpTemplateSpec {
     pub connect: Option<SocketAddr>,
     /// Server addresses from `connect`'s, in turn; default: the profile's.
     pub connect_ips: Option<u32>,
+    /// The template's own rate of new connections, apart from the profile's `cps`.
+    pub cps: Option<f64>,
+    /// Most connections of this template (default: no limit of its own).
+    pub connections: Option<u64>,
+    /// Most connections of this template open at once (default: no limit of its own).
+    pub concurrency: Option<usize>,
 }
 
 impl TcpTemplateSpec {
@@ -139,6 +167,9 @@ impl TcpTemplateSpec {
             port: None,
             connect: None,
             connect_ips: None,
+            cps: None,
+            connections: None,
+            concurrency: None,
         }
     }
 
@@ -362,6 +393,9 @@ struct RawTemplate {
     weight: Option<u32>,
     connect: Option<String>,
     connect_ips: Option<u32>,
+    cps: Option<f64>,
+    connections: Option<u64>,
+    concurrency: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -390,12 +424,66 @@ struct RawHost {
 struct RawOptions {
     mss: Option<u16>,
     rto: Option<String>,
+    min_rto: Option<String>,
     max_retries: Option<u32>,
+    syn_retries: Option<u32>,
     time_wait: Option<String>,
     idle_timeout: Option<String>,
     arp_timeout: Option<String>,
+    send_window: Option<RawSize>,
+    receive_window: Option<RawSize>,
+    window_scaling: Option<bool>,
+    timestamps: Option<bool>,
+    sack: Option<bool>,
     verify: Option<bool>,
     seed: Option<u64>,
+}
+
+/// A size in bytes: a number, or text such as `"64K"` or `"4M"`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawSize {
+    Bytes(u64),
+    Text(String),
+}
+
+impl RawSize {
+    fn bytes(self, what: &str) -> Result<u32> {
+        let n = match self {
+            RawSize::Bytes(n) => n,
+            RawSize::Text(t) => parse_size(&t)?,
+        };
+        u32::try_from(n).map_err(|_| Error::Profile(format!("{what} {n} is too large")))
+    }
+}
+
+/// Parses a size in bytes: `65535`, or with a suffix `K`, `M` or `G` (powers
+/// of 1024; `KB`, `KiB` and lower case work too), e.g. `64K` or `4M`.
+pub fn parse_size(s: &str) -> Result<u64> {
+    let bad = || Error::InvalidSpec(format!("invalid size '{s}' (use e.g. 65535, 64K or 4M)"));
+    let t = s.trim();
+    let digits = t
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(t.len());
+    let (num, unit) = t.split_at(digits);
+    let unit = unit.trim().to_ascii_lowercase();
+    let unit = unit
+        .strip_suffix("ib")
+        .or_else(|| unit.strip_suffix('b'))
+        .unwrap_or(&unit);
+    let mult: u64 = match unit {
+        "" => 1,
+        "k" => 1 << 10,
+        "m" => 1 << 20,
+        "g" => 1 << 30,
+        _ => return Err(bad()),
+    };
+    let v: f64 = num.parse().map_err(|_| bad())?;
+    let n = v * mult as f64;
+    if !(n.is_finite() && n >= 0.0 && n < u64::MAX as f64) {
+        return Err(bad());
+    }
+    Ok(n.round() as u64)
 }
 
 fn role(s: &str) -> Result<TcpRole> {
@@ -580,6 +668,9 @@ impl TcpProfile {
                         .transpose()
                         .map_err(ctx)?,
                     connect_ips: t.connect_ips,
+                    cps: t.cps,
+                    connections: t.connections,
+                    concurrency: t.concurrency,
                 });
             }
             out
@@ -618,10 +709,21 @@ impl TcpProfile {
             p.options = TcpOptions {
                 mss: o.mss.unwrap_or(defaults.mss),
                 rto: d(o.rto, defaults.rto)?,
+                min_rto: d(o.min_rto, defaults.min_rto)?,
                 max_retries: o.max_retries.unwrap_or(defaults.max_retries),
+                syn_retries: o.syn_retries.unwrap_or(defaults.syn_retries),
                 time_wait: d(o.time_wait, defaults.time_wait)?,
                 idle_timeout: d(o.idle_timeout, defaults.idle_timeout)?,
                 arp_timeout: d(o.arp_timeout, defaults.arp_timeout)?,
+                send_window: o
+                    .send_window
+                    .map_or(Ok(defaults.send_window), |w| w.bytes("send_window"))?,
+                receive_window: o
+                    .receive_window
+                    .map_or(Ok(defaults.receive_window), |w| w.bytes("receive_window"))?,
+                window_scaling: o.window_scaling.unwrap_or(defaults.window_scaling),
+                timestamps: o.timestamps.unwrap_or(defaults.timestamps),
+                sack: o.sack.unwrap_or(defaults.sack),
                 verify: o.verify.unwrap_or(defaults.verify),
                 seed: o.seed.unwrap_or(defaults.seed),
             };
@@ -736,6 +838,9 @@ impl TcpProfile {
                 connect_ips: ips,
                 listen_port: listen,
                 weight: t.weight,
+                cps: t.cps,
+                connections: t.connections.unwrap_or(0),
+                concurrency: t.concurrency.unwrap_or(0),
             });
         }
         let server = match &self.server {
@@ -875,6 +980,92 @@ mod tests {
         assert_eq!(parse_connect_addr("fd00::1").unwrap().port(), 0);
         assert!(parse_ip_prefix("fd00::1/129").is_err());
         assert!(parse_ip_prefix("10.0.0.1/33").is_err());
+    }
+
+    #[test]
+    fn parses_tcp_options_and_template_rates() {
+        let p = TcpProfile::from_toml(
+            r#"
+            cps = 10
+            connections = 100
+            [[template]]
+            name = "web"
+            port = 80
+            [[template.message]]
+            from = "client"
+            text = "GET"
+            [[template]]
+            name = "bulk"
+            port = 8080
+            cps = 2.5
+            connections = 20
+            concurrency = 3
+            [[template.message]]
+            from = "server"
+            text = "data"
+            [client]
+            ip = "10.0.0.1"
+            [server]
+            ip = "10.0.0.2"
+            [tcp]
+            rto = "1s"
+            min_rto = "50ms"
+            syn_retries = 2
+            max_retries = 4
+            idle_timeout = "2m"
+            send_window = "8M"
+            receive_window = 65535
+            window_scaling = false
+            timestamps = false
+            sack = false
+            "#,
+            Path::new("."),
+        )
+        .unwrap();
+        let o = &p.options;
+        assert_eq!(
+            (
+                o.rto,
+                o.min_rto,
+                o.syn_retries,
+                o.max_retries,
+                o.idle_timeout
+            ),
+            (
+                Duration::from_secs(1),
+                Duration::from_millis(50),
+                2,
+                4,
+                Duration::from_secs(120)
+            )
+        );
+        assert_eq!((o.send_window, o.receive_window), (8 << 20, 65535));
+        assert!(!o.window_scaling && !o.timestamps && !o.sack && o.verify);
+        let programs = p
+            .programs()
+            .unwrap()
+            .into_iter()
+            .map(Arc::new)
+            .collect::<Vec<_>>();
+        let cfg = p.config(&programs, &["eth0".into()], Some("eth0")).unwrap();
+        let t = &cfg.templates;
+        assert_eq!((t[0].cps, t[0].connections, t[0].concurrency), (None, 0, 0));
+        assert_eq!(
+            (t[1].cps, t[1].connections, t[1].concurrency),
+            (Some(2.5), 20, 3)
+        );
+
+        assert_eq!(parse_size("64K").unwrap(), 65536);
+        assert_eq!(parse_size("4MiB").unwrap(), 4 << 20);
+        assert_eq!(parse_size("1.5m").unwrap(), 3 << 19);
+        assert_eq!(parse_size(" 1000 ").unwrap(), 1000);
+        assert!(parse_size("4X").is_err());
+        assert!(parse_size("").is_err());
+        let err = TcpProfile::from_toml(
+            "[client]\nip = \"10.0.0.1\"\nport = 1\n[tcp]\nsend_window = \"8G\"",
+            Path::new("."),
+        );
+        assert!(err.is_err());
     }
 
     #[test]
