@@ -135,9 +135,12 @@ check "two flows with signatures, voice and bulk" \
 check "every flow sent and received packets" '[.flows[] | .tx > 1000 and .rx > 1000] | all'
 check "background traffic arrived without a signature" '.untagged > 100'
 check "no duplicates" '[.flows[] | .duplicates == 0] | all'
-# veth delivers on the CPU the sender ran on, so a sender thread that moves
-# between CPUs can reorder a packet now and then; allow 0.1%.
-check "(almost) nothing out of order" '[.flows[] | .out_of_order <= .rx / 1000] | all'
+# Reordering is not something the router was told to do, but the kernel does
+# some on a busy machine or VM: veth queues a packet on the CPU the sender ran
+# on, and packets of different connections (bulk varies its source port) are
+# processed on different CPUs. So it is shown, and only a lot of it fails.
+jq -r '.flows[] | "\(.name): \(.out_of_order) of \(.rx) packets out of order"' "$WORK/report.json"
+check "little reordering (under 5%)" '[.flows[] | .out_of_order <= .rx / 20] | all'
 if [ "$LOSS" = 0 ]; then
     check "no loss" '[.flows[] | .lost == 0] | all'
 else
