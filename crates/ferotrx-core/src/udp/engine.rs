@@ -414,7 +414,8 @@ struct Session {
     /// Client: when the request now waiting for an answer first went out.
     asked_at: Option<Duration>,
     last_rx: Duration,
-    /// Server: the last request received.
+    /// The last datagram from the other end that the program took: the
+    /// server's last request, the client's last answer.
     last_req: Vec<u8>,
     /// The transaction's number, which picks the DNS query.
     txn: u64,
@@ -619,7 +620,9 @@ impl Session {
         });
         if self.role == UdpRole::Server && self.step > 0 && data == self.last_req.as_slice() {
             // A request again: our answer was lost, or is still held back.
-            if !self.waiting(cx) && self.hold.is_none() && !self.last_sent.is_empty() {
+            // `last_sent` is only set once we answered this request, so the
+            // answer goes again also while we already wait for the next one.
+            if self.hold.is_none() && !self.last_sent.is_empty() {
                 let again = self.last_sent.clone();
                 cx.send(self, &again);
                 cx.add(self.role, self.tpl, |s| s.retries += 1);
@@ -642,6 +645,14 @@ impl Session {
                 cx.add(self.role, self.tpl, |s| s.unmatched += 1);
                 Fate::Keep
             }
+            Fit::Yes { ok: false, .. }
+                if self.role == UdpRole::Client && self.step > 0 && data == self.last_req =>
+            {
+                // The previous answer again: the server answered a request
+                // we asked again whose first answer was only late.
+                cx.add(self.role, self.tpl, |s| s.duplicates += 1);
+                Fate::Keep
+            }
             Fit::Yes { ok, error } => {
                 self.mismatched |= !ok;
                 self.error |= error;
@@ -651,8 +662,11 @@ impl Session {
                     let rt = now.saturating_sub(at);
                     cx.add(self.role, self.tpl, |s| s.response_time.record(Some(rt)));
                 }
+                self.last_req = data.to_vec();
                 if self.role == UdpRole::Server {
-                    self.last_req = data.to_vec();
+                    // Not answered yet: a repeat of it is not answered with
+                    // an older answer.
+                    self.last_sent.clear();
                 }
                 self.step += 1;
                 self.advance(cx, now)

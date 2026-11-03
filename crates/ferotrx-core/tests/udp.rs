@@ -39,6 +39,10 @@ struct UdpNat {
     drop_every: u64,
     seen: u64,
     dropped: u64,
+    /// Drop datagrams at random instead, one in this many (0: off); random,
+    /// so that retries cannot keep hitting the drop pattern.
+    random_drop: u64,
+    rng: u64,
     /// Hold datagrams from VLAN 20 back this long.
     delay: Duration,
     held: VecDeque<(Duration, Vec<u8>)>,
@@ -53,6 +57,8 @@ impl UdpNat {
             drop_every,
             seen: 0,
             dropped: 0,
+            random_drop: 0,
+            rng: 0x9e37_79b9_7f4a_7c15,
             delay: Duration::ZERO,
             held: VecDeque::new(),
         }
@@ -90,6 +96,15 @@ impl UdpNat {
             return vec![];
         }
         self.seen += 1;
+        if self.random_drop > 0 {
+            self.rng ^= self.rng << 13;
+            self.rng ^= self.rng >> 7;
+            self.rng ^= self.rng << 17;
+            if self.rng.is_multiple_of(self.random_drop) {
+                self.dropped += 1;
+                return vec![];
+            }
+        }
         if self.drop_every > 0 && self.seen.is_multiple_of(self.drop_every) {
             self.dropped += 1;
             return vec![];
@@ -498,6 +513,62 @@ fn rates_concurrency_and_think_time() {
         "{:?}",
         rt.min()
     );
+}
+
+#[test]
+fn multi_round_sessions_survive_loss_and_late_answers() {
+    // Two rounds: a lost or late first answer is asked for again while the
+    // server already waits for the second request.
+    let program = Arc::new(UdpProgram::new(
+        7,
+        vec![
+            UdpMessage::new(UdpRole::Client, "ping 1"),
+            UdpMessage::new(UdpRole::Server, "pong 1"),
+            UdpMessage::new(UdpRole::Client, "ping 2").with_delay(Duration::from_millis(20)),
+            UdpMessage::new(UdpRole::Server, "pong 2"),
+        ],
+    ));
+    for (drop, delay) in [(10, 0), (0, 150), (10, 120)] {
+        let options = UdpOptions {
+            timeout: Duration::from_millis(100),
+            retries: 8,
+            keep_timing: true,
+            ..Default::default()
+        };
+        let mut c = engine(
+            vec![tpl(UdpApp::Replay(program.clone()), 7)],
+            Some(client(100, 500.0)),
+            false,
+            options.clone(),
+        );
+        let mut s = engine(
+            vec![tpl(UdpApp::Replay(program.clone()), 7)],
+            None,
+            true,
+            options,
+        );
+        let mut router = UdpNat::new(0);
+        router.random_drop = drop;
+        router.delay = Duration::from_millis(delay);
+        simulate(&mut [&mut c, &mut s], &mut router, Duration::from_secs(60));
+        let (cs, ss) = (&c.stats().client, &s.stats().server);
+        assert_eq!(
+            (cs.sent, cs.answered, cs.timed_out, cs.mismatched),
+            (100, 100, 0, 0),
+            "drop 1 in {drop}, delay {delay}: {cs:?}"
+        );
+        if delay == 0 {
+            assert_eq!(cs.unmatched, 0, "{cs:?}");
+        } else {
+            // Late answers to the first try of a round the client already
+            // finished: duplicates while the session is open, unmatched
+            // after it ended.
+            assert!(cs.duplicates > 0, "{cs:?}");
+        }
+        assert!(cs.retries > 0, "{cs:?}");
+        assert_eq!(ss.answered, 100, "{ss:?}");
+        assert_eq!(ss.mismatched, 0, "{ss:?}");
+    }
 }
 
 #[test]
