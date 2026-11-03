@@ -114,8 +114,8 @@ pub use tcp::{
 };
 #[cfg(feature = "profile")]
 pub use tcp::{
-    parse_connect_addr, parse_ip_prefix, parse_port_range, TcpHostSpec, TcpProfile, TcpSource,
-    TcpTemplateSpec,
+    parse_connect_addr, parse_ip_prefix, parse_port_range, parse_size, TcpHostSpec, TcpProfile,
+    TcpSource, TcpTemplateSpec,
 };
 pub use transform::{
     Field, FixChecksums, IpRewrite, MacRewrite, PortRewrite, Rewrite, Transform, VlanPop, VlanPush,

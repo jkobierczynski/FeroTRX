@@ -603,7 +603,7 @@ pub(crate) mod tests {
             ack,
             flags,
             window: 65535,
-            mss: None,
+            opts: Default::default(),
         };
         let r1 = resp1.len() as u32;
         let r2 = resp2.len() as u32;

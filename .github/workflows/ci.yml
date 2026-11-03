@@ -109,6 +109,22 @@ jobs:
           sudo IPV6=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx -n 300 --cps 100
           sudo IPV6=1 MIX=1 NO_VLAN=1 LOSS=0.03 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
 
+      # TCP on a long fat pipe (50 Mbit/s, 80 ms round trip, netem on the
+      # router): window scaling must keep more than 64 KB in flight. Then
+      # reordering, duplicates and loss both ways, with the template mix.
+      # IPv4 and IPv6.
+      - name: Stateful TCP on long and impaired paths (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo modprobe 8021q || true
+          sudo modprobe sch_netem || true
+          sudo BDP=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
+          sudo BDP=1 IPV6=1 NO_VLAN=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
+          impair="delay 5ms reorder 10% 50% duplicate 2% loss 2%"
+          sudo NETEM="$impair" MIX=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
+          sudo NETEM="$impair" IPV6=1 MIX=1 NO_VLAN=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
+
       # Loss and latency through a router in a network namespace: routing and
       # masquerading, a 5 ms delay (netem), then 3% packet loss on top.
       - name: Loss and latency through a router (Linux)

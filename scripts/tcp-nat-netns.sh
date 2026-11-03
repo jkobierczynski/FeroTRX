@@ -20,6 +20,14 @@
 # echo on port 7, weighted 3:1:1, from the ten clients to four servers
 # (192.168.20.50-53). It checks that every template completed connections.
 #
+# NETEM="delay 5ms reorder 10% 50% duplicate 2% loss 2%" impairs what the
+# router forwards with netem (tc), both ways: delay, reordering, duplicates,
+# loss, a rate limit. Needs the sch_netem module.
+#
+# BDP=1 plays a 2 MB download over a long fat pipe: 50 Mbit/s and 40 ms each
+# way (netem; NETEM replaces that), 500 KB in flight to fill it. It checks
+# that the server had more than 64 KB in flight, which needs window scaling.
+#
 # IPV6=1 does the same over IPv6: the client is fd00:10::100-109, the server
 # fd00:20::50(-53), the router fd00:10::1 and fd00:20::1, and the emulated
 # hosts find the router (and it them) with neighbor discovery instead of ARP.
@@ -125,6 +133,22 @@ fi
 if [ -n "${LOSS:-}" ]; then
     ipt -A FORWARD -m statistic --mode random --probability "$LOSS" -j DROP
 fi
+if [ "${BDP:-}" = 1 ] && [ -z "${NETEM:-}" ]; then
+    NETEM="delay 40ms rate 50mbit limit 5000"
+fi
+if [ -n "${NETEM:-}" ]; then
+    # The router's ways out: the trunk carries both directions; without
+    # VLANs, one link to each side.
+    if [ $vlan = yes ]; then links=rt; else links="rc rs"; fi
+    for l in $links; do
+        # shellcheck disable=SC2086
+        if ! r tc qdisc add dev $l root netem $NETEM; then
+            echo "cannot add netem on $l (no sch_netem module, or no tc?)" >&2
+            exit 2
+        fi
+    done
+    echo "router impairs what it forwards: netem $NETEM"
+fi
 # Drop what conntrack thinks is not part of a valid connection, as strict
 # firewalls do: a stateless replay of a TCP session would not get through.
 ipt -A FORWARD -m conntrack --ctstate INVALID -j DROP
@@ -194,6 +218,36 @@ EOT
         status=1
     fi
     rm -f "$profile" "$out"
+elif [ "${BDP:-}" = 1 ]; then
+    profile=$(mktemp /tmp/ferotrx-bdp.XXXXXX)
+    out=$(mktemp /tmp/ferotrx-bdp-out.XXXXXX)
+    {
+        printf '%s\n' 'port = 8080'
+        printf '%s\n' 'closer = "server"'
+        printf '%s\n' '[[message]]'
+        printf '%s\n' 'from = "client"'
+        printf '%s\n' 'text = "GET /2MB HTTP/1.1\r\n\r\n"'
+        printf '%s\n' '[[message]]'
+        printf '%s\n' 'from = "server"'
+        printf 'text = "'
+        head -c 2097152 /dev/zero | tr '\0' 'x'
+        printf '%s\n' '"'
+        printf '%s\n' '[client]'
+        printf '%s\n' 'ip = "0.0.0.0"'
+        printf '%s\n' '[server]'
+        printf '%s\n' 'ip = "0.0.0.0"'
+    } >"$profile"
+    # shellcheck disable=SC2086
+    "$BIN" tcp -p "$profile" $hosts -n 3 --cps 1 "$@" >"$out" 2>&1
+    status=$?
+    cat "$out"
+    flight=$(sed -n 's/^  server: .*at most \([0-9]*\) bytes in flight.*/\1/p' "$out")
+    echo "the server had at most ${flight:-?} bytes in flight"
+    if [ -z "$flight" ] || [ "$flight" -le 65535 ]; then
+        echo "FAIL: no more than 64 KB in flight: is window scaling working?" >&2
+        status=1
+    fi
+    rm -f "$profile" "$out"
 else
     # shellcheck disable=SC2086
     "$BIN" tcp examples/http.pcap $hosts \
@@ -205,6 +259,10 @@ if [ "${IPV6:-}" = 1 ]; then
     # The router found the client addresses it answered by neighbor discovery.
     echo "router's IPv6 neighbors:"
     r ip -6 neigh show | grep -v '^fe80' || true
+fi
+if [ -n "${NETEM:-}" ]; then
+    echo "netem on the router:"
+    for l in $links; do r tc -s qdisc show dev $l | sed -n '1,3p'; done
 fi
 echo "router: connections masqueraded, and packets dropped:"
 [ $nat = no ] || ipt -t nat -L POSTROUTING -v -n | sed -n '3p'

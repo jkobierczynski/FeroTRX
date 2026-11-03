@@ -174,8 +174,9 @@ pub(crate) struct Segment<'a> {
     pub ack: u32,
     pub flags: u8,
     pub window: u16,
-    /// The MSS option, on SYNs.
-    pub mss: Option<u16>,
+    /// The options: MSS, window scale and SACK permitted on SYNs,
+    /// timestamps and SACK blocks on any segment.
+    pub opts: TcpOpts,
     pub data: &'a [u8],
 }
 
@@ -210,29 +211,9 @@ pub(crate) fn parse_tcp<'a>(ip: &Ip<'a>, verify: bool) -> Option<Segment<'a>> {
         ack: u32::from_be_bytes([p[8], p[9], p[10], p[11]]),
         flags: p[13],
         window: be16(p, 14)?,
-        mss: parse_mss(&p[20..off]),
+        opts: TcpOpts::parse(&p[20..off]),
         data: &p[off..],
     })
-}
-
-fn parse_mss(mut opts: &[u8]) -> Option<u16> {
-    while let Some(&kind) = opts.first() {
-        match kind {
-            0 => return None,
-            1 => opts = &opts[1..],
-            _ => {
-                let len = usize::from(*opts.get(1)?);
-                if len < 2 || len > opts.len() {
-                    return None;
-                }
-                if kind == 2 && len == 4 {
-                    return be16(opts, 2);
-                }
-                opts = &opts[len..];
-            }
-        }
-    }
-    None
 }
 
 /// Internet checksum of `data`, starting from `sum`.
@@ -363,6 +344,117 @@ fn push_ip(f: &mut Vec<u8>, path: &Path, proto: u8, payload_len: usize, id: u16,
     }
 }
 
+/// Most SACK blocks a segment carries.
+pub(crate) const MAX_SACK_BLOCKS: usize = 4;
+
+/// TCP options of a segment, sent or received.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TcpOpts {
+    /// Maximum segment size (SYNs only).
+    pub mss: Option<u16>,
+    /// Window scale shift count (SYNs only, RFC 7323).
+    pub wscale: Option<u8>,
+    /// SACK permitted (SYNs only, RFC 2018).
+    pub sack_ok: bool,
+    /// Timestamps: (TSval, TSecr) (RFC 7323).
+    pub ts: Option<(u32, u32)>,
+    /// SACK blocks, (left edge, right edge); the first `sack_n` are used.
+    pub sack: [(u32, u32); MAX_SACK_BLOCKS],
+    pub sack_n: usize,
+}
+
+impl TcpOpts {
+    /// The SACK blocks given.
+    pub fn sack_blocks(&self) -> &[(u32, u32)] {
+        &self.sack[..self.sack_n.min(MAX_SACK_BLOCKS)]
+    }
+
+    /// Bytes the options take on the wire, padded to four.
+    pub fn wire_len(&self) -> usize {
+        let mut n = 0;
+        if self.mss.is_some() {
+            n += 4;
+        }
+        if self.ts.is_some() || self.sack_ok {
+            n += if self.ts.is_some() { 12 } else { 4 };
+        }
+        if self.wscale.is_some() {
+            n += 4;
+        }
+        if self.sack_n > 0 {
+            n += 4 + 8 * self.sack_blocks().len();
+        }
+        n
+    }
+
+    /// Writes the options in the order Linux uses: MSS, SACK permitted with
+    /// timestamps, window scale, then SACK blocks. NOPs keep fields aligned.
+    fn write(&self, out: &mut Vec<u8>) {
+        if let Some(mss) = self.mss {
+            out.extend_from_slice(&[2, 4]);
+            out.extend_from_slice(&mss.to_be_bytes());
+        }
+        match (self.sack_ok, self.ts) {
+            (true, Some(_)) => out.extend_from_slice(&[4, 2]),
+            (false, Some(_)) => out.extend_from_slice(&[1, 1]),
+            (true, None) => out.extend_from_slice(&[1, 1, 4, 2]),
+            (false, None) => {}
+        }
+        if let Some((val, ecr)) = self.ts {
+            out.extend_from_slice(&[8, 10]);
+            out.extend_from_slice(&val.to_be_bytes());
+            out.extend_from_slice(&ecr.to_be_bytes());
+        }
+        if let Some(ws) = self.wscale {
+            out.extend_from_slice(&[1, 3, 3, ws]);
+        }
+        let blocks = self.sack_blocks();
+        if !blocks.is_empty() {
+            out.extend_from_slice(&[1, 1, 5, (2 + 8 * blocks.len()) as u8]);
+            for (l, r) in blocks {
+                out.extend_from_slice(&l.to_be_bytes());
+                out.extend_from_slice(&r.to_be_bytes());
+            }
+        }
+    }
+
+    /// Reads the options it knows; stops at the end-of-list option or at a
+    /// malformed one, keeping what came before.
+    pub fn parse(mut o: &[u8]) -> Self {
+        let mut t = TcpOpts::default();
+        let be32 = |b: &[u8]| u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+        while let Some(&kind) = o.first() {
+            match kind {
+                0 => break,
+                1 => o = &o[1..],
+                _ => {
+                    let Some(&len) = o.get(1) else { break };
+                    let len = usize::from(len);
+                    if len < 2 || len > o.len() {
+                        break;
+                    }
+                    let v = &o[2..len];
+                    match (kind, len) {
+                        (2, 4) => t.mss = Some(u16::from_be_bytes([v[0], v[1]])),
+                        (3, 3) => t.wscale = Some(v[0]),
+                        (4, 2) => t.sack_ok = true,
+                        (8, 10) => t.ts = Some((be32(v), be32(&v[4..]))),
+                        (5, _) if (len - 2) % 8 == 0 => {
+                            for b in v.chunks_exact(8).take(MAX_SACK_BLOCKS) {
+                                t.sack[t.sack_n] = (be32(b), be32(&b[4..]));
+                                t.sack_n += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    o = &o[len..];
+                }
+            }
+        }
+        t
+    }
+}
+
 /// The header fields of a TCP segment to send.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TcpHeader {
@@ -372,11 +464,12 @@ pub(crate) struct TcpHeader {
     pub ack: u32,
     pub flags: u8,
     pub window: u16,
-    pub mss: Option<u16>,
+    pub opts: TcpOpts,
 }
 
 pub(crate) fn tcp_frame(path: &Path, h: &TcpHeader, data: &[u8], ip_id: u16) -> Vec<u8> {
-    let opt_len = if h.mss.is_some() { 4 } else { 0 };
+    let opt_len = h.opts.wire_len();
+    debug_assert!(opt_len <= 40, "{opt_len} bytes of TCP options");
     let tcp_len = 20 + opt_len + data.len();
     let mut f = Vec::with_capacity(18 + 40 + tcp_len);
     push_ip(&mut f, path, 6, tcp_len, ip_id, 64);
@@ -389,10 +482,7 @@ pub(crate) fn tcp_frame(path: &Path, h: &TcpHeader, data: &[u8], ip_id: u16) -> 
     f.push(h.flags);
     f.extend_from_slice(&h.window.to_be_bytes());
     f.extend_from_slice(&[0, 0, 0, 0]); // checksum, urgent pointer
-    if let Some(mss) = h.mss {
-        f.extend_from_slice(&[2, 4]);
-        f.extend_from_slice(&mss.to_be_bytes());
-    }
+    h.opts.write(&mut f);
     f.extend_from_slice(data);
     let sum = checksum(&f[start..], pseudo_sum(path.src, path.dst, 6, tcp_len));
     f[start + 16..start + 18].copy_from_slice(&sum.to_be_bytes());
@@ -563,14 +653,17 @@ mod tests {
             ack: 9,
             flags: SYN | ACK,
             window: 65535,
-            mss: Some(1460),
+            opts: TcpOpts {
+                mss: Some(1460),
+                ..Default::default()
+            },
         };
         let f = tcp_frame(&path, &h, b"hello", 3);
         let link = parse_link(&f).unwrap();
         assert_eq!((link.vlan, link.ethertype), (Some(10), ETHERTYPE_IPV4));
         let ip = parse_ipv4(&f[link.payload..], true).unwrap();
         let seg = parse_tcp(&ip, true).unwrap();
-        assert_eq!((seg.sport, seg.seq, seg.mss), (40000, 7, Some(1460)));
+        assert_eq!((seg.sport, seg.seq, seg.opts.mss), (40000, 7, Some(1460)));
         assert_eq!(seg.data, b"hello");
         assert_eq!(seg.seq_len(), 6);
         assert!(crate::net::tests::checksums_ok(&f));
@@ -644,6 +737,57 @@ mod tests {
             (NDP_ADVERT, me.into(), Some(mac))
         );
         decodes_cleanly(&na);
+    }
+
+    #[test]
+    fn tcp_options_round_trip() {
+        let path = Path {
+            src_mac: MacAddr([2, 0, 0, 0, 0, 1]),
+            dst_mac: MacAddr([2, 0, 0, 0, 0, 2]),
+            vlan: None,
+            src: Ipv4Addr::new(10, 0, 0, 1).into(),
+            dst: Ipv4Addr::new(10, 0, 0, 2).into(),
+        };
+        let syn = TcpOpts {
+            mss: Some(1460),
+            wscale: Some(7),
+            sack_ok: true,
+            ts: Some((123, 0)),
+            ..Default::default()
+        };
+        let mut ack = TcpOpts {
+            ts: Some((0xdead_beef, 77)),
+            ..Default::default()
+        };
+        ack.sack[..3].copy_from_slice(&[(100, 200), (300, 400), (u32::MAX - 5, 10)]);
+        ack.sack_n = 3;
+        let no_ts = TcpOpts {
+            sack_ok: true,
+            wscale: Some(0),
+            ..Default::default()
+        };
+        for (opts, len) in [(syn, 20), (ack, 40), (no_ts, 8)] {
+            assert_eq!(opts.wire_len(), len);
+            let h = TcpHeader {
+                sport: 1,
+                dport: 2,
+                seq: 3,
+                ack: 4,
+                flags: if opts.mss.is_some() { SYN } else { ACK },
+                window: 1000,
+                opts,
+            };
+            let f = tcp_frame(&path, &h, b"data", 1);
+            let link = parse_link(&f).unwrap();
+            let ip = parse_ip(&f[link.payload..], true).unwrap();
+            let seg = parse_tcp(&ip, true).unwrap();
+            assert_eq!(seg.opts, opts);
+            assert_eq!(seg.data, b"data");
+            decodes_cleanly(&f);
+        }
+        // A malformed option ends the list, keeping what came before.
+        let t = TcpOpts::parse(&[2, 4, 5, 0xb4, 8, 30, 1]);
+        assert_eq!((t.mss, t.ts), (Some(1460), None));
     }
 
     #[test]

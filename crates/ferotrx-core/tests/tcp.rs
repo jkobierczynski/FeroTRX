@@ -496,7 +496,7 @@ fn gives_up_when_nobody_answers() {
         client: Some(client(2, 100.0, 0)),
         server: None,
         options: TcpOptions {
-            max_retries: 2,
+            syn_retries: 2,
             ..Default::default()
         },
     })

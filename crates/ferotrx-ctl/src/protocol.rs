@@ -648,6 +648,15 @@ pub struct TcpCounters {
     pub payload_tx: u64,
     pub payload_rx: u64,
     pub retransmits: u64,
+    /// Retransmission timeouts (also counted in `retransmits`).
+    #[serde(default)]
+    pub timeouts: u64,
+    /// Old duplicate segments dropped by PAWS.
+    #[serde(default)]
+    pub paws_dropped: u64,
+    /// Most bytes one connection had in flight at once.
+    #[serde(default)]
+    pub max_in_flight: u64,
 }
 
 impl From<&TcpSideStats> for TcpCounters {
@@ -663,6 +672,9 @@ impl From<&TcpSideStats> for TcpCounters {
             payload_tx: s.payload_tx,
             payload_rx: s.payload_rx,
             retransmits: s.retransmits,
+            timeouts: s.timeouts,
+            paws_dropped: s.paws_dropped,
+            max_in_flight: s.max_in_flight,
         }
     }
 }

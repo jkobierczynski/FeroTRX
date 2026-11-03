@@ -19,7 +19,8 @@ routers and firewalls, many sessions at once from templates), measures loss and 
 * **M8, stateful TCP (`ferotrx tcp`, TCP profiles, `tcp.*` control methods):** done.
 * **M9, receive side: loss and latency per stream (`--rx`, `ferotrx rx`, `rx.*` control methods):** done (0.2.0).
 * **M10, multi-flow TCP templates (`[[template]]` in TCP profiles, server address ranges, per-template counters):** done (0.3.0).
-* **M11, IPv6 everywhere (stateful TCP with neighbor discovery, IPv6 extension headers and neighbor discovery in the packet builder, IPv6 lab scripts):** this release (0.4.0).
+* **M11, IPv6 everywhere (stateful TCP with neighbor discovery, IPv6 extension headers and neighbor discovery in the packet builder, IPv6 lab scripts):** done (0.4.0).
+* **M12, TCP maturity (window scaling, timestamps and PAWS, SACK, RTT-based timeouts, windows and timeouts in profiles, per-template rates):** this release (0.5.0).
 
 ## Crates
 
@@ -553,6 +554,16 @@ How it works:
   than over IPv4 (1440 by default), so frames stay as long. Captures of IPv6
   sessions work as well as IPv4 ones, and either plays over either. See
   [`examples/lab-tcp-v6.toml`](examples/lab-tcp-v6.toml).
+* **TCP behavior.** Both ends negotiate window scaling, timestamps (with
+  PAWS) and SACK, so a connection can keep megabytes in flight on a long path
+  and recover from several losses per round trip without a timeout. The
+  retransmission timeout follows the measured round-trip time. Congestion
+  control is Reno/NewReno with SACK-based recovery; see
+  [docs/tcp-engine.md](docs/tcp-engine.md) for what the engine does and does
+  not do. `--send-window` and `--receive-window` (e.g. `4M`, the default),
+  `--rto`, `--min-rto`, `--syn-retries`, `--max-retries`, `--idle-timeout`,
+  and `--no-window-scaling`, `--no-timestamps`, `--no-sack` change it; the
+  summary shows timeouts and the most bytes a connection had in flight.
 
 A TCP profile holds all of this in a TOML file; see
 [`examples/lab-tcp.toml`](examples/lab-tcp.toml):
@@ -574,8 +585,17 @@ ip = "192.168.20.50/24"
 gateway = "192.168.20.1"
 vlan = 20
 
-[tcp]
-rto = "250ms"
+[tcp]                       # optional; the defaults
+rto = "250ms"               # until the round-trip time is measured
+min_rto = "200ms"
+syn_retries = 6
+max_retries = 8
+idle_timeout = "30s"
+send_window = "4M"          # most bytes in flight per connection
+receive_window = "4M"
+window_scaling = true
+timestamps = true
+sack = true
 verify = true
 ```
 
@@ -593,7 +613,10 @@ with 3% loss every connection still completed thanks to retransmits.
 `IPV6=1` builds the same lab over IPv6 (fd00:10::/64 and fd00:20::/64, with
 neighbor discovery between the router and the emulated hosts, and IPv6
 masquerading where the kernel has it); `MIX=1` and `NO_VLAN=1` combine with
-it. `IPV6=1 scripts/latency-netns.sh` measures loss and latency over IPv6, with
+it. `NETEM="delay 5ms reorder 10% 50% duplicate 2% loss 2%"` has the router
+impair what it forwards with netem, and `BDP=1` plays a 2 MB download over a
+50 Mbit/s path with an 80 ms round trip and checks that more than 64 KB were
+in flight. `IPV6=1 scripts/latency-netns.sh` measures loss and latency over IPv6, with
 the bulk stream varying its IPv6 source address.
 
 #### Templates: many kinds of connections at once
@@ -603,7 +626,10 @@ give `[[template]]` tables instead of a top-level `pcap` or `[[message]]`.
 Each new connection gets a template by `weight` (a smooth weighted round
 robin, so a 3:1:1 mix holds over every five connections, not only on
 average). `cps`, `connections` and `concurrency` count all templates
-together. The server tells templates apart by the port the SYN arrives on, so
+together. A template can have its own `cps`: it then opens connections at
+that rate on its own, besides the shared rate. Its own `connections` and
+`concurrency` limit it further, within the run-wide ones; when every template
+has used up its own `connections`, the run ends. The server tells templates apart by the port the SYN arrives on, so
 each template has its own `port` (default: the capture's). See
 [`examples/lab-tcp-mix.toml`](examples/lab-tcp-mix.toml):
 

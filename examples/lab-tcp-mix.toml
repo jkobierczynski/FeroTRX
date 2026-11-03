@@ -35,6 +35,10 @@ pcap = "web.pcap"
 flow = 1             # the first of its three connections
 port = 8080          # the capture's port 80 is taken by "http"
 weight = 1
+# A template can have its own rate and limits instead of a weight:
+# cps = 5            # 5 per second of these, besides the 100 shared above
+# connections = 200  # at most 200 of them
+# concurrency = 10   # at most 10 open at once
 
 [[template]]
 name = "echo"
