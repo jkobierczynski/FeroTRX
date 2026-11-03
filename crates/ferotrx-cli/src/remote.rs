@@ -6,8 +6,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use ferotrx_core::Profile;
 use ferotrx_ctl::protocol::{
-    Counters, LoadProfileParams, OutputSpec, ProfileInfo, RunInfo, RunState, StartParams,
-    TcpStartParams, DEFAULT_PORT,
+    Counters, LoadProfileParams, OutputSpec, ProfileInfo, RunInfo, RunState, RxRunInfo, RxSpec,
+    RxStartParams, StartParams, TcpStartParams, DEFAULT_PORT,
 };
 use ferotrx_ctl::{Client, Controller, Server};
 use serde_json::Value;
@@ -166,6 +166,18 @@ enum CtlCommand {
     TcpStats { id: Option<u64> },
     /// Stop a TCP run and show its final counters.
     TcpStop { id: u64 },
+    /// Start a receiver on an interface of the server, counting the loss and
+    /// latency of flows with signatures sent from elsewhere (`--latency`).
+    RxStart {
+        iface: String,
+        /// Stop after this long, e.g. 60s; otherwise until `rx-stop`.
+        #[arg(short, long)]
+        duration: Option<String>,
+    },
+    /// Show the flows of one receiver, or of every receiver.
+    RxStats { id: Option<u64> },
+    /// Stop a receiver and show its final counters.
+    RxStop { id: u64 },
     /// Call any method with JSON parameters and print the JSON result.
     Call {
         method: String,
@@ -200,6 +212,19 @@ struct StartArgs {
     /// Count failed sends and keep going instead of failing the run.
     #[arg(long)]
     ignore_errors: bool,
+
+    /// Receive on this interface of the server while the run goes, and
+    /// report loss and latency per stream (see `ferotrx run --help`).
+    #[arg(long, value_name = "IFACE")]
+    rx: Option<String>,
+
+    /// Put a latency signature in every stream's packets.
+    #[arg(long)]
+    latency: bool,
+
+    /// With --rx: how long to keep receiving after the last packet, e.g. 1s.
+    #[arg(long, value_name = "TIME", requires = "rx")]
+    rx_wait: Option<String>,
 
     /// Follow the run's counters until it ends.
     #[arg(short, long)]
@@ -339,6 +364,11 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                 limit: s.limit,
                 duration: s.duration,
                 ignore_errors: s.ignore_errors,
+                latency: s.latency,
+                rx: s.rx.map(|iface| RxSpec {
+                    iface,
+                    wait: s.rx_wait,
+                }),
             };
             let run = c.start(&params)?;
             if json && !s.watch {
@@ -442,6 +472,39 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
             }
             crate::tcp::print_tcp_run(&run);
         }
+        CtlCommand::RxStart { iface, duration } => {
+            let r = c.rx_start(&RxStartParams { iface, duration })?;
+            if json {
+                return print_json(&r);
+            }
+            println!("started receiver {} on {}", r.id, r.counters.iface);
+        }
+        CtlCommand::RxStats { id: Some(id) } => {
+            let r = c.rx_stats(id)?;
+            if json {
+                return print_json(&r);
+            }
+            print_rx_run(&r);
+        }
+        CtlCommand::RxStats { id: None } => {
+            let list = c.rx_runs()?;
+            if json {
+                return print_json(&list);
+            }
+            if list.is_empty() {
+                println!("no receivers");
+            }
+            for r in &list {
+                print_rx_run(r);
+            }
+        }
+        CtlCommand::RxStop { id } => {
+            let r = c.rx_stop(id)?;
+            if json {
+                return print_json(&r);
+            }
+            print_rx_run(&r);
+        }
         CtlCommand::Call { method, params } => {
             let params: Value = match params {
                 Some(p) => serde_json::from_str(&p).context("params are not valid JSON")?,
@@ -499,6 +562,9 @@ fn print_profile(p: &ProfileInfo) {
         if !s.vary.is_empty() {
             line.push_str(&format!(", vary {}", s.vary.join(" ")));
         }
+        if let Some(flow) = s.latency {
+            line.push_str(&format!(", latency flow {flow}"));
+        }
         println!("{line}");
     }
 }
@@ -518,6 +584,36 @@ fn print_run(r: &RunInfo) {
         print_counters(&format!("  {}", s.name), &s.counters);
     }
     print_counters("  total", &r.total);
+    if let Some(rx) = &r.rx {
+        let rows: Vec<_> = r
+            .streams
+            .iter()
+            .filter_map(|s| Some((s.name.clone(), s.latency.clone()?)))
+            .collect();
+        println!("  loss and latency (received on {}):", rx.iface);
+        for line in crate::latency::flow_lines(&rows) {
+            println!("{line}");
+        }
+    }
+}
+
+fn print_rx_run(r: &RxRunInfo) {
+    let state = format!("{:?}", r.state).to_lowercase();
+    println!(
+        "receiver {} on {}: {state}, {} frames in {:.3} s, {} without a signature",
+        r.id, r.counters.iface, r.counters.packets, r.counters.elapsed_s, r.counters.untagged
+    );
+    if let Some(e) = &r.error {
+        println!("  error: {e}");
+    }
+    let rows: Vec<_> = r
+        .flows
+        .iter()
+        .map(|f| (format!("flow {}", f.flow), f.clone()))
+        .collect();
+    for line in crate::latency::flow_lines(&rows) {
+        println!("{line}");
+    }
 }
 
 fn print_counters(label: &str, s: &Counters) {

@@ -1,3 +1,4 @@
+mod latency;
 mod remote;
 mod tcp;
 
@@ -37,6 +38,10 @@ enum Command {
     /// playing the client, the server or both (handshakes, sequence and
     /// acknowledgement tracking, retransmits), e.g. through a NAT router.
     Tcp(tcp::TcpArgs),
+    /// Receive on an interface (or read a capture) and report loss and
+    /// latency of the flows with FeroTRX signatures, sent by `--latency` or
+    /// `--rx` on another machine.
+    Rx(latency::RxCmdArgs),
     /// Show what a capture contains.
     Info {
         /// The pcap or pcapng file.
@@ -87,6 +92,9 @@ struct ReplayArgs {
     /// ip_id, ttl, payload@OFFSET[:SIZE], len. Runs after the rewrites.
     #[arg(long = "vary", value_name = "SPEC")]
     vary: Vec<FieldVar>,
+
+    #[command(flatten)]
+    rx: latency::RxArgs,
 
     #[command(flatten)]
     common: CommonArgs,
@@ -184,6 +192,10 @@ struct BuildArgs {
     #[arg(short = 'n', long, value_name = "N")]
     count: Option<usize>,
 
+    /// Loss and latency, when sending with --iface.
+    #[command(flatten)]
+    rx: latency::RxArgs,
+
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -225,6 +237,9 @@ struct RunArgs {
 
     #[command(flatten)]
     send: SendArgs,
+
+    #[command(flatten)]
+    rx: latency::RxArgs,
 
     #[command(flatten)]
     common: CommonArgs,
@@ -370,6 +385,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Inspect(args) => cmd_inspect(args),
         Command::Build(args) => cmd_build(args),
         Command::Tcp(args) => tcp::cmd_tcp(args),
+        Command::Rx(args) => latency::cmd_rx(args),
         #[cfg(feature = "pcap")]
         Command::Interfaces => cmd_interfaces(),
         Command::Backends => cmd_backends(),
@@ -622,16 +638,29 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
             // A fresh engine, so the first loop sends what was shown above.
             stream.push_transform(FieldEngine::new(args.vary.iter().cloned()));
         }
+        if args.rx.tags() {
+            stream = stream.with_latency(1);
+        }
         let output = Output {
             iface: Some(iface.clone()),
             out: None,
             null: false,
         };
+        let rx = args.rx.open()?;
         let sink = open_sink(&output, &args.send, linktype, args.common.quiet)?;
-        let job = Job::spawn(vec![stream], sink, run_config(&args.common)?)?;
-        let stats = watch(job, &args.common)?;
+        let job = Job::spawn_with_rx(vec![stream], sink, run_config(&args.common)?, rx)?;
+        let (stats, report) = watch(job, &args.common)?;
         print_line(done_label(&stats.total), &stats.total);
+        if let Some(r) = report {
+            r.print();
+            if let Some(path) = &args.rx.report {
+                r.save(path)?;
+            }
+        }
         return Ok(());
+    }
+    if args.rx.tags() {
+        bail!("--rx and --latency apply when sending with --iface");
     }
     if args.out.is_none() && (args.loops != 1 || args.rate.is_set()) {
         eprintln!("note: --loop and rates apply when sending with --iface");
@@ -743,16 +772,29 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
     if !args.vary.is_empty() {
         stream.push_transform(FieldEngine::new(args.vary));
     }
+    if args.rx.tags() {
+        stream = stream.with_latency(1);
+    }
+    let rx = args.rx.open()?;
     let sink = open_sink(&args.output, &args.send, linktype, args.common.quiet)?;
-    let job = Job::spawn(vec![stream], sink, run_config(&args.common)?)?;
-    let stats = watch(job, &args.common)?;
+    let job = Job::spawn_with_rx(vec![stream], sink, run_config(&args.common)?, rx)?;
+    let (stats, report) = watch(job, &args.common)?;
     print_line(done_label(&stats.total), &stats.total);
+    if let Some(r) = report {
+        r.print();
+        if let Some(path) = &args.rx.report {
+            r.save(path)?;
+        }
+    }
     Ok(())
 }
 
 fn cmd_run(args: RunArgs) -> Result<()> {
-    let profile = Profile::from_path(&args.profile)
+    let mut profile = Profile::from_path(&args.profile)
         .with_context(|| format!("cannot read {}", args.profile.display()))?;
+    if args.rx.latency || (args.rx.rx.is_some() && !profile.has_latency()) {
+        profile.enable_latency();
+    }
     if !args.common.quiet {
         for spec in &profile.streams {
             let mut line = format!("stream {}: {} at {}", spec.name, spec.source, spec.rate);
@@ -764,24 +806,34 @@ fn cmd_run(args: RunArgs) -> Result<()> {
                 let v: Vec<String> = spec.vary.iter().map(ToString::to_string).collect();
                 line.push_str(&format!(", vary {}", v.join(" ")));
             }
+            if let Some(flow) = spec.latency {
+                line.push_str(&format!(", latency flow {flow}"));
+            }
             eprintln!("{line}");
         }
     }
     let output = args.output.to_io(&args.send)?;
+    let rx = args.rx.open()?;
     // The same function starts `run.start` runs on the control server.
     let started =
-        ferotrx_ctl::start_run_detailed(&profile, &output, None, run_config(&args.common)?)
+        ferotrx_ctl::start_run_with_rx(&profile, &output, None, run_config(&args.common)?, rx)
             .map_err(|e| anyhow::anyhow!(e))?;
     if !args.common.quiet && matches!(output, ferotrx_io::Output::Interface { .. }) {
         eprintln!("sending with {}", started.detail);
     }
     let job = started.job;
     let names = job.stream_names().to_vec();
-    let stats = watch(job, &args.common)?;
+    let (stats, report) = watch(job, &args.common)?;
     for (name, st) in names.iter().zip(&stats.streams) {
         print_line(&format!("  {name}"), st);
     }
     print_line(done_label(&stats.total), &stats.total);
+    if let Some(r) = report {
+        r.print();
+        if let Some(path) = &args.rx.report {
+            r.save(path)?;
+        }
+    }
     Ok(())
 }
 
@@ -802,13 +854,21 @@ fn run_config(common: &CommonArgs) -> Result<RunConfig> {
 }
 
 /// Waits for a job, printing a progress line every second unless quiet.
-fn watch(job: Job, common: &CommonArgs) -> Result<RunStats> {
+/// Returns the final counters, and the loss and latency report if the job
+/// has a receiver.
+fn watch(job: Job, common: &CommonArgs) -> Result<(RunStats, Option<latency::Report>)> {
     while !job.wait(Some(Duration::from_secs(1))) {
         if !common.quiet {
-            print_line("progress", &job.stats().total);
+            let mut line = stats_line("progress", &job.stats().total);
+            if let Some(note) = latency::progress_note(&job) {
+                line.push_str("; ");
+                line.push_str(&note);
+            }
+            eprintln!("{line}");
         }
     }
-    Ok(job.join()?)
+    let report = latency::Report::of(&job);
+    Ok((job.join()?, report))
 }
 
 fn done_label(s: &ReplayStats) -> &'static str {
@@ -820,6 +880,10 @@ fn done_label(s: &ReplayStats) -> &'static str {
 }
 
 fn print_line(label: &str, s: &ReplayStats) {
+    eprintln!("{}", stats_line(label, s));
+}
+
+fn stats_line(label: &str, s: &ReplayStats) -> String {
     let mut line = format!(
         "{label}: {} packets, {} bytes in {:.3} s ({:.1} pps, {:.3} Mbps)",
         s.packets,
@@ -831,7 +895,7 @@ fn print_line(label: &str, s: &ReplayStats) {
     if s.send_errors > 0 {
         line.push_str(&format!(", {} send errors", s.send_errors));
     }
-    eprintln!("{line}");
+    line
 }
 
 #[cfg(test)]

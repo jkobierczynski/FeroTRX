@@ -237,6 +237,28 @@ impl Client {
         self.call("tcp.remove", &RunId { id })
     }
 
+    /// Starts a receiver on an interface of the server (see `rx.start`).
+    pub fn rx_start(&mut self, params: &RxStartParams) -> Result<RxRunInfo, ClientError> {
+        self.call("rx.start", params)
+    }
+
+    /// Stops a receiver and waits for it to end.
+    pub fn rx_stop(&mut self, id: u64) -> Result<RxRunInfo, ClientError> {
+        self.call("rx.stop", &StopParams { id, wait: true })
+    }
+
+    pub fn rx_stats(&mut self, id: u64) -> Result<RxRunInfo, ClientError> {
+        self.call("rx.stats", &RunId { id })
+    }
+
+    pub fn rx_runs(&mut self) -> Result<Vec<RxRunInfo>, ClientError> {
+        self.call("rx.list", &Value::Null)
+    }
+
+    pub fn rx_remove(&mut self, id: u64) -> Result<RxRunInfo, ClientError> {
+        self.call("rx.remove", &RunId { id })
+    }
+
     /// Asks for `stats` notifications about one run, or all running runs.
     /// Read them with [`next_stats`](Client::next_stats).
     pub fn subscribe(&mut self, id: Option<u64>, interval_ms: u64) -> Result<u64, ClientError> {

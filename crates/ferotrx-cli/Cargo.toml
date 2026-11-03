@@ -38,8 +38,8 @@ license-file = ["../../LICENSE", "0"]
 extended-description = """\
 FeroTRX replays pcap and pcapng captures at a controlled rate, rewrites them \
 on the way, varies fields from packet to packet, builds packets from scratch, \
-runs several streams at once from a profile and replays TCP sessions \
-statefully. Sends through libpcap or AF_XDP."""
+runs several streams at once from a profile, replays TCP sessions \
+statefully and measures loss and latency on the receive side. Sends through libpcap or AF_XDP."""
 section = "net"
 priority = "optional"
 depends = "$auto"

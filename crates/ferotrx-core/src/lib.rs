@@ -26,6 +26,12 @@
 //!   emulated client and server with handshakes, sequence and acknowledgement
 //!   tracking and retransmits, so it passes NAT routers and stateful firewalls.
 //!   [`TcpJob`] runs it on [`PacketPort`]s, ports that send and receive.
+//! * Loss and latency: a stream made with [`Stream::with_latency`] carries a
+//!   [`Signature`] (flow, sequence number, send time) in every packet; a
+//!   [`PacketReceiver`] on the far side counts arrivals into [`RxStats`]:
+//!   loss, duplicates, reordering, and latency with jitter and percentiles.
+//!   [`Job::spawn_with_rx`] sends and receives together, and [`FlowReport`]
+//!   compares the two.
 //!
 //! Sinks that talk to real interfaces or files live in the `ferotrx-io` crate,
 //! so this crate has no platform specific code. [`SendSettings`] names the
@@ -71,6 +77,7 @@ mod capture;
 mod error;
 mod field_engine;
 mod job;
+mod latency;
 mod net;
 mod pacer;
 #[cfg(feature = "profile")]
@@ -86,7 +93,11 @@ mod transform;
 pub use capture::{Capture, Packet, LINKTYPE_ETHERNET};
 pub use error::{Error, Result};
 pub use field_engine::{FieldEngine, FieldVar, Side, VarField, VarOp};
-pub use job::{Job, JobState, JOB_STATS_INTERVAL};
+pub use job::{Job, JobState, RxSettings, JOB_STATS_INTERVAL};
+pub use latency::{
+    wall_clock, FlowReport, FlowStats, LatencyStats, PacketReceiver, PortReceiver, RxConfig, RxJob,
+    RxStats, Signature, SIGNATURE_LEN,
+};
 pub use net::{MacAddr, TPID_QINQ, TPID_VLAN};
 pub use pacer::{parse_duration, Pacer, Rate};
 #[cfg(feature = "profile")]

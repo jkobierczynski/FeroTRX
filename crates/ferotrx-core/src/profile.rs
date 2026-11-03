@@ -23,6 +23,10 @@ use crate::{
 /// rewrite = ["vlan_push=20", "ip_dst=10.0.0.0/8->192.168.20.0"]
 /// # Field engine: change fields from packet to packet, after the rewrites.
 /// vary = ["ip_src=192.168.10.1..192.168.10.254", "port_src=1024..65535,random"]
+/// # Measure loss and latency: every packet carries a signature (flow id,
+/// # sequence number, send time) that a receiver counts. `true` uses the
+/// # stream's number (1 for the first) as flow id; a number sets it.
+/// latency = true
 ///
 /// [[stream]]
 /// name = "ping"
@@ -62,6 +66,9 @@ pub struct StreamSpec {
     pub rewrite: Vec<Rewrite>,
     /// Field engine variables, applied after the rewrites.
     pub vary: Vec<FieldVar>,
+    /// Flow id of the stream's latency signature, if it measures loss and
+    /// latency (see [`Stream::with_latency`]).
+    pub latency: Option<u32>,
 }
 
 /// Where a [`StreamSpec`] gets its packets.
@@ -151,6 +158,14 @@ struct StreamFile {
     rewrite: Vec<String>,
     #[serde(default)]
     vary: Vec<String>,
+    latency: Option<LatencyFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LatencyFile {
+    On(bool),
+    Flow(u32),
 }
 
 impl Profile {
@@ -215,7 +230,13 @@ impl Profile {
                         )))
                     }
                 };
+                let latency = match s.latency {
+                    None | Some(LatencyFile::On(false)) => None,
+                    Some(LatencyFile::On(true)) => Some(i as u32 + 1),
+                    Some(LatencyFile::Flow(id)) => Some(id),
+                };
                 Ok(StreamSpec {
+                    latency,
                     rate: s
                         .rate
                         .as_deref()
@@ -248,7 +269,46 @@ impl Profile {
         let output = file
             .output
             .map_or(Ok(SendSettings::default()), OutputFile::settings)?;
-        Ok(Self { streams, output })
+        let profile = Self { streams, output };
+        profile.check_flows()?;
+        Ok(profile)
+    }
+
+    fn check_flows(&self) -> Result<()> {
+        let mut seen: HashMap<u32, &str> = HashMap::new();
+        for s in &self.streams {
+            if let Some(id) = s.latency {
+                if let Some(other) = seen.insert(id, &s.name) {
+                    return Err(Error::Profile(format!(
+                        "streams '{other}' and '{}' both use latency flow {id}",
+                        s.name
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// True when any stream measures loss and latency.
+    pub fn has_latency(&self) -> bool {
+        self.streams.iter().any(|s| s.latency.is_some())
+    }
+
+    /// Makes every stream measure loss and latency. Streams without a flow id
+    /// get the lowest free one from their number (1 for the first) up.
+    pub fn enable_latency(&mut self) {
+        let mut used: std::collections::HashSet<u32> =
+            self.streams.iter().filter_map(|s| s.latency).collect();
+        for (i, s) in self.streams.iter_mut().enumerate() {
+            if s.latency.is_none() {
+                let mut id = i as u32 + 1;
+                while used.contains(&id) {
+                    id += 1;
+                }
+                used.insert(id);
+                s.latency = Some(id);
+            }
+        }
     }
 
     /// Loads the captures, builds the packets and makes the streams, ready for
@@ -299,6 +359,7 @@ impl Profile {
                     // A fresh engine per load: every run starts its ranges from the top.
                     stream.push_transform(FieldEngine::new(spec.vary.iter().cloned()));
                 }
+                stream.latency = spec.latency;
                 Ok(stream)
             })
             .collect()
@@ -356,6 +417,11 @@ mod tests {
         let p = Profile::from_toml(text, Path::new("examples")).unwrap();
         assert_eq!(p.streams.len(), 3);
         assert!(p.load().is_ok());
+
+        let text = include_str!("../../../examples/lab-latency.toml");
+        let p = Profile::from_toml(text, Path::new("examples")).unwrap();
+        let flows: Vec<_> = p.load().unwrap().iter().map(|s| s.latency).collect();
+        assert_eq!(flows, [Some(1), Some(2)]);
     }
 
     #[test]
@@ -417,6 +483,39 @@ mod tests {
             err.contains("stream 'a'") && err.contains("invalid address"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn latency_flows() {
+        let text = r#"
+            [[stream]]
+            name = "a"
+            packet = "eth/ipv4/udp"
+            latency = true
+            [[stream]]
+            name = "b"
+            packet = "eth/ipv4/udp"
+            [[stream]]
+            name = "c"
+            packet = "eth/ipv4/udp"
+            latency = 2
+        "#;
+        let mut p = Profile::from_toml(text, Path::new("")).unwrap();
+        let ids: Vec<_> = p.streams.iter().map(|s| s.latency).collect();
+        assert_eq!(ids, [Some(1), None, Some(2)]);
+        assert!(p.has_latency());
+        p.enable_latency();
+        let ids: Vec<_> = p.streams.iter().map(|s| s.latency).collect();
+        assert_eq!(ids, [Some(1), Some(3), Some(2)]);
+        let flows: Vec<_> = p.load().unwrap().iter().map(|s| s.latency).collect();
+        assert_eq!(flows, ids);
+        let err = Profile::from_toml(
+            "[[stream]]\nname=\"x\"\npacket = \"eth\"\nlatency = true\n[[stream]]\nname=\"y\"\npacket = \"eth\"\nlatency = 1",
+            Path::new(""),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("both use latency flow 1"), "{err}");
     }
 
     #[test]

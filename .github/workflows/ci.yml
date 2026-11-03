@@ -88,6 +88,16 @@ jobs:
           sudo scripts/tcp-nat-netns.sh ./target/debug/ferotrx -n 300 --cps 100
           sudo NO_VLAN=1 LOSS=0.03 scripts/tcp-nat-netns.sh ./target/debug/ferotrx -n 300 --cps 100
 
+      # Loss and latency through a router in a network namespace: routing and
+      # masquerading, a 5 ms delay (netem), then 3% packet loss on top.
+      - name: Loss and latency through a router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo modprobe sch_netem || true
+          sudo scripts/latency-netns.sh ./target/debug/ferotrx
+          sudo LOSS=0.03 scripts/latency-netns.sh ./target/debug/ferotrx
+
   # DPDK is an optional feature: build it against Ubuntu's DPDK and send
   # through DPDK's af_packet driver on a veth pair, without hugepages.
   dpdk:

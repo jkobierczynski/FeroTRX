@@ -42,6 +42,8 @@ pub struct ReplayStats {
     pub bytes: u64,
     pub send_errors: u64,
     pub loops_completed: u64,
+    /// Packets sent with a latency [`Signature`](crate::Signature).
+    pub tagged: u64,
     pub elapsed: Duration,
     /// True when the replay ended because `stop` was set.
     pub stopped: bool,
