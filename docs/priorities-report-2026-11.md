@@ -1,6 +1,6 @@
 > Outside review written on 3 November 2026 from the README at 0.3.0, kept as received.
 > Some points were already done by then (IPv6 stateful TCP, receive-side percentiles);
-> see [ROADMAP.md](../ROADMAP.md) for the checked to-do list.
+> see [DEVELOPMENT.md](../DEVELOPMENT.md) and issues #15 to #21 for the checked to-do list.
 
 # FeroTRX Priorities Report
 
