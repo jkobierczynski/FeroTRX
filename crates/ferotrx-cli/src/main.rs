@@ -1,3 +1,4 @@
+mod bench;
 mod latency;
 mod remote;
 mod tcp;
@@ -12,8 +13,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use ferotrx_core::{
     parse_duration, Backend, Capture, CaptureSource, FieldEngine, FieldVar, Job, PacketSink,
-    Profile, Rate, ReplayStats, Rewrite, RunConfig, RunStats, SendSettings, Stream, Transform,
-    XdpMode, LINKTYPE_ETHERNET,
+    Profile, Rate, ReplayStats, Rewrite, RunConfig, RunStats, SendSettings, SizeMix, Stream,
+    Transform, XdpMode, LINKTYPE_ETHERNET,
 };
 
 /// FeroTRX: replay captured traffic at a controlled rate.
@@ -42,6 +43,10 @@ enum Command {
     /// latency of the flows with FeroTRX signatures, sent by `--latency` or
     /// `--rx` on another machine.
     Rx(latency::RxCmdArgs),
+    /// Benchmark a device the RFC 2544 way: throughput (binary search on the
+    /// rate), latency, frame loss and back-to-back bursts, for a list of frame
+    /// sizes or mixes such as IMIX; writes a JSON and a text report.
+    Bench(bench::BenchArgs),
     /// Show what a capture contains.
     Info {
         /// The pcap or pcapng file.
@@ -95,6 +100,13 @@ struct ReplayArgs {
     /// ip_id, ttl, payload@OFFSET[:SIZE], len. Runs after the rewrites.
     #[arg(long = "vary", value_name = "SPEC")]
     vary: Vec<FieldVar>,
+
+    /// Cut or pad every packet to the next size of a mix, after the rewrites
+    /// and --vary: imix (60:7,590:4,1514:1), rfc2544, SIZE:WEIGHT,... or
+    /// SIZE,SIZE,...; add ,random for random order. Sizes are without FCS.
+    /// With latency signatures the frames keep these sizes.
+    #[arg(long, value_name = "MIX")]
+    sizes: Option<SizeMix>,
 
     #[command(flatten)]
     rx: latency::RxArgs,
@@ -194,6 +206,11 @@ struct BuildArgs {
     /// Shown and written packets get the --vary values in turn.
     #[arg(short = 'n', long, value_name = "N")]
     count: Option<usize>,
+
+    /// Cut or pad the packets to the sizes of a mix, in turn (see `ferotrx
+    /// replay --help`), e.g. --sizes imix -n 12.
+    #[arg(long, value_name = "MIX")]
+    sizes: Option<SizeMix>,
 
     /// Loss and latency, when sending with --iface.
     #[command(flatten)]
@@ -389,6 +406,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Build(args) => cmd_build(args),
         Command::Tcp(args) => tcp::cmd_tcp(args),
         Command::Rx(args) => latency::cmd_rx(args),
+        Command::Bench(args) => bench::cmd_bench(args),
         #[cfg(feature = "pcap")]
         Command::Interfaces => cmd_interfaces(),
         Command::Backends => cmd_backends(),
@@ -564,14 +582,18 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
             })
             .collect();
     }
-    if !args.vary.is_empty() && cap.linktype != LINKTYPE_ETHERNET {
-        bail!("vary needs Ethernet frames; start the packets with eth, not ipv4 or ipv6");
+    if (!args.vary.is_empty() || args.sizes.is_some()) && cap.linktype != LINKTYPE_ETHERNET {
+        bail!("vary and sizes need Ethernet frames; start the packets with eth, not ipv4 or ipv6");
     }
-    // What is shown and written: the packets with the field engine applied.
+    // What is shown and written: the packets with the field engine and sizes applied.
     let mut shown = cap.clone();
     let mut engine = FieldEngine::new(args.vary.iter().cloned());
+    let mut sizes = args.sizes.clone();
     for p in &mut shown.packets {
         engine.apply(p);
+        if let Some(s) = &mut sizes {
+            s.apply(p);
+        }
     }
 
     let sending = args.iface.is_some();
@@ -642,6 +664,11 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
             // A fresh engine, so the first loop sends what was shown above.
             stream.push_transform(FieldEngine::new(args.vary.iter().cloned()));
         }
+        if let Some(mut s) = args.sizes.clone() {
+            s.reset();
+            stream.push_transform(s);
+            stream.keep_size = true;
+        }
         if args.rx.tags() {
             stream = stream.with_latency(1);
         }
@@ -651,13 +678,18 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
             null: false,
         };
         let rx = args.rx.open()?;
-        let sink = open_sink(&output, &args.send, linktype, args.common.quiet)?;
+        let (sink, detail) = open_sink(&output, &args.send, linktype, args.common.quiet)?;
         let job = Job::spawn_with_rx(vec![stream], sink, run_config(&args.common)?, rx)?;
         let (stats, report) = watch(job, &args.common)?;
         print_line(done_label(&stats.total), &stats.total);
-        if let Some(r) = report {
+        if let Some(mut r) = report {
             r.print();
             if let Some(path) = &args.rx.report {
+                r.info = Some(latency::run_info(
+                    Some(iface),
+                    args.rx.rx.as_deref(),
+                    Some(detail),
+                ));
                 r.save(path)?;
             }
         }
@@ -730,7 +762,7 @@ fn open_sink(
     send: &SendArgs,
     linktype: u32,
     quiet: bool,
-) -> Result<Box<dyn PacketSink + Send>> {
+) -> Result<(Box<dyn PacketSink + Send>, String)> {
     let output = output.to_io(send)?;
     warn_linktype(&output, linktype);
     let opened = output
@@ -739,7 +771,7 @@ fn open_sink(
     if !quiet && matches!(output, ferotrx_io::Output::Interface { .. }) {
         eprintln!("sending with {}", opened.detail);
     }
-    Ok(opened.sink)
+    Ok((opened.sink, opened.detail))
 }
 
 fn warn_linktype(output: &ferotrx_io::Output, linktype: u32) {
@@ -757,9 +789,11 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
     if cap.is_empty() {
         bail!("{} has no packets", args.file.display());
     }
-    if (!args.rewrites.is_empty() || !args.vary.is_empty()) && cap.linktype != LINKTYPE_ETHERNET {
+    if (!args.rewrites.is_empty() || !args.vary.is_empty() || args.sizes.is_some())
+        && cap.linktype != LINKTYPE_ETHERNET
+    {
         bail!(
-            "rewrites and vary need Ethernet frames, {} has link type {}",
+            "rewrites, vary and sizes need Ethernet frames, {} has link type {}",
             args.file.display(),
             cap.linktype
         );
@@ -776,17 +810,28 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
     if !args.vary.is_empty() {
         stream.push_transform(FieldEngine::new(args.vary));
     }
+    if let Some(s) = args.sizes {
+        stream.push_transform(s);
+        stream.keep_size = true;
+    }
     if args.rx.tags() {
         stream = stream.with_latency(1);
     }
     let rx = args.rx.open()?;
-    let sink = open_sink(&args.output, &args.send, linktype, args.common.quiet)?;
+    let (sink, detail) = open_sink(&args.output, &args.send, linktype, args.common.quiet)?;
     let job = Job::spawn_with_rx(vec![stream], sink, run_config(&args.common)?, rx)?;
     let (stats, report) = watch(job, &args.common)?;
     print_line(done_label(&stats.total), &stats.total);
-    if let Some(r) = report {
+    if let Some(mut r) = report {
         r.print();
         if let Some(path) = &args.rx.report {
+            let mut info = latency::run_info(
+                args.output.iface.as_deref(),
+                args.rx.rx.as_deref(),
+                Some(detail),
+            );
+            info.profile = Some(format!("capture {}", args.file.display()));
+            r.info = Some(info);
             r.save(path)?;
         }
     }
@@ -832,9 +877,17 @@ fn cmd_run(args: RunArgs) -> Result<()> {
         print_line(&format!("  {name}"), st);
     }
     print_line(done_label(&stats.total), &stats.total);
-    if let Some(r) = report {
+    if let Some(mut r) = report {
         r.print();
         if let Some(path) = &args.rx.report {
+            let mut info = latency::run_info(
+                args.output.iface.as_deref(),
+                args.rx.rx.as_deref(),
+                Some(started.detail),
+            );
+            info.profile = Some(args.profile.display().to_string());
+            info.profile_text = std::fs::read_to_string(&args.profile).ok();
+            r.info = Some(info);
             r.save(path)?;
         }
     }

@@ -17,6 +17,8 @@ pub enum Error {
     InvalidSpec(String),
     #[error("tcp: {0}")]
     Tcp(String),
+    #[error("benchmark: {0}")]
+    Bench(String),
     #[error("profile: {0}")]
     Profile(String),
     #[error("sending packet {index} failed: {source}")]

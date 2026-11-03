@@ -17,6 +17,6 @@ mod signature;
 mod stats;
 
 pub use rx::{PacketReceiver, PortReceiver, RxConfig, RxJob};
-pub(crate) use signature::{reserve, stamp};
-pub use signature::{wall_clock, Signature, SIGNATURE_LEN};
+pub(crate) use signature::{reserve, reserve_inside, stamp};
+pub use signature::{signed_len, wall_clock, Signature, SIGNATURE_LEN};
 pub use stats::{FlowReport, FlowStats, LatencyStats, RxStats};

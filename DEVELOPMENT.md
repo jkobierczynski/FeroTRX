@@ -34,10 +34,13 @@ the same library.
 | M11, IPv6 everywhere | Stateful TCP over IPv6 with neighbor discovery, IPv6 extension headers and ND in the packet builder, `IPV6=1` for both lab scripts | #13 | 0.4.0 |
 | M12, TCP maturity | Window scaling, timestamps and PAWS, SACK with out-of-order receive and hole-only retransmits, RTT-based timeouts (RFC 6298), NewReno/SACK recovery; windows, timeouts and SYN retries in profiles and on the command line; per-template `cps`, `connections`, `concurrency`; [docs/tcp-engine.md](docs/tcp-engine.md); simulated long-fat-pipe and impairment tests, `BDP=1` and `NETEM=` in the lab script | #22 | 0.5.0 |
 | M13, secure remote control | TLS (rustls) and mutual TLS for `serve`/`ctl`, read-only and operator roles by token, tokens file or client CA, data directories for profiles, pcaps and outputs, upload/request/connection limits, idle and login timeouts, JSON-lines audit log, no open listener on the network without a login (`--insecure`), `ferotrx certs` lab CA; threat model and deployment notes in the README | #24 | 0.6.0 |
+| M14, benchmarking | `ferotrx bench`: RFC 2544 throughput (binary search on the rate with a loss threshold), latency, frame loss and back-to-back; frame sizes and size mixes (IMIX, weighted, random) also in profiles and on `replay`/`build`; signatures that keep the frame size; warm-up, repetitions, stop conditions in a benchmark profile; offered against achieved rates and run metadata (version, kernel, CPU, sender, drivers, NICs, profile) in JSON and text reports; [docs/benchmarking.md](docs/benchmarking.md); `scripts/bench-netns.sh` | #25 | 0.7.0 |
 
 The lab scripts (`scripts/*.sh`) build a NAT router in network namespaces
 and run in CI, over IPv4 and IPv6, with and without loss, and for TCP also
-on a long fat pipe and with reordering and duplicates (netem).
+on a long fat pipe and with reordering and duplicates (netem); the benchmark
+script puts a rate limit (token bucket) on the router and checks that
+`ferotrx bench` finds it.
 
 ## Still to do
 
@@ -56,9 +59,10 @@ checked against 0.4.0. Each issue has the full checklist.
 
 **P1: measurements and more session types**
 
-- [ ] **M14, benchmarking (0.7.0)**, [#17](https://github.com/jkobierczynski/FeroTRX/issues/17):
+- [x] **M14, benchmarking (0.7.0)**, [#17](https://github.com/jkobierczynski/FeroTRX/issues/17):
       IMIX and size distributions, RFC 2544-style throughput/loss/latency/
-      back-to-back, run metadata in reports, documented method
+      back-to-back, run metadata in reports, documented method (the
+      optional receive path through AF_XDP is not done yet; libpcap receives)
 - [ ] **M15, stateful UDP and transactions (0.8.0)**, [#18](https://github.com/jkobierczynski/FeroTRX/issues/18):
       UDP sessions with matching/timeouts/retries, DNS first, per-template
       transaction rates, message timing for TCP replay

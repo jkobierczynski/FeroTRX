@@ -127,6 +127,29 @@ impl LatencyStats {
         self.max()
     }
 
+    /// Adds the packets of `other`, e.g. to sum up repeated trials. Jitter
+    /// becomes the larger of the two, as it is a running estimate.
+    pub fn merge(&mut self, other: &LatencyStats) {
+        if other.count == 0 {
+            return;
+        }
+        if self.count == 0 || other.min_ns < self.min_ns {
+            self.min_ns = other.min_ns;
+        }
+        self.max_ns = self.max_ns.max(other.max_ns);
+        self.count += other.count;
+        self.sum_ns += other.sum_ns;
+        self.jitter_ns = self.jitter_ns.max(other.jitter_ns);
+        self.last_ns = None;
+        self.negative += other.negative;
+        if self.hist.len() < other.hist.len() {
+            self.hist.resize(other.hist.len(), 0);
+        }
+        for (a, b) in self.hist.iter_mut().zip(&other.hist) {
+            *a += b;
+        }
+    }
+
     /// The histogram: `(from, to, packets)` for every non-empty bucket, `to` exclusive.
     pub fn histogram(&self) -> impl Iterator<Item = (Duration, Duration, u64)> + '_ {
         self.hist
@@ -313,6 +336,8 @@ pub struct FlowReport {
     pub tx: u64,
     /// Packets received once (duplicates not counted).
     pub rx: u64,
+    /// Bytes received, duplicates included.
+    pub rx_bytes: u64,
     /// `tx - rx`. While a run is going, packets on their way count here too.
     pub lost: u64,
     pub duplicates: u64,
@@ -352,6 +377,7 @@ impl FlowReport {
                     flow,
                     tx: st.tagged,
                     rx: rx_n,
+                    rx_bytes: got.map_or(0, |f| f.bytes),
                     lost: st.tagged.saturating_sub(rx_n),
                     duplicates: got.map_or(0, |f| f.duplicates),
                     out_of_order: got.map_or(0, |f| f.out_of_order),
@@ -400,6 +426,16 @@ mod tests {
         assert!((p99 - 990.0).abs() / 990.0 < 0.13, "{p99}");
         assert!(l.jitter().unwrap() > Duration::ZERO);
         assert_eq!(l.histogram().map(|h| h.2).sum::<u64>(), 101);
+        let mut m = LatencyStats::default();
+        m.merge(&l);
+        let mut more = LatencyStats::default();
+        more.record(Some(Duration::from_millis(5)));
+        m.merge(&more);
+        assert_eq!(m.count(), 102);
+        assert_eq!(m.min(), Some(Duration::ZERO));
+        assert_eq!(m.max(), Some(Duration::from_millis(5)));
+        assert_eq!(m.negative, 1);
+        assert_eq!(m.histogram().map(|h| h.2).sum::<u64>(), 102);
     }
 
     fn sig(seq: u64) -> Signature {

@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::{
     parse_duration, Capture, CaptureSource, Error, FieldEngine, FieldVar, Rate, Result, Rewrite,
-    SendSettings, Stream, LINKTYPE_ETHERNET,
+    SendSettings, SizeMix, Stream, LINKTYPE_ETHERNET,
 };
 
 /// A traffic profile: several streams that run together, read from a TOML file.
@@ -27,6 +27,11 @@ use crate::{
 /// # sequence number, send time) that a receiver counts. `true` uses the
 /// # stream's number (1 for the first) as flow id; a number sets it.
 /// latency = true
+/// # Frame sizes: every packet is cut or padded to the next size of a mix
+/// # (see `SizeMix`): "imix", "64:7,570:4,1518:1", "128,256,512,random".
+/// # With latency, the signature then takes the end of the payload, so the
+/// # frames keep these sizes.
+/// sizes = "imix"
 ///
 /// [[stream]]
 /// name = "ping"
@@ -69,6 +74,9 @@ pub struct StreamSpec {
     /// Flow id of the stream's latency signature, if it measures loss and
     /// latency (see [`Stream::with_latency`]).
     pub latency: Option<u32>,
+    /// Frame sizes, applied last; the signature then keeps the size
+    /// ([`Stream::keep_size`]).
+    pub sizes: Option<SizeMix>,
 }
 
 /// Where a [`StreamSpec`] gets its packets.
@@ -108,7 +116,7 @@ struct ProfileFile {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OutputFile {
+pub(crate) struct OutputFile {
     backend: Option<String>,
     xdp_mode: Option<String>,
     queue: Option<u16>,
@@ -117,7 +125,7 @@ struct OutputFile {
 }
 
 impl OutputFile {
-    fn settings(self) -> Result<SendSettings> {
+    pub(crate) fn settings(self) -> Result<SendSettings> {
         let ctx = |e: Error| Error::Profile(format!("[output]: {e}"));
         let settings = SendSettings {
             backend: self
@@ -159,6 +167,7 @@ struct StreamFile {
     #[serde(default)]
     vary: Vec<String>,
     latency: Option<LatencyFile>,
+    sizes: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -237,6 +246,12 @@ impl Profile {
                 };
                 Ok(StreamSpec {
                     latency,
+                    sizes: s
+                        .sizes
+                        .as_deref()
+                        .map(str::parse)
+                        .transpose()
+                        .map_err(ctx)?,
                     rate: s
                         .rate
                         .as_deref()
@@ -341,11 +356,11 @@ impl Profile {
                     }
                 };
                 let linktype = source.capture().linktype;
-                if (!spec.rewrite.is_empty() || !spec.vary.is_empty())
+                if (!spec.rewrite.is_empty() || !spec.vary.is_empty() || spec.sizes.is_some())
                     && linktype != LINKTYPE_ETHERNET
                 {
                     return Err(ctx(Error::InvalidSpec(format!(
-                        "rewrites and vary need Ethernet frames, packets have link type {linktype}"
+                        "rewrites, vary and sizes need Ethernet frames, packets have link type {linktype}"
                     ))));
                 }
                 let mut stream = Stream::new(&spec.name, source.loops(spec.loops))
@@ -358,6 +373,12 @@ impl Profile {
                 if !spec.vary.is_empty() {
                     // A fresh engine per load: every run starts its ranges from the top.
                     stream.push_transform(FieldEngine::new(spec.vary.iter().cloned()));
+                }
+                if let Some(sizes) = &spec.sizes {
+                    let mut sizes = sizes.clone();
+                    sizes.reset();
+                    stream.push_transform(sizes);
+                    stream.keep_size = true;
                 }
                 stream.latency = spec.latency;
                 Ok(stream)
@@ -404,6 +425,32 @@ mod tests {
         );
         assert_eq!(bulk.delay, Duration::from_secs(1));
         assert_eq!((bulk.loops, bulk.limit), (1, Some(100)));
+    }
+
+    #[test]
+    fn sizes_keep_their_length_with_signatures() {
+        let text = r#"
+            [[stream]]
+            packet = "eth/ipv4(dst=10.0.0.2)/udp(dport=9)"
+            loops = 12
+            rate = "topspeed"
+            sizes = "imix"
+            latency = true
+        "#;
+        let p = Profile::from_toml(text, Path::new(".")).unwrap();
+        assert_eq!(p.streams[0].sizes.as_ref().unwrap().to_string(), "imix");
+        let mut streams = p.load().unwrap();
+        assert!(streams[0].keep_size);
+        let mut sink = crate::VecSink::default();
+        crate::run(&mut streams, &mut sink, &crate::RunConfig::default()).unwrap();
+        let mut lens: Vec<usize> = sink.packets.iter().map(Vec::len).collect();
+        lens.sort();
+        // 60-byte frames have no room for the signature: 70.
+        assert_eq!(lens[..7], [70; 7]);
+        assert_eq!(lens[7..11], [590; 4]);
+        assert_eq!(lens[11], 1514);
+        let bad = text.replace("imix", "big");
+        assert!(Profile::from_toml(&bad, Path::new(".")).is_err());
     }
 
     #[test]

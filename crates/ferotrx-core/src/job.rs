@@ -4,8 +4,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::{
-    run_with_progress, Error, FlowReport, PacketReceiver, PacketSink, Result, RunConfig, RunStats,
-    RxConfig, RxJob, RxStats, Stream,
+    run_with_progress, Error, FlowReport, PacketReceiver, PacketSink, Rate, Result, RunConfig,
+    RunStats, RxConfig, RxJob, RxStats, Stream,
 };
 
 /// How often a running [`Job`] publishes its counters.
@@ -66,6 +66,7 @@ impl RxSettings {
 /// ```
 pub struct Job {
     names: Vec<String>,
+    rates: Vec<Rate>,
     flows: Vec<Option<u32>>,
     rx: Option<Arc<RxJob>>,
     stop: Arc<AtomicBool>,
@@ -139,6 +140,7 @@ impl Job {
             .clone();
         let names: Vec<String> = streams.iter().map(|s| s.name.clone()).collect();
         let flows: Vec<Option<u32>> = streams.iter().map(|s| s.latency).collect();
+        let rates: Vec<Rate> = streams.iter().map(|s| s.rate).collect();
         let (rx, rx_wait) = match rx {
             Some(r) => (
                 Some(Arc::new(RxJob::spawn(r.receiver, RxConfig::default())?)),
@@ -205,6 +207,7 @@ impl Job {
         };
         Ok(Job {
             names,
+            rates,
             flows,
             rx,
             stop,
@@ -216,6 +219,11 @@ impl Job {
     /// Names of the streams, in the order of [`RunStats::streams`].
     pub fn stream_names(&self) -> &[String] {
         &self.names
+    }
+
+    /// The rate each stream was asked to send at, in the order of [`RunStats::streams`].
+    pub fn rates(&self) -> &[Rate] {
+        &self.rates
     }
 
     /// The latency flow id of each stream (see [`Stream::with_latency`]), in

@@ -5,7 +5,7 @@ FeroTRX is a traffic replay tool written in Rust, inspired by
 at a controlled rate on Linux, macOS and Windows, rewrites them on the way
 (addresses, ports, VLAN tags), varies fields from packet to packet, builds packets from scratch, runs several streams
 at once from a profile, replays TCP sessions statefully (real connections, both ends emulated, through NAT
-routers and firewalls, many sessions at once from templates), measures loss and latency on the receive side, all over IPv4 and IPv6, and its engine is a library you can use from your own programs.
+routers and firewalls, many sessions at once from templates), measures loss and latency on the receive side, benchmarks devices the RFC 2544 way (throughput, latency, frame loss, back-to-back, with IMIX and other size mixes), all over IPv4 and IPv6, and its engine is a library you can use from your own programs.
 
 ## Status
 
@@ -21,7 +21,8 @@ routers and firewalls, many sessions at once from templates), measures loss and 
 * **M10, multi-flow TCP templates (`[[template]]` in TCP profiles, server address ranges, per-template counters):** done (0.3.0).
 * **M11, IPv6 everywhere (stateful TCP with neighbor discovery, IPv6 extension headers and neighbor discovery in the packet builder, IPv6 lab scripts):** done (0.4.0).
 * **M12, TCP maturity (window scaling, timestamps and PAWS, SACK, RTT-based timeouts, windows and timeouts in profiles, per-template rates):** done (0.5.0).
-* **M13, secure remote control (TLS and mutual TLS, read-only and operator roles, data directories, limits, audit log, `ferotrx certs`):** this release (0.6.0).
+* **M13, secure remote control (TLS and mutual TLS, read-only and operator roles, data directories, limits, audit log, `ferotrx certs`):** done (0.6.0).
+* **M14, benchmarking (`ferotrx bench`: RFC 2544 throughput, latency, frame loss and back-to-back; IMIX and size mixes; run metadata and text reports):** this release (0.7.0).
 
 ## Crates
 
@@ -569,6 +570,69 @@ and loss (`LOSS=0.02`), runs a profile with two latency streams and one
 plain one through it, and checks the report against what the router was told
 to do. CI runs it with and without loss.
 
+### Benchmarking
+
+`ferotrx bench` measures a device between two interfaces the RFC 2544 way:
+**throughput** (the highest rate without loss, by a binary search on the
+rate), **latency** at that rate, **frame loss** from line rate down, and
+**back-to-back** (the longest burst at line rate without loss), for each frame
+size of a list and for size mixes such as IMIX. Trials, warm-up,
+repetitions, the loss threshold and the stop conditions come from a
+benchmark profile; every trial is reported with the rate offered next to the
+rate achieved, and the report starts with what it ran on (FeroTRX version,
+kernel, CPU, sender, interface drivers and NICs, the profile).
+
+```sh
+sudo ferotrx bench examples/bench-rfc2544.toml -i eth1 --rx eth2 --report bench.json
+# Writes bench.json and bench.txt. Override the profile from the command line:
+sudo ferotrx bench examples/bench-rfc2544.toml -i eth1 --rx eth2 \
+     --tests throughput,latency --size 508 --size imix --trial-duration 60s
+```
+
+```toml
+[benchmark]
+packet = "eth(src=02:00:00:00:01:02,dst=02:00:00:00:01:01)/ipv4(src=10.9.1.2,dst=10.9.2.2)/udp(sport=4000,dport=9000)"
+vary = ["port_src=4000..4255"]
+tests = ["throughput", "latency", "frame_loss", "back_to_back"]
+sizes = ["rfc2544", "imix"]    # sizes without FCS: 60, 124, ... 1514, and a mix
+line_rate = "1gbps"
+trial_duration = "10s"
+warmup = "2s"
+repetitions = 1
+loss_threshold = 0.0           # percent
+```
+
+Through the namespace router of `scripts/bench-netns.sh`, which forwards
+20 Mbit/s (a token bucket) with a 10 ms queue, on a 100 Mbit/s line rate:
+
+```text
+Throughput (highest load losing at most 0%, searched to 1%):
+  size   frame   load %     frames/s     Mbit/s  L1 Mbit/s  note
+  1020    1020    20.39         2442      19.93      20.40
+  imix   363.7    21.17         6828      19.87      21.18
+
+Frame loss:
+  size   load %    offered/s         sent     received   loss %
+  1020   100.00        11973        11974         2480   79.288
+  1020    80.00         9579         9579         2506   73.839
+  ...
+Back-to-back (longest burst without loss):
+  size   load %     frames      burst  note
+  1020   100.00         39     3.26ms
+  imix   100.00        195     6.05ms
+```
+
+Sizes are frame lengths without the 4-byte FCS (RFC 2544's 64 to 1518 bytes
+are 60 to 1514 here); loads are percent of the line rate counting 24 bytes of
+FCS, preamble and gap per frame. Each frame carries the 28-byte signature
+in place of the end of its payload, so it keeps its size (a 60-byte UDP/IPv4
+frame has no room and goes out as 70). `imix` (60:7, 590:4, 1514:1) and other
+mixes also work in traffic profiles (`sizes = "imix"`) and on `replay` and
+`build` (`--sizes imix`). How it measures, and the limits of the method
+(software timestamps, clocks, the sender's and the receiver's speed), are in
+[docs/benchmarking.md](docs/benchmarking.md). `sudo scripts/bench-netns.sh`
+runs the lab above and checks the results; CI runs it.
+
 ### Stateful TCP
 
 A replay sends captured packets as they are. That is fine for a switch, but a
@@ -907,6 +971,26 @@ for r in job.flow_reports() {
 
 `RxStats::record(frame, receive_time)` does the counting for frames from
 anywhere, and `Signature::find(frame)` reads a signature.
+
+A benchmark in code: `run_benchmark` decides the trials, a `TrialRunner`
+runs them. `JobTrialRunner` sends with a `Job` on any sink and counts with
+any receiver; a simulated device works too:
+
+```rust
+use ferotrx_core::*;
+
+let config = BenchConfig {
+    tests: vec![BenchTest::Throughput, BenchTest::BackToBack],
+    sizes: vec!["508".parse()?, "imix".parse()?],
+    line_rate_mbps: 1000.0,
+    ..Default::default()
+};
+let mut runner = JobTrialRunner::new(capture, open_sink, open_receiver);
+let report = run_benchmark(&config, &mut runner, |size, trial| {
+    println!("{} {}: {:.2}% lost {}", size.size, trial.test, trial.load_pct, trial.lost)
+})?;
+println!("{}", report.text());
+```
 
 Stateful TCP in code, here with the client and the server on two in-memory
 ports (`ferotrx_io::open_port("eth0")` opens a real one):

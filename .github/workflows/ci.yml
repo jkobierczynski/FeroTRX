@@ -136,6 +136,16 @@ jobs:
           sudo LOSS=0.03 scripts/latency-netns.sh ./target/debug/ferotrx
           sudo IPV6=1 scripts/latency-netns.sh ./target/debug/ferotrx
 
+      # RFC 2544 benchmark of a router whose output a token bucket limits to
+      # 20 Mbit/s: throughput, latency, frame loss and back-to-back for a
+      # fixed size and IMIX, checked against the limit; JSON and text reports.
+      - name: Benchmark a rate-limited router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo modprobe sch_netem || true
+          sudo scripts/bench-netns.sh ./target/debug/ferotrx -q
+
   # DPDK is an optional feature: build it against Ubuntu's DPDK and send
   # through DPDK's af_packet driver on a veth pair, without hugepages.
   dpdk:

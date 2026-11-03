@@ -288,6 +288,9 @@ pub struct StreamInfo {
     /// Latency flow id, for a stream the profile marks with `latency`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency: Option<u32>,
+    /// Frame sizes (the profile's `sizes`), e.g. `imix`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sizes: Option<String>,
 }
 
 // ----- run.* -----

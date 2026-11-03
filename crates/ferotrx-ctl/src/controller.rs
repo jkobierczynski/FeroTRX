@@ -726,6 +726,7 @@ fn profile_info(name: &str, p: &Profile) -> ProfileInfo {
                 rewrite: s.rewrite.iter().map(ToString::to_string).collect(),
                 vary: s.vary.iter().map(ToString::to_string).collect(),
                 latency: s.latency,
+                sizes: s.sizes.as_ref().map(ToString::to_string),
             })
             .collect(),
     }
