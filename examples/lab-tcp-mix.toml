@@ -1,0 +1,77 @@
+# FeroTRX stateful TCP profile with several templates: a mix of connection
+# kinds, like TRex ASTF. Same lab as lab-tcp.toml: one switch, a NAT router
+# between two VLANs.
+#
+#   FeroTRX host --- switch (trunk) --- router --- VLAN 10: 192.168.10.0/24 (clients)
+#                                              \-- VLAN 20: 192.168.20.0/24 (servers)
+#
+# Run it with:
+#   sudo ferotrx tcp -p examples/lab-tcp-mix.toml -i <interface>
+#
+# Every new connection gets a template by weight: here 3 of every 5 are the
+# HTTP session from http.pcap, 1 a download from web.pcap on port 8080, and
+# 1 a short echo written out below. The clients use 100 addresses and connect
+# to 4 servers in turn. `cps`, `connections` and `concurrency` count all
+# templates together; the summary also shows each template's counters.
+#
+# The server tells templates apart by the port the connection arrives on, so
+# each template needs its own `port`.
+#
+# Change the addresses to your lab, as in lab-tcp.toml: free addresses in each
+# VLAN (not the FeroTRX machine's own), and the router's address as gateway.
+
+cps = 100            # new connections per second, all templates together
+connections = 2000   # in all; 0 keeps going until Ctrl-C or --duration
+concurrency = 200    # most connections open at once
+
+[[template]]
+name = "http"
+pcap = "http.pcap"   # server port 80, from the capture
+weight = 3
+
+[[template]]
+name = "download"
+pcap = "web.pcap"
+flow = 1             # the first of its three connections
+port = 8080          # the capture's port 80 is taken by "http"
+weight = 1
+
+[[template]]
+name = "echo"
+port = 7
+weight = 1
+closer = "server"
+[[template.message]]
+from = "client"
+text = "hello from FeroTRX\r\n"
+[[template.message]]
+from = "server"
+text = "hello from FeroTRX\r\n"
+
+[client]
+# iface = "enp0s3"   # default: the -i interface
+ip = "192.168.10.100/24"
+ips = 100            # clients 192.168.10.100 - 192.168.10.199
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+# iface = "enp0s3"
+ip = "192.168.20.50/24"
+ips = 4              # servers 192.168.20.50 - 192.168.20.53, used in turn
+gateway = "192.168.20.1"
+vlan = 20
+
+# Clients and servers on two machines: give each machine only its own table,
+# and on the client machine say where the servers are (each template's port
+# is used), and how many:
+# connect = "192.168.20.50"
+# connect_ips = 4
+#
+# Behind a port forward, a template can connect elsewhere than where its
+# server listens:
+#   connect = "192.168.20.1:18080"   # in the [[template]] table
+
+[tcp]
+rto = "250ms"
+verify = true

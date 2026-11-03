@@ -612,8 +612,12 @@ pub struct TcpRunInfo {
     pub state: RunState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// All templates together.
     pub client: TcpCounters,
     pub server: TcpCounters,
+    /// Each template's counters, in the profile's order.
+    #[serde(default)]
+    pub templates: Vec<TcpTemplateCounters>,
     pub tx_packets: u64,
     pub tx_bytes: u64,
     pub rx_packets: u64,
@@ -621,6 +625,14 @@ pub struct TcpRunInfo {
     pub elapsed_s: f64,
     /// Completed client connections per second.
     pub cps: f64,
+}
+
+/// The counters of one template of a [`TcpRunInfo`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TcpTemplateCounters {
+    pub name: String,
+    pub client: TcpCounters,
+    pub server: TcpCounters,
 }
 
 /// Connection counters of one side of a [`TcpRunInfo`].
@@ -659,6 +671,15 @@ impl TcpRunInfo {
     pub(crate) fn fill(&mut self, s: &TcpStats) {
         self.client = (&s.client).into();
         self.server = (&s.server).into();
+        self.templates = s
+            .templates
+            .iter()
+            .map(|t| TcpTemplateCounters {
+                name: t.name.clone(),
+                client: (&t.client).into(),
+                server: (&t.server).into(),
+            })
+            .collect();
         self.tx_packets = s.tx_packets;
         self.tx_bytes = s.tx_bytes;
         self.rx_packets = s.rx_packets;

@@ -110,10 +110,13 @@ pub use stream::{run, run_with_progress, RunConfig, RunStats, Stream};
 pub use tcp::{
     memory_ports, run_tcp, MemoryPort, PacketPort, TcpClientConfig, TcpConfig, TcpEndpoint,
     TcpEngine, TcpFlow, TcpJob, TcpMessage, TcpOptions, TcpProgram, TcpRole, TcpRunConfig,
-    TcpServerConfig, TcpSideStats, TcpStats,
+    TcpServerConfig, TcpSideStats, TcpStats, TcpTemplate, TcpTemplateStats,
 };
 #[cfg(feature = "profile")]
-pub use tcp::{parse_ip_prefix, parse_port_range, TcpHostSpec, TcpProfile, TcpSource};
+pub use tcp::{
+    parse_connect_addr, parse_ip_prefix, parse_port_range, TcpHostSpec, TcpProfile, TcpSource,
+    TcpTemplateSpec,
+};
 pub use transform::{
     Field, FixChecksums, IpRewrite, MacRewrite, PortRewrite, Rewrite, Transform, VlanPop, VlanPush,
     VlanSet,

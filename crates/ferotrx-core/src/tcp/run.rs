@@ -192,14 +192,13 @@ where
 /// let server_ep = TcpEndpoint::new(1, "02:00:00:00:00:02".parse().unwrap(), "10.0.0.2".parse().unwrap());
 /// let mut client = TcpClientConfig::new(
 ///     TcpEndpoint::new(0, "02:00:00:00:00:01".parse().unwrap(), "10.0.0.1".parse().unwrap()),
-///     "10.0.0.2:80".parse().unwrap(),
 /// );
 /// client.connections = 5;
 /// client.cps = 1000.0;
 /// let engine = TcpEngine::new(TcpConfig {
-///     program: Arc::new(program),
+///     templates: vec![TcpTemplate::new(Arc::new(program), "10.0.0.2:80".parse().unwrap())],
 ///     client: Some(client),
-///     server: Some(TcpServerConfig { endpoint: server_ep, port: 80 }),
+///     server: Some(TcpServerConfig::new(server_ep)),
 ///     options: TcpOptions::default(),
 /// }).unwrap();
 /// let job = TcpJob::spawn(engine, vec![Box::new(a), Box::new(b)], TcpRunConfig::default()).unwrap();

@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ferotrx_core::{PacketPort, SinkError, TcpEngine, TcpJob, TcpProfile, TcpRunConfig};
+use ferotrx_core::{
+    PacketPort, SinkError, TcpEngine, TcpJob, TcpProfile, TcpProgram, TcpRunConfig,
+};
 
 use crate::controller::StartError;
 use crate::protocol::{RunState, TcpRunInfo};
@@ -15,7 +17,8 @@ pub type PortOpener = dyn Fn(&str) -> Result<Box<dyn PacketPort>, SinkError> + S
 /// A TCP run started by [`start_tcp`].
 pub struct TcpStarted {
     pub job: TcpJob,
-    /// The session played.
+    /// The session played; with several templates, each one's name, weight
+    /// and session.
     pub program: String,
     /// The interfaces, in port order.
     pub interfaces: Vec<String>,
@@ -40,9 +43,17 @@ pub fn start_tcp_with(
     mut config: TcpRunConfig,
     open: &PortOpener,
 ) -> Result<TcpStarted, StartError> {
-    let program = Arc::new(profile.program()?);
+    let programs: Vec<Arc<TcpProgram>> = profile.programs()?.into_iter().map(Arc::new).collect();
     let interfaces = profile.interfaces(iface)?;
-    let engine = TcpEngine::new(profile.config(program.clone(), &interfaces, iface)?)?;
+    let engine = TcpEngine::new(profile.config(&programs, &interfaces, iface)?)?;
+    let program = match engine.templates() {
+        [one] => one.program.to_string(),
+        many => many
+            .iter()
+            .map(|t| format!("{} (weight {}): {}", t.name, t.weight, t.program))
+            .collect::<Vec<_>>()
+            .join("; "),
+    };
     let mut ports = Vec::with_capacity(interfaces.len());
     for name in &interfaces {
         ports.push(open(name)?);
@@ -52,7 +63,7 @@ pub fn start_tcp_with(
     }
     Ok(TcpStarted {
         job: TcpJob::spawn(engine, ports, config)?,
-        program: program.to_string(),
+        program,
         interfaces,
     })
 }
@@ -85,6 +96,7 @@ impl TcpRun {
             error: self.job.error(),
             client: Default::default(),
             server: Default::default(),
+            templates: Vec::new(),
             tx_packets: 0,
             tx_bytes: 0,
             rx_packets: 0,

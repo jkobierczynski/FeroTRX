@@ -30,6 +30,8 @@ struct NatRouter {
     drop_every: u64,
     seen: u64,
     dropped: u64,
+    /// Server addresses and ports clients connected to.
+    servers: HashMap<SocketAddrV4, u64>,
 }
 
 fn csum(data: &[u8], mut sum: u32) -> u16 {
@@ -85,6 +87,7 @@ impl NatRouter {
             drop_every,
             seen: 0,
             dropped: 0,
+            servers: HashMap::new(),
         }
     }
 
@@ -118,6 +121,13 @@ impl NatRouter {
         f[a + 8] -= 1; // TTL
         match vlan {
             10 if f[0..6] == R10_MAC.0 && dst.octets()[2] == 20 => {
+                if f[t + 13] & 0x12 == 0x02 {
+                    // A SYN.
+                    *self
+                        .servers
+                        .entry(SocketAddrV4::new(dst, dport))
+                        .or_default() += 1;
+                }
                 let key = SocketAddrV4::new(src, sport);
                 let port = *self.out_map.entry(key).or_insert_with(|| {
                     self.next_port += 1;
@@ -175,8 +185,13 @@ fn web_program(size: usize) -> TcpProgram {
     .with_closer(TcpRole::Server)
 }
 
+/// A template that connects to the server at 192.168.20.50:80.
+fn tpl(program: Arc<TcpProgram>) -> TcpTemplate {
+    TcpTemplate::new(program, "192.168.20.50:80".parse().unwrap())
+}
+
 fn client(connections: u64, cps: f64, concurrency: usize) -> TcpClientConfig {
-    let mut c = TcpClientConfig::new(client_endpoint(), "192.168.20.50:80".parse().unwrap());
+    let mut c = TcpClientConfig::new(client_endpoint());
     c.connections = connections;
     c.cps = cps;
     c.concurrency = concurrency;
@@ -222,19 +237,16 @@ fn simulate(engines: &mut [&mut TcpEngine], router: &mut NatRouter, max: Duratio
 fn two_engines_through_a_lossy_nat_router() {
     let program = Arc::new(web_program(100_000));
     let mut client = TcpEngine::new(TcpConfig {
-        program: program.clone(),
+        templates: vec![tpl(program.clone())],
         client: Some(client(20, 200.0, 5)),
         server: None,
         options: TcpOptions::default(),
     })
     .unwrap();
     let mut server = TcpEngine::new(TcpConfig {
-        program,
+        templates: vec![tpl(program)],
         client: None,
-        server: Some(TcpServerConfig {
-            endpoint: server_endpoint(),
-            port: 80,
-        }),
+        server: Some(TcpServerConfig::new(server_endpoint())),
         options: TcpOptions::default(),
     })
     .unwrap();
@@ -277,12 +289,9 @@ fn program_bytes(role: TcpRole) -> u64 {
 fn one_engine_plays_both_ends_on_a_trunk() {
     let program = Arc::new(TcpProgram::from_capture(&session_capture(), None).unwrap());
     let mut engine = TcpEngine::new(TcpConfig {
-        program,
+        templates: vec![tpl(program)],
         client: Some(client(50, 1000.0, 0)),
-        server: Some(TcpServerConfig {
-            endpoint: server_endpoint(),
-            port: 80,
-        }),
+        server: Some(TcpServerConfig::new(server_endpoint())),
         options: TcpOptions::default(),
     })
     .unwrap();
@@ -312,15 +321,13 @@ fn session_capture() -> Capture {
 #[test]
 fn closed_port_is_reset() {
     let program = Arc::new(web_program(10));
-    let mut c = client(3, 100.0, 0);
-    c.connect = "192.168.20.50:81".parse().unwrap();
+    let c = client(3, 100.0, 0);
     let mut engine = TcpEngine::new(TcpConfig {
-        program,
+        templates: vec![
+            TcpTemplate::new(program, "192.168.20.50:81".parse().unwrap()).with_listen_port(80),
+        ],
         client: Some(c),
-        server: Some(TcpServerConfig {
-            endpoint: server_endpoint(),
-            port: 80,
-        }),
+        server: Some(TcpServerConfig::new(server_endpoint())),
         options: TcpOptions::default(),
     })
     .unwrap();
@@ -337,7 +344,7 @@ fn closed_port_is_reset() {
 #[test]
 fn gives_up_when_nobody_answers() {
     let mut engine = TcpEngine::new(TcpConfig {
-        program: Arc::new(web_program(10)),
+        templates: vec![tpl(Arc::new(web_program(10)))],
         client: Some(client(2, 100.0, 0)),
         server: None,
         options: TcpOptions {
@@ -365,7 +372,7 @@ fn reports_a_missing_gateway() {
     let mut c = client(1, 1.0, 0);
     c.endpoint.gateway = Some(ip("192.168.10.254"));
     let mut engine = TcpEngine::new(TcpConfig {
-        program: Arc::new(web_program(10)),
+        templates: vec![tpl(Arc::new(web_program(10)))],
         client: Some(c),
         server: None,
         options: TcpOptions::default(),
@@ -390,19 +397,16 @@ fn notices_bytes_that_differ() {
     let mut other = web_program(100);
     other.messages[1].data[20] ^= 0xff;
     let mut client_engine = TcpEngine::new(TcpConfig {
-        program: Arc::new(web_program(100)),
+        templates: vec![tpl(Arc::new(web_program(100)))],
         client: Some(client(4, 100.0, 0)),
         server: None,
         options: TcpOptions::default(),
     })
     .unwrap();
     let mut server = TcpEngine::new(TcpConfig {
-        program: Arc::new(other),
+        templates: vec![tpl(Arc::new(other))],
         client: None,
-        server: Some(TcpServerConfig {
-            endpoint: server_endpoint(),
-            port: 80,
-        }),
+        server: Some(TcpServerConfig::new(server_endpoint())),
         options: TcpOptions::default(),
     })
     .unwrap();
@@ -419,12 +423,9 @@ fn notices_bytes_that_differ() {
 #[test]
 fn answers_arp_and_ping() {
     let mut engine = TcpEngine::new(TcpConfig {
-        program: Arc::new(web_program(10)),
+        templates: vec![tpl(Arc::new(web_program(10)))],
         client: None,
-        server: Some(TcpServerConfig {
-            endpoint: server_endpoint(),
-            port: 80,
-        }),
+        server: Some(TcpServerConfig::new(server_endpoint())),
         options: TcpOptions::default(),
     })
     .unwrap();
@@ -451,7 +452,7 @@ fn answers_arp_and_ping() {
 fn says_when_arp_replies_come_back_untagged() {
     // The router answers on VLAN 10, but the switch strips the tag.
     let mut engine = TcpEngine::new(TcpConfig {
-        program: Arc::new(web_program(10)),
+        templates: vec![tpl(Arc::new(web_program(10)))],
         client: Some(client(1, 1.0, 0)),
         server: None,
         options: TcpOptions::default(),
@@ -471,4 +472,184 @@ fn says_when_arp_replies_come_back_untagged() {
     }
     let err = engine.error().expect("ARP fails");
     assert!(err.contains("arrive untagged"), "{err}");
+}
+
+/// An echo: the client sends a line, the server sends it back and closes.
+fn echo_program() -> TcpProgram {
+    TcpProgram::new(
+        7,
+        vec![
+            TcpMessage::new(TcpRole::Client, "ping\r\n"),
+            TcpMessage::new(TcpRole::Server, "ping\r\n"),
+        ],
+    )
+    .with_closer(TcpRole::Server)
+}
+
+#[test]
+fn mixes_templates_by_weight_across_servers() {
+    let web = TcpTemplate::new(
+        Arc::new(web_program(5_000)),
+        "192.168.20.50:80".parse().unwrap(),
+    )
+    .with_name("web")
+    .with_weight(3)
+    .with_connect_ips(4);
+    let echo = TcpTemplate::new(Arc::new(echo_program()), "192.168.20.50:7".parse().unwrap())
+        .with_name("echo")
+        .with_connect_ips(4);
+    // Only the server knows this one: the client never opens it.
+    let idle = TcpTemplate::new(Arc::new(echo_program()), "192.168.20.50:9".parse().unwrap())
+        .with_name("idle")
+        .with_weight(0);
+    let templates = vec![web, echo, idle];
+    let mut client_engine = TcpEngine::new(TcpConfig {
+        templates: templates.clone(),
+        client: Some(client(40, 500.0, 6)),
+        server: None,
+        options: TcpOptions::default(),
+    })
+    .unwrap();
+    let mut server = TcpEngine::new(TcpConfig {
+        templates,
+        client: None,
+        server: Some(TcpServerConfig::new(server_endpoint().with_ip_count(4))),
+        options: TcpOptions::default(),
+    })
+    .unwrap();
+    let mut router = NatRouter::new(37);
+    simulate(
+        &mut [&mut client_engine, &mut server],
+        &mut router,
+        Duration::from_secs(60),
+    );
+    assert!(client_engine.is_done());
+    let (c, s) = (client_engine.stats(), server.stats());
+    assert_eq!((c.client.completed, c.client.failed()), (40, 0), "{c:?}");
+    assert_eq!(c.client.mismatched + s.server.mismatched, 0);
+    let per = |st: &TcpStats, server_side: bool| -> Vec<(String, u64)> {
+        st.templates
+            .iter()
+            .map(|t| {
+                let side = if server_side { &t.server } else { &t.client };
+                (t.name.clone(), side.completed)
+            })
+            .collect()
+    };
+    let want = vec![
+        ("web".to_string(), 30),
+        ("echo".to_string(), 10),
+        ("idle".to_string(), 0),
+    ];
+    assert_eq!(per(c, false), want);
+    assert_eq!(per(s, true), want);
+    assert_eq!(
+        s.templates[1].server.payload_tx,
+        10 * echo_program().bytes(TcpRole::Server)
+    );
+    // Each template went to all four servers, evenly.
+    for port in [80, 7] {
+        for host in 50..54 {
+            let a = SocketAddrV4::new(Ipv4Addr::new(192, 168, 20, host), port);
+            let n = router.servers.get(&a).copied().unwrap_or(0);
+            let want = if port == 80 { 30 / 4 } else { 10 / 4 };
+            assert!(n >= want, "{a}: {n} connections");
+        }
+    }
+}
+
+#[test]
+fn weights_hold_over_short_stretches() {
+    let a = TcpTemplate::new(
+        Arc::new(web_program(10)),
+        "192.168.20.50:80".parse().unwrap(),
+    )
+    .with_name("a")
+    .with_weight(2);
+    let b = TcpTemplate::new(Arc::new(echo_program()), "192.168.20.50:7".parse().unwrap())
+        .with_name("b");
+    let mut engine = TcpEngine::new(TcpConfig {
+        templates: vec![a, b],
+        client: Some(client(6, 1000.0, 0)),
+        server: None,
+        options: TcpOptions::default(),
+    })
+    .unwrap();
+    let mut router = NatRouter::new(0);
+    let mut order = Vec::new();
+    let mut now = Duration::ZERO;
+    while order.len() < 6 && now < Duration::from_secs(2) {
+        engine.poll(now);
+        for (_, f) in engine.take_output() {
+            if let Some(r) = router.route(f.clone()) {
+                if u16::from_be_bytes([f[16], f[17]]) == 0x0806 {
+                    engine.handle_frame(0, &r, now);
+                }
+            }
+            if f.len() > 18 + 20 + 13 && f[16..18] == [0x08, 0x00] && f[18 + 20 + 13] == 0x02 {
+                order.push(u16::from_be_bytes([f[18 + 22], f[18 + 23]]));
+            }
+        }
+        now += Duration::from_millis(1);
+    }
+    assert_eq!(order, [80, 7, 80, 80, 7, 80]);
+}
+
+#[test]
+fn servers_on_the_link_are_each_resolved() {
+    // No router: four servers on the client's subnet, each found by ARP.
+    let (a, b) = memory_ports();
+    let mac = |s: &str| s.parse::<MacAddr>().unwrap();
+    let server = TcpEndpoint::new(1, mac("02:00:00:00:00:02"), ip("10.0.0.10")).with_ip_count(4);
+    let mut client = TcpClientConfig::new(TcpEndpoint::new(
+        0,
+        mac("02:00:00:00:00:01"),
+        ip("10.0.0.1"),
+    ));
+    client.connections = 8;
+    client.cps = 1000.0;
+    let engine = TcpEngine::new(TcpConfig {
+        templates: vec![
+            TcpTemplate::new(Arc::new(echo_program()), "10.0.0.10:7".parse().unwrap())
+                .with_connect_ips(4),
+        ],
+        client: Some(client),
+        server: Some(TcpServerConfig::new(server)),
+        options: TcpOptions::default(),
+    })
+    .unwrap();
+    let job = TcpJob::spawn(
+        engine,
+        vec![Box::new(a), Box::new(b)],
+        TcpRunConfig::default(),
+    )
+    .unwrap();
+    let st = job.join().unwrap();
+    assert_eq!((st.client.completed, st.server.completed), (8, 8), "{st:?}");
+}
+
+#[test]
+fn rejects_templates_the_server_cannot_tell_apart() {
+    let t = |port| {
+        TcpTemplate::new(
+            Arc::new(echo_program()),
+            SocketAddrV4::new(ip("192.168.20.50"), port),
+        )
+    };
+    let err = TcpEngine::new(TcpConfig {
+        templates: vec![t(7).with_name("a"), t(8).with_name("b").with_listen_port(7)],
+        client: None,
+        server: Some(TcpServerConfig::new(server_endpoint())),
+        options: TcpOptions::default(),
+    })
+    .unwrap_err();
+    assert!(err.to_string().contains("both listen on port 7"), "{err}");
+    let err = TcpEngine::new(TcpConfig {
+        templates: vec![t(7).with_weight(0)],
+        client: Some(client(1, 1.0, 0)),
+        server: None,
+        options: TcpOptions::default(),
+    })
+    .unwrap_err();
+    assert!(err.to_string().contains("weight 0"), "{err}");
 }

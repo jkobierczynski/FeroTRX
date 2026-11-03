@@ -7,6 +7,9 @@
 //!
 //! * [`TcpProgram`] turns a session from a capture into the messages each end
 //!   sends, in order.
+//! * [`TcpTemplate`] is a kind of connection: a program, the servers clients
+//!   connect to and the port servers accept it on. A run mixes templates by
+//!   weight, like TRex ASTF templates.
 //! * [`TcpEngine`] emulates the client and server hosts. It answers ARP and
 //!   ping, opens connections at a set rate with real handshakes, tracks
 //!   sequence and acknowledgement numbers, retransmits lost segments, plays
@@ -27,9 +30,12 @@ mod wire;
 
 pub use engine::{
     TcpClientConfig, TcpConfig, TcpEndpoint, TcpEngine, TcpOptions, TcpServerConfig, TcpSideStats,
-    TcpStats,
+    TcpStats, TcpTemplate, TcpTemplateStats,
 };
 #[cfg(feature = "profile")]
-pub use profile::{parse_ip_prefix, parse_port_range, TcpHostSpec, TcpProfile, TcpSource};
+pub use profile::{
+    parse_connect_addr, parse_ip_prefix, parse_port_range, TcpHostSpec, TcpProfile, TcpSource,
+    TcpTemplateSpec,
+};
 pub use program::{TcpFlow, TcpMessage, TcpProgram, TcpRole};
 pub use run::{memory_ports, run_tcp, MemoryPort, PacketPort, TcpJob, TcpRunConfig};
