@@ -358,7 +358,7 @@ fn payload_start(data: &[u8]) -> (usize, usize, Vec<(u8, usize)>) {
 
 /// Cuts or pads the frame to `len` bytes and makes the IP and UDP lengths and
 /// all checksums match. IP fragments only change length if they are not IP.
-fn set_len(data: &mut Vec<u8>, len: usize) {
+pub(crate) fn set_len(data: &mut Vec<u8>, len: usize) {
     let Some(ip) = ip_layer(data) else {
         data.resize(len.max(net::ETH_HEADER), 0);
         return;

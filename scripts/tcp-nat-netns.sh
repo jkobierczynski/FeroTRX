@@ -20,8 +20,23 @@
 #   c0 --- rc 192.168.10.1/24 (router) rs 192.168.20.1/24 --- s0
 set -eu
 
-BIN=${1:-./target/debug/ferotrx}
-[ $# -gt 0 ] && shift
+# The binary: the first argument, else a build in this checkout, else the
+# installed one.
+if [ $# -gt 0 ]; then
+    BIN=$1
+    shift
+else
+    BIN=
+    for b in ./target/debug/ferotrx ./target/release/ferotrx "$(command -v ferotrx || true)"; do
+        if [ -n "$b" ] && [ -x "$b" ]; then BIN=$b; break; fi
+    done
+fi
+if [ -z "$BIN" ] || ! [ -x "$BIN" ]; then
+    echo "ferotrx not found${BIN:+ at $BIN}: build it first (cargo build -p ferotrx-cli)," >&2
+    echo "or give its path: sudo $0 path/to/ferotrx" >&2
+    exit 1
+fi
+echo "using $BIN"
 NS=ferotrx-rtr
 
 cleanup() {

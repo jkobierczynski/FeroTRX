@@ -3,7 +3,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::{run_with_progress, Error, PacketSink, Result, RunConfig, RunStats, Stream};
+use crate::{
+    run_with_progress, Error, FlowReport, PacketReceiver, PacketSink, Result, RunConfig, RunStats,
+    RxConfig, RxJob, RxStats, Stream,
+};
 
 /// How often a running [`Job`] publishes its counters.
 pub const JOB_STATS_INTERVAL: Duration = Duration::from_millis(100);
@@ -16,6 +19,27 @@ pub enum JobState {
     Finished,
     /// The run ended with an error, such as a failed send.
     Failed(String),
+}
+
+/// A receiver that runs alongside a [`Job`]'s streams, to measure the loss and
+/// latency of the streams made with [`Stream::with_latency`].
+pub struct RxSettings {
+    pub receiver: Box<dyn PacketReceiver>,
+    /// How long to keep receiving after the last packet is sent, for packets
+    /// still on their way.
+    pub wait: Duration,
+}
+
+impl RxSettings {
+    /// Time a receiver keeps going after the last packet, unless told otherwise.
+    pub const DEFAULT_WAIT: Duration = Duration::from_millis(500);
+
+    pub fn new(receiver: Box<dyn PacketReceiver>) -> Self {
+        Self {
+            receiver,
+            wait: Self::DEFAULT_WAIT,
+        }
+    }
 }
 
 /// A [`run`](crate::run) on its own thread, which can be watched and stopped
@@ -42,6 +66,8 @@ pub enum JobState {
 /// ```
 pub struct Job {
     names: Vec<String>,
+    flows: Vec<Option<u32>>,
+    rx: Option<Arc<RxJob>>,
     stop: Arc<AtomicBool>,
     shared: Arc<Shared>,
     thread: Option<JoinHandle<Result<RunStats>>>,
@@ -66,7 +92,37 @@ impl Job {
     pub fn spawn(
         streams: Vec<Stream<'static>>,
         sink: Box<dyn PacketSink + Send>,
+        config: RunConfig,
+    ) -> Result<Job> {
+        Self::spawn_with_rx(streams, sink, config, None)
+    }
+
+    /// Like [`spawn`](Job::spawn), with a receiver counting what arrives while
+    /// the streams run, and for `rx.wait` after. The job ends when the
+    /// receiver does. See [`rx_stats`](Job::rx_stats) and [`flow_reports`](Job::flow_reports).
+    ///
+    /// ```
+    /// use ferotrx_core::*;
+    /// use std::time::Duration;
+    ///
+    /// let (tx, rx) = memory_ports();
+    /// let cap = std::sync::Arc::new(Capture::from_specs(
+    ///     &["eth/ipv4(dst=10.0.0.2)/udp(dport=7)/raw(len=32)"], Duration::ZERO).unwrap());
+    /// let streams = vec![Stream::new("probe", CaptureSource::new(cap).loops(100))
+    ///     .with_rate(Rate::Pps(5000.0))
+    ///     .with_latency(1)];
+    /// let rx = RxSettings { receiver: Box::new(PortReceiver(rx)), wait: Duration::from_millis(50) };
+    /// let job = Job::spawn_with_rx(streams, Box::new(tx), RunConfig::default(), Some(rx)).unwrap();
+    /// job.wait(None);
+    /// let report = &job.flow_reports()[0];
+    /// assert_eq!((report.tx, report.rx, report.lost), (100, 100, 0));
+    /// assert!(report.latency.max().unwrap() < Duration::from_secs(1));
+    /// ```
+    pub fn spawn_with_rx(
+        streams: Vec<Stream<'static>>,
+        sink: Box<dyn PacketSink + Send>,
         mut config: RunConfig,
+        rx: Option<RxSettings>,
     ) -> Result<Job> {
         for s in &streams {
             s.rate.validate()?;
@@ -82,6 +138,14 @@ impl Job {
             .get_or_insert_with(|| Arc::new(AtomicBool::new(false)))
             .clone();
         let names: Vec<String> = streams.iter().map(|s| s.name.clone()).collect();
+        let flows: Vec<Option<u32>> = streams.iter().map(|s| s.latency).collect();
+        let (rx, rx_wait) = match rx {
+            Some(r) => (
+                Some(Arc::new(RxJob::spawn(r.receiver, RxConfig::default())?)),
+                r.wait,
+            ),
+            None => (None, Duration::ZERO),
+        };
         let shared = Arc::new(Shared {
             live: Mutex::new(Live {
                 stats: RunStats {
@@ -95,19 +159,30 @@ impl Job {
         });
         let thread = {
             let shared = shared.clone();
+            let rx = rx.clone();
             std::thread::Builder::new()
                 .name("ferotrx-job".into())
                 .spawn(move || {
                     let mut streams = streams;
                     let mut sink = sink;
                     shared.lock().start = Instant::now();
-                    let result = run_with_progress(
+                    let mut result = run_with_progress(
                         &mut streams,
                         &mut *sink,
                         &config,
                         JOB_STATS_INTERVAL,
                         |s| shared.lock().stats = s.clone(),
                     );
+                    if let Some(rx) = rx {
+                        // Packets still on their way get `rx_wait` to arrive.
+                        rx.wait(Some(rx_wait));
+                        rx.stop();
+                        if let Err(e) = rx.join_ref() {
+                            if result.is_ok() {
+                                result = Err(e);
+                            }
+                        }
+                    }
                     let mut live = shared.lock();
                     match &result {
                         Ok(stats) => {
@@ -130,6 +205,8 @@ impl Job {
         };
         Ok(Job {
             names,
+            flows,
+            rx,
             stop,
             shared,
             thread: Some(thread),
@@ -139,6 +216,28 @@ impl Job {
     /// Names of the streams, in the order of [`RunStats::streams`].
     pub fn stream_names(&self) -> &[String] {
         &self.names
+    }
+
+    /// The latency flow id of each stream (see [`Stream::with_latency`]), in
+    /// the order of [`RunStats::streams`].
+    pub fn flows(&self) -> &[Option<u32>] {
+        &self.flows
+    }
+
+    /// The receiver's latest counters, if the job has one
+    /// ([`spawn_with_rx`](Job::spawn_with_rx)); final once the job has ended.
+    pub fn rx_stats(&self) -> Option<RxStats> {
+        self.rx.as_ref().map(|r| r.stats())
+    }
+
+    /// Sent against received, for each stream with a latency signature, when
+    /// the job has a receiver. While the job runs, packets on their way count
+    /// as lost.
+    pub fn flow_reports(&self) -> Vec<FlowReport> {
+        match self.rx_stats() {
+            Some(rx) => FlowReport::for_run(&self.names, &self.flows, &self.stats(), &rx),
+            None => Vec::new(),
+        }
     }
 
     /// The latest counters. While the job runs they are at most
@@ -221,6 +320,9 @@ impl Shared {
 impl Drop for Job {
     fn drop(&mut self) {
         self.stop();
+        if let Some(rx) = &self.rx {
+            rx.stop();
+        }
     }
 }
 

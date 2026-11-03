@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::latency::{reserve, stamp, wall_clock};
 use crate::{Error, Pacer, Packet, PacketSink, PacketSource, Rate, ReplayStats, Result, Transform};
 
 /// One flow of traffic: a source, the transforms applied to it, and its own rate.
@@ -14,6 +15,9 @@ pub struct Stream<'a> {
     pub limit: Option<u64>,
     /// Wait this long after the run starts before the first packet.
     pub delay: Duration,
+    /// Flow id of the latency [`Signature`](crate::Signature) every packet
+    /// carries, or `None` for a stream without one.
+    pub latency: Option<u32>,
     source: Box<dyn PacketSource + 'a>,
     transforms: Vec<Box<dyn Transform + 'a>>,
 }
@@ -26,6 +30,7 @@ impl<'a> Stream<'a> {
             rate: Rate::default(),
             limit: None,
             delay: Duration::ZERO,
+            latency: None,
             source: Box::new(source),
             transforms: Vec::new(),
         }
@@ -43,6 +48,16 @@ impl<'a> Stream<'a> {
 
     pub fn with_delay(mut self, delay: Duration) -> Self {
         self.delay = delay;
+        self
+    }
+
+    /// Measures loss and latency of this stream: every packet carries a
+    /// [`Signature`](crate::Signature) with flow id `flow`, a sequence number
+    /// and its send time, at the end of its IP payload (28 more bytes; frames
+    /// that are not IP get it at their end, IP fragments get none). A
+    /// [`PacketReceiver`](crate::PacketReceiver) on the far side counts what arrives.
+    pub fn with_latency(mut self, flow: u32) -> Self {
+        self.latency = Some(flow);
         self
     }
 
@@ -68,6 +83,7 @@ impl std::fmt::Debug for Stream<'_> {
             .field("rate", &self.rate)
             .field("limit", &self.limit)
             .field("delay", &self.delay)
+            .field("latency", &self.latency)
             .field("transforms", &self.transforms.len())
             .finish_non_exhaustive()
     }
@@ -113,6 +129,10 @@ struct Lane {
     deadline: Duration,
     /// The source's pass count after the pending packet was read.
     passes: u64,
+    /// Where the pending packet's latency signature is.
+    signature: Option<usize>,
+    /// Sequence number of the next signature.
+    seq: u64,
 }
 
 /// Like [`run`], and calls `progress` with the running counters about every `interval`.
@@ -153,6 +173,8 @@ where
             done: false,
             deadline: Duration::ZERO,
             passes: 0,
+            signature: None,
+            seq: 0,
         })
         .collect();
 
@@ -207,10 +229,21 @@ where
             break;
         }
 
+        let flow = streams[i].latency;
+        if let (Some(at), Some(flow)) = (lane.signature, flow) {
+            stamp(&mut lane.packet.data, at, flow, lane.seq, wall_clock());
+        }
         let len = lane.packet.data.len() as u64;
         let st = &mut stats.streams[i];
         match sink.send(&lane.packet.data) {
             Ok(()) => {
+                if lane.signature.is_some() {
+                    // Numbers only advance on packets that left, so failed
+                    // sends do not show up as loss.
+                    lane.seq += 1;
+                    st.tagged += 1;
+                    stats.total.tagged += 1;
+                }
                 st.packets += 1;
                 st.bytes += len;
                 stats.total.packets += 1;
@@ -264,6 +297,9 @@ fn fill(stream: &mut Stream<'_>, lane: &mut Lane, st: &ReplayStats, start: Insta
     for t in &mut stream.transforms {
         t.apply(&mut lane.packet);
     }
+    lane.signature = stream
+        .latency
+        .and_then(|flow| reserve(&mut lane.packet.data, flow));
     lane.deadline = match lane
         .pacer
         .next_deadline(lane.packet.timestamp, lane.packet.data.len())

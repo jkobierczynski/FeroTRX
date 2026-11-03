@@ -1,0 +1,48 @@
+# FeroTRX profile: loss and latency through the lab, like TRex's latency streams.
+#
+#   sender  --- switch --- router (or firewall, or a WAN link) --- receiver
+#   enp0s3                                                         enp0s8
+#
+# Every stream marked `latency` carries a 28-byte signature at the end of its
+# IP payload: a flow id, a sequence number and the send time. The receiver
+# counts what arrives per flow: lost, duplicated and reordered packets, and
+# latency (min, average, p99, max, jitter).
+#
+# Sender and receiver on one machine (two NICs, or one NIC when the router
+# sends the packets back on the same link):
+#   sudo ferotrx run examples/lab-latency.toml -i enp0s3 --rx enp0s8 -d 60s
+#
+# Receiver on another machine: start it there first, then send from here.
+#   receiver$ sudo ferotrx rx -i enp0s3 -d 70s
+#   sender$   sudo ferotrx run examples/lab-latency.toml -i enp0s3 -d 60s
+# Latency between two machines is only as good as their clocks agree (NTP:
+# about a millisecond; PTP: microseconds). Loss is counted from gaps in the
+# sequence numbers.
+#
+# Replace the addresses with your own:
+#   * ROUTER_MAC (02:00:00:00:01:01 here): the next hop's MAC on the sending
+#     side (`ip neigh` after pinging it).
+#   * 192.168.20.50: the receiving host. Nothing has to listen there; the
+#     receiver captures in promiscuous mode. If no host has that address, the
+#     router must still be able to resolve it (a static ARP entry), or use the
+#     receiver's own address.
+#
+# Without a lab, scripts/latency-netns.sh builds a router with delay and loss
+# in a network namespace and runs a profile like this one through it.
+
+# Voice-like: small packets, 50 per second, marked EF.
+[[stream]]
+name = "voice"
+packet = "eth(dst=02:00:00:00:01:01)/ipv4(src=192.168.10.100,dst=192.168.20.50,dscp=46)/udp(sport=4000,dport=5004)/raw(len=160)"
+interval = "20ms"
+loops = 0
+latency = true
+
+# Bulk: full-size packets at 20 Mbps, from 100 source ports.
+[[stream]]
+name = "bulk"
+packet = "eth(dst=02:00:00:00:01:01)/ipv4(src=192.168.10.100,dst=192.168.20.50)/udp(sport=4001,dport=9000)/raw(len=1400)"
+rate = "20mbps"
+loops = 0
+vary = ["port_src=4001..4100"]
+latency = true

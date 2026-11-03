@@ -7,7 +7,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use super::engine::{TcpEngine, TcpStats};
-use crate::{Error, Result, SinkError};
+use crate::{Error, PacketSink, Result, SinkError};
 
 /// A network port that can send and receive frames, for stateful traffic.
 ///
@@ -63,6 +63,13 @@ pub fn memory_ports() -> (MemoryPort, MemoryPort) {
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What a memory port sends as a [`PacketSink`], the other end receives.
+impl PacketSink for MemoryPort {
+    fn send(&mut self, data: &[u8]) -> std::result::Result<(), SinkError> {
+        PacketPort::send(self, data)
+    }
 }
 
 impl PacketPort for MemoryPort {

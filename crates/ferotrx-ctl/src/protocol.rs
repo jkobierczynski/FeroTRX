@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use ferotrx_core::{ReplayStats, RunStats, TcpSideStats, TcpStats};
+use ferotrx_core::{
+    FlowReport, FlowStats, LatencyStats, ReplayStats, RunStats, RxStats, TcpSideStats, TcpStats,
+};
 
 /// Version of the method set below. Bumped when a method changes incompatibly.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -214,6 +216,9 @@ pub struct StreamInfo {
     /// Field engine variables (the profile's `vary` list).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vary: Vec<String>,
+    /// Latency flow id, for a stream the profile marks with `latency`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency: Option<u32>,
 }
 
 // ----- run.* -----
@@ -271,6 +276,28 @@ pub struct StartParams {
     /// Count failed sends and keep going instead of failing the run.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ignore_errors: bool,
+    /// Put a latency signature in the packets of every stream, not only
+    /// those the profile marks with `latency`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub latency: bool,
+    /// Receive on an interface of the server while the run goes, and report
+    /// loss and latency of the streams with signatures (all of them if the
+    /// profile marks none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx: Option<RxSpec>,
+}
+
+/// Where a run receives its own packets back, for loss and latency.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RxSpec {
+    /// The interface on the server, e.g. `enp0s8`. It may be the one the run
+    /// sends on, if the packets come back on it (a router on a stick).
+    pub iface: String,
+    /// How long to keep receiving after the last packet is sent, e.g. `500ms`
+    /// (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<String>,
 }
 
 /// Parameters that name a run: `run.stats`, `run.remove`.
@@ -325,6 +352,9 @@ pub struct RunInfo {
     pub error: Option<String>,
     pub total: Counters,
     pub streams: Vec<StreamCounters>,
+    /// What the run's receiver saw, when it has one (`rx` in `run.start`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx: Option<RxCounters>,
 }
 
 /// Counters of a run or of one stream.
@@ -332,6 +362,9 @@ pub struct RunInfo {
 pub struct Counters {
     pub packets: u64,
     pub bytes: u64,
+    /// Packets sent with a latency signature.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tagged: u64,
     pub send_errors: u64,
     pub loops_completed: u64,
     pub elapsed_s: f64,
@@ -346,6 +379,7 @@ impl From<&ReplayStats> for Counters {
         Self {
             packets: s.packets,
             bytes: s.bytes,
+            tagged: s.tagged,
             send_errors: s.send_errors,
             loops_completed: s.loops_completed,
             elapsed_s: s.elapsed.as_secs_f64(),
@@ -361,6 +395,9 @@ pub struct StreamCounters {
     pub name: String,
     #[serde(flatten)]
     pub counters: Counters,
+    /// Loss and latency, for a stream with a signature in a run with a receiver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency: Option<FlowCounters>,
 }
 
 impl RunInfo {
@@ -371,10 +408,166 @@ impl RunInfo {
             .map(|(name, s)| StreamCounters {
                 name: name.clone(),
                 counters: s.into(),
+                latency: None,
             })
             .collect();
         ((&stats.total).into(), streams)
     }
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+// ----- loss and latency -----
+
+/// What a receiver saw: every frame, and those without a signature.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RxCounters {
+    /// The interface received on.
+    pub iface: String,
+    pub packets: u64,
+    pub bytes: u64,
+    /// Frames without a latency signature (other traffic on the interface).
+    pub untagged: u64,
+    pub elapsed_s: f64,
+}
+
+impl RxCounters {
+    pub fn new(iface: &str, s: &RxStats) -> Self {
+        Self {
+            iface: iface.to_string(),
+            packets: s.packets,
+            bytes: s.bytes,
+            untagged: s.untagged,
+            elapsed_s: s.elapsed.as_secs_f64(),
+        }
+    }
+}
+
+/// Loss and latency of one flow.
+///
+/// In a run, `tx` is what the stream sent with a signature and `lost` is
+/// `tx - rx` (packets on their way count while the run goes). On a receiver
+/// alone (`rx.start`) `tx` is absent and `lost` is the gaps in the sequence
+/// numbers, between the first and the highest one seen.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FlowCounters {
+    pub flow: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx: Option<u64>,
+    /// Packets received, duplicates not counted.
+    pub rx: u64,
+    pub lost: u64,
+    /// `lost` as a percentage of the packets expected.
+    pub loss_pct: f64,
+    pub duplicates: u64,
+    pub out_of_order: u64,
+    pub latency: LatencyCounters,
+}
+
+/// Latency figures of a flow, in microseconds; absent until a packet arrived.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LatencyCounters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_us: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_us: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_us: Option<f64>,
+    /// Smoothed variation from packet to packet (RFC 3550).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter_us: Option<f64>,
+    /// Percentiles, to within 12.5%.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p50_us: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p99_us: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p999_us: Option<f64>,
+    /// Packets that seemed to arrive before they were sent: the sender's and
+    /// the receiver's clocks disagree.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub negative: u64,
+}
+
+impl From<&LatencyStats> for LatencyCounters {
+    fn from(l: &LatencyStats) -> Self {
+        let us = |d: Option<std::time::Duration>| d.map(|d| d.as_nanos() as f64 / 1000.0);
+        Self {
+            min_us: us(l.min()),
+            avg_us: us(l.mean()),
+            max_us: us(l.max()),
+            jitter_us: us(l.jitter()),
+            p50_us: us(l.percentile(0.5)),
+            p99_us: us(l.percentile(0.99)),
+            p999_us: us(l.percentile(0.999)),
+            negative: l.negative,
+        }
+    }
+}
+
+fn pct(lost: u64, of: u64) -> f64 {
+    if of == 0 {
+        0.0
+    } else {
+        lost as f64 * 100.0 / of as f64
+    }
+}
+
+impl From<&FlowReport> for FlowCounters {
+    fn from(r: &FlowReport) -> Self {
+        Self {
+            flow: r.flow,
+            tx: Some(r.tx),
+            rx: r.rx,
+            lost: r.lost,
+            loss_pct: pct(r.lost, r.tx),
+            duplicates: r.duplicates,
+            out_of_order: r.out_of_order,
+            latency: (&r.latency).into(),
+        }
+    }
+}
+
+impl From<&FlowStats> for FlowCounters {
+    fn from(f: &FlowStats) -> Self {
+        let lost = f.seq_lost();
+        Self {
+            flow: f.flow,
+            tx: None,
+            rx: f.unique(),
+            lost,
+            loss_pct: pct(lost, f.unique() + lost),
+            duplicates: f.duplicates,
+            out_of_order: f.out_of_order,
+            latency: (&f.latency).into(),
+        }
+    }
+}
+
+/// Parameters of `rx.start`: receive on an interface of the server and count
+/// the flows of latency signatures that arrive, sent by another FeroTRX.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RxStartParams {
+    pub iface: String,
+    /// Stop after this long, e.g. `60s`; without it, until `rx.stop`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+}
+
+/// A receiver, as `rx.start`, `rx.stats`, `rx.stop` and `rx.list` report it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RxRunInfo {
+    /// Id; shared with `run.*` and `tcp.*` runs, so they never clash.
+    pub id: u64,
+    pub state: RunState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(flatten)]
+    pub counters: RxCounters,
+    pub flows: Vec<FlowCounters>,
 }
 
 // ----- tcp.* -----

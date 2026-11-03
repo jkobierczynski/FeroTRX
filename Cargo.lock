@@ -234,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ferotrx-packet",
  "pcap-file",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-ctl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ferotrx-core",
  "ferotrx-io",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-io"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cc",
  "ferotrx-core",
@@ -282,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-packet"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ferotrx-core",
 ]

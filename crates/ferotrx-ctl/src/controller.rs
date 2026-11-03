@@ -9,8 +9,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use ferotrx_core::{
-    parse_duration, Job, JobState, Profile, Rate, RunConfig, SendSettings, StreamSource,
-    TcpProfile, TcpRunConfig, LINKTYPE_ETHERNET,
+    parse_duration, FlowReport, Job, JobState, PacketReceiver, Profile, Rate, RunConfig, RxConfig,
+    RxJob, RxSettings, SendSettings, SinkError, StreamSource, TcpProfile, TcpRunConfig,
+    LINKTYPE_ETHERNET,
 };
 use ferotrx_io::Output;
 
@@ -49,7 +50,27 @@ pub fn start_run_detailed(
     rate: Option<Rate>,
     config: RunConfig,
 ) -> Result<Started, StartError> {
-    let mut streams = profile.load()?;
+    start_run_with_rx(profile, output, rate, config, None)
+}
+
+/// Like [`start_run_detailed`], with a receiver that measures loss and
+/// latency while the run goes (see [`Job::spawn_with_rx`]). With a receiver,
+/// a profile that marks no stream with `latency` has a signature put in
+/// every stream's packets.
+pub fn start_run_with_rx(
+    profile: &Profile,
+    output: &Output,
+    rate: Option<Rate>,
+    config: RunConfig,
+    rx: Option<RxSettings>,
+) -> Result<Started, StartError> {
+    let mut streams = if rx.is_some() && !profile.has_latency() {
+        let mut p = profile.clone();
+        p.enable_latency();
+        p.load()?
+    } else {
+        profile.load()?
+    };
     if let Some(rate) = rate {
         rate.validate()?;
         for s in &mut streams {
@@ -64,10 +85,13 @@ pub fn start_run_detailed(
         .with_defaults(&profile.output)
         .open_detailed(linktype)?;
     Ok(Started {
-        job: Job::spawn(streams, opened.sink, config)?,
+        job: Job::spawn_with_rx(streams, opened.sink, config, rx)?,
         detail: opened.detail,
     })
 }
+
+/// Opens an interface by name to receive on, for loss and latency.
+pub type ReceiverOpener = dyn Fn(&str) -> Result<Box<dyn PacketReceiver>, SinkError> + Send + Sync;
 
 /// How long `run.stop` waits for a run to end before answering anyway.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -81,9 +105,18 @@ pub struct Controller {
     profiles: Mutex<BTreeMap<String, Profile>>,
     runs: Mutex<BTreeMap<u64, Arc<Run>>>,
     tcp_runs: Mutex<BTreeMap<u64, Arc<TcpRun>>>,
+    rx_runs: Mutex<BTreeMap<u64, Arc<RxRun>>>,
     next_run: AtomicU64,
     auth_required: bool,
     open_port: Box<PortOpener>,
+    open_receiver: Box<ReceiverOpener>,
+}
+
+struct RxRun {
+    id: u64,
+    iface: String,
+    job: RxJob,
+    stopped_by_request: std::sync::atomic::AtomicBool,
 }
 
 struct Run {
@@ -91,6 +124,8 @@ struct Run {
     profile: String,
     /// How the output sends, as `start_run_detailed` described it.
     output: String,
+    /// The interface the run receives on, if it measures loss and latency.
+    rx_iface: Option<String>,
     job: Job,
     stopped_by_request: std::sync::atomic::AtomicBool,
 }
@@ -107,10 +142,22 @@ impl Controller {
             profiles: Mutex::default(),
             runs: Mutex::default(),
             tcp_runs: Mutex::default(),
+            rx_runs: Mutex::default(),
             next_run: AtomicU64::new(1),
             auth_required: false,
             open_port: Box::new(ferotrx_io::open_port),
+            open_receiver: Box::new(ferotrx_io::open_receiver),
         }
+    }
+
+    /// Opens the interfaces runs receive on with `open` instead of
+    /// libpcap/Npcap, for example to receive from in-memory ports in tests.
+    pub fn with_receiver_opener(
+        mut self,
+        open: impl Fn(&str) -> Result<Box<dyn PacketReceiver>, SinkError> + Send + Sync + 'static,
+    ) -> Self {
+        self.open_receiver = Box::new(open);
+        self
     }
 
     /// Opens the interfaces of TCP runs with `open` instead of libpcap/Npcap,
@@ -177,6 +224,22 @@ impl Controller {
                 let p: RunId = parse(params)?;
                 let info = self.tcp_stop(p.id, true)?;
                 lock(&self.tcp_runs).remove(&p.id);
+                to_value(info)
+            }
+            "rx.start" => to_value(self.rx_start(parse(params)?)?),
+            "rx.stop" => {
+                let p: StopParams = parse(params)?;
+                to_value(self.rx_stop(p.id, p.wait)?)
+            }
+            "rx.stats" => {
+                let p: RunId = parse(params)?;
+                to_value(self.rx_run(p.id)?.info())
+            }
+            "rx.list" => to_value(self.rx_runs()),
+            "rx.remove" => {
+                let p: RunId = parse(params)?;
+                let info = self.rx_stop(p.id, true)?;
+                lock(&self.rx_runs).remove(&p.id);
                 to_value(info)
             }
             _ => Err(RpcError::new(
@@ -329,12 +392,33 @@ impl Controller {
             ignore_send_errors: p.ignore_errors,
             stop: None,
         };
+        let mut profile = profile;
+        if p.latency {
+            profile.enable_latency();
+        }
+        let rx = match &p.rx {
+            Some(spec) => {
+                let wait = spec
+                    .wait
+                    .as_deref()
+                    .map(parse_duration)
+                    .transpose()
+                    .map_err(|e| RpcError::invalid_params(e.to_string()))?
+                    .unwrap_or(RxSettings::DEFAULT_WAIT);
+                let receiver = (self.open_receiver)(&spec.iface).map_err(|e| {
+                    RpcError::failed(format!("cannot receive on {}: {e}", spec.iface))
+                })?;
+                Some(RxSettings { receiver, wait })
+            }
+            None => None,
+        };
         let started =
-            start_run_detailed(&profile, &output, rate, config).map_err(RpcError::failed)?;
+            start_run_with_rx(&profile, &output, rate, config, rx).map_err(RpcError::failed)?;
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
         let run = Arc::new(Run {
             id,
             profile: p.profile,
+            rx_iface: p.rx.map(|r| r.iface),
             output: started.detail,
             job: started.job,
             stopped_by_request: Default::default(),
@@ -386,6 +470,10 @@ impl Controller {
     pub fn stop_all(&self) {
         let runs: Vec<Arc<Run>> = lock(&self.runs).values().cloned().collect();
         let tcp: Vec<Arc<TcpRun>> = lock(&self.tcp_runs).values().cloned().collect();
+        let rx: Vec<Arc<RxRun>> = lock(&self.rx_runs).values().cloned().collect();
+        for r in &rx {
+            r.job.stop();
+        }
         for r in &runs {
             r.job.stop();
         }
@@ -465,6 +553,61 @@ impl Controller {
             .ok_or_else(|| RpcError::not_found(format!("no TCP run {id}")))
     }
 
+    /// Starts a receiver that counts the latency flows arriving on an interface.
+    pub fn rx_start(&self, p: RxStartParams) -> Result<RxRunInfo, RpcError> {
+        let duration = p
+            .duration
+            .as_deref()
+            .map(parse_duration)
+            .transpose()
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let receiver = (self.open_receiver)(&p.iface)
+            .map_err(|e| RpcError::failed(format!("cannot receive on {}: {e}", p.iface)))?;
+        let job = RxJob::spawn(
+            receiver,
+            RxConfig {
+                duration,
+                stop: None,
+            },
+        )
+        .map_err(RpcError::failed)?;
+        let id = self.next_run.fetch_add(1, Ordering::Relaxed);
+        let run = Arc::new(RxRun {
+            id,
+            iface: p.iface,
+            job,
+            stopped_by_request: Default::default(),
+        });
+        let info = run.info();
+        lock(&self.rx_runs).insert(id, run);
+        Ok(info)
+    }
+
+    /// Stops a receiver. With `wait`, answers once it has ended (or after 10 s).
+    pub fn rx_stop(&self, id: u64, wait: bool) -> Result<RxRunInfo, RpcError> {
+        let run = self.rx_run(id)?;
+        if run.job.is_running() {
+            run.stopped_by_request.store(true, Ordering::Relaxed);
+        }
+        run.job.stop();
+        if wait {
+            run.job.wait(Some(STOP_TIMEOUT));
+        }
+        Ok(run.info())
+    }
+
+    pub fn rx_runs(&self) -> Vec<RxRunInfo> {
+        let runs: Vec<Arc<RxRun>> = lock(&self.rx_runs).values().cloned().collect();
+        runs.iter().map(|r| r.info()).collect()
+    }
+
+    fn rx_run(&self, id: u64) -> Result<Arc<RxRun>, RpcError> {
+        lock(&self.rx_runs)
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| RpcError::not_found(format!("no receiver {id}")))
+    }
+
     fn get_run(&self, id: u64) -> Result<Arc<Run>, RpcError> {
         lock(&self.runs)
             .get(&id)
@@ -486,7 +629,20 @@ impl Run {
             JobState::Finished => (RunState::Finished, None),
             JobState::Failed(e) => (RunState::Failed, Some(e)),
         };
-        let (total, streams) = RunInfo::counters(&stats, self.job.stream_names());
+        let (total, mut streams) = RunInfo::counters(&stats, self.job.stream_names());
+        let rx = match (&self.rx_iface, self.job.rx_stats()) {
+            (Some(iface), Some(rx)) => {
+                let reports =
+                    FlowReport::for_run(self.job.stream_names(), self.job.flows(), &stats, &rx);
+                for r in &reports {
+                    if let Some(s) = streams.iter_mut().find(|s| s.name == r.stream) {
+                        s.latency = Some(r.into());
+                    }
+                }
+                Some(RxCounters::new(iface, &rx))
+            }
+            _ => None,
+        };
         RunInfo {
             id: self.id,
             profile: self.profile.clone(),
@@ -495,6 +651,28 @@ impl Run {
             error,
             total,
             streams,
+            rx,
+        }
+    }
+}
+
+impl RxRun {
+    fn info(&self) -> RxRunInfo {
+        let stats = self.job.stats();
+        let (state, error) = match self.job.state() {
+            JobState::Running => (RunState::Running, None),
+            JobState::Finished if self.stopped_by_request.load(Ordering::Relaxed) => {
+                (RunState::Stopped, None)
+            }
+            JobState::Finished => (RunState::Finished, None),
+            JobState::Failed(e) => (RunState::Failed, Some(e)),
+        };
+        RxRunInfo {
+            id: self.id,
+            state,
+            error,
+            counters: RxCounters::new(&self.iface, &stats),
+            flows: stats.flows.values().map(Into::into).collect(),
         }
     }
 }
@@ -517,6 +695,7 @@ fn profile_info(name: &str, p: &Profile) -> ProfileInfo {
                 delay_s: s.delay.as_secs_f64(),
                 rewrite: s.rewrite.iter().map(ToString::to_string).collect(),
                 vary: s.vary.iter().map(ToString::to_string).collect(),
+                latency: s.latency,
             })
             .collect(),
     }

@@ -451,3 +451,128 @@ fn tcp_start_reports_bad_profiles_and_interfaces() {
     let neither = c.tcp_start(&TcpStartParams::default()).unwrap_err();
     assert_eq!(rpc_code(neither), RpcError::INVALID_PARAMS);
 }
+
+/// A server whose receivers read from in-memory ports; the test sends into
+/// the other end of `wire`.
+fn rx_server(
+    wire: std::sync::Arc<std::sync::Mutex<Option<ferotrx_core::MemoryPort>>>,
+) -> SocketAddr {
+    let controller = Controller::new().with_receiver_opener(move |name| {
+        if name != "mem0" {
+            return Err(format!("no interface {name}").into());
+        }
+        let (a, b) = ferotrx_core::memory_ports();
+        *wire.lock().unwrap() = Some(a);
+        Ok(Box::new(ferotrx_core::PortReceiver(b)))
+    });
+    Server::bind("127.0.0.1:0", controller, None)
+        .unwrap()
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn runs_with_a_receiver_report_loss_per_stream() {
+    let wire = Default::default();
+    let addr = rx_server(wire);
+    let mut c = client(addr);
+    load(&mut c);
+    let run = c
+        .start(&StartParams {
+            profile: "lab".into(),
+            output: null_output(),
+            limit: Some(300),
+            rx: Some(RxSpec {
+                iface: "mem0".into(),
+                wait: Some("50ms".into()),
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(run.rx.as_ref().unwrap().iface, "mem0");
+    c.subscribe(Some(run.id), 100).unwrap();
+    let last = loop {
+        let u = c.next_stats().unwrap();
+        if u.last {
+            break u.run;
+        }
+    };
+    assert_eq!(last.state, RunState::Finished);
+    // Nothing comes back from a null output: everything sent is lost.
+    for s in &last.streams {
+        let l = s.latency.as_ref().expect("every stream gets a signature");
+        assert_eq!(l.tx, Some(s.counters.tagged));
+        assert_eq!((l.rx, l.lost), (0, s.counters.tagged));
+        assert_eq!(l.loss_pct, 100.0);
+        assert_eq!(l.latency.avg_us, None);
+    }
+    assert_eq!(last.total.tagged, 300);
+
+    let err = c
+        .start(&StartParams {
+            profile: "lab".into(),
+            output: null_output(),
+            rx: Some(RxSpec {
+                iface: "nope0".into(),
+                wait: None,
+            }),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_eq!(rpc_code(err), RpcError::FAILED);
+}
+
+#[test]
+fn a_receiver_alone_counts_flows_from_elsewhere() {
+    use ferotrx_core::*;
+    let wire: std::sync::Arc<std::sync::Mutex<Option<MemoryPort>>> = Default::default();
+    let addr = rx_server(wire.clone());
+    let mut c = client(addr);
+    let rx = c
+        .rx_start(&RxStartParams {
+            iface: "mem0".into(),
+            duration: None,
+        })
+        .unwrap();
+    assert_eq!(rx.state, RunState::Running);
+    // "Another machine" sends two flows into the wire, dropping some packets.
+    let mut port = wire.lock().unwrap().take().unwrap();
+    let cap =
+        Capture::from_specs(&["eth/ipv4(dst=10.0.0.2)/udp(dport=9)"], Duration::ZERO).unwrap();
+    for flow in [1u32, 2] {
+        let mut streams = [Stream::new("s", CaptureSource::new(&cap).loops(100))
+            .with_rate(Rate::TopSpeed)
+            .with_latency(flow)];
+        let mut sink = VecSink::default();
+        run(&mut streams, &mut sink, &RunConfig::default()).unwrap();
+        for (i, p) in sink.packets.iter().enumerate() {
+            if flow == 2 && i % 10 == 5 {
+                continue;
+            }
+            PacketPort::send(&mut port, p).unwrap();
+        }
+    }
+    PacketPort::send(&mut port, &[0u8; 60]).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let info = c.rx_stats(rx.id).unwrap();
+    assert_eq!(info.counters.packets, 191);
+    assert_eq!(info.counters.untagged, 1);
+    assert_eq!(info.flows.len(), 2);
+    assert_eq!(
+        (info.flows[0].flow, info.flows[0].rx, info.flows[0].lost),
+        (1, 100, 0)
+    );
+    // Flow 2 lost seq 5, 15, ... 95: all inside the range seen.
+    assert_eq!((info.flows[1].rx, info.flows[1].lost), (90, 10));
+    assert!((info.flows[1].loss_pct - 10.0).abs() < 1e-9);
+    assert!(info.flows[0].latency.max_us.is_some());
+    assert_eq!(c.rx_runs().unwrap().len(), 1);
+    let done = c.rx_stop(rx.id).unwrap();
+    assert_eq!(done.state, RunState::Stopped);
+    assert_eq!(c.rx_remove(rx.id).unwrap().id, rx.id);
+    assert!(c.rx_runs().unwrap().is_empty());
+    assert_eq!(
+        rpc_code(c.rx_stats(rx.id).unwrap_err()),
+        RpcError::NOT_FOUND
+    );
+}

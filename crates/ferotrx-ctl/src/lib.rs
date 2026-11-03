@@ -40,12 +40,30 @@
 //! | `tcp.stop` | `id`, `wait` (true) | `TcpRunInfo` |
 //! | `tcp.stats` / `tcp.remove` | `id` | `TcpRunInfo` |
 //! | `tcp.list` | | `TcpRunInfo[]` |
+//! | `rx.start` | [`RxStartParams`](protocol::RxStartParams): `iface`, `duration` | [`RxRunInfo`](protocol::RxRunInfo) |
+//! | `rx.stop` | `id`, `wait` (true) | `RxRunInfo` |
+//! | `rx.stats` / `rx.remove` | `id` | `RxRunInfo` |
+//! | `rx.list` | | `RxRunInfo[]` |
 //! | `stats.subscribe` | `id` (optional), `interval_ms` (1000) | `{"subscription": n}` |
 //! | `stats.unsubscribe` | `subscription` | `true` |
 //!
 //! After `stats.subscribe` the server sends `stats` notifications
 //! ([`StatsUpdate`](protocol::StatsUpdate)) on the same connection. They cover
 //! `run.*` runs; poll `tcp.stats` for stateful TCP runs.
+//!
+//! # Loss and latency
+//!
+//! `run.start` with `"rx": {"iface": "enp0s8"}` receives on that interface
+//! while the run goes, and every [`RunInfo`](protocol::RunInfo) then has
+//! `rx` and, per stream, `latency`: sent, received, lost, duplicates,
+//! reordering, and latency in microseconds (min, avg, max, jitter, p50, p99,
+//! p99.9). Streams the profile marks with `latency` carry signatures; if it
+//! marks none, all of them do (`"latency": true` forces all).
+//!
+//! When the traffic comes back to another machine, run a receiver there with
+//! `rx.start` and send from here with `"latency": true`; the receiver counts
+//! loss from gaps in the sequence numbers. Latency across machines needs
+//! their clocks in step (NTP, better PTP).
 //!
 //! # One engine
 //!
@@ -68,7 +86,10 @@ mod server;
 mod tcp;
 
 pub use client::{Client, ClientError};
-pub use controller::{start_run, start_run_detailed, Controller, StartError, Started};
+pub use controller::{
+    start_run, start_run_detailed, start_run_with_rx, Controller, ReceiverOpener, StartError,
+    Started,
+};
 pub use protocol::RpcError;
 pub use server::{Server, MAX_LINE};
 pub use tcp::{start_tcp, start_tcp_with, PortOpener, TcpStarted};
