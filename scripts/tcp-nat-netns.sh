@@ -28,6 +28,10 @@
 # way (netem; NETEM replaces that), 500 KB in flight to fill it. It checks
 # that the server had more than 64 KB in flight, which needs window scaling.
 #
+# LOG_INVALID=1 logs why conntrack found packets INVALID (the router drops
+# them) and prints the first of those kernel log lines at the end. It sets
+# net.netfilter.nf_log_all_netns=1 on the host, which stays set.
+#
 # IPV6=1 does the same over IPv6: the client is fd00:10::100-109, the server
 # fd00:20::50(-53), the router fd00:10::1 and fd00:20::1, and the emulated
 # hosts find the router (and it them) with neighbor discovery instead of ARP.
@@ -70,6 +74,11 @@ r() { ip netns exec $NS "$@"; }
 r ip link set lo up
 r sysctl -qw net.ipv4.ip_forward=1
 quiet_v6() { sysctl -qw "net.ipv6.conf.$1.disable_ipv6=1" 2>/dev/null || true; }
+# A router link moved into the namespace: no duplicate address detection.
+no_dad() {
+    [ "${IPV6:-}" = 1 ] || return 0
+    r sysctl -qw "net.ipv6.conf.$1.accept_dad=0"
+}
 
 if [ "${IPV6:-}" = 1 ]; then
     if ! [ -d /proc/sys/net/ipv6 ]; then
@@ -77,6 +86,13 @@ if [ "${IPV6:-}" = 1 ]; then
         exit 2
     fi
     r sysctl -qw net.ipv6.conf.all.forwarding=1
+    # No duplicate address detection on the router's links either, link-local
+    # addresses included: while its link-local address is tentative (one to
+    # two seconds after the link comes up), Linux cannot send the neighbor
+    # solicitations it needs to forward to new hosts, and the first
+    # connections stall.
+    r sysctl -qw net.ipv6.conf.default.accept_dad=0
+    r sysctl -qw net.ipv6.conf.all.accept_dad=0
     net() { echo "fd00:$1::"; }
     plen=64
     ipt() { r ip6tables "$@"; }
@@ -104,10 +120,13 @@ if [ $vlan = yes ]; then
     ip link set rt netns $NS
     # No IPv6 on the trunk: router solicitations would only add noise.
     quiet_v6 t0
+    no_dad rt
     ip link set t0 up
     r ip link set rt up
     r ip link add link rt name rt.10 type vlan id 10
     r ip link add link rt name rt.20 type vlan id 20
+    no_dad rt.10
+    no_dad rt.20
     addr "$(net 10)1/$plen" rt.10
     addr "$(net 20)1/$plen" rt.20
     r ip link set rt.10 up
@@ -119,11 +138,21 @@ else
         ip link add ${n}0 type veth peer name r$n
         ip link set r$n netns $NS
         quiet_v6 ${n}0
+        no_dad r$n
         ip link set ${n}0 up
         addr "$(net $net)1/$plen" r$n
         r ip link set r$n up
     done
     out=rs
+fi
+if [ "${IPV6:-}" = 1 ]; then
+    # In case the kernel still runs duplicate address detection: wait until
+    # no address of the router is tentative.
+    i=0
+    while [ -n "$(r ip -6 addr show tentative)" ] && [ $i -lt 50 ]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
 fi
 nat=yes
 if ! ipt -t nat -A POSTROUTING -o $out -j MASQUERADE 2>/dev/null; then
@@ -152,6 +181,20 @@ fi
 # Drop what conntrack thinks is not part of a valid connection, as strict
 # firewalls do: a stateless replay of a TCP session would not get through.
 ipt -A FORWARD -m conntrack --ctstate INVALID -j DROP
+# And on the way in to the router itself: conntrack does not undo the
+# masquerading of an INVALID packet, so a server's reply that conntrack finds
+# INVALID is addressed to the router, whose own TCP answers it with a reset
+# that ends the connection (kube-proxy drops these for the same reason). The
+# second rule counts the TCP packets that still reach the router itself.
+ipt -A INPUT -m conntrack --ctstate INVALID -j DROP
+ipt -A INPUT -p tcp
+if [ "${LOG_INVALID:-}" = 1 ]; then
+    # Why conntrack found packets INVALID, in the kernel log.
+    modprobe nf_log_syslog 2>/dev/null || true
+    sysctl -qw net.netfilter.nf_log_all_netns=1 2>/dev/null || true
+    r sysctl -qw net.netfilter.nf_conntrack_log_invalid=6 2>/dev/null || true
+    dmesg_start=$(dmesg 2>/dev/null | wc -l)
+fi
 
 # The addresses are given here rather than taken from examples/lab-tcp.toml,
 # so editing that profile for a real lab does not break this script.
@@ -267,4 +310,10 @@ fi
 echo "router: connections masqueraded, and packets dropped:"
 [ $nat = no ] || ipt -t nat -L POSTROUTING -v -n | sed -n '3p'
 ipt -L FORWARD -v -n | sed -n '3,$p'
+echo "router: packets dropped on the way in to the router, and TCP that reached it:"
+ipt -L INPUT -v -n | sed -n '3,$p'
+if [ "${LOG_INVALID:-}" = 1 ]; then
+    echo "conntrack's INVALID packets (first 20):"
+    dmesg 2>/dev/null | sed -n "$((dmesg_start + 1)),\$p" | grep -i 'nf_ct' | head -20 || true
+fi
 exit $status

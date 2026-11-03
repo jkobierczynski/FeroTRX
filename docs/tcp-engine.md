@@ -48,6 +48,17 @@ open.
   one recorded for an in-order segment is an old duplicate (sequence numbers
   can wrap on fast links) and is dropped; it is counted as `paws_dropped`.
 
+## Resets
+
+* A reset ends a connection only when its sequence number is in the receive
+  window, so a stray reset from an old connection on the same ports does not;
+  in SYN-SENT, only one that acknowledges our SYN.
+* A reset never cuts TIME_WAIT short (RFC 1337). The other end may still be
+  resending its FIN because our last ACK was lost. A Linux router answers
+  with a reset of its own when conntrack finds a packet INVALID (out of the
+  window it tracks) and so leaves it addressed to the router; ending
+  TIME_WAIT then would make us reset the other end's next FIN.
+
 ## Sending and congestion control
 
 The engine follows the classic Reno/NewReno rules (RFC 5681, RFC 6582),
@@ -110,7 +121,8 @@ scaling is filling a long path.
   it), window limits, option negotiation, SACK against NewReno with several
   losses per window, burst losses at a short queue, reordering, duplicates and
   loss both ways over IPv4 and IPv6, PAWS dropping an old duplicate,
-  RTT-based timeouts on a 300 ms path, and per-template rates.
+  RTT-based timeouts on a 300 ms path, per-template rates, a reset in
+  TIME_WAIT and one outside the window.
 * `scripts/tcp-nat-netns.sh` in CI: `BDP=1` (netem: 50 Mbit/s, 40 ms each
   way) checks more than 64 KB in flight through a real Linux router, and
   `NETEM="delay 5ms reorder 10% 50% duplicate 2% loss 2%"` runs the

@@ -122,8 +122,8 @@ jobs:
           sudo BDP=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
           sudo BDP=1 IPV6=1 NO_VLAN=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
           impair="delay 5ms reorder 10% 50% duplicate 2% loss 2%"
-          sudo NETEM="$impair" MIX=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
-          sudo NETEM="$impair" IPV6=1 MIX=1 NO_VLAN=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
+          sudo NETEM="$impair" LOG_INVALID=1 MIX=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
+          sudo NETEM="$impair" LOG_INVALID=1 IPV6=1 MIX=1 NO_VLAN=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
 
       # Loss and latency through a router in a network namespace: routing and
       # masquerading, a 5 ms delay (netem), then 3% packet loss on top.
