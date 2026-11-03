@@ -285,11 +285,11 @@ pub(crate) fn hex16(v: u16) -> String {
 pub(crate) fn ones_sum(chunks: &[&[u8]]) -> u16 {
     let mut sum: u64 = 0;
     for data in chunks {
-        let mut it = data.chunks_exact(2);
-        for w in &mut it {
-            sum += u64::from(u16::from_be_bytes([w[0], w[1]]));
+        let (words, rest) = data.as_chunks::<2>();
+        for w in words {
+            sum += u64::from(u16::from_be_bytes(*w));
         }
-        if let [last] = it.remainder() {
+        if let [last] = rest {
             sum += u64::from(*last) << 8;
         }
     }

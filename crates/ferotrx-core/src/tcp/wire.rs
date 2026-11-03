@@ -218,11 +218,11 @@ pub(crate) fn parse_tcp<'a>(ip: &Ip<'a>, verify: bool) -> Option<Segment<'a>> {
 
 /// Internet checksum of `data`, starting from `sum`.
 pub(crate) fn checksum(data: &[u8], mut sum: u32) -> u16 {
-    let mut chunks = data.chunks_exact(2);
-    for c in &mut chunks {
-        sum += u32::from(u16::from_be_bytes([c[0], c[1]]));
+    let (words, rest) = data.as_chunks::<2>();
+    for c in words {
+        sum += u32::from(u16::from_be_bytes(*c));
     }
-    if let [last] = chunks.remainder() {
+    if let [last] = rest {
         sum += u32::from(*last) << 8;
     }
     while sum >> 16 != 0 {
@@ -440,7 +440,7 @@ impl TcpOpts {
                         (4, 2) => t.sack_ok = true,
                         (8, 10) => t.ts = Some((be32(v), be32(&v[4..]))),
                         (5, _) if (len - 2) % 8 == 0 => {
-                            for b in v.chunks_exact(8).take(MAX_SACK_BLOCKS) {
+                            for b in v.as_chunks::<8>().0.iter().take(MAX_SACK_BLOCKS) {
                                 t.sack[t.sack_n] = (be32(b), be32(&b[4..]));
                                 t.sack_n += 1;
                             }

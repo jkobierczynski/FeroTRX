@@ -224,11 +224,11 @@ fn parse_ipv6(data: &[u8], off: usize) -> Option<IpLayer> {
 /// Adds big endian 16-bit words to a ones' complement sum. An odd last byte is
 /// padded with zero.
 pub(crate) fn sum_words(data: &[u8], mut sum: u64) -> u64 {
-    let mut chunks = data.chunks_exact(2);
-    for w in &mut chunks {
-        sum += u64::from(u16::from_be_bytes([w[0], w[1]]));
+    let (words, rest) = data.as_chunks::<2>();
+    for w in words {
+        sum += u64::from(u16::from_be_bytes(*w));
     }
-    if let [last] = chunks.remainder() {
+    if let [last] = rest {
         sum += u64::from(*last) << 8;
     }
     sum
@@ -248,10 +248,9 @@ pub(crate) fn fold(mut sum: u64) -> u16 {
 pub(crate) fn adjust_checksum(checksum: u16, old: &[u8], new: &[u8]) -> u16 {
     debug_assert_eq!(old.len(), new.len());
     let mut sum = u64::from(!checksum);
-    let mut olds = old.chunks_exact(2);
-    for (o, n) in (&mut olds).zip(new.chunks_exact(2)) {
-        sum += u64::from(!u16::from_be_bytes([o[0], o[1]]));
-        sum += u64::from(u16::from_be_bytes([n[0], n[1]]));
+    for (o, n) in old.as_chunks::<2>().0.iter().zip(new.as_chunks::<2>().0) {
+        sum += u64::from(!u16::from_be_bytes(*o));
+        sum += u64::from(u16::from_be_bytes(*n));
     }
     !fold(sum)
 }
