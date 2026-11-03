@@ -128,6 +128,15 @@ pub struct TcpArgs {
     #[arg(long)]
     no_verify: bool,
 
+    /// Keep the capture's message timing: wait as long between messages as
+    /// the capture shows.
+    #[arg(long)]
+    keep_timing: bool,
+
+    /// Pause this long before answering the other end's message, e.g. 50ms.
+    #[arg(long, value_parser = parse_duration)]
+    think_time: Option<Duration>,
+
     /// Stop after this long, e.g. 30s or 5m.
     #[arg(short, long, value_parser = parse_duration)]
     duration: Option<Duration>,
@@ -138,7 +147,7 @@ pub struct TcpArgs {
 }
 
 #[derive(Args)]
-struct HostArgs {
+pub(crate) struct HostArgs {
     /// Run an emulated client at this address, IP[/PREFIX], IPv4 (default
     /// /24) or IPv6 (default /64). It must not be an address of this machine.
     #[arg(long, value_name = "IP[/PREFIX]")]
@@ -178,7 +187,7 @@ struct HostArgs {
     /// Port the server listens on (default: the server port in the capture).
     /// Only with one template; templates in a profile each have a `port`.
     #[arg(long, value_name = "PORT")]
-    server_port: Option<u16>,
+    pub(crate) server_port: Option<u16>,
     /// The server owns this many consecutive addresses from --server-ip;
     /// clients connect to each in turn.
     #[arg(long, value_name = "N")]
@@ -190,7 +199,7 @@ fn parse_window(s: &str) -> std::result::Result<u32, String> {
     u32::try_from(n).map_err(|_| format!("{s} is too large"))
 }
 
-fn parse_connect(s: &str) -> std::result::Result<SocketAddr, String> {
+pub(crate) fn parse_connect(s: &str) -> std::result::Result<SocketAddr, String> {
     parse_connect_addr(s).map_err(|e| e.to_string())
 }
 
@@ -214,13 +223,17 @@ impl HostArgs {
 
     /// Applies the client and server options to the profile's hosts, creating
     /// a host when its address is given.
-    fn apply(&self, p: &mut TcpProfile) -> Result<()> {
+    pub(crate) fn apply(
+        &self,
+        client: &mut Option<TcpHostSpec>,
+        server: &mut Option<TcpHostSpec>,
+    ) -> Result<()> {
         if let Some(ip) = &self.client_ip {
             let h = TcpHostSpec::new(ip)?;
-            let old = p.client.take();
-            p.client = Some(merge(old, h));
+            let old = client.take();
+            *client = Some(merge(old, h));
         }
-        if let Some(c) = p.client.as_mut() {
+        if let Some(c) = client.as_mut() {
             set(&mut c.ips, self.client_ips);
             opt(&mut c.gateway, self.client_gw);
             opt(&mut c.vlan, self.client_vlan);
@@ -231,10 +244,10 @@ impl HostArgs {
         }
         if let Some(ip) = &self.server_ip {
             let h = TcpHostSpec::new(ip)?;
-            let old = p.server.take();
-            p.server = Some(merge(old, h));
+            let old = server.take();
+            *server = Some(merge(old, h));
         }
-        if let Some(s) = p.server.as_mut() {
+        if let Some(s) = server.as_mut() {
             opt(&mut s.gateway, self.server_gw);
             opt(&mut s.vlan, self.server_vlan);
             opt(&mut s.mac, self.server_mac);
@@ -260,13 +273,13 @@ fn merge(old: Option<TcpHostSpec>, new: TcpHostSpec) -> TcpHostSpec {
     }
 }
 
-fn set<T>(slot: &mut T, v: Option<T>) {
+pub(crate) fn set<T>(slot: &mut T, v: Option<T>) {
     if let Some(v) = v {
         *slot = v;
     }
 }
 
-fn opt<T>(slot: &mut Option<T>, v: Option<T>) {
+pub(crate) fn opt<T>(slot: &mut Option<T>, v: Option<T>) {
     if v.is_some() {
         *slot = v;
     }
@@ -296,7 +309,16 @@ fn show(program: &TcpProgram) {
             .chars()
             .map(|c| if c.is_control() { '.' } else { c })
             .collect();
-        println!("{:>4}  {arrow} {:>7} bytes  {text}", i + 1, m.data.len());
+        let gap = if m.delay.is_zero() {
+            String::new()
+        } else {
+            format!(" (after {:?})", m.delay)
+        };
+        println!(
+            "{:>4}  {arrow} {:>7} bytes  {text}{gap}",
+            i + 1,
+            m.data.len()
+        );
     }
     println!("      then the {} closes", program.closer);
 }
@@ -332,7 +354,7 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
             TcpSource::Program(_) => bail!("--flow needs a capture, not [[message]] tables"),
         }
     }
-    args.hosts.apply(&mut profile)?;
+    args.hosts.apply(&mut profile.client, &mut profile.server)?;
     set(&mut profile.cps, args.cps);
     set(&mut profile.connections, args.connections);
     set(&mut profile.concurrency, args.concurrency);
@@ -365,6 +387,10 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
     if args.no_verify {
         profile.options.verify = false;
     }
+    if args.keep_timing {
+        profile.options.keep_timing = true;
+    }
+    set(&mut profile.options.think_time, args.think_time);
     if args.duration.is_some() {
         profile.duration = args.duration;
     }
