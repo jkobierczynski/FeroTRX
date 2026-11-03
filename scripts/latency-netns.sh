@@ -22,8 +22,23 @@
 # DURATION=4s how long to send
 set -eu
 
-BIN=${1:-./target/debug/ferotrx}
-[ $# -gt 0 ] && shift
+# The binary: the first argument, else a build in this checkout, else the
+# installed one.
+if [ $# -gt 0 ]; then
+    BIN=$1
+    shift
+else
+    BIN=
+    for b in ./target/debug/ferotrx ./target/release/ferotrx "$(command -v ferotrx || true)"; do
+        if [ -n "$b" ] && [ -x "$b" ]; then BIN=$b; break; fi
+    done
+fi
+if [ -z "$BIN" ] || ! [ -x "$BIN" ]; then
+    echo "ferotrx not found${BIN:+ at $BIN}: build it first (cargo build -p ferotrx-cli)," >&2
+    echo "or give its path: sudo $0 path/to/ferotrx" >&2
+    exit 1
+fi
+echo "using $BIN"
 NS=ferotrx-lat
 DELAY=${DELAY:-5ms}
 LOSS=${LOSS:-0}
@@ -119,7 +134,10 @@ check "two flows with signatures, voice and bulk" \
     '[.flows[].name] == ["voice", "bulk"] and [.flows[].flow] == [1, 7]'
 check "every flow sent and received packets" '[.flows[] | .tx > 1000 and .rx > 1000] | all'
 check "background traffic arrived without a signature" '.untagged > 100'
-check "no duplicates, nothing out of order" '[.flows[] | .duplicates == 0 and .out_of_order == 0] | all'
+check "no duplicates" '[.flows[] | .duplicates == 0] | all'
+# veth delivers on the CPU the sender ran on, so a sender thread that moves
+# between CPUs can reorder a packet now and then; allow 0.1%.
+check "(almost) nothing out of order" '[.flows[] | .out_of_order <= .rx / 1000] | all'
 if [ "$LOSS" = 0 ]; then
     check "no loss" '[.flows[] | .lost == 0] | all'
 else
