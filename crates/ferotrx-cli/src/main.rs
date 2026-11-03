@@ -57,6 +57,9 @@ enum Command {
     Serve(remote::ServeArgs),
     /// Control a `ferotrx serve` server, on this machine or another one.
     Ctl(remote::CtlArgs),
+    /// Make TLS certificates for `ferotrx serve` and `ferotrx ctl`: a small
+    /// lab certificate authority, a server certificate and client certificates.
+    Certs(remote::CertsArgs),
 }
 
 #[derive(Args)]
@@ -391,6 +394,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Backends => cmd_backends(),
         Command::Serve(args) => remote::cmd_serve(args),
         Command::Ctl(args) => remote::cmd_ctl(args),
+        Command::Certs(args) => remote::cmd_certs(args),
     }
 }
 

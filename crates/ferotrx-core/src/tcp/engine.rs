@@ -1163,7 +1163,7 @@ impl Conn {
                 self.rttvar = r / 2;
             }
             Some(srtt) => {
-                let diff = if srtt > r { srtt - r } else { r - srtt };
+                let diff = srtt.abs_diff(r);
                 self.rttvar = (self.rttvar * 3 + diff) / 4;
                 self.srtt = Some((srtt * 7 + r) / 8);
             }

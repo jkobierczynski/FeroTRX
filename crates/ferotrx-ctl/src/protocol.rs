@@ -11,7 +11,7 @@ use ferotrx_core::{
 };
 
 /// Version of the method set below. Bumped when a method changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Port the server listens on unless told otherwise.
 pub const DEFAULT_PORT: u16 = 4510;
@@ -104,6 +104,9 @@ impl RpcError {
     /// The request was understood but could not be carried out, e.g. a profile
     /// that does not parse or an interface that cannot be opened.
     pub const FAILED: i64 = -32003;
+    /// The connection may not do this: a read-only login calling a method
+    /// that changes something, or a path outside the server's data directories.
+    pub const FORBIDDEN: i64 = -32004;
 
     pub fn new(code: i64, message: impl Into<String>) -> Self {
         Self {
@@ -123,6 +126,10 @@ impl RpcError {
 
     pub fn failed(message: impl std::fmt::Display) -> Self {
         Self::new(Self::FAILED, message.to_string())
+    }
+
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(Self::FORBIDDEN, message)
     }
 }
 
@@ -147,8 +154,70 @@ pub struct ServerInfo {
     /// The interface backends the server has: `pcap`, `af_xdp`, `dpdk`.
     #[serde(default)]
     pub backends: Vec<String>,
-    /// True when connections must send `auth` first.
+    /// True when connections must log in (`auth` with a token, or a client
+    /// certificate) before anything but `server.info`.
     pub auth_required: bool,
+    /// True when this connection is encrypted with TLS.
+    #[serde(default)]
+    pub tls: bool,
+    /// What this connection may do, once logged in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
+    /// Who this connection is logged in as: the token's name or the client
+    /// certificate's common name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+}
+
+/// What a connection may do.
+///
+/// `read` sees everything (`server.info`, `interfaces.list`, `*.get`,
+/// `*.list`, `*.stats`, `stats.subscribe`) and changes nothing; `operator`
+/// may also load profiles and start, stop and remove runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Read,
+    Operator,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Read => "read",
+            Role::Operator => "operator",
+        }
+    }
+
+    /// The role a method needs, or `None` for the methods anyone may call
+    /// (`server.info`, `auth`).
+    pub fn required_for(method: &str) -> Option<Role> {
+        match method {
+            "server.info" | "auth" => None,
+            "interfaces.list" | "profile.get" | "profile.list" | "run.stats" | "run.list"
+            | "tcp.stats" | "tcp.list" | "rx.stats" | "rx.list" | "stats.subscribe"
+            | "stats.unsubscribe" => Some(Role::Read),
+            _ => Some(Role::Operator),
+        }
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Role {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "read" | "read-only" | "readonly" => Ok(Role::Read),
+            "operator" => Ok(Role::Operator),
+            _ => Err(format!("unknown role '{s}' (use read or operator)")),
+        }
+    }
 }
 
 /// Parameters of `auth`.

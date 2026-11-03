@@ -113,7 +113,7 @@ impl NatRouter {
             return None;
         }
         self.seen += 1;
-        if self.drop_every > 0 && self.seen % self.drop_every == 0 {
+        if self.drop_every > 0 && self.seen.is_multiple_of(self.drop_every) {
             self.dropped += 1;
             return None;
         }
@@ -263,7 +263,7 @@ impl Router for Router6 {
             }
             6 => {
                 self.seen += 1;
-                if self.drop_every > 0 && self.seen % self.drop_every == 0 {
+                if self.drop_every > 0 && self.seen.is_multiple_of(self.drop_every) {
                     self.dropped += 1;
                     return out;
                 }

@@ -1,46 +1,178 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
+use crate::audit::AuditLog;
+use crate::auth::Token;
 use crate::controller::{parse, to_value};
 use crate::protocol::*;
+use crate::tls::{common_name, fingerprint, ServerTls, TlsSetup};
 use crate::Controller;
 
-/// Longest request line the server accepts (a profile sent as TOML text included).
+/// Longest request line the server accepts unless set otherwise (a profile
+/// sent as TOML text included).
 pub const MAX_LINE: usize = 4 * 1024 * 1024;
 
 const DEFAULT_INTERVAL: Duration = Duration::from_millis(1000);
 const MIN_INTERVAL: Duration = Duration::from_millis(50);
+/// How often a waiting connection wakes up to check its timeouts.
+const TICK: Duration = Duration::from_millis(500);
+/// A client that does not read its answers for this long is dropped.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Wrong tokens a connection may send before it is closed.
+const MAX_AUTH_FAILURES: u32 = 5;
+/// Pause after a wrong token, against guessing.
+const AUTH_FAILURE_DELAY: Duration = Duration::from_millis(500);
 
-/// The control server: JSON-RPC 2.0 over TCP, one JSON object per line.
+/// How the control server lets clients in, and its limits.
+///
+/// With no tokens and no client certificate authorities, every connection
+/// may do everything; the server then refuses to listen on anything but a
+/// loopback address unless `insecure` is set.
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    /// Tokens clients log in with (`auth`), each with its role.
+    pub tokens: Vec<Token>,
+    /// TLS: the server's certificate, and client certificate authorities.
+    pub tls: Option<ServerTls>,
+    /// Listen on a non-loopback address without any login.
+    pub insecure: bool,
+    /// Connections open at once; more are turned away.
+    pub max_connections: usize,
+    /// Longest request line, in bytes.
+    pub max_request: usize,
+    /// A connection that sends no request for this long, and has no
+    /// `stats` subscription running, is closed.
+    pub idle_timeout: Option<Duration>,
+    /// When login is required, a connection that has not logged in after
+    /// this long is closed.
+    pub login_timeout: Duration,
+    /// Where logins, refusals and changes are recorded.
+    pub audit: Option<AuditLog>,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            tokens: Vec::new(),
+            tls: None,
+            insecure: false,
+            max_connections: 64,
+            max_request: MAX_LINE,
+            idle_timeout: Some(Duration::from_secs(300)),
+            login_timeout: Duration::from_secs(30),
+            audit: None,
+        }
+    }
+}
+
+impl ServerConfig {
+    /// True when connections must log in.
+    pub fn login_required(&self) -> bool {
+        !self.tokens.is_empty() || self.tls.as_ref().is_some_and(ServerTls::verifies_clients)
+    }
+}
+
+/// The control server: JSON-RPC 2.0 over TCP (or TLS), one JSON object per line.
 ///
 /// Each connection gets its own thread, so a client waiting on `run.stop` or
 /// reading `stats` notifications does not hold up the others.
 pub struct Server {
     listener: TcpListener,
     controller: Arc<Controller>,
-    token: Option<Arc<str>>,
+    shared: Arc<Shared>,
+}
+
+struct Shared {
+    tokens: Vec<Token>,
+    tls: Option<TlsSetup>,
+    login_required: bool,
+    max_connections: usize,
+    max_request: usize,
+    idle_timeout: Option<Duration>,
+    login_timeout: Duration,
+    audit: Option<AuditLog>,
+    open: AtomicUsize,
+    next_conn: AtomicU64,
+}
+
+impl Shared {
+    fn audit(&self, event: &str, fields: Value) {
+        if let (Some(log), Value::Object(m)) = (&self.audit, fields) {
+            log.record(event, m);
+        }
+    }
 }
 
 impl Server {
-    /// Listens on `addr`. With a `token`, every connection must send
-    /// `auth` with it before anything but `server.info`.
+    /// Listens on `addr`. With a `token`, every connection must send `auth`
+    /// with it before anything but `server.info`, and may then do everything.
+    /// See [`with_config`](Server::with_config) for roles, TLS and limits.
     pub fn bind(
         addr: impl ToSocketAddrs,
-        mut controller: Controller,
+        controller: Controller,
         token: Option<String>,
     ) -> io::Result<Server> {
-        controller.set_auth_required(token.is_some());
+        let config = ServerConfig {
+            tokens: token
+                .into_iter()
+                .map(|t| Token::new("token", Role::Operator, t))
+                .collect(),
+            ..Default::default()
+        };
+        Self::with_config(addr, controller, config)
+    }
+
+    /// Listens on `addr` with logins, TLS and limits from `config`.
+    ///
+    /// Fails with [`io::ErrorKind::PermissionDenied`] for a non-loopback
+    /// address when `config` has no way to log in and is not `insecure`.
+    pub fn with_config(
+        addr: impl ToSocketAddrs,
+        mut controller: Controller,
+        config: ServerConfig,
+    ) -> io::Result<Server> {
+        let login_required = config.login_required();
+        let listener = TcpListener::bind(addr)?;
+        let local = listener.local_addr()?;
+        if !local.ip().is_loopback() && !login_required && !config.insecure {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing to listen on {local} without a token or client certificates: \
+                     anyone who reaches it could send traffic from this machine \
+                     (`ferotrx serve --insecure`, or ServerConfig::insecure, does it anyway)"
+                ),
+            ));
+        }
+        let tls = config
+            .tls
+            .as_ref()
+            .map(|t| t.build(!config.tokens.is_empty()))
+            .transpose()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        controller.set_auth_required(login_required);
         Ok(Server {
-            listener: TcpListener::bind(addr)?,
+            listener,
             controller: Arc::new(controller),
-            token: token.map(Into::into),
+            shared: Arc::new(Shared {
+                tokens: config.tokens,
+                tls,
+                login_required,
+                max_connections: config.max_connections.max(1),
+                max_request: config.max_request.max(1024),
+                idle_timeout: config.idle_timeout,
+                login_timeout: config.login_timeout,
+                audit: config.audit,
+                open: AtomicUsize::new(0),
+                next_conn: AtomicU64::new(1),
+            }),
         })
     }
 
@@ -52,6 +184,11 @@ impl Server {
         &self.controller
     }
 
+    /// True when connections are encrypted.
+    pub fn tls(&self) -> bool {
+        self.shared.tls.is_some()
+    }
+
     /// Accepts connections for ever.
     pub fn serve(&self) -> io::Result<()> {
         for conn in self.listener.incoming() {
@@ -61,13 +198,41 @@ impl Server {
                 // keep serving the others.
                 Err(_) => continue,
             };
+            let peer = stream
+                .peer_addr()
+                .map(|a| a.to_string())
+                .unwrap_or_default();
+            let shared = self.shared.clone();
+            if shared.open.fetch_add(1, Ordering::SeqCst) >= shared.max_connections {
+                shared.open.fetch_sub(1, Ordering::SeqCst);
+                shared.audit(
+                    "refused",
+                    json!({"peer": peer, "reason": "too many connections"}),
+                );
+                if shared.tls.is_none() {
+                    let err = RpcError::new(RpcError::FAILED, "too many connections");
+                    let mut s = &stream;
+                    let _ = s.set_write_timeout(Some(Duration::from_secs(1)));
+                    if let Ok(mut line) = serde_json::to_vec(&Response::new(Value::Null, Err(err)))
+                    {
+                        line.push(b'\n');
+                        let _ = s.write_all(&line);
+                    }
+                }
+                continue;
+            }
             let controller = self.controller.clone();
-            let token = self.token.clone();
-            let _ = std::thread::Builder::new()
+            let spawned = std::thread::Builder::new()
                 .name("ferotrx-ctl-conn".into())
                 .spawn(move || {
-                    let _ = Connection::new(stream, controller, token).and_then(|c| c.run());
+                    let _guard = OpenGuard(shared.clone());
+                    if let Ok(c) = Connection::new(stream, peer, controller, shared) {
+                        c.run();
+                    }
                 });
+            if spawned.is_err() {
+                self.shared.open.fetch_sub(1, Ordering::SeqCst);
+            }
         }
         Ok(())
     }
@@ -82,75 +247,369 @@ impl Server {
     }
 }
 
-type Writer = Arc<Mutex<TcpStream>>;
+struct OpenGuard(Arc<Shared>);
+
+impl Drop for OpenGuard {
+    fn drop(&mut self) {
+        self.0.open.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+// ----- the wire: plain TCP or TLS, written from several threads -----
+
+/// The sending side of a connection, shared by the connection's thread and
+/// its `stats` publishers. For TLS the rustls state sits behind the same
+/// lock, and the reader takes it only for a moment, never while it waits
+/// for the network.
+enum Wire {
+    Plain(Mutex<TcpStream>),
+    Tls(Box<Mutex<TlsWire>>),
+}
+
+struct TlsWire {
+    conn: rustls::ServerConnection,
+    sock: TcpStream,
+}
+
+impl TlsWire {
+    fn flush(&mut self) -> io::Result<()> {
+        while self.conn.wants_write() {
+            self.conn.write_tls(&mut self.sock)?;
+        }
+        self.sock.flush()
+    }
+}
+
+type Writer = Arc<Wire>;
+
+impl Wire {
+    fn send(&self, bytes: &[u8]) -> io::Result<()> {
+        match self {
+            Wire::Plain(s) => {
+                let mut s = lock(s);
+                s.write_all(bytes)?;
+                s.flush()
+            }
+            Wire::Tls(t) => {
+                let mut t = lock(t);
+                t.conn.writer().write_all(bytes)?;
+                t.flush()
+            }
+        }
+    }
+
+    fn close(&self) {
+        match self {
+            Wire::Plain(s) => {
+                let _ = lock(s).shutdown(Shutdown::Both);
+            }
+            Wire::Tls(t) => {
+                let mut t = lock(t);
+                t.conn.send_close_notify();
+                let _ = t.flush();
+                let _ = t.sock.shutdown(Shutdown::Both);
+            }
+        }
+    }
+
+    /// The client's certificate chain, once the TLS handshake is done.
+    fn peer_certificates(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
+        match self {
+            Wire::Plain(_) => None,
+            Wire::Tls(t) => {
+                let t = lock(t);
+                if t.conn.is_handshaking() {
+                    return None;
+                }
+                Some(
+                    t.conn
+                        .peer_certificates()
+                        .map(|c| c.iter().map(|c| c.clone().into_owned()).collect())
+                        .unwrap_or_default(),
+                )
+            }
+        }
+    }
+}
+
+/// Reads plain text from the wire.
+struct WireReader {
+    sock: TcpStream,
+    wire: Writer,
+    pending: Vec<u8>,
+    start: usize,
+    eof: bool,
+}
+
+impl Read for WireReader {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let Wire::Tls(t) = &*self.wire else {
+            return self.sock.read(out);
+        };
+        loop {
+            {
+                let mut t = lock(t);
+                match t.conn.reader().read(out) {
+                    Ok(n) => return Ok(n),
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(0),
+                    Err(e) => return Err(e),
+                }
+                if self.start < self.pending.len() || self.eof {
+                    let mut rest = &self.pending[self.start..];
+                    let n = t.conn.read_tls(&mut rest)?;
+                    self.start += n;
+                    let processed = t.conn.process_new_packets();
+                    // Handshake messages, session tickets, or the alert for an error.
+                    let flushed = t.flush();
+                    if let Err(e) = processed {
+                        return Err(io::Error::new(io::ErrorKind::InvalidData, TlsFailure(e)));
+                    }
+                    flushed?;
+                    if self.eof && n == 0 {
+                        return Ok(0);
+                    }
+                    continue;
+                }
+            }
+            self.pending.resize(16 * 1024, 0);
+            self.start = 0;
+            match self.sock.read(&mut self.pending) {
+                Ok(0) => {
+                    self.pending.clear();
+                    self.eof = true;
+                }
+                Ok(n) => self.pending.truncate(n),
+                Err(e) => {
+                    self.pending.clear();
+                    return Err(e);
+                }
+            }
+        }
+    }
+}
+
+/// A TLS error from the client's side of the handshake or record layer.
+#[derive(Debug)]
+struct TlsFailure(rustls::Error);
+
+impl std::fmt::Display for TlsFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TLS: {}", self.0)
+    }
+}
+
+impl std::error::Error for TlsFailure {}
+
+fn is_timeout(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
+}
+
+// ----- one connection -----
 
 struct Connection {
-    reader: BufReader<TcpStream>,
+    id: u64,
+    peer: String,
+    reader: BufReader<WireReader>,
     writer: Writer,
     controller: Arc<Controller>,
-    token: Option<Arc<str>>,
-    authed: bool,
+    shared: Arc<Shared>,
+    role: Option<Role>,
+    user: Option<String>,
+    /// The role and name the client certificate gave, if any.
+    cert_login: Option<(Role, String)>,
+    cert_checked: bool,
+    auth_failures: u32,
+    opened: Instant,
+    last_request: Instant,
     subs: HashMap<u64, Arc<AtomicBool>>,
     next_sub: u64,
+}
+
+/// What to do after a request.
+enum Next {
+    Continue,
+    Close(&'static str),
 }
 
 impl Connection {
     fn new(
         stream: TcpStream,
+        peer: String,
         controller: Arc<Controller>,
-        token: Option<Arc<str>>,
+        shared: Arc<Shared>,
     ) -> io::Result<Self> {
         stream.set_nodelay(true)?;
-        let writer = Arc::new(Mutex::new(stream.try_clone()?));
+        stream.set_read_timeout(Some(TICK))?;
+        stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        let wire = match &shared.tls {
+            None => Wire::Plain(Mutex::new(stream.try_clone()?)),
+            Some(tls) => Wire::Tls(Box::new(Mutex::new(TlsWire {
+                conn: rustls::ServerConnection::new(tls.config.clone())
+                    .map_err(io::Error::other)?,
+                sock: stream.try_clone()?,
+            }))),
+        };
+        let writer = Arc::new(wire);
+        let open = !shared.login_required;
+        let now = Instant::now();
         Ok(Self {
-            reader: BufReader::new(stream),
+            id: shared.next_conn.fetch_add(1, Ordering::Relaxed),
+            peer,
+            reader: BufReader::new(WireReader {
+                sock: stream,
+                wire: writer.clone(),
+                pending: Vec::new(),
+                start: 0,
+                eof: false,
+            }),
             writer,
             controller,
-            authed: token.is_none(),
-            token,
+            role: open.then_some(Role::Operator),
+            user: None,
+            cert_login: None,
+            cert_checked: shared.tls.is_none(),
+            shared,
+            auth_failures: 0,
+            opened: now,
+            last_request: now,
             subs: HashMap::new(),
             next_sub: 1,
         })
     }
 
-    fn run(mut self) -> io::Result<()> {
-        let result = self.serve();
+    /// Who the connection is, for the audit log.
+    fn who(&self) -> Map<String, Value> {
+        let mut m = Map::new();
+        m.insert("conn".into(), self.id.into());
+        m.insert("peer".into(), self.peer.clone().into());
+        if let Some(u) = &self.user {
+            m.insert("user".into(), u.clone().into());
+        }
+        if let Some(r) = self.role {
+            m.insert("role".into(), r.as_str().into());
+        }
+        m
+    }
+
+    fn audit(&self, event: &str, extra: Value) {
+        if self.shared.audit.is_none() {
+            return;
+        }
+        let mut m = self.who();
+        if let Value::Object(e) = extra {
+            m.extend(e);
+        }
+        self.shared.audit(event, Value::Object(m));
+    }
+
+    fn run(mut self) {
+        self.audit("connect", json!({"tls": self.shared.tls.is_some()}));
+        let reason = match self.serve() {
+            Ok(reason) => reason.to_string(),
+            Err(e) => {
+                if let Some(t) = e.get_ref().and_then(|e| e.downcast_ref::<TlsFailure>()) {
+                    self.audit("tls_error", json!({"error": t.0.to_string()}));
+                    "TLS error".to_string()
+                } else {
+                    format!("error: {e}")
+                }
+            }
+        };
         for cancel in self.subs.values() {
             cancel.store(true, Ordering::Relaxed);
         }
-        result
+        self.writer.close();
+        self.audit("disconnect", json!({"reason": reason}));
     }
 
-    fn serve(&mut self) -> io::Result<()> {
+    fn serve(&mut self) -> io::Result<&'static str> {
+        let max = self.shared.max_request;
         let mut line = Vec::new();
         loop {
-            line.clear();
-            let n = (&mut self.reader)
-                .take(MAX_LINE as u64 + 1)
-                .read_until(b'\n', &mut line)?;
-            if n == 0 {
-                return Ok(());
+            let limit = (max + 1).saturating_sub(line.len()) as u64;
+            let read = (&mut self.reader).take(limit).read_until(b'\n', &mut line);
+            if !self.cert_checked {
+                self.check_certificate();
             }
-            if line.len() > MAX_LINE {
+            match read {
+                Ok(0) if line.is_empty() => return Ok("closed by the client"),
+                Ok(0) => {}
+                Ok(_) if line.len() <= max && !line.ends_with(b"\n") => {
+                    // The end of the input, or a short read before a timeout: wait
+                    // for the rest unless it was the end.
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) if is_timeout(&e) => {
+                    if let Some(reason) = self.timed_out() {
+                        return Ok(reason);
+                    }
+                    continue;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+            if line.len() > max {
                 let err = RpcError::new(RpcError::INVALID_REQUEST, "request line too long");
                 send(&self.writer, &Response::new(Value::Null, Err(err)))?;
-                return Ok(());
+                return Ok("request line too long");
             }
-            let text = String::from_utf8_lossy(&line);
+            self.last_request = Instant::now();
+            let text = String::from_utf8_lossy(&line).into_owned();
+            line.clear();
             let text = text.trim();
-            if text.is_empty() {
-                continue;
+            if !text.is_empty() {
+                if let Next::Close(reason) = self.handle_line(text)? {
+                    return Ok(reason);
+                }
             }
-            self.handle_line(text)?;
         }
     }
 
-    fn handle_line(&mut self, text: &str) -> io::Result<()> {
+    /// Why the connection should close now, if it should.
+    fn timed_out(&self) -> Option<&'static str> {
+        if self.role.is_none() && self.opened.elapsed() >= self.shared.login_timeout {
+            return Some("no login in time");
+        }
+        let watching = self.subs.values().any(|c| !c.load(Ordering::Relaxed));
+        match self.shared.idle_timeout {
+            Some(t) if !watching && self.last_request.elapsed() >= t => Some("idle"),
+            _ => None,
+        }
+    }
+
+    /// Logs in with the client certificate once the handshake is done.
+    fn check_certificate(&mut self) {
+        let Some(chain) = self.writer.peer_certificates() else {
+            return;
+        };
+        self.cert_checked = true;
+        let Some(end) = chain.first() else {
+            return;
+        };
+        let role = self.shared.tls.as_ref().and_then(|t| t.role_of(&chain));
+        let fp = fingerprint(end);
+        let name = common_name(end).unwrap_or_else(|| format!("cert:{}", &fp[..16]));
+        let Some(role) = role else {
+            return;
+        };
+        self.cert_login = Some((role, name.clone()));
+        self.role = Some(role);
+        self.user = Some(name);
+        self.audit("login", json!({"by": "certificate", "cert_sha256": fp}));
+    }
+
+    fn handle_line(&mut self, text: &str) -> io::Result<Next> {
         let value: Value = match serde_json::from_str(text) {
             Ok(v) => v,
             Err(e) => {
                 let err = RpcError::new(RpcError::PARSE_ERROR, format!("not JSON: {e}"));
-                return send(&self.writer, &Response::new(Value::Null, Err(err)));
+                send(&self.writer, &Response::new(Value::Null, Err(err)))?;
+                return Ok(Next::Continue);
             }
         };
         let id_of = |v: &Value| v.get("id").cloned().unwrap_or(Value::Null);
@@ -161,44 +620,119 @@ impl Connection {
                     RpcError::INVALID_REQUEST,
                     "expected a JSON-RPC 2.0 request object (batches are not supported)",
                 );
-                return send(&self.writer, &Response::new(id_of(&value), Err(err)));
+                send(&self.writer, &Response::new(id_of(&value), Err(err)))?;
+                return Ok(Next::Continue);
             }
         };
         if req.jsonrpc != "2.0" {
             let err = RpcError::new(RpcError::INVALID_REQUEST, "jsonrpc must be \"2.0\"");
-            return send(&self.writer, &Response::new(id_of(&value), Err(err)));
+            send(&self.writer, &Response::new(id_of(&value), Err(err)))?;
+            return Ok(Next::Continue);
         }
 
-        let outcome = match req.method.as_str() {
-            "auth" => self.auth(req.params),
-            "server.info" => self.controller.call(&req.method, req.params),
-            _ if !self.authed => Err(RpcError::new(
+        let need = Role::required_for(&req.method);
+        let allowed = match (need, self.role) {
+            (None, _) => Ok(()),
+            (Some(_), None) => Err(RpcError::new(
                 RpcError::UNAUTHORIZED,
-                "send auth with the server's token first",
+                "log in first: send auth with a token, or connect with a client certificate",
             )),
-            "stats.subscribe" => {
-                // The response must go out before the first notification.
-                return self.subscribe(req.params, req.id);
+            (Some(need), Some(have)) if have < need => {
+                self.audit("denied", json!({"method": req.method}));
+                Err(RpcError::forbidden(format!(
+                    "{} needs the {need} role; this login is {have}",
+                    req.method
+                )))
             }
-            "stats.unsubscribe" => self.unsubscribe(req.params),
-            method => self.controller.call(method, req.params),
+            _ => Ok(()),
         };
-        match req.id {
-            Some(id) => send(&self.writer, &Response::new(id, outcome)),
-            None => Ok(()),
+        let mut next = Next::Continue;
+        let outcome = match allowed {
+            Err(e) => Err(e),
+            Ok(()) => match req.method.as_str() {
+                "auth" => {
+                    let r = self.auth(req.params);
+                    if r.is_err() {
+                        self.auth_failures += 1;
+                        std::thread::sleep(AUTH_FAILURE_DELAY);
+                        if self.auth_failures >= MAX_AUTH_FAILURES {
+                            next = Next::Close("too many failed logins");
+                        }
+                    }
+                    r
+                }
+                "server.info" => {
+                    let mut info = self.controller.info();
+                    info.tls = self.shared.tls.is_some();
+                    info.role = self.role;
+                    info.user = self.user.clone();
+                    to_value(info)
+                }
+                "stats.subscribe" => {
+                    // The response must go out before the first notification.
+                    self.subscribe(req.params, req.id)?;
+                    return Ok(Next::Continue);
+                }
+                "stats.unsubscribe" => self.unsubscribe(req.params),
+                method if need == Some(Role::Operator) => {
+                    let logged = audit_params(&req.params);
+                    let r = self.controller.call(method, req.params);
+                    if self.shared.audit.is_some() {
+                        let mut extra =
+                            json!({"method": method, "params": logged, "ok": r.is_ok()});
+                        match &r {
+                            Ok(v) => {
+                                if let Some(id) = v.get("id") {
+                                    extra["id"] = id.clone();
+                                }
+                            }
+                            Err(e) => extra["error"] = e.message.clone().into(),
+                        }
+                        self.audit("call", extra);
+                    }
+                    r
+                }
+                method => self.controller.call(method, req.params),
+            },
+        };
+        if let Some(id) = req.id {
+            send(&self.writer, &Response::new(id, outcome))?;
         }
+        Ok(next)
     }
 
     fn auth(&mut self, params: Value) -> Result<Value, RpcError> {
         let p: AuthParams = parse(params)?;
-        match &self.token {
-            None => Ok(Value::Bool(true)),
-            Some(t) if same(t.as_bytes(), p.token.as_bytes()) => {
-                self.authed = true;
+        if !self.shared.login_required {
+            return Ok(Value::Bool(true));
+        }
+        // Check every token, so the time taken does not tell which one is close.
+        let mut found = None;
+        for t in &self.shared.tokens {
+            if t.matches(&p.token) && found.is_none() {
+                found = Some(t);
+            }
+        }
+        match found {
+            Some(t) => {
+                self.role = Some(t.role);
+                self.user = Some(t.name.clone());
+                self.audit("login", json!({"by": "token"}));
                 Ok(Value::Bool(true))
             }
-            Some(_) => {
-                self.authed = false;
+            None => {
+                // A wrong token ends a token login; a certificate login stays.
+                match &self.cert_login {
+                    Some((role, name)) => {
+                        self.role = Some(*role);
+                        self.user = Some(name.clone());
+                    }
+                    None => {
+                        self.role = None;
+                        self.user = None;
+                    }
+                }
+                self.audit("login_failed", json!({"by": "token"}));
                 Err(RpcError::new(RpcError::UNAUTHORIZED, "wrong token"))
             }
         }
@@ -232,7 +766,11 @@ impl Connection {
         let controller = self.controller.clone();
         std::thread::Builder::new()
             .name("ferotrx-ctl-stats".into())
-            .spawn(move || publish(sub, p.id, interval, &cancel, &controller, &writer))?;
+            .spawn(move || {
+                publish(sub, p.id, interval, &cancel, &controller, &writer);
+                // Marks the subscription as over, for the idle timeout.
+                cancel.store(true, Ordering::Relaxed);
+            })?;
         Ok(())
     }
 
@@ -249,6 +787,16 @@ impl Connection {
             ))),
         }
     }
+}
+
+/// Parameters as the audit log shows them: profile text by its size.
+fn audit_params(params: &Value) -> Value {
+    let mut p = params.clone();
+    if let Some(Value::String(text)) = p.get("toml") {
+        let bytes = text.len();
+        p["toml"] = json!({ "bytes": bytes });
+    }
+    p
 }
 
 /// Sends `stats` notifications every `interval` until cancelled, the
@@ -330,12 +878,9 @@ fn reply(writer: &Writer, id: Option<Value>, outcome: Result<Value, RpcError>) -
 fn send(writer: &Writer, msg: &impl Serialize) -> io::Result<()> {
     let mut line = serde_json::to_vec(msg).map_err(io::Error::other)?;
     line.push(b'\n');
-    let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
-    w.write_all(&line)?;
-    w.flush()
+    writer.send(&line)
 }
 
-/// Compares two secrets in time that depends only on their lengths.
-fn same(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }

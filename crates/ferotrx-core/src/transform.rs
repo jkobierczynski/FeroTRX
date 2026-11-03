@@ -52,7 +52,7 @@ impl Transform for MacRewrite {
             return;
         }
         for (wanted, range) in [(self.field.dst(), 0..6), (self.field.src(), 6..12)] {
-            if wanted && self.from.map_or(true, |f| data[range.clone()] == f.0) {
+            if wanted && self.from.is_none_or(|f| data[range.clone()] == f.0) {
                 data[range].copy_from_slice(&self.to.0);
             }
         }
@@ -168,7 +168,7 @@ impl Transform for PortRewrite {
         let sums: Vec<_> = ip.l4_checksum(data).into_iter().collect();
         for (wanted, off) in [(self.field.src(), at), (self.field.dst(), at + 2)] {
             let old = net::be16(data, off).expect("ports() checked the length");
-            if wanted && self.from.map_or(true, |f| f == old) {
+            if wanted && self.from.is_none_or(|f| f == old) {
                 net::replace(data, off..off + 2, &self.to.to_be_bytes(), &sums);
             }
         }

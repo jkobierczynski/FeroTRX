@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::protocol::*;
+use crate::tls::{ClientTls, TlsError};
 
 /// Error from a [`Client`] call.
 #[derive(Debug, thiserror::Error)]
@@ -18,7 +19,12 @@ pub enum ClientError {
     Rpc(#[from] RpcError),
     #[error("protocol: {0}")]
     Protocol(String),
+    #[error(transparent)]
+    Tls(#[from] TlsError),
 }
+
+trait Stream: Read + Write + Send {}
+impl<T: Read + Write + Send> Stream for T {}
 
 /// A blocking client for the control server.
 ///
@@ -45,19 +51,48 @@ pub enum ClientError {
 /// # Ok::<(), ferotrx_ctl::ClientError>(())
 /// ```
 pub struct Client {
-    reader: BufReader<TcpStream>,
-    writer: TcpStream,
+    reader: BufReader<Box<dyn Stream>>,
+    /// The socket under it, for timeouts.
+    sock: TcpStream,
     next_id: u64,
     notifications: VecDeque<Notification>,
 }
 
 impl Client {
+    /// Connects over plain TCP.
     pub fn connect(addr: impl ToSocketAddrs) -> io::Result<Client> {
         let stream = TcpStream::connect(addr)?;
         stream.set_nodelay(true)?;
         Ok(Client {
-            reader: BufReader::new(stream.try_clone()?),
-            writer: stream,
+            reader: BufReader::new(Box::new(stream.try_clone()?)),
+            sock: stream,
+            next_id: 1,
+            notifications: VecDeque::new(),
+        })
+    }
+
+    /// Connects over TLS to `addr` (`host:port`), checking the server's
+    /// certificate for `host` (or the name `tls` sets) and logging in with
+    /// the client certificate `tls` has, if any.
+    pub fn connect_tls(addr: &str, tls: &ClientTls) -> Result<Client, ClientError> {
+        let host = match addr.rsplit_once(':') {
+            Some((h, _)) => h,
+            None => addr,
+        };
+        let mut conn = tls.connection(host)?;
+        let mut stream = TcpStream::connect(addr)?;
+        stream.set_nodelay(true)?;
+        // Finish the handshake here, so a refused certificate shows as an
+        // error from connect rather than from the first call.
+        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        while conn.is_handshaking() {
+            conn.complete_io(&mut stream).map_err(tls_error)?;
+        }
+        stream.set_read_timeout(None)?;
+        let sock = stream.try_clone()?;
+        Ok(Client {
+            reader: BufReader::new(Box::new(rustls::StreamOwned::new(conn, stream))),
+            sock,
             next_id: 1,
             notifications: VecDeque::new(),
         })
@@ -65,7 +100,7 @@ impl Client {
 
     /// Gives up on reads that take longer than `timeout` (`None`: wait for ever).
     pub fn set_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        self.writer.set_read_timeout(timeout)
+        self.sock.set_read_timeout(timeout)
     }
 
     /// Calls `method` and returns its raw JSON result.
@@ -75,8 +110,9 @@ impl Client {
         let mut line = serde_json::to_vec(&Request::new(method, params, id))
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
         line.push(b'\n');
-        self.writer.write_all(&line)?;
-        self.writer.flush()?;
+        let w = self.reader.get_mut();
+        w.write_all(&line)?;
+        w.flush()?;
         loop {
             let msg = self.read_message()?;
             if msg.get("id").is_some() {
@@ -144,8 +180,16 @@ impl Client {
                 .into());
             }
             if !line.trim().is_empty() {
-                return serde_json::from_str(&line)
-                    .map_err(|e| ClientError::Protocol(format!("bad message from server: {e}")));
+                return serde_json::from_str(&line).map_err(|e| {
+                    // 0x15 and 0x16: a TLS alert or handshake record.
+                    if line.starts_with(['\u{15}', '\u{16}']) {
+                        ClientError::Protocol(
+                            "the server speaks TLS: connect with TLS (ferotrx ctl --ca)".into(),
+                        )
+                    } else {
+                        ClientError::Protocol(format!("bad message from server: {e}"))
+                    }
+                });
             }
         }
     }
@@ -275,5 +319,13 @@ impl Client {
     pub fn unsubscribe(&mut self, subscription: u64) -> Result<(), ClientError> {
         self.call::<_, Value>("stats.unsubscribe", &Subscription { subscription })
             .map(drop)
+    }
+}
+
+fn tls_error(e: io::Error) -> ClientError {
+    // rustls reports a refused handshake as InvalidData with its own error inside.
+    match e.get_ref().and_then(|i| i.downcast_ref::<rustls::Error>()) {
+        Some(t) => ClientError::Tls(TlsError::from_rustls(t)),
+        None => ClientError::Io(e),
     }
 }

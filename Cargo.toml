@@ -9,17 +9,17 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/jkobierczynski/FeroTRX"
-rust-version = "1.75"
+rust-version = "1.88"
 
 [workspace.dependencies]
-ferotrx-core = { path = "crates/ferotrx-core", version = "0.5.0" }
-ferotrx-packet = { path = "crates/ferotrx-packet", version = "0.5.0" }
-ferotrx-ctl = { path = "crates/ferotrx-ctl", version = "0.5.0", default-features = false }
-ferotrx-io = { path = "crates/ferotrx-io", version = "0.5.0", default-features = false }
+ferotrx-core = { path = "crates/ferotrx-core", version = "0.6.0" }
+ferotrx-packet = { path = "crates/ferotrx-packet", version = "0.6.0" }
+ferotrx-ctl = { path = "crates/ferotrx-ctl", version = "0.6.0", default-features = false }
+ferotrx-io = { path = "crates/ferotrx-io", version = "0.6.0", default-features = false }
 pcap-file = "2.0"
 pcap = "2.2"
 thiserror = "1"
@@ -32,3 +32,7 @@ ctrlc = "3"
 libc = "0.2.155"
 cc = "1"
 pkg-config = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "1.10", features = ["std"] }
+ring = "0.17"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }

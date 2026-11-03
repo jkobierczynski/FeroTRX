@@ -6,15 +6,27 @@ Start the server first, for example:
 
 Then:
     python3 ctl-client.py 192.168.56.10 lab-two-vlans.toml enp0s3 --token s3cret
+
+With TLS (`ferotrx certs pki --server 192.168.56.10 --client alice`, then
+`ferotrx serve ... --tls-cert pki/server.pem --tls-key pki/server-key.pem
+--client-ca pki/ca.pem`):
+    python3 ctl-client.py 192.168.56.10 lab-two-vlans.toml enp0s3 \
+        --ca pki/ca.pem --cert pki/alice.pem --key pki/alice-key.pem
 """
 import argparse
 import json
 import socket
+import ssl
 
 
 class FeroTRX:
-    def __init__(self, host, port=4510, token=None):
+    def __init__(self, host, port=4510, token=None, ca=None, cert=None, key=None):
         self.sock = socket.create_connection((host, port))
+        if ca:
+            ctx = ssl.create_default_context(cafile=ca)
+            if cert:
+                ctx.load_cert_chain(cert, key)
+            self.sock = ctx.wrap_socket(self.sock, server_hostname=host)
         self.file = self.sock.makefile("rw", encoding="utf-8", newline="\n")
         self.next_id = 1
         self.notifications = []
@@ -50,10 +62,13 @@ def main():
     ap.add_argument("iface", help="interface on the server, or 'null'")
     ap.add_argument("--port", type=int, default=4510)
     ap.add_argument("--token")
+    ap.add_argument("--ca", help="connect with TLS, checking the server against this CA")
+    ap.add_argument("--cert", help="client certificate (with --ca and --key)")
+    ap.add_argument("--key", help="client certificate's key")
     ap.add_argument("--duration", default="10s")
     args = ap.parse_args()
 
-    trx = FeroTRX(args.host, args.port, args.token)
+    trx = FeroTRX(args.host, args.port, args.token, args.ca, args.cert, args.key)
     print(trx.call("server.info"))
     with open(args.profile, encoding="utf-8") as f:
         profile = trx.call("profile.load", {"name": "py", "toml": f.read()})
