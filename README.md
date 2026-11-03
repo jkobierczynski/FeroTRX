@@ -669,7 +669,7 @@ through the namespace router and checks that every template completed
 connections on both sides and that the router reached all four servers. CI
 runs it on the VLAN trunk, and on two links with 3% loss.
 
-Limits of this release: IPv4 only; one rate and concurrency limit for all
+Limits of this release: one rate and concurrency limit for all
 templates together (no per-template rates); libpcap or
 Npcap for sending and receiving (AF_XDP and DPDK are for stateless runs);
 no TCP window scaling, SACK or timestamps, so each connection keeps at most
