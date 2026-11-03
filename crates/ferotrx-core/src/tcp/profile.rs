@@ -57,11 +57,14 @@ use crate::{parse_duration, Capture, Error, MacAddr, Result};
 /// timestamps = true           # RFC 7323: RTT from every ACK, and PAWS
 /// sack = true                 # RFC 2018
 /// verify = true
+/// keep_timing = false         # wait the capture's gaps between messages
+/// think_time = "0s"           # pause before answering the other end's message
 /// ```
 ///
 /// Instead of `pcap`, a session can be written out as `[[message]]` tables,
 /// each with `from = "client"` or `"server"` and `text` (with `\r\n` escapes)
-/// or `hex`, plus `port` for the server port and optionally `closer`.
+/// or `hex`, and optionally `delay` (the gap before it, played with
+/// `keep_timing`), plus `port` for the server port and optionally `closer`.
 ///
 /// To mix several kinds of connections, give `[[template]]` tables instead of
 /// `pcap` or `[[message]]`, like TRex ASTF templates. `cps`, `connections` and
@@ -289,7 +292,7 @@ impl TcpHostSpec {
         }
     }
 
-    fn endpoint(&self, port: usize) -> TcpEndpoint {
+    pub(crate) fn endpoint(&self, port: usize) -> TcpEndpoint {
         TcpEndpoint {
             port,
             mac: self.mac(),
@@ -400,15 +403,33 @@ struct RawTemplate {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawMessage {
-    from: String,
-    text: Option<String>,
-    hex: Option<String>,
+pub(crate) struct RawMessage {
+    pub from: String,
+    pub text: Option<String>,
+    pub hex: Option<String>,
+    pub delay: Option<String>,
+}
+
+impl RawMessage {
+    /// The message's role, bytes and delay.
+    pub(crate) fn parts(self) -> Result<(TcpRole, Vec<u8>, Duration)> {
+        let data = match (self.text, self.hex) {
+            (Some(t), None) => t.into_bytes(),
+            (None, Some(h)) => hex(&h)?,
+            _ => return Err(Error::Profile("give `text` or `hex`".into())),
+        };
+        let delay = self
+            .delay
+            .map(|d| parse_duration(&d))
+            .transpose()?
+            .unwrap_or_default();
+        Ok((role(&self.from)?, data, delay))
+    }
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawHost {
+pub(crate) struct RawHost {
     iface: Option<String>,
     ip: String,
     ips: Option<u32>,
@@ -436,6 +457,8 @@ struct RawOptions {
     timestamps: Option<bool>,
     sack: Option<bool>,
     verify: Option<bool>,
+    keep_timing: Option<bool>,
+    think_time: Option<String>,
     seed: Option<u64>,
 }
 
@@ -569,13 +592,10 @@ fn source(
                 .ok_or_else(|| Error::Profile("a profile with [[message]] needs `port`".into()))?;
             let mut out = Vec::new();
             for (i, m) in messages.into_iter().enumerate() {
-                let ctx = |e: Error| Error::Profile(format!("message {}: {e}", i + 1));
-                let data = match (m.text, m.hex) {
-                    (Some(t), None) => t.into_bytes(),
-                    (None, Some(h)) => hex(&h).map_err(ctx)?,
-                    _ => return Err(ctx(Error::Profile("give `text` or `hex`".into()))),
-                };
-                out.push(TcpMessage::new(role(&m.from).map_err(ctx)?, data));
+                let (from, data, delay) = m
+                    .parts()
+                    .map_err(|e| Error::Profile(format!("message {}: {e}", i + 1)))?;
+                out.push(TcpMessage::new(from, data).with_delay(delay));
             }
             let mut program = TcpProgram::new(port, out);
             if let Some(c) = closer {
@@ -591,7 +611,7 @@ fn source(
 }
 
 impl RawHost {
-    fn spec(self, what: &str) -> Result<TcpHostSpec> {
+    pub(crate) fn spec(self, what: &str) -> Result<TcpHostSpec> {
         let ctx = |e: Error| Error::Profile(format!("[{what}]: {e}"));
         let mut h = TcpHostSpec::new(&self.ip).map_err(ctx)?;
         h.iface = self.iface;
@@ -725,6 +745,8 @@ impl TcpProfile {
                 timestamps: o.timestamps.unwrap_or(defaults.timestamps),
                 sack: o.sack.unwrap_or(defaults.sack),
                 verify: o.verify.unwrap_or(defaults.verify),
+                keep_timing: o.keep_timing.unwrap_or(defaults.keep_timing),
+                think_time: d(o.think_time, defaults.think_time)?,
                 seed: o.seed.unwrap_or(defaults.seed),
             };
         }

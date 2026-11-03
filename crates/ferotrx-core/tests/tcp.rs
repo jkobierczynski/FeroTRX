@@ -997,3 +997,58 @@ fn rejects_mixed_ip_versions() {
     let e = err("ff02::1", None, "[fd00::1]:7");
     assert!(e.contains("not a unicast address"), "{e}");
 }
+
+/// Message timing: with `keep_timing` each message waits its gap from the
+/// program, and `think_time` adds a pause before every answer.
+#[test]
+fn keeps_message_timing_and_think_time() {
+    let program = TcpProgram::new(
+        80,
+        vec![
+            TcpMessage::new(TcpRole::Client, "one"),
+            TcpMessage::new(TcpRole::Server, "two").with_delay(Duration::from_millis(300)),
+            TcpMessage::new(TcpRole::Client, "three").with_delay(Duration::from_millis(500)),
+            TcpMessage::new(TcpRole::Server, "four"),
+        ],
+    );
+    let run = |options: TcpOptions| {
+        let mut engine = TcpEngine::new(TcpConfig {
+            templates: vec![tpl(Arc::new(program.clone()))],
+            client: Some(client(1, 10.0, 0)),
+            server: Some(TcpServerConfig::new(server_endpoint())),
+            options,
+        })
+        .unwrap();
+        let took = simulate(
+            &mut [&mut engine],
+            &mut NatRouter::new(0),
+            Duration::from_secs(10),
+        );
+        let st = engine.stats();
+        assert_eq!((st.client.completed, st.server.completed), (1, 1), "{st:?}");
+        assert_eq!(st.client.mismatched + st.server.mismatched, 0);
+        took
+    };
+    let plain = run(TcpOptions::default());
+    let timed = run(TcpOptions {
+        keep_timing: true,
+        ..Default::default()
+    });
+    let thinking = run(TcpOptions {
+        keep_timing: true,
+        think_time: Duration::from_millis(100),
+        ..Default::default()
+    });
+    assert!(plain < Duration::from_millis(100), "{plain:?}");
+    let gaps = Duration::from_millis(800);
+    assert!(
+        timed >= gaps && timed < gaps + Duration::from_millis(100),
+        "{timed:?}"
+    );
+    // Three answers, each 100 ms later.
+    let more = gaps + Duration::from_millis(300);
+    assert!(
+        thinking >= more && thinking < more + Duration::from_millis(100),
+        "{thinking:?}"
+    );
+}

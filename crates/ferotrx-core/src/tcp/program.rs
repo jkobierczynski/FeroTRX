@@ -53,6 +53,10 @@ impl fmt::Display for TcpRole {
 pub struct TcpMessage {
     pub from: TcpRole,
     pub data: Vec<u8>,
+    /// How long after the previous message (its last byte, from either end)
+    /// this one started in the capture; zero for the first. Played only with
+    /// [`TcpOptions::keep_timing`](super::TcpOptions::keep_timing).
+    pub delay: Duration,
 }
 
 impl TcpMessage {
@@ -60,7 +64,14 @@ impl TcpMessage {
         Self {
             from,
             data: data.into(),
+            delay: Duration::ZERO,
         }
+    }
+
+    /// Sets the gap before the message.
+    pub fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
     }
 }
 
@@ -315,7 +326,7 @@ fn collect(capture: &Capture) -> Result<Vec<Flow>> {
 }
 
 /// Where the IPv4 or IPv6 header starts, for the link types captures commonly use.
-fn ip_offset(linktype: u32, data: &[u8]) -> Option<usize> {
+pub(crate) fn ip_offset(linktype: u32, data: &[u8]) -> Option<usize> {
     let ip = |et: u16| et == ETHERTYPE_IPV4 || et == ETHERTYPE_IPV6;
     match linktype {
         LINKTYPE_ETHERNET => {
@@ -487,7 +498,7 @@ impl Flow {
             out
         };
         let m = [milestones(&dirs[0]), milestones(&dirs[1])];
-        let mut pieces: Vec<(TcpRole, Range<usize>)> = Vec::new();
+        let mut pieces: Vec<(TcpRole, Range<usize>, Duration)> = Vec::new();
         let (mut i, mut j, mut done) = (0, 0, [0usize, 0usize]);
         while i < m[0].len() || j < m[1].len() {
             let take_client = match (m[0].get(i), m[1].get(j)) {
@@ -504,17 +515,24 @@ impl Flow {
             };
             let k = role.index();
             if mark.1 > done[k] {
-                pieces.push((role, done[k]..mark.1));
+                pieces.push((role, done[k]..mark.1, mark.0));
                 done[k] = mark.1;
             }
         }
 
         let mut program = TcpProgram::new(server.port(), Vec::new());
-        for (role, range) in pieces {
-            program.push(TcpMessage::new(
-                role,
-                dirs[role.index()].data[range].to_vec(),
-            ));
+        // When the last piece of the message before was seen.
+        let mut last_end: Option<Duration> = None;
+        for (role, range, t) in pieces {
+            let joins = program.messages.last().is_some_and(|m| m.from == role);
+            let delay = match (joins, last_end) {
+                (false, Some(end)) => t.saturating_sub(end),
+                _ => Duration::ZERO,
+            };
+            program.push(
+                TcpMessage::new(role, dirs[role.index()].data[range].to_vec()).with_delay(delay),
+            );
+            last_end = Some(t);
         }
         program.client = Some(client);
         program.server = Some(server);
@@ -710,7 +728,10 @@ pub(crate) mod tests {
                 TcpRole::Server,
                 "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
             )
+            .with_delay(Duration::from_millis(10))
         );
+        // The request went out at 30 ms, the answer at 40 ms.
+        assert_eq!(p.messages[0].delay, Duration::ZERO);
         assert_eq!(p.closer, TcpRole::Server);
         assert_eq!(p.inferred_bytes, 0);
     }

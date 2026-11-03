@@ -11,13 +11,14 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::hosts::{self, Host, MAX_HOPS};
 use super::program::{TcpProgram, TcpRole};
-use super::wire::{self, Path, Segment, TcpHeader, TcpOpts, ACK, BROADCAST, FIN, PSH, RST, SYN};
+use super::wire::{self, Path, Segment, TcpHeader, TcpOpts, ACK, FIN, PSH, RST, SYN};
 use crate::net::{ETHERTYPE_IPV4, ETHERTYPE_IPV6, IPPROTO_ICMPV6};
 use crate::{Error, MacAddr, Result};
 
 /// An address as a number, for address ranges of either IP version.
-fn ip_num(ip: IpAddr) -> u128 {
+pub(crate) fn ip_num(ip: IpAddr) -> u128 {
     match ip {
         IpAddr::V4(a) => u128::from(u32::from(a)),
         IpAddr::V6(a) => u128::from(a),
@@ -25,7 +26,7 @@ fn ip_num(ip: IpAddr) -> u128 {
 }
 
 /// Address bits of `ip`'s version: 32 or 128.
-fn ip_bits(ip: IpAddr) -> u32 {
+pub(crate) fn ip_bits(ip: IpAddr) -> u32 {
     if ip.is_ipv4() {
         32
     } else {
@@ -34,12 +35,12 @@ fn ip_bits(ip: IpAddr) -> u32 {
 }
 
 /// The highest address of `ip`'s version, as a number.
-fn ip_max(ip: IpAddr) -> u128 {
+pub(crate) fn ip_max(ip: IpAddr) -> u128 {
     u128::MAX >> (128 - ip_bits(ip))
 }
 
 /// The address `n` after `ip`, wrapping around within its version.
-fn ip_add(ip: IpAddr, n: u128) -> IpAddr {
+pub(crate) fn ip_add(ip: IpAddr, n: u128) -> IpAddr {
     match ip {
         IpAddr::V4(a) => Ipv4Addr::from(u32::from(a).wrapping_add(n as u32)).into(),
         IpAddr::V6(a) => Ipv6Addr::from(u128::from(a).wrapping_add(n)).into(),
@@ -47,11 +48,11 @@ fn ip_add(ip: IpAddr, n: u128) -> IpAddr {
 }
 
 /// How far `ip` is after `first`, if both are of one version.
-fn ip_offset(first: IpAddr, ip: IpAddr) -> Option<u128> {
+pub(crate) fn ip_offset(first: IpAddr, ip: IpAddr) -> Option<u128> {
     (first.is_ipv4() == ip.is_ipv4()).then(|| ip_num(ip).wrapping_sub(ip_num(first)) & ip_max(ip))
 }
 
-fn ip_version(ip: IpAddr) -> &'static str {
+pub(crate) fn ip_version(ip: IpAddr) -> &'static str {
     if ip.is_ipv4() {
         "IPv4"
     } else {
@@ -61,7 +62,7 @@ fn ip_version(ip: IpAddr) -> &'static str {
 
 /// The MSS for connections over `ip`'s version: `mss` is for IPv4, and IPv6
 /// headers are 20 bytes longer.
-fn mss_for(ip: IpAddr, mss: u16) -> u16 {
+pub(crate) fn mss_for(ip: IpAddr, mss: u16) -> u16 {
     if ip.is_ipv4() {
         mss
     } else {
@@ -142,7 +143,7 @@ impl TcpEndpoint {
         ip_offset(self.ip, ip).is_some_and(|d| d < u128::from(self.ip_count))
     }
 
-    fn nth_ip(&self, n: u32) -> IpAddr {
+    pub(crate) fn nth_ip(&self, n: u32) -> IpAddr {
         ip_add(self.ip, u128::from(n % self.ip_count.max(1)))
     }
 
@@ -163,7 +164,7 @@ impl TcpEndpoint {
         }
     }
 
-    fn validate(&self, what: &str) -> Result<()> {
+    pub(crate) fn validate(&self, what: &str) -> Result<()> {
         if self.ip_count == 0 {
             return Err(Error::Tcp(format!("{what}: ip_count must be at least 1")));
         }
@@ -392,6 +393,13 @@ pub struct TcpOptions {
     /// Check that the bytes each end receives are the ones the program says
     /// (default true). Connections that differ count as `mismatched`.
     pub verify: bool,
+    /// Keep the capture's message timing: before each message, wait as long
+    /// as the capture shows between the previous message and it (see
+    /// [`TcpMessage::delay`](super::TcpMessage::delay); default false).
+    pub keep_timing: bool,
+    /// Think time: how long an end waits after the other end's message
+    /// before it sends its own (default 0). Adds to `keep_timing`'s gaps.
+    pub think_time: Duration,
     /// Seed for initial sequence numbers.
     pub seed: u64,
 }
@@ -413,6 +421,8 @@ impl Default for TcpOptions {
             timestamps: true,
             sack: true,
             verify: true,
+            keep_timing: false,
+            think_time: Duration::ZERO,
             seed: 0x5eed_f00d,
         }
     }
@@ -557,8 +567,9 @@ impl TcpStats {
 
 #[derive(Clone, Debug)]
 enum Action {
-    /// Send this range of the own stream.
-    Send(Range<usize>),
+    /// Send this range of the own stream, after waiting this long (message
+    /// timing and think time).
+    Send(Range<usize>, Duration),
     /// Wait for this many bytes from the other end.
     Recv(usize),
 }
@@ -582,11 +593,21 @@ impl Shared {
     fn new(program: &TcpProgram, options: TcpOptions) -> Self {
         let mut actions = [Vec::new(), Vec::new()];
         let mut offsets = [0usize, 0usize];
+        let mut previous: Option<TcpRole> = None;
         for m in &program.messages {
             let me = idx(m.from);
             let start = offsets[me];
             offsets[me] += m.data.len();
-            actions[me].push(Action::Send(start..offsets[me]));
+            let mut wait = if options.keep_timing {
+                m.delay
+            } else {
+                Duration::ZERO
+            };
+            if previous == Some(m.from.peer()) {
+                wait += options.think_time;
+            }
+            previous = Some(m.from);
+            actions[me].push(Action::Send(start..offsets[me], wait));
             actions[1 - me].push(Action::Recv(m.data.len()));
         }
         Shared {
@@ -680,6 +701,8 @@ struct Conn {
     unread: usize,
     rx_total: usize,
     mismatched: bool,
+    /// When the next message may go, while it waits (message timing).
+    hold: Option<Duration>,
 
     rto: Duration,
     srtt: Option<Duration>,
@@ -824,6 +847,7 @@ impl Conn {
             unread: 0,
             rx_total: 0,
             mismatched: false,
+            hold: None,
             rto: o.rto,
             srtt: None,
             rttvar: Duration::ZERO,
@@ -959,11 +983,22 @@ impl Conn {
     }
 
     /// Plays the program as far as it can go now.
-    fn advance(&mut self, sh: &Shared, out: &mut Out) {
+    fn advance(&mut self, sh: &Shared, out: &mut Out, now: Duration) {
         let me = idx(self.role);
         loop {
             match sh.actions[me].get(self.step) {
-                Some(Action::Send(r)) => {
+                Some(Action::Send(r, wait)) => {
+                    if !wait.is_zero() {
+                        // Message timing: hold the message until its time.
+                        match self.hold {
+                            None => {
+                                self.hold = Some(now + *wait);
+                                break;
+                            }
+                            Some(t) if now < t => break,
+                            Some(_) => self.hold = None,
+                        }
+                    }
                     self.snd_buf.extend(&sh.streams[me][r.clone()]);
                     let n = r.len() as u64;
                     out.add(self.role, self.tpl, |s| s.payload_tx += n);
@@ -1233,7 +1268,7 @@ impl Conn {
                     self.measure_rtt(seg, now);
                     self.establish(o, out, now);
                     self.need_ack = true;
-                    self.advance(sh, out);
+                    self.advance(sh, out, now);
                     self.transmit(o, out, now);
                 } else if seg.has(ACK) {
                     // Not for this connection attempt.
@@ -1264,7 +1299,7 @@ impl Conn {
                 self.snd_wnd = usize::from(seg.window) << self.snd_shift;
                 self.measure_rtt(seg, now);
                 self.establish(o, out, now);
-                self.advance(sh, out);
+                self.advance(sh, out, now);
             }
             State::TimeWait => {
                 if seg.has(FIN) {
@@ -1305,7 +1340,7 @@ impl Conn {
             self.on_ack(o, out, seg, now);
         }
         self.on_data(sh, out, seg);
-        self.advance(sh, out);
+        self.advance(sh, out, now);
         self.transmit(o, out, now);
         self.check_closed(o, out, now)
     }
@@ -1579,6 +1614,10 @@ impl Conn {
             out.add(self.role, self.tpl, |s| s.timed_out += 1);
             return Fate::Remove;
         }
+        if self.state == State::Open && self.hold.is_some_and(|t| now >= t) {
+            self.advance(sh, out, now);
+            self.transmit(o, out, now);
+        }
         let Some(deadline) = self.deadline else {
             return Fate::Keep;
         };
@@ -1640,19 +1679,6 @@ impl Rng {
     }
 }
 
-struct Host {
-    ep: TcpEndpoint,
-    role: TcpRole,
-    /// The client's next hops (the gateway, or servers on its link) and
-    /// their MACs, once known.
-    hops: Vec<(IpAddr, Option<MacAddr>)>,
-    arp_next: Duration,
-    arp_since: Option<Duration>,
-    /// A reply from the next hop seen on the right port but another VLAN
-    /// (`Some(None)`: untagged), for the error message if ARP fails.
-    arp_elsewhere: Option<Option<u16>>,
-}
-
 /// Emulated TCP clients and servers that replay a [`TcpProgram`].
 ///
 /// Feed it received frames with [`handle_frame`](Self::handle_frame), call
@@ -1687,10 +1713,6 @@ pub struct TcpEngine {
 
 /// How often connection timers are looked at.
 const TIMER_TICK: Duration = Duration::from_millis(1);
-/// How often an unanswered ARP request is repeated.
-const ARP_RETRY: Duration = Duration::from_millis(500);
-/// Most next hops a client resolves: servers on its own link, without a gateway.
-const MAX_HOPS: usize = 1024;
 
 impl TcpEngine {
     pub fn new(config: TcpConfig) -> Result<Self> {
@@ -1785,14 +1807,7 @@ impl TcpEngine {
                     }
                 }
             }
-            hosts.push(Host {
-                role: TcpRole::Client,
-                hops,
-                ep: c.endpoint.clone(),
-                arp_next: Duration::ZERO,
-                arp_since: None,
-                arp_elsewhere: None,
-            });
+            hosts.push(Host::new(TcpRole::Client, c.endpoint.clone(), hops));
         }
         if let Some(s) = &server {
             s.endpoint.validate("server")?;
@@ -1814,14 +1829,7 @@ impl TcpEngine {
                     )));
                 }
             }
-            hosts.push(Host {
-                role: TcpRole::Server,
-                hops: Vec::new(),
-                ep: s.endpoint.clone(),
-                arp_next: Duration::ZERO,
-                arp_since: None,
-                arp_elsewhere: None,
-            });
+            hosts.push(Host::new(TcpRole::Server, s.endpoint.clone(), Vec::new()));
         }
         let seed = options.seed | 1;
         let shared: Vec<Shared> = templates
@@ -1923,90 +1931,11 @@ impl TcpEngine {
         };
         let payload = &frame[link.payload..];
         match link.ethertype {
-            wire::ETHERTYPE_ARP => self.on_arp(port, &link, payload),
+            wire::ETHERTYPE_ARP => {
+                hosts::on_arp(&mut self.hosts, &mut self.out, port, &link, payload)
+            }
             ETHERTYPE_IPV4 | ETHERTYPE_IPV6 => self.on_ip(port, &link, payload, now),
             _ => {}
-        }
-    }
-
-    fn on_arp(&mut self, port: usize, link: &wire::Link, payload: &[u8]) {
-        let Some(arp) = wire::parse_arp(payload) else {
-            return;
-        };
-        for host in &mut self.hosts {
-            if host.ep.port != port || !host.ep.ip.is_ipv4() {
-                continue;
-            }
-            let sender_ip = IpAddr::V4(arp.sender_ip);
-            if host.ep.vlan != link.vlan {
-                if arp.op == 2 && host.hops.iter().any(|(h, _)| *h == sender_ip) {
-                    host.arp_elsewhere = Some(link.vlan);
-                }
-                continue;
-            }
-            if host.ep.next_hop_mac.is_none() {
-                for (hop, mac) in host.hops.iter_mut() {
-                    if *hop == sender_ip {
-                        *mac = Some(arp.sender_mac);
-                    }
-                }
-            }
-            if arp.op == 1 && host.ep.owns(arp.target_ip.into()) {
-                self.out.push((
-                    port,
-                    wire::arp_frame(
-                        arp.sender_mac,
-                        host.ep.vlan,
-                        2,
-                        host.ep.mac,
-                        arp.target_ip,
-                        arp.sender_mac,
-                        arp.sender_ip,
-                    ),
-                ));
-            }
-        }
-    }
-
-    /// Neighbor discovery: learns next hops' MACs from their advertisements
-    /// and solicitations, and answers solicitations for the hosts' addresses.
-    fn on_ndp(&mut self, port: usize, link: &wire::Link, ip: &wire::Ip, nd: &wire::Ndp) {
-        let advert = nd.kind == wire::NDP_ADVERT;
-        // Who the message tells about: the target of an advertisement, the
-        // sender of a solicitation.
-        let about = if advert { nd.target } else { ip.src };
-        let mac = nd.lladdr.or(advert.then_some(link.src));
-        for host in &mut self.hosts {
-            if host.ep.port != port || host.ep.ip.is_ipv4() {
-                continue;
-            }
-            if host.ep.vlan != link.vlan {
-                if advert && host.hops.iter().any(|(h, _)| *h == about) {
-                    host.arp_elsewhere = Some(link.vlan);
-                }
-                continue;
-            }
-            if let (None, Some(mac)) = (host.ep.next_hop_mac, mac) {
-                for (hop, m) in host.hops.iter_mut() {
-                    if *hop == about {
-                        *m = Some(mac);
-                    }
-                }
-            }
-            // Duplicate address detection (from ::) is not answered: the
-            // emulated addresses are not configured anywhere else.
-            if !advert && host.ep.owns(nd.target) && !ip.src.is_unspecified() {
-                let path = Path {
-                    src_mac: host.ep.mac,
-                    dst_mac: nd.lladdr.unwrap_or(link.src),
-                    vlan: host.ep.vlan,
-                    src: nd.target,
-                    dst: ip.src,
-                };
-                if let Some(f) = wire::ndp_advert(&path) {
-                    self.out.push((port, f));
-                }
-            }
         }
     }
 
@@ -2019,7 +1948,7 @@ impl TcpEngine {
         }
         if ip.proto == IPPROTO_ICMPV6 && ip.src.is_ipv6() {
             if let Some(nd) = wire::parse_ndp(&ip) {
-                self.on_ndp(port, link, &ip, &nd);
+                hosts::on_ndp(&mut self.hosts, &mut self.out, port, link, &ip, &nd);
                 return;
             }
         }
@@ -2151,7 +2080,8 @@ impl TcpEngine {
             self.next_conn_at = now;
             self.tpl_next.fill(now);
         }
-        self.resolve(now);
+        let timeout = self.shared[0].options.arp_timeout;
+        self.error = hosts::resolve(&mut self.hosts, &mut self.out, now, timeout);
         if self.error.is_some() {
             return;
         }
@@ -2160,76 +2090,6 @@ impl TcpEngine {
             self.run_timers(now);
         }
         self.open_connections_due(now);
-    }
-
-    fn resolve(&mut self, now: Duration) {
-        let timeout = self.shared[0].options.arp_timeout;
-        for host in &mut self.hosts {
-            let pending: Vec<IpAddr> = host
-                .hops
-                .iter()
-                .filter(|(_, mac)| mac.is_none())
-                .map(|(h, _)| *h)
-                .collect();
-            let Some(&hop) = pending.first() else {
-                continue;
-            };
-            let since = *host.arp_since.get_or_insert(now);
-            if now.saturating_sub(since) >= timeout {
-                let vlan =
-                    |v: Option<u16>| v.map_or("untagged".to_string(), |v| format!("on VLAN {v}"));
-                let more = match pending.len() {
-                    1 => String::new(),
-                    n => format!(" (nor from {} other next hops)", n - 1),
-                };
-                let reply = if hop.is_ipv4() {
-                    "ARP reply"
-                } else {
-                    "neighbor advertisement"
-                };
-                self.error = Some(match host.arp_elsewhere {
-                    Some(seen) => format!(
-                        "no {reply} from {hop} (the {}'s next hop) {} within {:?}{more}, but its replies \
-                         arrive {}: the switch or interface changes the tag; set the {}'s VLAN to match, \
-                         or use a VLAN the switch keeps tagged (VLAN 1 is often sent untagged)",
-                        host.role,
-                        vlan(host.ep.vlan),
-                        timeout,
-                        vlan(seen),
-                        host.role
-                    ),
-                    None => format!(
-                        "no {reply} from {hop} (the {}'s next hop) {} within {:?}{more}; \
-                         check the gateway address, the VLAN, and that the port can receive",
-                        host.role,
-                        vlan(host.ep.vlan),
-                        timeout
-                    ),
-                });
-                return;
-            }
-            if now >= host.arp_next {
-                host.arp_next = now + ARP_RETRY;
-                for hop in pending {
-                    let frame = match (host.ep.ip, hop) {
-                        (IpAddr::V4(me), IpAddr::V4(hop)) => wire::arp_frame(
-                            BROADCAST,
-                            host.ep.vlan,
-                            1,
-                            host.ep.mac,
-                            me,
-                            MacAddr([0; 6]),
-                            hop,
-                        ),
-                        (IpAddr::V6(me), IpAddr::V6(hop)) => {
-                            wire::ndp_solicit(host.ep.mac, host.ep.vlan, me, hop)
-                        }
-                        _ => continue,
-                    };
-                    self.out.push((host.ep.port, frame));
-                }
-            }
-        }
     }
 
     fn run_timers(&mut self, now: Duration) {
@@ -2268,7 +2128,7 @@ impl TcpEngine {
         let Some(host) = self.hosts.iter().find(|h| h.role == TcpRole::Client) else {
             return;
         };
-        if host.hops.iter().any(|(_, mac)| mac.is_none()) {
+        if !host.resolved() {
             return;
         }
         let interval = Duration::from_secs_f64(1.0 / client.cps);
@@ -2378,12 +2238,7 @@ impl TcpEngine {
         let t = &self.templates[tpl];
         let connect = SocketAddr::new(t.nth_server(self.opened[tpl]), t.connect.port());
         let hop = ep.next_hop(connect.ip());
-        let Some(mac) = self.hosts[0]
-            .hops
-            .iter()
-            .find(|(h, _)| *h == hop)
-            .and_then(|(_, m)| *m)
-        else {
+        let Some(mac) = self.hosts[0].hop_mac(hop) else {
             return false;
         };
         let span = u64::from(ports.end - ports.start);

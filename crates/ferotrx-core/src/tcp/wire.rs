@@ -489,6 +489,59 @@ pub(crate) fn tcp_frame(path: &Path, h: &TcpHeader, data: &[u8], ip_id: u16) -> 
     pad(f)
 }
 
+/// A received UDP datagram.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Datagram<'a> {
+    pub sport: u16,
+    pub dport: u16,
+    pub data: &'a [u8],
+}
+
+/// Parses a UDP datagram; with `verify`, checks its checksum (when the
+/// sender set one) against the IP pseudo header.
+pub(crate) fn parse_udp<'a>(ip: &Ip<'a>, verify: bool) -> Option<Datagram<'a>> {
+    let p = ip.payload;
+    if p.len() < 8 {
+        return None;
+    }
+    let len = usize::from(be16(p, 4)?);
+    if len < 8 || len > p.len() {
+        return None;
+    }
+    let p = &p[..len];
+    let sum = be16(p, 6)?;
+    if verify
+        && (sum != 0 || ip.dst.is_ipv6())
+        && checksum(p, pseudo_sum(ip.src, ip.dst, 17, len)) != 0
+    {
+        return None;
+    }
+    Some(Datagram {
+        sport: be16(p, 0)?,
+        dport: be16(p, 2)?,
+        data: &p[8..],
+    })
+}
+
+/// A UDP datagram on `path`, from `sport` to `dport`.
+pub(crate) fn udp_frame(path: &Path, sport: u16, dport: u16, data: &[u8], ip_id: u16) -> Vec<u8> {
+    let udp_len = 8 + data.len();
+    let mut f = Vec::with_capacity(18 + 40 + udp_len);
+    push_ip(&mut f, path, 17, udp_len, ip_id, 64);
+    let start = f.len();
+    f.extend_from_slice(&sport.to_be_bytes());
+    f.extend_from_slice(&dport.to_be_bytes());
+    f.extend_from_slice(&(udp_len as u16).to_be_bytes());
+    f.extend_from_slice(&[0, 0]);
+    f.extend_from_slice(data);
+    let mut sum = checksum(&f[start..], pseudo_sum(path.src, path.dst, 17, udp_len));
+    if sum == 0 {
+        sum = 0xffff;
+    }
+    f[start + 6..start + 8].copy_from_slice(&sum.to_be_bytes());
+    pad(f)
+}
+
 /// An ICMP or ICMPv6 echo reply to `request` (the ICMP part of a received
 /// echo request), by the IP version of `path`.
 pub(crate) fn icmp_echo_reply(path: &Path, request: &[u8], ip_id: u16) -> Option<Vec<u8>> {

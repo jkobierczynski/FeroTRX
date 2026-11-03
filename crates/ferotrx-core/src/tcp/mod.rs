@@ -24,12 +24,13 @@
 //! The client and the server can run in one engine (two ports, or one port
 //! with two VLANs) or in two engines on different machines.
 
-mod engine;
+pub(crate) mod engine;
+pub(crate) mod hosts;
 #[cfg(feature = "profile")]
-mod profile;
-mod program;
+pub(crate) mod profile;
+pub(crate) mod program;
 mod run;
-mod wire;
+pub(crate) mod wire;
 
 pub use engine::{
     TcpClientConfig, TcpConfig, TcpEndpoint, TcpEngine, TcpOptions, TcpServerConfig, TcpSideStats,
@@ -41,4 +42,7 @@ pub use profile::{
     TcpSource, TcpTemplateSpec,
 };
 pub use program::{TcpFlow, TcpMessage, TcpProgram, TcpRole};
-pub use run::{memory_ports, run_tcp, MemoryPort, PacketPort, TcpJob, TcpRunConfig};
+pub use run::{
+    memory_ports, run_engine, run_tcp, MemoryPort, PacketPort, PortEngine, PortJob, TcpJob,
+    TcpRunConfig,
+};
