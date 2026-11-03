@@ -125,6 +125,20 @@ jobs:
           sudo NETEM="$impair" LOG_INVALID=1 MIX=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
           sudo NETEM="$impair" LOG_INVALID=1 IPV6=1 MIX=1 NO_VLAN=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
 
+      # Stateful UDP through the NAT router: DNS lookups between emulated
+      # clients and an emulated server (which dig then asks too), with 3%
+      # loss, a mix of DNS, NTP and a timed echo, and over IPv6.
+      - name: Stateful UDP and DNS through a NAT router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo modprobe 8021q || true
+          sudo scripts/udp-netns.sh ./target/debug/ferotrx
+          sudo NO_VLAN=1 LOSS=0.03 scripts/udp-netns.sh ./target/debug/ferotrx
+          sudo MIX=1 scripts/udp-netns.sh ./target/debug/ferotrx
+          sudo IPV6=1 scripts/udp-netns.sh ./target/debug/ferotrx
+          sudo IPV6=1 MIX=1 NO_VLAN=1 LOSS=0.03 scripts/udp-netns.sh ./target/debug/ferotrx
+
       # Loss and latency through a router in a network namespace: routing and
       # masquerading, a 5 ms delay (netem), then 3% packet loss on top.
       - name: Loss and latency through a router (Linux)

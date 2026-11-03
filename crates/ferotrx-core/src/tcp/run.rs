@@ -1,4 +1,5 @@
-//! Running a [`TcpEngine`] on real ports, on this thread or on its own.
+//! Running a [`TcpEngine`] (or a UDP engine) on real ports, on this thread
+//! or on its own.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -89,7 +90,58 @@ impl PacketPort for MemoryPort {
     }
 }
 
-/// When a TCP run ends early.
+/// An engine that plays stateful traffic on [`PacketPort`]s: the TCP engine
+/// and the UDP engine. It does no I/O and reads no clock; [`run_engine`] and
+/// [`PortJob`] feed it frames and the time.
+pub trait PortEngine: Send {
+    /// The engine's counters.
+    type Stats: Clone + Default + Send + 'static;
+    /// Handles one frame received on `port`.
+    fn handle_frame(&mut self, port: usize, frame: &[u8], now: Duration);
+    /// Runs timers and starts what is due.
+    fn poll(&mut self, now: Duration);
+    /// Frames to send, as (port, frame). Empties the queue.
+    fn take_output(&mut self) -> Vec<(usize, Vec<u8>)>;
+    /// The error that stopped the engine.
+    fn error(&self) -> Option<&str>;
+    /// True when the engine has nothing more to do.
+    fn is_done(&self) -> bool;
+    /// Sets the elapsed time and stop flag in the counters.
+    fn set_elapsed(&mut self, elapsed: Duration, stopped: bool);
+    fn stats(&self) -> &Self::Stats;
+    /// Wraps an error message in the engine's kind of [`Error`].
+    fn wrap_error(message: String) -> Error;
+}
+
+impl PortEngine for TcpEngine {
+    type Stats = TcpStats;
+    fn handle_frame(&mut self, port: usize, frame: &[u8], now: Duration) {
+        TcpEngine::handle_frame(self, port, frame, now)
+    }
+    fn poll(&mut self, now: Duration) {
+        TcpEngine::poll(self, now)
+    }
+    fn take_output(&mut self) -> Vec<(usize, Vec<u8>)> {
+        TcpEngine::take_output(self)
+    }
+    fn error(&self) -> Option<&str> {
+        TcpEngine::error(self)
+    }
+    fn is_done(&self) -> bool {
+        TcpEngine::is_done(self)
+    }
+    fn set_elapsed(&mut self, elapsed: Duration, stopped: bool) {
+        TcpEngine::set_elapsed(self, elapsed, stopped)
+    }
+    fn stats(&self) -> &TcpStats {
+        TcpEngine::stats(self)
+    }
+    fn wrap_error(message: String) -> Error {
+        Error::Tcp(message)
+    }
+}
+
+/// When a TCP or UDP run ends early.
 #[derive(Clone, Debug, Default)]
 pub struct TcpRunConfig {
     /// Stop after this long.
@@ -112,10 +164,26 @@ pub fn run_tcp<F>(
     ports: &mut [Box<dyn PacketPort>],
     config: &TcpRunConfig,
     interval: Duration,
-    mut progress: F,
+    progress: F,
 ) -> Result<TcpStats>
 where
     F: FnMut(&TcpStats),
+{
+    run_engine(engine, ports, config, interval, progress)
+}
+
+/// Runs any [`PortEngine`] on `ports` until it is done, the run is stopped,
+/// or its duration passes; see [`run_tcp`].
+pub fn run_engine<E, F>(
+    engine: &mut E,
+    ports: &mut [Box<dyn PacketPort>],
+    config: &TcpRunConfig,
+    interval: Duration,
+    mut progress: F,
+) -> Result<E::Stats>
+where
+    E: PortEngine,
+    F: FnMut(&E::Stats),
 {
     let start = Instant::now();
     let mut next_progress = interval;
@@ -131,20 +199,20 @@ where
                         busy = true;
                     }
                     Ok(false) => break,
-                    Err(e) => return Err(Error::Tcp(format!("receiving on port {p}: {e}"))),
+                    Err(e) => return Err(E::wrap_error(format!("receiving on port {p}: {e}"))),
                 }
             }
         }
         engine.poll(now);
         if let Some(e) = engine.error() {
-            return Err(Error::Tcp(e.to_string()));
+            return Err(E::wrap_error(e.to_string()));
         }
         let out = engine.take_output();
         busy |= !out.is_empty();
         for (index, (p, frame)) in out.iter().enumerate() {
             let port = ports
                 .get_mut(*p)
-                .ok_or_else(|| Error::Tcp(format!("no port {p}")))?;
+                .ok_or_else(|| E::wrap_error(format!("no port {p}")))?;
             port.send(frame).map_err(|source| Error::Sink {
                 index: index as u64,
                 source,
@@ -177,7 +245,11 @@ where
     }
 }
 
-/// A TCP run on its own thread, which can be watched and stopped.
+/// A TCP run on its own thread; see [`PortJob`].
+pub type TcpJob = PortJob<TcpStats>;
+
+/// A run of a [`PortEngine`] (TCP or UDP) on its own thread, which can be
+/// watched and stopped.
 ///
 /// ```
 /// use ferotrx_core::*;
@@ -207,37 +279,40 @@ where
 /// assert_eq!(stats.server.completed, 5);
 /// assert_eq!(stats.client.mismatched, 0);
 /// ```
-pub struct TcpJob {
+pub struct PortJob<S> {
     stop: Arc<AtomicBool>,
-    shared: Arc<JobShared>,
-    thread: Option<JoinHandle<Result<TcpStats>>>,
+    shared: Arc<JobShared<S>>,
+    thread: Option<JoinHandle<Result<S>>>,
 }
 
-struct JobShared {
-    live: Mutex<Live>,
+struct JobShared<S> {
+    live: Mutex<Live<S>>,
     changed: Condvar,
 }
 
-struct Live {
-    stats: TcpStats,
+struct Live<S> {
+    stats: S,
     error: Option<String>,
     running: bool,
 }
 
-impl TcpJob {
+impl<S: Clone + Default + Send + 'static> PortJob<S> {
     /// Starts running `engine` on `ports` on a new thread.
-    pub fn spawn(
-        mut engine: TcpEngine,
+    pub fn spawn<E>(
+        mut engine: E,
         mut ports: Vec<Box<dyn PacketPort>>,
         mut config: TcpRunConfig,
-    ) -> Result<TcpJob> {
+    ) -> Result<PortJob<S>>
+    where
+        E: PortEngine<Stats = S> + 'static,
+    {
         let stop = config
             .stop
             .get_or_insert_with(|| Arc::new(AtomicBool::new(false)))
             .clone();
         let shared = Arc::new(JobShared {
             live: Mutex::new(Live {
-                stats: TcpStats::default(),
+                stats: S::default(),
                 error: None,
                 running: true,
             }),
@@ -246,9 +321,9 @@ impl TcpJob {
         let thread = {
             let shared = shared.clone();
             std::thread::Builder::new()
-                .name("ferotrx-tcp".into())
+                .name("ferotrx-engine".into())
                 .spawn(move || {
-                    let result = run_tcp(
+                    let result = run_engine(
                         &mut engine,
                         &mut ports,
                         &config,
@@ -269,7 +344,7 @@ impl TcpJob {
                     result
                 })?
         };
-        Ok(TcpJob {
+        Ok(PortJob {
             stop,
             shared,
             thread: Some(thread),
@@ -277,10 +352,12 @@ impl TcpJob {
     }
 
     /// The latest counters, at most [`JOB_STATS_INTERVAL`](crate::JOB_STATS_INTERVAL) old.
-    pub fn stats(&self) -> TcpStats {
+    pub fn stats(&self) -> S {
         lock(&self.shared.live).stats.clone()
     }
+}
 
+impl<S> PortJob<S> {
     pub fn is_running(&self) -> bool {
         lock(&self.shared.live).running
     }
@@ -327,7 +404,7 @@ impl TcpJob {
     }
 
     /// Waits for the run to end and returns its counters or its error.
-    pub fn join(mut self) -> Result<TcpStats> {
+    pub fn join(mut self) -> Result<S> {
         let thread = self.thread.take().expect("joined once");
         match thread.join() {
             Ok(r) => r,
@@ -337,16 +414,16 @@ impl TcpJob {
 }
 
 /// Dropping a job stops it.
-impl Drop for TcpJob {
+impl<S> Drop for PortJob<S> {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
-impl std::fmt::Debug for TcpJob {
+impl<S> std::fmt::Debug for PortJob<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TcpJob")
-            .field("running", &self.is_running())
+        f.debug_struct("PortJob")
+            .field("running", &lock(&self.shared.live).running)
             .finish_non_exhaustive()
     }
 }

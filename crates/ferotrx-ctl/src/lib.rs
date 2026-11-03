@@ -40,6 +40,10 @@
 //! | `tcp.stop` | `id`, `wait` (true) | `TcpRunInfo` |
 //! | `tcp.stats` / `tcp.remove` | `id` | `TcpRunInfo` |
 //! | `tcp.list` | | `TcpRunInfo[]` |
+//! | `udp.start` | [`UdpStartParams`](protocol::UdpStartParams): a UDP profile as `path` or `toml`, `iface`, overrides | [`UdpRunInfo`](protocol::UdpRunInfo) |
+//! | `udp.stop` | `id`, `wait` (true) | `UdpRunInfo` |
+//! | `udp.stats` / `udp.remove` | `id` | `UdpRunInfo` |
+//! | `udp.list` | | `UdpRunInfo[]` |
 //! | `rx.start` | [`RxStartParams`](protocol::RxStartParams): `iface`, `duration` | [`RxRunInfo`](protocol::RxRunInfo) |
 //! | `rx.stop` | `id`, `wait` (true) | `RxRunInfo` |
 //! | `rx.stats` / `rx.remove` | `id` | `RxRunInfo` |
@@ -49,7 +53,7 @@
 //!
 //! After `stats.subscribe` the server sends `stats` notifications
 //! ([`StatsUpdate`](protocol::StatsUpdate)) on the same connection. They cover
-//! `run.*` runs; poll `tcp.stats` for stateful TCP runs.
+//! `run.*` runs; poll `tcp.stats` and `udp.stats` for stateful runs.
 //!
 //! # Loss and latency
 //!
@@ -108,6 +112,7 @@ pub mod protocol;
 mod server;
 mod tcp;
 mod tls;
+mod udp;
 
 pub use audit::AuditLog;
 pub use auth::{Token, TokenError};
@@ -121,3 +126,4 @@ pub use protocol::{Role, RpcError};
 pub use server::{Server, ServerConfig, MAX_LINE};
 pub use tcp::{start_tcp, start_tcp_with, PortOpener, TcpStarted};
 pub use tls::{common_name, fingerprint, ClientTls, Issued, LabPki, ServerTls, TlsError};
+pub use udp::{start_udp, start_udp_with, UdpStarted};

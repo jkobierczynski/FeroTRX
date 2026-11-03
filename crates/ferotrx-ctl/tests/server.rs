@@ -635,3 +635,82 @@ fn a_receiver_alone_counts_flows_from_elsewhere() {
         RpcError::NOT_FOUND
     );
 }
+
+/// A UDP profile with a DNS template and an NTP template over the in-memory cable.
+const UDP_PROFILE: &str = r#"
+transactions = 30
+rate = 1000
+[[template]]
+name = "dns"
+queries = ["www.lab.local A", "nope.lab.local A NXDOMAIN"]
+records = ["www.lab.local A 10.9.0.80"]
+weight = 2
+[[template]]
+app = "ntp"
+[client]
+iface = "a"
+ip = "10.9.0.1"
+[server]
+iface = "b"
+ip = "10.9.0.2"
+"#;
+
+#[test]
+fn udp_runs_start_finish_and_report() {
+    let mut c = client(tcp_server());
+    let info = c
+        .udp_start(&UdpStartParams {
+            toml: Some(UDP_PROFILE.into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(info.interfaces, ["a", "b"]);
+    assert!(
+        info.program.contains("dns (weight 2): DNS: 2 queries"),
+        "{}",
+        info.program
+    );
+    let mut last = info;
+    for _ in 0..100 {
+        last = c.udp_stats(last.id).unwrap();
+        if !last.state.is_running() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(last.state, RunState::Finished, "{last:?}");
+    assert_eq!((last.client.sent, last.client.answered), (30, 30));
+    assert_eq!(last.server.answered, 30);
+    assert_eq!(last.templates[0].client.answered, 20);
+    assert_eq!(last.templates[0].client.errors, 10);
+    assert_eq!(last.templates[1].client.answered, 10);
+    assert_eq!(
+        last.client.mismatched + last.client.unmatched + last.client.timed_out,
+        0
+    );
+    let rt = last.client.response_time.as_ref().unwrap();
+    assert!(rt.max_us.unwrap() < 1_000_000.0, "{rt:?}");
+    assert!(last.server.response_time.is_none());
+    assert_eq!(c.udp_runs().unwrap().len(), 1);
+
+    let endless = c
+        .udp_start(&UdpStartParams {
+            toml: Some(UDP_PROFILE.into()),
+            transactions: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(c.udp_stop(endless.id).unwrap().state, RunState::Stopped);
+    c.udp_remove(endless.id).unwrap();
+    assert_eq!(
+        rpc_code(c.udp_stats(endless.id).unwrap_err()),
+        RpcError::NOT_FOUND
+    );
+    let bad = c
+        .udp_start(&UdpStartParams {
+            toml: Some("app = \"ntp\"\n[client]\nip = \"10.9.0.1\"\niface = \"zz\"".into()),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_eq!(rpc_code(bad), RpcError::FAILED);
+}

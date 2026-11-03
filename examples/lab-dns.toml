@@ -1,0 +1,60 @@
+# FeroTRX stateful UDP profile: DNS lookups through a NAT router between two VLANs.
+#
+#   FeroTRX host --- switch (trunk) --- router --- VLAN 10: 192.168.10.0/24 (clients)
+#                                              \-- VLAN 20: 192.168.20.0/24 (DNS server)
+#
+# Run it with:
+#   sudo ferotrx udp -p examples/lab-dns.toml -i <interface>
+#
+# FeroTRX plays both ends: emulated clients on VLAN 10 send DNS queries, each
+# from its own address and port, through the router to an emulated DNS server
+# on VLAN 20, which answers from the records below. Answers are matched to
+# their queries by transaction id and question; a late answer is asked for
+# again (`[udp] timeout`, `retries`), and the counters say how many were
+# answered, timed out or unmatched, with response times.
+#
+# As in examples/lab-tcp.toml, the `ip`s must be free addresses in each VLAN,
+# not addresses of the FeroTRX machine, and `gateway` the router's address.
+#
+# To test a real DNS server instead, leave out [server] and send to it:
+#   sudo ferotrx udp -p examples/lab-dns.toml -i eth0 --connect 192.168.20.53
+# (then the records below do not matter; the expected response codes do).
+# To take the queries and records from a capture of real lookups, use
+#   pcap = "dns-lookups.pcap"   (with app = "dns")
+
+queries = [
+  "www.lab.local A",
+  "www.lab.local AAAA",
+  "lab.local MX",
+  "lab.local TXT",
+  "_sip._udp.lab.local SRV",
+  "missing.lab.local A NXDOMAIN",   # the answer must be NXDOMAIN
+]
+records = [
+  "www.lab.local 300 CNAME web.lab.local",
+  "web.lab.local 300 A 192.168.20.80",
+  "web.lab.local 300 AAAA fd00:20::80",
+  "lab.local 3600 MX 10 mail.lab.local",
+  "lab.local 3600 TXT \"v=spf1 mx -all\"",
+  "_sip._udp.lab.local SRV 0 5 5060 sip.lab.local",
+  "broken.lab.local SERVFAIL",      # answered with this error
+]
+rate = 100            # transactions per second
+transactions = 1000   # in all; 0 keeps going until Ctrl-C or --duration
+concurrency = 100     # most open at once
+
+[client]
+# iface = "enp0s3"    # default: the -i interface
+ip = "192.168.10.100/24"
+ips = 10              # clients 192.168.10.100 - 192.168.10.109
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.53/24"
+gateway = "192.168.20.1"
+vlan = 20
+
+[udp]
+timeout = "500ms"     # ask again after this long without an answer
+retries = 3
