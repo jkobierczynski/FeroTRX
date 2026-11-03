@@ -112,7 +112,10 @@ fi
 if [ "${IPV6:-}" = 1 ]; then
     ip="ipv6(src=$(a 1 2),dst=$(a 2 2))"
     voice_ip="ipv6(src=$(a 1 2),dst=$(a 2 2),tc=184)" # DSCP 46
-    vary_ip=", \"ip_src=$(a 1 100)..$(a 1 1ff)\""
+    # 100 source addresses, stepping with the 100 source ports: 100 flows for
+    # the router's connection tracking, as over IPv4. (256 addresses would
+    # make lcm(256, 100) = 6400 flows, each a new NAT mapping.)
+    vary_ip=", \"ip_src=$(a 1 100)..$(a 1 163)\""
 else
     ip="ipv4(src=$(a 1 2),dst=$(a 2 2))"
     voice_ip="ipv4(src=$(a 1 2),dst=$(a 2 2),dscp=46)"
