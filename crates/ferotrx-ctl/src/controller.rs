@@ -17,8 +17,10 @@ use ferotrx_io::Output;
 
 use crate::files::FilePolicy;
 use crate::protocol::*;
+use crate::scenario::{scenario_info, LabRunner, ScenarioRun};
 use crate::tcp::{start_tcp_with, PortOpener, TcpRun};
 use crate::udp::{start_udp_with, UdpRun};
+use ferotrx_core::scenario::{Scenario, Workload};
 
 /// Error from [`start_run`].
 pub type StartError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -134,8 +136,9 @@ pub struct Controller {
     next_run: AtomicU64,
     auth_required: bool,
     files: FilePolicy,
-    open_port: Box<PortOpener>,
-    open_receiver: Box<ReceiverOpener>,
+    scenario_runs: Mutex<BTreeMap<u64, Arc<ScenarioRun>>>,
+    open_port: Arc<PortOpener>,
+    open_receiver: Arc<ReceiverOpener>,
     /// Whether `lab.start` may build a lab, and the one running.
     lab_allowed: bool,
     lab: Mutex<Option<ferotrx_io::Lab>>,
@@ -176,8 +179,9 @@ impl Controller {
             next_run: AtomicU64::new(1),
             auth_required: false,
             files: FilePolicy::unrestricted(),
-            open_port: Box::new(ferotrx_io::open_port_with),
-            open_receiver: Box::new(ferotrx_io::open_receiver),
+            scenario_runs: Mutex::default(),
+            open_port: Arc::new(ferotrx_io::open_port_with),
+            open_receiver: Arc::new(ferotrx_io::open_receiver),
             lab_allowed: false,
             lab: Mutex::default(),
         }
@@ -218,17 +222,7 @@ impl Controller {
         if let Some(why) = self.lab_unavailable() {
             return Err(RpcError::failed(why));
         }
-        let d = ferotrx_io::LabConfig::default();
-        let config = ferotrx_io::LabConfig {
-            ipv6: p.ipv6.unwrap_or(d.ipv6),
-            nat: p.nat.unwrap_or(d.nat),
-            loss: p.loss.unwrap_or(0.0),
-            delay: p.delay.clone().unwrap_or_default(),
-            block_tcp: p.block_tcp.clone(),
-            block_udp: p.block_udp.clone(),
-            dhcp: p.dhcp,
-            queues: p.queues.unwrap_or(1).clamp(1, 64),
-        };
+        let config = lab_config(&p);
         let mut lab = lock(&self.lab);
         if let Some(old) = lab.take() {
             old.down();
@@ -237,6 +231,24 @@ impl Controller {
         let info = lab_info(&l, None);
         *lab = Some(l);
         Ok(info)
+    }
+
+    /// Builds the lab a scenario names, unless one built the same way runs.
+    fn scenario_lab(&self, spec: &ferotrx_core::scenario::LabSpec) -> Result<(), RpcError> {
+        if !self.lab_allowed {
+            return Err(RpcError::failed(
+                "the scenario needs the lab router ([lab]), and labs are off on this server: \
+                 start it with ferotrx serve --lab, or run with \"lab\": false on what is there",
+            ));
+        }
+        let p = LabStartParams::from(spec);
+        let same = lock(&self.lab)
+            .as_ref()
+            .is_some_and(|l| *l.config() == lab_config(&p));
+        if !same {
+            self.lab_start(p)?;
+        }
+        Ok(())
     }
 
     pub fn lab_stop(&self) -> LabInfo {
@@ -252,7 +264,7 @@ impl Controller {
         mut self,
         open: impl Fn(&str) -> Result<Box<dyn PacketReceiver>, SinkError> + Send + Sync + 'static,
     ) -> Self {
-        self.open_receiver = Box::new(open);
+        self.open_receiver = Arc::new(open);
         self
     }
 
@@ -268,7 +280,7 @@ impl Controller {
             + Sync
             + 'static,
     ) -> Self {
-        self.open_port = Box::new(open);
+        self.open_port = Arc::new(open);
         self
     }
 
@@ -368,6 +380,21 @@ impl Controller {
                 lock(&self.rx_runs).remove(&p.id);
                 to_value(info)
             }
+            "scenario.check" => to_value(self.scenario_check(parse(params)?)?),
+            "scenario.start" => to_value(self.scenario_start(parse(params)?)?),
+            "scenario.get" => {
+                let p: RunId = parse(params)?;
+                to_value(self.scenario_run(p.id)?.info())
+            }
+            "scenario.list" => to_value(self.scenario_runs()),
+            "scenario.stop" => {
+                let p: StopParams = parse(params)?;
+                to_value(self.scenario_stop(p.id, p.wait)?)
+            }
+            "scenario.remove" => {
+                let p: RunId = parse(params)?;
+                to_value(self.scenario_remove(p.id)?)
+            }
             "lab.get" => to_value(self.lab_info()),
             "lab.start" => to_value(self.lab_start(parse(params)?)?),
             "lab.stop" => to_value(self.lab_stop()),
@@ -452,11 +479,7 @@ impl Controller {
         if name.trim().is_empty() {
             return Err(RpcError::invalid_params("profile name is empty"));
         }
-        for s in &profile.streams {
-            if let StreamSource::Pcap(path) = &s.source {
-                self.files.readable(path)?;
-            }
-        }
+        self.check_stream_files(&profile)?;
         let info = profile_info(&name, &profile);
         lock(&self.profiles).insert(name, profile);
         Ok(info)
@@ -616,6 +639,11 @@ impl Controller {
 
     /// Stops every run and waits for them, e.g. when the server shuts down.
     pub fn stop_all(&self) {
+        let scenarios: Vec<Arc<ScenarioRun>> =
+            lock(&self.scenario_runs).values().cloned().collect();
+        for r in &scenarios {
+            r.stop();
+        }
         let runs: Vec<Arc<Run>> = lock(&self.runs).values().cloned().collect();
         let tcp: Vec<Arc<TcpRun>> = lock(&self.tcp_runs).values().cloned().collect();
         let udp: Vec<Arc<UdpRun>> = lock(&self.udp_runs).values().cloned().collect();
@@ -643,6 +671,163 @@ impl Controller {
         }
     }
 
+    /// The pcaps the streams of a profile replay must be readable.
+    fn check_stream_files(&self, profile: &Profile) -> Result<(), RpcError> {
+        for s in &profile.streams {
+            if let StreamSource::Pcap(path) = &s.source {
+                self.files.readable(path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_tcp_files(&self, profile: &TcpProfile) -> Result<(), RpcError> {
+        for t in &profile.templates {
+            if let ferotrx_core::TcpSource::Pcap { path, .. } = &t.source {
+                self.files.readable(path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_udp_files(&self, profile: &UdpProfile) -> Result<(), RpcError> {
+        for t in &profile.templates {
+            match &t.source {
+                UdpSource::Pcap { path, .. }
+                | UdpSource::Dns {
+                    pcap: Some(path), ..
+                } => {
+                    self.files.readable(path)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads the scenario of `scenario.check` and `scenario.start`, with
+    /// every file it names checked against the file policy.
+    fn read_scenario(&self, p: &ScenarioStartParams) -> Result<Scenario, RpcError> {
+        let overrides: Vec<(String, String)> =
+            p.set.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let allow = |path: &Path| self.files.readable(path).map_err(|e| e.message);
+        let failed = |what: &str, e: ferotrx_core::Error| RpcError::failed(format!("{what}: {e}"));
+        let mut scenario = match (&p.path, &p.toml) {
+            (Some(path), None) => {
+                if p.base_dir.is_some() {
+                    return Err(RpcError::invalid_params(
+                        "base_dir goes with toml; a scenario file uses its own folder",
+                    ));
+                }
+                let file = self.files.readable(path)?;
+                let text = std::fs::read_to_string(&file).map_err(|e| {
+                    RpcError::failed(format!("cannot read {}: {e}", path.display()))
+                })?;
+                let base = file.parent().unwrap_or(Path::new("."));
+                let what = path.display().to_string();
+                let mut s = Scenario::from_toml_with(&text, base, &overrides, &allow)
+                    .map_err(|e| failed(&what, e))?;
+                s.path = Some(path.clone());
+                if s.name.is_empty() {
+                    s.name = path
+                        .file_stem()
+                        .map_or("scenario".into(), |n| n.to_string_lossy().into_owned());
+                }
+                s
+            }
+            (None, Some(text)) => {
+                self.files.upload(text)?;
+                let base = self.files.base_dir(p.base_dir.as_deref())?;
+                Scenario::from_toml_with(text, &base, &overrides, &allow)
+                    .map_err(|e| failed("scenario", e))?
+            }
+            _ => return Err(RpcError::invalid_params("give either path or toml")),
+        };
+        if scenario.name.is_empty() {
+            scenario.name = "scenario".into();
+        }
+        if let Some(i) = &p.iface {
+            scenario.set_default_iface(i);
+        }
+        for c in &scenario.checks {
+            match &c.workload {
+                Workload::Tcp(t) => self.check_tcp_files(t)?,
+                Workload::Udp(u) => self.check_udp_files(u)?,
+                Workload::Traffic(t) => self.check_stream_files(t)?,
+            }
+        }
+        for name in &p.only {
+            if !scenario.checks.iter().any(|c| c.name == *name) {
+                let names: Vec<&str> = scenario.checks.iter().map(|c| c.name.as_str()).collect();
+                return Err(RpcError::invalid_params(format!(
+                    "no check called '{name}'; there are: {}",
+                    names.join(", ")
+                )));
+            }
+        }
+        Ok(scenario)
+    }
+
+    /// Reads a scenario and lists its checks; nothing runs.
+    pub fn scenario_check(&self, p: ScenarioStartParams) -> Result<ScenarioInfo, RpcError> {
+        Ok(scenario_info(&self.read_scenario(&p)?))
+    }
+
+    /// Starts running a scenario's checks, one after the other, on a thread
+    /// of its own; `scenario.get` follows it.
+    pub fn scenario_start(&self, p: ScenarioStartParams) -> Result<ScenarioRunInfo, RpcError> {
+        let scenario = self.read_scenario(&p)?;
+        if let (Some(spec), true) = (&scenario.lab, p.lab.unwrap_or(true)) {
+            self.scenario_lab(spec)?;
+        }
+        let open_port = self.open_port.clone();
+        let open_receiver = self.open_receiver.clone();
+        let runner = LabRunner::new()
+            .with_port_opener(move |name, settings| open_port(name, settings))
+            .with_receiver_opener(move |name| open_receiver(name));
+        let id = self.next_run.fetch_add(1, Ordering::Relaxed);
+        let run = ScenarioRun::spawn(id, scenario, p.only, runner)
+            .map_err(|e| RpcError::failed(format!("cannot start the scenario: {e}")))?;
+        let info = run.info();
+        lock(&self.scenario_runs).insert(id, run);
+        Ok(info)
+    }
+
+    fn scenario_run(&self, id: u64) -> Result<Arc<ScenarioRun>, RpcError> {
+        lock(&self.scenario_runs)
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| RpcError::not_found(format!("no scenario run {id}")))
+    }
+
+    pub fn scenario_runs(&self) -> Vec<ScenarioRunInfo> {
+        let runs: Vec<Arc<ScenarioRun>> = lock(&self.scenario_runs).values().cloned().collect();
+        runs.iter().map(|r| r.info()).collect()
+    }
+
+    /// Stops a scenario run: the running check ends, the rest are skipped.
+    /// With `wait`, answers once it has ended (or after 10 s).
+    pub fn scenario_stop(&self, id: u64, wait: bool) -> Result<ScenarioRunInfo, RpcError> {
+        let run = self.scenario_run(id)?;
+        run.stop();
+        if wait {
+            run.wait(STOP_TIMEOUT);
+        }
+        Ok(run.info())
+    }
+
+    /// Forgets a scenario run that has ended.
+    pub fn scenario_remove(&self, id: u64) -> Result<ScenarioRunInfo, RpcError> {
+        let run = self.scenario_run(id)?;
+        if run.is_running() {
+            return Err(RpcError::failed(format!(
+                "scenario run {id} is still running; stop it first"
+            )));
+        }
+        lock(&self.scenario_runs).remove(&id);
+        Ok(run.info())
+    }
+
     /// Starts a stateful TCP run from a TCP profile.
     pub fn tcp_start(&self, p: TcpStartParams) -> Result<TcpRunInfo, RpcError> {
         let failed = |e: ferotrx_core::Error| RpcError::failed(e);
@@ -656,11 +841,7 @@ impl Controller {
             }
             _ => return Err(RpcError::invalid_params("give either path or toml")),
         };
-        for t in &profile.templates {
-            if let ferotrx_core::TcpSource::Pcap { path, .. } = &t.source {
-                self.files.readable(path)?;
-            }
-        }
+        self.check_tcp_files(&profile)?;
         if let Some(v) = p.cps {
             profile.cps = v;
         }
@@ -739,17 +920,7 @@ impl Controller {
             }
             _ => return Err(RpcError::invalid_params("give either path or toml")),
         };
-        for t in &profile.templates {
-            match &t.source {
-                UdpSource::Pcap { path, .. }
-                | UdpSource::Dns {
-                    pcap: Some(path), ..
-                } => {
-                    self.files.readable(path)?;
-                }
-                _ => {}
-            }
-        }
+        self.check_udp_files(&profile)?;
         if let Some(v) = p.rate {
             profile.rate = v;
         }
@@ -1019,6 +1190,21 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The lab router `lab.start` builds from its parameters.
+fn lab_config(p: &LabStartParams) -> ferotrx_io::LabConfig {
+    let d = ferotrx_io::LabConfig::default();
+    ferotrx_io::LabConfig {
+        ipv6: p.ipv6.unwrap_or(d.ipv6),
+        nat: p.nat.unwrap_or(d.nat),
+        loss: p.loss.unwrap_or(0.0),
+        delay: p.delay.clone().unwrap_or_default(),
+        block_tcp: p.block_tcp.clone(),
+        block_udp: p.block_udp.clone(),
+        dhcp: p.dhcp,
+        queues: p.queues.unwrap_or(1).clamp(1, 64),
+    }
+}
+
 fn lab_info(l: &ferotrx_io::Lab, unavailable: Option<String>) -> LabInfo {
     let c = l.config();
     let mut summary = vec![
@@ -1030,6 +1216,11 @@ fn lab_info(l: &ferotrx_io::Lab, unavailable: Option<String>) -> LabInfo {
         format!(
             "router MAC {} on both VLANs (mac_dst for replayed streams)",
             ferotrx_io::LAB_ROUTER_MAC
+        ),
+        format!(
+            "stream receiver {} (always reachable, received on {})",
+            ferotrx_io::LAB_RECEIVER_IP,
+            l.interface()
         ),
     ];
     if c.ipv6 {

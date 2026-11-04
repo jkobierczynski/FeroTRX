@@ -1,11 +1,13 @@
 //! The wire format: JSON-RPC 2.0 messages, one JSON object per line, and the
 //! parameter and result types of every method.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use ferotrx_core::scenario::{CheckReport, LabSpec, ScenarioReport};
 use ferotrx_core::{
     FlowReport, FlowStats, HostAddress, HostStatus, LatencyStats, ReplayStats, RunStats, RxStats,
     TcpSideStats, TcpStats, UdpSideStats, UdpStats,
@@ -201,7 +203,8 @@ impl Role {
             "server.info" | "auth" => None,
             "interfaces.list" | "profile.get" | "profile.list" | "run.stats" | "run.list"
             | "tcp.stats" | "tcp.list" | "udp.stats" | "udp.list" | "rx.stats" | "rx.list"
-            | "lab.get" | "stats.subscribe" | "stats.unsubscribe" => Some(Role::Read),
+            | "lab.get" | "scenario.get" | "scenario.list" | "stats.subscribe"
+            | "stats.unsubscribe" => Some(Role::Read),
             _ => Some(Role::Operator),
         }
     }
@@ -1188,6 +1191,21 @@ pub struct LabStartParams {
     pub queues: Option<u32>,
 }
 
+impl From<&LabSpec> for LabStartParams {
+    fn from(l: &LabSpec) -> Self {
+        LabStartParams {
+            ipv6: l.ipv6,
+            nat: l.nat,
+            loss: l.loss,
+            delay: l.delay.clone(),
+            block_tcp: l.block_tcp.clone(),
+            block_udp: l.block_udp.clone(),
+            dhcp: l.dhcp,
+            queues: l.queues,
+        }
+    }
+}
+
 /// Result of `lab.start` and `lab.get`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1206,6 +1224,118 @@ pub struct LabInfo {
     /// Why `lab.start` is refused here, if it is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<String>,
+}
+
+// ----- scenario.* -----
+
+/// Parameters of `scenario.start` and `scenario.check`: a scenario file on
+/// the server, or its text (see `ferotrx_core::scenario`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScenarioStartParams {
+    /// A scenario file on the server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Or the scenario itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toml: Option<String>,
+    /// With `toml`: where its profile files and pcaps are (on the server).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_dir: Option<PathBuf>,
+    /// `[vars]` to replace or add, as `ferotrx scenario run --set`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub set: BTreeMap<String, String>,
+    /// Only the checks with these names.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub only: Vec<String>,
+    /// The interface of checks that name none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iface: Option<String>,
+    /// `scenario.start` of a scenario with a `[lab]` table: build that lab
+    /// router first (default true; the server must allow labs). False runs
+    /// the checks on whatever is there, e.g. a lab changed on purpose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lab: Option<bool>,
+}
+
+/// A check of a scenario, as `scenario.check` reads it and a scenario run
+/// goes through it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScenarioCheckInfo {
+    pub name: String,
+    /// tcp, udp or traffic.
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The profile file, or `inline`.
+    pub source: String,
+    /// complete, blocked or any.
+    pub expect: String,
+    /// Every condition the check is judged by.
+    pub conditions: Vec<String>,
+    pub attempts: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iface: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rx: Option<String>,
+    /// In a run: waiting, running, or the verdict (pass, fail, error, skipped).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    /// In a run: the attempt running or made last.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub attempt: u32,
+    /// In a run: the live counters of the running check, about once a second.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub progress: String,
+    /// In a run: the check's report once it has a verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<CheckReport>,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
+/// Result of `scenario.check`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScenarioInfo {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The variables, after `set`.
+    pub vars: BTreeMap<String, String>,
+    pub checks: Vec<ScenarioCheckInfo>,
+    /// The lab router the scenario is written for (`[lab]`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lab: Option<LabSpec>,
+}
+
+/// A scenario run, as `scenario.start`, `scenario.get`, `scenario.stop` and
+/// `scenario.list` show it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScenarioRunInfo {
+    pub id: u64,
+    pub scenario: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The file on the server, when it was started from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// running, finished (every check has a verdict), stopped, or failed
+    /// (the runner itself broke; see `error`).
+    pub state: RunState,
+    #[serde(default)]
+    pub elapsed_s: f64,
+    /// The checks, in order, with their state.
+    pub checks: Vec<ScenarioCheckInfo>,
+    /// The whole report, as `ferotrx scenario run --report` writes it, once
+    /// the run has ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<ScenarioReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 // ----- stats.* -----

@@ -134,8 +134,8 @@ checked against 0.4.0. Each issue has the full checklist.
       profile-relative paths, and a lab router the control server builds
       (`serve --lab`, `lab.*`, `ferotrx lab up`) so the lab examples run on
       one machine
-- [ ] **Scenarios in the GUI**: prepare a scenario locally, run it on the
-      server (`scenario.*` methods), see its report
+- [x] **Scenarios in the GUI**: prepare a scenario locally, run it on the
+      server (`scenario.*` methods), see its report; `examples/lab-scenario.toml`
 - [ ] **Distributed agents**, [#21](https://github.com/jkobierczynski/FeroTRX/issues/21)
 
 **Not planned for now:** a packet-analysis suite (use Wireshark), a long

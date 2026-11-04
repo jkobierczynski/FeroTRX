@@ -1,0 +1,165 @@
+# The checks of scenario-nat.toml, inside the lab router: what must get
+# through the NAT, what the firewall must block, and how well a stream flows.
+# Everything runs on the lab's trunk, ftrx-lab: clients on VLAN 10, servers
+# on VLAN 20.
+#
+# The [lab] table below says how the router is built. The control server
+# (`ferotrx serve --lab`, and the GUI's Scenario tab) builds it before the
+# run; on the command line:
+#
+#   sudo ferotrx scenario run examples/lab-scenario.toml --lab
+#
+# To see a regression, break the router and run the checks on it as it is
+# (GUI: untick "Build the lab it names"; ctl: "lab": false; command line:
+# start the lab yourself and leave out --lab):
+#
+#   sudo ferotrx lab up --block-tcp 80 --block-tcp 8080 --block-udp 123 &
+#   sudo ferotrx scenario run examples/lab-scenario.toml
+#
+# Only "web through the lab" fails then.
+
+format = 1
+name = "lab-nat"
+description = "The lab router: web and DNS pass the NAT, 8080 and NTP are blocked, a voice stream flows"
+# A busy VM can stall for a moment; run a failing check once more before
+# calling it failed.
+attempts = 2
+# Every check sends on the lab's trunk unless it names another interface.
+iface = "${iface}"
+
+# The router: the firewall resets TCP to 8080 and drops NTP.
+[lab]
+block_tcp = [8080]
+block_udp = [123]
+
+[vars]
+iface = "ftrx-lab"
+clients = "192.168.10"
+servers = "192.168.20"
+
+# Every HTTP connection of examples/http.pcap completes through the NAT,
+# byte for byte.
+[[check]]
+name = "web through the lab"
+require = ["cps > 10", "timed_out == 0"]
+[check.tcp]
+pcap = "http.pcap"
+connections = 50
+cps = 50
+concurrency = 20
+[check.tcp.client]
+ip = "${clients}.100/24"
+ips = 10
+gateway = "${clients}.1"
+vlan = 10
+[check.tcp.server]
+ip = "${servers}.80/24"
+gateway = "${servers}.1"
+vlan = 20
+[check.tcp.tcp]
+# Give up on a connection after two SYN retransmissions (1.75 s), so a
+# router that drops the traffic fails the check in seconds, not minutes.
+syn_retries = 2
+
+# The firewall resets TCP to port 8080: no handshake completes.
+[[check]]
+name = "port 8080 blocked"
+expect = "blocked"
+duration = "3s"
+[check.tcp]
+port = 8080
+connections = 3
+[[check.tcp.message]]
+from = "client"
+text = "GET / HTTP/1.0\r\n\r\n"
+[[check.tcp.message]]
+from = "server"
+text = "HTTP/1.0 200 OK\r\n\r\n"
+[check.tcp.client]
+ip = "${clients}.100/24"
+gateway = "${clients}.1"
+vlan = 10
+[check.tcp.server]
+ip = "${servers}.80/24"
+gateway = "${servers}.1"
+vlan = 20
+[check.tcp.tcp]
+syn_retries = 1
+
+# DNS lookups through the NAT: every one answered as expected, quickly.
+[[check]]
+name = "DNS through the lab"
+require = ["response_avg < 100ms"]
+[check.udp]
+transactions = 100
+rate = 100
+queries = ["www.lab.local A", "www.lab.local AAAA", "lab.local MX", "missing.lab.local A NXDOMAIN"]
+records = ["www.lab.local CNAME web.lab.local", "web.lab.local A ${servers}.80",
+           "web.lab.local AAAA fd00:20::80", "lab.local MX 10 mail.lab.local"]
+[check.udp.client]
+ip = "${clients}.100/24"
+ips = 10
+gateway = "${clients}.1"
+vlan = 10
+[check.udp.server]
+ip = "${servers}.53/24"
+gateway = "${servers}.1"
+vlan = 20
+[check.udp.udp]
+timeout = "300ms"
+retries = 5
+
+# The firewall drops NTP: no answer.
+[[check]]
+name = "NTP blocked"
+expect = "blocked"
+duration = "3s"
+[check.udp]
+app = "ntp"
+transactions = 3
+[check.udp.client]
+ip = "${clients}.100/24"
+gateway = "${clients}.1"
+vlan = 10
+[check.udp.server]
+ip = "${servers}.123/24"
+gateway = "${servers}.1"
+vlan = 20
+[check.udp.udp]
+timeout = "500ms"
+retries = 1
+
+# A voice-like stream (1000 packets per second, DSCP EF) through the NAT to
+# the lab's stream receiver, 192.168.20.2, which the router always reaches;
+# it comes back on ftrx-lab on VLAN 20. Little loss, low latency; the
+# thresholds leave room for a jittery VM.
+[[check]]
+name = "voice stream"
+rx = "${iface}"
+duration = "3s"
+require = ["loss_pct < 2%", "latency_avg < 50ms", "rx_mbps > 1Mbit/s"]
+[check.traffic]
+[[check.traffic.stream]]
+name = "voice"
+packet = "eth(src=02:00:00:00:10:02,dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=${clients}.2,dst=${servers}.2,dscp=46)/udp(sport=4000,dport=5004)/raw(len=160)"
+rate = "1000pps"
+loops = 0
+
+# The router has no route to 192.168.30.0/24: no handshake completes.
+[[check]]
+name = "no route to 192.168.30.0/24"
+expect = "blocked"
+duration = "3s"
+[check.tcp]
+port = 80
+connect = "192.168.30.80"
+connections = 3
+[[check.tcp.message]]
+from = "client"
+text = "GET / HTTP/1.0\r\n\r\n"
+[check.tcp.client]
+ip = "${clients}.100/24"
+gateway = "${clients}.1"
+vlan = 10
+[check.tcp.tcp]
+syn_retries = 1
