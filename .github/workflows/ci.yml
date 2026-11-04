@@ -151,6 +151,15 @@ jobs:
           sudo scripts/tcp-nat-netns.sh ./target/debug/ferotrx -n 300 --cps 100
           sudo NO_VLAN=1 LOSS=0.03 scripts/tcp-nat-netns.sh ./target/debug/ferotrx -n 300 --cps 100
 
+      # The lab router the control server builds (serve --lab, lab.start), as
+      # the GUI starts it: the lab examples as they are, through NAT.
+      - name: Lab examples through the server's lab router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo modprobe 8021q || true
+          sudo BLOCK=1 scripts/lab-examples.sh ./target/debug/ferotrx
+
       # Several templates mixed by weight, from ten clients to four servers,
       # through the same NAT router: on the trunk, then with 3% loss.
       - name: Multi-flow TCP templates through a NAT router (Linux)

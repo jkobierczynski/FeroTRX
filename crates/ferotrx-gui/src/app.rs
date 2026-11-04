@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use ferotrx_ctl::protocol::{InterfaceEntry, ProfileInfo, RunInfo, ServerInfo};
+use ferotrx_ctl::protocol::{InterfaceEntry, LabInfo, ProfileInfo, RunInfo, ServerInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -68,6 +68,12 @@ pub enum Pending {
     Started { port: String },
     /// `profile.load` only, to check the streams on the server.
     Checked { port: String },
+    /// `lab.get`, `lab.start` or `lab.stop`: keep the lab's state, log this
+    /// on success (nothing when empty; an empty one also stays quiet when
+    /// an older server does not know the method).
+    Lab(String),
+    /// `interfaces.list`, after the lab changed the server's links.
+    Interfaces,
     /// Any other call: log this on success.
     Done(String),
 }
@@ -110,6 +116,10 @@ pub struct ServerState {
     pub pending: HashMap<u64, Pending>,
     /// The stream run each port started last.
     pub port_runs: BTreeMap<String, u64>,
+    /// The server's lab router, once `lab.get` answered (older servers have none).
+    pub lab: Option<LabInfo>,
+    /// Why the last `lab.start` or `lab.stop` failed.
+    pub lab_error: Option<String>,
 }
 
 impl ServerState {
@@ -124,6 +134,8 @@ impl ServerState {
             history: BTreeMap::new(),
             pending: HashMap::new(),
             port_runs: BTreeMap::new(),
+            lab: None,
+            lab_error: None,
         }
     }
 
@@ -205,6 +217,8 @@ pub struct FeroApp {
     pub add_server: Option<ConnSettings>,
     /// The file dialog, while open.
     pub files: crate::files::Dialogs,
+    /// The lab router window, while open.
+    pub lab_form: Option<crate::views::LabForm>,
     pub ctx: egui::Context,
 }
 
@@ -248,6 +262,7 @@ impl FeroApp {
             started: Instant::now(),
             add_server: None,
             files: Default::default(),
+            lab_form: None,
             ctx,
         };
         if let Some(last) = app.work.last.clone() {
@@ -413,6 +428,7 @@ impl FeroApp {
                 s.interfaces = interfaces;
                 s.status = Status::Connected;
                 self.info(&name, what);
+                self.call(i, "lab.get", Value::Null, Pending::Lab(String::new()));
             }
             Event::Closed(err) => {
                 let s = &mut self.servers[i];
@@ -503,6 +519,44 @@ impl FeroApp {
                             Err(e) => self.error(&name, format!("profile.load: {e}")),
                         }
                     }
+                    (Pending::Lab(what), Ok(v)) => match serde_json::from_value::<LabInfo>(v) {
+                        Ok(lab) => {
+                            let was = self.servers[i].lab.as_ref().is_some_and(|l| l.running);
+                            let now_running = lab.running;
+                            let announce = !what.is_empty();
+                            if announce {
+                                self.info(&name, what);
+                                for l in lab.summary.iter().chain(&lab.notes) {
+                                    self.info(&name, format!("  {l}"));
+                                }
+                            }
+                            let iface = lab.interface.clone();
+                            self.servers[i].lab = Some(lab);
+                            if announce {
+                                self.servers[i].lab_error = None;
+                            }
+                            if was != now_running || announce {
+                                self.call(i, "interfaces.list", Value::Null, Pending::Interfaces);
+                            }
+                            if now_running && !was && announce {
+                                self.sel_server = i;
+                                self.sel_port = Some(PortKind::Interface(iface.clone()));
+                                self.stateful.iface = iface;
+                            }
+                        }
+                        Err(e) => self.error(&name, format!("lab: {e}")),
+                    },
+                    (Pending::Interfaces, Ok(v)) => {
+                        match serde_json::from_value::<Vec<InterfaceEntry>>(v) {
+                            Ok(list) => self.servers[i].interfaces = list,
+                            Err(e) => self.error(&name, format!("interfaces.list: {e}")),
+                        }
+                    }
+                    (Pending::Lab(what), Err(_)) if what.is_empty() => {}
+                    (Pending::Lab(what), Err(e)) => {
+                        self.servers[i].lab_error = Some(e.to_string());
+                        self.error(&name, format!("{what} failed: {e}"));
+                    }
                     (Pending::Done(what), Ok(_)) => self.info(&name, what),
                     (p, Err(e)) => {
                         let what = match p {
@@ -510,7 +564,10 @@ impl FeroApp {
                                 format!("{port}: profile refused: {e}")
                             }
                             Pending::Started { port } => format!("{port}: run.start: {e}"),
-                            Pending::Done(what) => format!("{what} failed: {e}"),
+                            Pending::Done(what) | Pending::Lab(what) => {
+                                format!("{what} failed: {e}")
+                            }
+                            Pending::Interfaces => format!("interfaces.list: {e}"),
                         };
                         self.error(&name, what);
                     }

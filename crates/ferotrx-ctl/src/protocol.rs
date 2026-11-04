@@ -168,6 +168,10 @@ pub struct ServerInfo {
     /// certificate's common name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// True when `lab.start` may build a lab router on the server
+    /// (`ferotrx serve --lab`, Linux, root).
+    #[serde(default)]
+    pub lab: bool,
 }
 
 /// What a connection may do.
@@ -197,7 +201,7 @@ impl Role {
             "server.info" | "auth" => None,
             "interfaces.list" | "profile.get" | "profile.list" | "run.stats" | "run.list"
             | "tcp.stats" | "tcp.list" | "udp.stats" | "udp.list" | "rx.stats" | "rx.list"
-            | "stats.subscribe" | "stats.unsubscribe" => Some(Role::Read),
+            | "lab.get" | "stats.subscribe" | "stats.unsubscribe" => Some(Role::Read),
             _ => Some(Role::Operator),
         }
     }
@@ -1074,6 +1078,51 @@ impl From<&HostStatus> for HostInfo {
                 .collect(),
         }
     }
+}
+
+// ----- lab.* -----
+
+/// Parameters of `lab.start`: the lab router to build on the server. See
+/// `ferotrx_io::Lab` for the topology; every field has a default.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LabStartParams {
+    /// IPv6 besides IPv4 (default true).
+    pub ipv6: Option<bool>,
+    /// Masquerade towards the servers (default true).
+    pub nat: Option<bool>,
+    /// Share of forwarded packets to drop, 0 to 1.
+    pub loss: Option<f64>,
+    /// netem delay on the router's links (`5ms`, `20ms 5ms`).
+    pub delay: Option<String>,
+    /// TCP ports the router refuses with a reset.
+    pub block_tcp: Vec<u16>,
+    /// UDP ports the router drops.
+    pub block_udp: Vec<u16>,
+    /// DHCP and router advertisements on VLAN 10 (dnsmasq).
+    pub dhcp: bool,
+    /// Queues on the veth link, for workers with AF_XDP.
+    pub queues: Option<u32>,
+}
+
+/// Result of `lab.start` and `lab.get`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LabInfo {
+    pub running: bool,
+    /// The interface to send on.
+    pub interface: String,
+    /// The router's namespace.
+    pub namespace: String,
+    /// What the lab offers, one line each: networks, gateways, options.
+    pub summary: Vec<String>,
+    /// What could not be set up, and why.
+    pub notes: Vec<String>,
+    /// How it was built.
+    pub config: LabStartParams,
+    /// Why `lab.start` is refused here, if it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
 }
 
 // ----- stats.* -----

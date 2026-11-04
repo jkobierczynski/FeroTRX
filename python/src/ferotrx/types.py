@@ -183,6 +183,8 @@ class ServerInfo(Record):
     role: Role | None = None
     #: Who this connection is logged in as (token name or certificate name).
     user: str | None = None
+    #: True when ``lab.start`` may build a lab router (``ferotrx serve --lab``).
+    lab: bool = False
 
 
 @dataclass(kw_only=True)

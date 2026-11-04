@@ -1,6 +1,7 @@
 //! The panels of the window, each an `impl FeroApp` block.
 
 mod capture;
+mod lab;
 mod stateful;
 mod stats;
 mod streams;
@@ -8,6 +9,7 @@ mod streams;
 use eframe::egui::{self, RichText};
 
 pub use capture::CaptureState;
+pub use lab::LabForm;
 pub use stateful::StatefulState;
 pub use streams::EditorState;
 
@@ -179,6 +181,35 @@ impl FeroApp {
                                 }
                             });
                         }
+                        if let Some(lab) = &s.lab {
+                            let (text, tip) = if lab.running {
+                                (
+                                    "Lab router: running",
+                                    "Send on ftrx-lab; click to change or remove it",
+                                )
+                            } else if lab.unavailable.is_some() {
+                                (
+                                    "Lab router: off",
+                                    "Start the server with ferotrx serve --lab (Linux, root)",
+                                )
+                            } else {
+                                (
+                                    "Lab router…",
+                                    "Build a router on the server for the lab examples",
+                                )
+                            };
+                            let mut t = RichText::new(text).small();
+                            if lab.running {
+                                t = t.color(egui::Color32::from_rgb(0x2e, 0xa0, 0x43));
+                            }
+                            if ui
+                                .add(egui::Button::new(t).frame(false))
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                action = Some(PanelAction::Lab(i));
+                            }
+                        }
                     });
             }
             if let Some(a) = action {
@@ -213,6 +244,15 @@ impl FeroApp {
                 if self.tab != Tab::Streams && self.tab != Tab::Stateful {
                     self.tab = Tab::Streams;
                 }
+            }
+            PanelAction::Lab(i) => {
+                self.lab_form = Some(LabForm::new(i));
+                self.call(
+                    i,
+                    "lab.get",
+                    serde_json::Value::Null,
+                    crate::app::Pending::Lab(String::new()),
+                );
             }
             PanelAction::Connect(i) => self.connect(i),
             PanelAction::Disconnect(i) => self.disconnect(i),
@@ -358,11 +398,13 @@ impl FeroApp {
             self.sel_server = i;
             self.connect(i);
         }
+        self.lab_window(ctx);
         self.file_dialog(ctx);
     }
 }
 
 enum PanelAction {
+    Lab(usize),
     SelectServer(usize),
     SelectPort(usize, PortKind),
     Connect(usize),

@@ -41,10 +41,12 @@ pub use xdp::{XdpPort, XdpPortConfig};
 mod dpdk;
 
 mod host;
+mod lab;
 mod port;
 #[cfg(feature = "dpdk")]
 pub use dpdk::{DpdkConfig, DpdkPort, DpdkSink};
 pub use host::{describe_host, describe_interface};
+pub use lab::{lab_unavailable, remove_lab, Lab, LabConfig, LAB_INTERFACE, LAB_NAMESPACE};
 pub use port::{interface_mac, open_port, open_port_with, open_receiver, PortSettings};
 #[cfg(feature = "pcap")]
 pub use port::{PcapPort, PcapReceiver};

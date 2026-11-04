@@ -1,6 +1,7 @@
 mod bench;
 mod check;
 mod host;
+mod lab;
 mod latency;
 mod remote;
 mod scenario;
@@ -85,6 +86,11 @@ enum Command {
     /// Make TLS certificates for `ferotrx serve` and `ferotrx ctl`: a small
     /// lab certificate authority, a server certificate and client certificates.
     Certs(remote::CertsArgs),
+    /// Build a lab router on this machine (Linux, root): a network namespace
+    /// that routes and masquerades between VLAN 10 (clients, 192.168.10.0/24)
+    /// and VLAN 20 (servers, 192.168.20.0/24), reached on the link ftrx-lab.
+    /// The examples/lab-*.toml profiles run through it as they are.
+    Lab(lab::LabArgs),
 }
 
 #[derive(Args)]
@@ -461,6 +467,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Serve(args) => remote::cmd_serve(args),
         Command::Ctl(args) => remote::cmd_ctl(args),
         Command::Certs(args) => remote::cmd_certs(args),
+        Command::Lab(args) => lab::cmd_lab(args),
     }
 }
 

@@ -1,6 +1,8 @@
 # Lab scripts
 
-You do not need a lab of switches and routers to try FeroTRX. Each script in
+You do not need a lab of switches and routers to try FeroTRX. For trying
+profiles by hand (or from the GUI) there is a [standing lab
+router](#a-standing-lab-router); each script in
 [`scripts/`](../scripts) builds a small one in Linux network namespaces, with
 the kernel as the router, runs FeroTRX through it, checks the results and
 removes the lab again. CI runs all of them on every change.
@@ -19,6 +21,7 @@ this checkout, else the installed one); arguments after it go to the
 | `latency-netns.sh` | a profile with two latency streams and a plain one, through a router with delay and loss | `DELAY=5ms`, `LOSS=0.02`, `DURATION=4s`, `IPV6=1` |
 | `bench-netns.sh` | `ferotrx bench` against a router that forwards 20 Mbit/s through a token bucket | `RATE=20`, `LINE=100`, `DELAY=2ms`, `SIZES="1020 imix"`, `TRIAL=1s` |
 | `hosts-netns.sh` | `ferotrx host` and `ferotrx tcp --client-ip dhcp` against dnsmasq and a bridge with IGMP/MLD snooping | `IPV6=1` (SLAAC, DHCPv6, MLD, router advertisements) |
+| `lab-examples.sh` | the control server's lab router (`serve --lab`, `lab.start`), with `examples/lab-tcp.toml` and `examples/lab-udp-mix.toml` as they are | `BLOCK=1` (router resets TCP to port 80) |
 | `scenario-netns.sh` | `examples/scenario-nat.toml`, then the same after breaking the router's firewall, which must show as a regression | `KEEP=DIR` keeps the reports |
 
 ```sh
@@ -48,3 +51,51 @@ Things to know:
   with `ethtool` when it is installed.
 * IPv6 needs a kernel with IPv6 enabled, and IPv6 masquerading only happens
   when the kernel has IPv6 NAT; otherwise the router only routes.
+
+## A standing lab router
+
+The scripts build a lab, run one test and remove the lab. To try the lab
+examples (`examples/lab-*.toml`) by hand, or from the [GUI](gui.md), build
+the same router and keep it:
+
+```text
+  this machine                   router (namespace ferotrx-lab)
+  ftrx-lab ---- veth trunk ----- rt.10  192.168.10.1/24  fd00:10::1/64
+    VLAN 10: clients             rt.20  192.168.20.1/24  fd00:20::1/64
+    VLAN 20: servers             forwards, conntrack, masquerades out of rt.20
+```
+
+```sh
+sudo ferotrx lab up                       # until Ctrl-C
+sudo ferotrx udp -p examples/lab-udp-mix.toml -i ftrx-lab
+sudo ferotrx tcp -p examples/lab-tcp.toml -i ftrx-lab
+sudo ferotrx run examples/lab-two-vlans.toml -i ftrx-lab
+```
+
+Every lab example fits it as it is: clients on VLAN 10 with gateway
+192.168.10.1, servers on VLAN 20 with gateway 192.168.20.1, the same with
+`fd00:10::1` and `fd00:20::1` for IPv6. The router tracks connections and
+drops what conntrack calls INVALID, as a firewall does, and masquerades
+towards the servers. Options:
+
+| `ferotrx lab up` | `lab.start` | What the router does |
+| --- | --- | --- |
+| `--no-ipv6` | `ipv6: false` | IPv4 only |
+| `--no-nat` | `nat: false` | routes without masquerading |
+| `--loss 0.03` | `loss: 0.03` | drops 3% of what it forwards |
+| `--delay "20ms 5ms"` | `delay` | netem delay on both links (`sch_netem`) |
+| `--block-tcp 80` | `block_tcp: [80]` | resets TCP to port 80, to see a test fail |
+| `--block-udp 53` | `block_udp: [53]` | drops UDP to port 53 |
+| `--dhcp` | `dhcp: true` | DHCP on VLAN 10 (.200-.250), with IPv6 also router advertisements and DHCPv6, from dnsmasq: for `examples/lab-tcp-dhcp.toml` and `lab-hosts.toml` |
+| `--queues 4` | `queues: 4` | four queues on the link, for `--workers 4 -B af_xdp` |
+
+It needs Linux, root, `ip` and `iptables`, VLAN support (the 8021q module),
+and `tc` or `dnsmasq` for those options. `ferotrx lab down` removes a lab
+that was left behind.
+
+A control server builds it for its clients when started with `--lab`
+(`sudo ferotrx serve --lab`): `lab.start` with the parameters above, `lab.stop`
+and `lab.get` (see [remote control](remote-control.md)). The GUI has a
+**Lab router** entry under each such server. The server removes the lab when
+it stops (Ctrl-C). Labs are off unless `--lab` is given, because they change
+the machine's network: a namespace and a link.

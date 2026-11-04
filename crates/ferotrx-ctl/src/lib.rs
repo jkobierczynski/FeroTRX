@@ -48,6 +48,8 @@
 //! | `rx.stop` | `id`, `wait` (true) | `RxRunInfo` |
 //! | `rx.stats` / `rx.remove` | `id` | `RxRunInfo` |
 //! | `rx.list` | | `RxRunInfo[]` |
+//! | `lab.start` | [`LabStartParams`](protocol::LabStartParams) | [`LabInfo`](protocol::LabInfo) |
+//! | `lab.stop` / `lab.get` | | `LabInfo` |
 //! | `stats.subscribe` | `id` (optional), `interval_ms` (1000) | `{"subscription": n}` |
 //! | `stats.unsubscribe` | `subscription` | `true` |
 //!
