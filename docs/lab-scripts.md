@@ -14,8 +14,8 @@ this checkout, else the installed one); arguments after it go to the
 
 | Script | What it runs | Options |
 | --- | --- | --- |
-| `tcp-nat-netns.sh` | `ferotrx tcp` with `examples/http.pcap` through a NAT router between VLANs 10 and 20 on a trunk | `LOSS=0.03`, `MIX=1` (three templates to four servers), `NETEM="..."`, `BDP=1` (long fat pipe), `IPV6=1`, `NO_VLAN=1`, `LOG_INVALID=1` |
-| `udp-netns.sh` | `ferotrx udp` DNS lookups through the same kind of router, then `dig` against the DNS server | `LOSS=0.03`, `MIX=1` (DNS, NTP, echo), `IPV6=1`, `NO_VLAN=1` |
+| `tcp-nat-netns.sh` | `ferotrx tcp` with `examples/http.pcap` through a NAT router between VLANs 10 and 20 on a trunk | `LOSS=0.03`, `MIX=1` (three templates to four servers), `NETEM="..."`, `BDP=1` (long fat pipe), `IPV6=1`, `NO_VLAN=1`, `LOG_INVALID=1`, `QUEUES=4` (multi-queue veths, for `--workers`) |
+| `udp-netns.sh` | `ferotrx udp` DNS lookups through the same kind of router, then `dig` against the DNS server | `LOSS=0.03`, `MIX=1` (DNS, NTP, echo), `IPV6=1`, `NO_VLAN=1`, `QUEUES=4` |
 | `latency-netns.sh` | a profile with two latency streams and a plain one, through a router with delay and loss | `DELAY=5ms`, `LOSS=0.02`, `DURATION=4s`, `IPV6=1` |
 | `bench-netns.sh` | `ferotrx bench` against a router that forwards 20 Mbit/s through a token bucket | `RATE=20`, `LINE=100`, `DELAY=2ms`, `SIZES="1020 imix"`, `TRIAL=1s` |
 | `hosts-netns.sh` | `ferotrx host` and `ferotrx tcp --client-ip dhcp` against dnsmasq and a bridge with IGMP/MLD snooping | `IPV6=1` (SLAAC, DHCPv6, MLD, router advertisements) |
@@ -26,9 +26,11 @@ sudo scripts/tcp-nat-netns.sh
 sudo LOSS=0.03 MIX=1 scripts/tcp-nat-netns.sh
 sudo IPV6=1 scripts/udp-netns.sh
 sudo scripts/tcp-nat-netns.sh target/release/ferotrx -B af_xdp   # through the fast ports
+sudo QUEUES=4 scripts/tcp-nat-netns.sh -B af_xdp --workers 4 --cps 4000 -n 40000   # on four cores
 ```
 
-The header of each script draws its lab and lists every option. What the
+Options after the script name (and the optional path to the binary) go to
+`ferotrx`. The header of each script draws its lab and lists every option. What the
 results look like, and what each script checks, is in the guide for the
 feature: [stateful TCP](stateful-tcp.md#lab-script),
 [stateful UDP](stateful-udp.md#lab-script),

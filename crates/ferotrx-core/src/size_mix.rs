@@ -198,6 +198,12 @@ impl Transform for SizeMix {
         let size = self.next_size();
         set_len(&mut packet.data, size);
     }
+
+    fn skip(&mut self, n: u64) {
+        for _ in 0..n {
+            self.next_size();
+        }
+    }
 }
 
 impl FromStr for SizeMix {

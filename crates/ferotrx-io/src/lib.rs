@@ -140,6 +140,61 @@ impl Output {
         Ok(self.open_detailed(linktype)?.sink)
     }
 
+    /// Opens the output once per worker of a run on several cores: one
+    /// libpcap/Npcap handle per worker, or one AF_XDP socket per worker on
+    /// consecutive queues from `queue` (the interface needs that many). DPDK
+    /// ports, files and the null output are opened once and shared by the
+    /// workers, taking turns behind a lock ([`ferotrx_core::share_sink`]).
+    pub fn open_workers(&self, linktype: u32, workers: usize) -> Result<Vec<Opened>, SinkError> {
+        let workers = workers.max(1);
+        if workers == 1 {
+            return Ok(vec![self.open_detailed(linktype)?]);
+        }
+        match self {
+            Output::Interface { name, send } if send.backend() != Backend::Dpdk => {
+                let mut out = Vec::with_capacity(workers);
+                for k in 0..workers {
+                    let mut send = send.clone();
+                    if send.backend() == Backend::AfXdp {
+                        let queue = u32::from(send.queue()) + k as u32;
+                        send.queue = Some(u16::try_from(queue).map_err(|_| "queue out of range")?);
+                    }
+                    let mut opened = open_interface(name, &send).map_err(|e| {
+                        if send.backend() == Backend::AfXdp {
+                            format!(
+                                "worker {k} sends on queue {}: {e} (each AF_XDP worker needs                                  a queue of its own; see `ethtool -L {name}`)",
+                                send.queue()
+                            )
+                            .into()
+                        } else {
+                            e
+                        }
+                    })?;
+                    opened.detail = format!("worker {k}: {}", opened.detail);
+                    out.push(opened);
+                }
+                Ok(out)
+            }
+            Output::Null => Ok((0..workers)
+                .map(|_| Opened {
+                    sink: Box::new(NullSink),
+                    detail: "null".into(),
+                })
+                .collect()),
+            _ => {
+                let opened = self.open_detailed(linktype)?;
+                let detail = format!("{} (shared by {workers} workers)", opened.detail);
+                Ok(ferotrx_core::share_sink(opened.sink, workers)
+                    .into_iter()
+                    .map(|sink| Opened {
+                        sink,
+                        detail: detail.clone(),
+                    })
+                    .collect())
+            }
+        }
+    }
+
     /// Opens the output, and says how it sends.
     pub fn open_detailed(&self, linktype: u32) -> Result<Opened, SinkError> {
         match self {

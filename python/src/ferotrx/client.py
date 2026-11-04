@@ -334,6 +334,7 @@ class Client:
         xdp_mode: str | None = None,
         batch: int | None = None,
         dpdk_args: str | Sequence[str] | None = None,
+        workers: int | None = None,
         rate: str | None = None,
         limit: int | None = None,
         duration: str | None = None,
@@ -351,6 +352,7 @@ class Client:
         ``limit`` packets in total and ``duration`` (e.g. ``"30s"``) stop it.
         ``rx`` receives on that interface for loss and latency (``latency``
         puts a signature in every stream), ``rx_wait`` after the last packet.
+        ``workers`` spreads the run over that many threads on the server.
         """
         output = _wire.output_spec(
             iface=iface,
@@ -361,6 +363,7 @@ class Client:
             xdp_mode=xdp_mode,
             batch=batch,
             dpdk_args=dpdk_args,
+            workers=workers,
         )
         return self._run(
             _wire.start(
@@ -413,6 +416,7 @@ class Client:
         xdp_mode: str | None = None,
         batch: int | None = None,
         dpdk_args: str | Sequence[str] | None = None,
+        workers: int | None = None,
     ) -> TcpRunInfo:
         """Starts a stateful TCP run of a TCP profile: ``path`` on the server,
         this machine's file with ``upload=True``, or ``toml`` text. ``iface``
@@ -434,6 +438,7 @@ class Client:
                 xdp_mode=xdp_mode,
                 batch=batch,
                 dpdk_args=dpdk_args,
+                workers=workers,
             )
         )
 
@@ -471,6 +476,7 @@ class Client:
         xdp_mode: str | None = None,
         batch: int | None = None,
         dpdk_args: str | Sequence[str] | None = None,
+        workers: int | None = None,
     ) -> UdpRunInfo:
         """Starts a stateful UDP run (DNS, NTP, replayed sessions) of a UDP
         profile, as :meth:`tcp_start` does; ``rate`` is transactions per second."""
@@ -490,6 +496,7 @@ class Client:
                 xdp_mode=xdp_mode,
                 batch=batch,
                 dpdk_args=dpdk_args,
+                workers=workers,
             )
         )
 

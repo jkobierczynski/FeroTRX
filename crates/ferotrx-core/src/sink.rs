@@ -69,3 +69,63 @@ impl PacketSink for VecSink {
         Ok(())
     }
 }
+
+/// `n` sinks that all send into `sink`, taking turns behind a lock, for
+/// workers of a run on several cores whose output cannot be opened once per
+/// worker (a file, a DPDK queue). Each turn sends what the worker queued
+/// since its last one, at `idle` and `flush`, or when 64 packets are queued.
+pub fn share_sink(sink: Box<dyn PacketSink + Send>, n: usize) -> Vec<Box<dyn PacketSink + Send>> {
+    if n <= 1 {
+        return vec![sink];
+    }
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(sink));
+    (0..n)
+        .map(|_| {
+            Box::new(SharedSink {
+                sink: shared.clone(),
+                queued: Vec::new(),
+            }) as Box<dyn PacketSink + Send>
+        })
+        .collect()
+}
+
+/// One worker's turn on a shared sink; see [`share_sink`].
+struct SharedSink {
+    sink: std::sync::Arc<std::sync::Mutex<Box<dyn PacketSink + Send>>>,
+    queued: Vec<Vec<u8>>,
+}
+
+impl SharedSink {
+    fn hand_over(&mut self, flush: bool) -> Result<(), SinkError> {
+        let mut sink = self.sink.lock().unwrap_or_else(|e| e.into_inner());
+        for p in self.queued.drain(..) {
+            sink.send(&p)?;
+        }
+        if flush {
+            sink.flush()
+        } else {
+            sink.idle()
+        }
+    }
+}
+
+impl PacketSink for SharedSink {
+    fn send(&mut self, data: &[u8]) -> Result<(), SinkError> {
+        self.queued.push(data.to_vec());
+        if self.queued.len() >= 64 {
+            self.hand_over(false)?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), SinkError> {
+        self.hand_over(true)
+    }
+
+    fn idle(&mut self) -> Result<(), SinkError> {
+        if self.queued.is_empty() {
+            return Ok(());
+        }
+        self.hand_over(false)
+    }
+}

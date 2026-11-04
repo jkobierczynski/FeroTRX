@@ -66,29 +66,51 @@ pub fn start_run_with_rx(
     config: RunConfig,
     rx: Option<RxSettings>,
 ) -> Result<Started, StartError> {
-    let mut streams = if rx.is_some() && !profile.has_latency() {
+    let profile = if rx.is_some() && !profile.has_latency() {
         let mut p = profile.clone();
         p.enable_latency();
-        p.load()?
+        std::borrow::Cow::Owned(p)
     } else {
-        profile.load()?
+        std::borrow::Cow::Borrowed(profile)
+    };
+    let output = output.clone().with_defaults(&profile.output);
+    // Interface outputs carry the profile's [output] settings now; files and
+    // the null output take the worker count from the profile.
+    let workers = match &output {
+        Output::Interface { send, .. } => send.workers(),
+        _ => profile.output.workers(),
     };
     if let Some(rate) = rate {
         rate.validate()?;
-        for s in &mut streams {
-            s.rate = rate;
-        }
     }
-    let linktype = streams
+    let mut sets = Vec::with_capacity(workers);
+    for k in 0..workers {
+        let mut streams = profile.load()?;
+        for s in &mut streams {
+            if let Some(rate) = rate {
+                s.rate = rate;
+            }
+        }
+        if workers > 1 {
+            streams = streams.into_iter().map(|s| s.shard(k, workers)).collect();
+        }
+        sets.push(streams);
+    }
+    let linktype = sets[0]
         .first()
         .map_or(LINKTYPE_ETHERNET, ferotrx_core::Stream::linktype);
-    let opened = output
-        .clone()
-        .with_defaults(&profile.output)
-        .open_detailed(linktype)?;
+    let opened = output.open_workers(linktype, workers)?;
+    let mut details: Vec<String> = Vec::new();
+    let mut work = Vec::with_capacity(workers);
+    for (streams, o) in sets.into_iter().zip(opened) {
+        if !details.contains(&o.detail) {
+            details.push(o.detail);
+        }
+        work.push((streams, o.sink));
+    }
     Ok(Started {
-        job: Job::spawn_with_rx(streams, opened.sink, config, rx)?,
-        detail: opened.detail,
+        job: Job::spawn_workers(work, config, rx)?,
+        detail: details.join("; "),
     })
 }
 
@@ -400,15 +422,24 @@ impl Controller {
 
     /// Starts a run of a loaded profile and returns it.
     pub fn start(&self, p: StartParams) -> Result<RunInfo, RpcError> {
-        let profile = lock(&self.profiles)
+        let mut profile = lock(&self.profiles)
             .get(&p.profile)
             .cloned()
             .ok_or_else(|| no_profile(&p.profile))?;
         let send = p.output.send_settings()?;
+        // Files and the null output take only a worker count.
+        let workers_only = send
+            == SendSettings {
+                workers: send.workers,
+                ..Default::default()
+            };
+        if workers_only && p.output.iface.is_none() && send.workers.is_some() {
+            profile.output.workers = send.workers;
+        }
         let output = match (p.output.iface, p.output.file, p.output.null) {
             (Some(name), None, false) => Output::Interface { name, send },
-            (None, Some(f), false) if send.is_empty() => Output::File(self.files.writable(&f)?),
-            (None, None, true) if send.is_empty() => Output::Null,
+            (None, Some(f), false) if workers_only => Output::File(self.files.writable(&f)?),
+            (None, None, true) if workers_only => Output::Null,
             (None, Some(_), false) | (None, None, true) => {
                 return Err(RpcError::invalid_params(
                     "backend, queue, xdp_mode, batch and dpdk_args need iface",
@@ -438,7 +469,6 @@ impl Controller {
             ignore_send_errors: p.ignore_errors,
             stop: None,
         };
-        let mut profile = profile;
         if p.latency {
             profile.enable_latency();
         }
@@ -584,6 +614,7 @@ impl Controller {
             xdp_mode: p.xdp_mode,
             batch: p.batch,
             dpdk_args: p.dpdk_args,
+            workers: p.workers,
             ..Default::default()
         }
         .send_settings()?;
@@ -672,6 +703,7 @@ impl Controller {
             xdp_mode: p.xdp_mode,
             batch: p.batch,
             dpdk_args: p.dpdk_args,
+            workers: p.workers,
             ..Default::default()
         }
         .send_settings()?;
@@ -805,6 +837,7 @@ impl Run {
             id: self.id,
             profile: self.profile.clone(),
             output: self.output.clone(),
+            workers: self.job.workers(),
             state,
             error,
             total,
@@ -889,6 +922,7 @@ impl OutputSpec {
                 .map_err(bad)?,
             batch: self.batch,
             dpdk_args: self.dpdk_args.clone(),
+            workers: self.workers,
         };
         s.validate().map_err(bad)?;
         Ok(s)

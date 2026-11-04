@@ -28,6 +28,9 @@ pub struct Stream<'a> {
     /// How packets spread around the rate: Poisson arrivals, bursts, ramps.
     /// Anything but the default needs a pps or Mbit/s rate.
     pub model: TrafficModel,
+    /// This stream's part of a stream split over several workers:
+    /// (index, count); see [`shard`](Stream::shard).
+    shard: (u64, u64),
     source: Box<dyn PacketSource + 'a>,
     transforms: Vec<Box<dyn Transform + 'a>>,
 }
@@ -43,6 +46,7 @@ impl<'a> Stream<'a> {
             latency: None,
             keep_size: false,
             model: TrafficModel::default(),
+            shard: (0, 1),
             source: Box::new(source),
             transforms: Vec::new(),
         }
@@ -102,6 +106,70 @@ impl<'a> Stream<'a> {
     pub fn linktype(&self) -> u32 {
         self.source.linktype()
     }
+
+    /// Makes this stream worker `index`'s part of the stream split over
+    /// `count` workers, each with its own copy of the stream and its own sink.
+    /// Packet `i` of the whole stream is sent by worker `i % count`, so
+    /// together the workers send exactly what one stream would: the same
+    /// packets, transform values, latency sequence numbers and limit. Each
+    /// worker skips the others' packets without building them (see
+    /// [`PacketSource::skip`] and [`Transform::skip`]).
+    ///
+    /// The rate is shared too: a packet or bit rate is divided by `count`, and
+    /// each worker of an evenly spaced pps stream starts `index / pps` later,
+    /// so the packets interleave as one stream's would. Original timing and
+    /// top speed stay as they are. A traffic model's seed is offset per worker.
+    ///
+    /// Call it after the rate, limit and model are set.
+    ///
+    /// ```
+    /// use ferotrx_core::*;
+    /// use std::sync::Arc;
+    /// use std::time::Duration;
+    ///
+    /// let cap = Arc::new(Capture::from_specs(&["eth/ipv4/udp/raw(len=8)"], Duration::ZERO).unwrap());
+    /// let make = |k| Stream::new("s", CaptureSource::new(cap.clone()).loops(10))
+    ///     .with_rate(Rate::TopSpeed)
+    ///     .with_transform(FieldEngine::parse(["ip_id=0..65535"]).unwrap())
+    ///     .shard(k, 3);
+    /// let mut ids = Vec::new();
+    /// for k in 0..3 {
+    ///     let mut sink = VecSink::default();
+    ///     run(&mut [make(k)], &mut sink, &RunConfig::default()).unwrap();
+    ///     ids.extend(sink.packets.iter().map(|p| u16::from_be_bytes([p[18], p[19]])));
+    /// }
+    /// ids.sort();
+    /// assert_eq!(ids, (0..10).collect::<Vec<u16>>());
+    /// ```
+    pub fn shard(mut self, index: usize, count: usize) -> Self {
+        assert!(count > 0 && index < count, "shard {index} of {count}");
+        let (k, n) = (index as u64, count as u64);
+        self.shard = (k, n);
+        if n == 1 {
+            return self;
+        }
+        self.limit = self.limit.map(|l| crate::share(l, index, count));
+        match self.rate {
+            Rate::Pps(pps) => {
+                self.rate = Rate::Pps(pps / n as f64);
+                if self.model.is_steady() {
+                    self.delay += Duration::from_secs_f64(k as f64 / pps);
+                }
+            }
+            Rate::Mbps(mbps) => self.rate = Rate::Mbps(mbps / n as f64),
+            Rate::Original { .. } | Rate::TopSpeed => {}
+        }
+        if let Some(seed) = self.model.seed {
+            self.model.seed = Some(crate::worker_seed(seed, index));
+        }
+        self
+    }
+
+    /// Which part of a split stream this is: (index, count); (0, 1) for a
+    /// whole stream.
+    pub fn shard_of(&self) -> (usize, usize) {
+        (self.shard.0 as usize, self.shard.1 as usize)
+    }
 }
 
 impl std::fmt::Debug for Stream<'_> {
@@ -114,6 +182,7 @@ impl std::fmt::Debug for Stream<'_> {
             .field("latency", &self.latency)
             .field("keep_size", &self.keep_size)
             .field("model", &self.model)
+            .field("shard", &self.shard)
             .field("transforms", &self.transforms.len())
             .finish_non_exhaustive()
     }
@@ -163,6 +232,8 @@ struct Lane {
     signature: Option<usize>,
     /// Sequence number of the next signature.
     seq: u64,
+    /// No packet read yet (a shard skips the packets before its first).
+    first: bool,
 }
 
 /// Like [`run`], and calls `progress` with the running counters about every `interval`.
@@ -206,7 +277,8 @@ where
             deadline: Duration::ZERO,
             passes: 0,
             signature: None,
-            seq: 0,
+            seq: s.shard.0,
+            first: true,
         })
         .collect();
 
@@ -272,7 +344,7 @@ where
                 if lane.signature.is_some() {
                     // Numbers only advance on packets that left, so failed
                     // sends do not show up as loss.
-                    lane.seq += 1;
+                    lane.seq += streams[i].shard.1;
                     st.tagged += 1;
                     stats.total.tagged += 1;
                 }
@@ -321,8 +393,26 @@ fn fill(stream: &mut Stream<'_>, lane: &mut Lane, st: &ReplayStats, start: Insta
     if stream
         .limit
         .is_some_and(|l| st.packets + st.send_errors >= l)
-        || !stream.source.next_into(&mut lane.packet)?
     {
+        lane.done = true;
+        return Ok(());
+    }
+    let (k, n) = stream.shard;
+    if n > 1 {
+        // The packets before this worker's next one belong to the others.
+        let skip = if lane.first { k } else { n - 1 };
+        if skip > 0 {
+            if !stream.source.skip(skip)? {
+                lane.done = true;
+                return Ok(());
+            }
+            for t in &mut stream.transforms {
+                t.skip(skip);
+            }
+        }
+    }
+    lane.first = false;
+    if !stream.source.next_into(&mut lane.packet)? {
         lane.done = true;
         return Ok(());
     }

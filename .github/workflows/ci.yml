@@ -215,6 +215,38 @@ jobs:
           sudo scripts/udp-netns.sh ./target/debug/ferotrx -B af_xdp
           sudo IPV6=1 MIX=1 NO_VLAN=1 scripts/udp-netns.sh ./target/debug/ferotrx -B af_xdp
 
+      # One run on several workers (M20). Streams: four AF_XDP sockets on four
+      # queues of a veth pair, then four libpcap handles; every packet arrives
+      # once. TCP and UDP through the NAT router split by flow: libpcap ports
+      # shared by the workers, AF_XDP ports split by queue (QUEUES=4), IPv6,
+      # the template mixes, and a stream with latency signatures.
+      - name: One run on several workers (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo modprobe 8021q || true
+          sudo ip link add xw0 numtxqueues 4 numrxqueues 4 type veth peer name xw1 numtxqueues 4 numrxqueues 4
+          sudo sysctl -qw net.ipv6.conf.xw0.disable_ipv6=1 net.ipv6.conf.xw1.disable_ipv6=1
+          sudo ip link set xw0 up
+          sudo ip link set xw1 up
+          for backend in "-B af_xdp --xdp-mode copy" "-B pcap"; do
+            before=$(cat /sys/class/net/xw1/statistics/rx_packets)
+            # shellcheck disable=SC2086
+            sudo ./target/debug/ferotrx replay examples/web.pcap -i xw0 $backend -t -l 100 --workers 4
+            after=$(cat /sys/class/net/xw1/statistics/rx_packets)
+            echo "xw1 received $((after - before)) packets ($backend)"
+            test $((after - before)) -ge 2100
+          done
+          sudo ip link del xw0
+          sudo scripts/tcp-nat-netns.sh ./target/debug/ferotrx --workers 4 -n 300 --cps 100
+          sudo QUEUES=4 scripts/tcp-nat-netns.sh ./target/debug/ferotrx -B af_xdp --workers 4 -n 2000 --cps 500
+          sudo QUEUES=4 NO_VLAN=1 LOSS=0.03 scripts/tcp-nat-netns.sh ./target/debug/ferotrx -B af_xdp --workers 2 -n 300 --cps 100
+          sudo QUEUES=2 IPV6=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx -B af_xdp --workers 2 -n 300 --cps 100
+          sudo MIX=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx --workers 3
+          sudo scripts/udp-netns.sh ./target/debug/ferotrx --workers 3
+          sudo QUEUES=2 IPV6=1 MIX=1 NO_VLAN=1 scripts/udp-netns.sh ./target/debug/ferotrx -B af_xdp --workers 2
+          sudo scripts/latency-netns.sh ./target/debug/ferotrx --workers 2
+
       # Loss and latency through a router in a network namespace: routing and
       # masquerading, a 5 ms delay (netem), then 3% packet loss on top.
       - name: Loss and latency through a router (Linux)

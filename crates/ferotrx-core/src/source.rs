@@ -22,6 +22,20 @@ pub trait PacketSource: Send {
     fn passes(&self) -> u64 {
         0
     }
+
+    /// Passes over the next `n` packets. Returns false if the source ran out
+    /// on the way. A stream split over several workers
+    /// ([`Stream::shard`](crate::Stream::shard)) skips the packets the other
+    /// workers send. By default it reads them and throws them away.
+    fn skip(&mut self, n: u64) -> Result<bool> {
+        let mut scratch = Packet::new(Duration::ZERO, Vec::new());
+        for _ in 0..n {
+            if !self.next_into(&mut scratch)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
 }
 
 impl<S: PacketSource + ?Sized> PacketSource for Box<S> {
@@ -33,6 +47,9 @@ impl<S: PacketSource + ?Sized> PacketSource for Box<S> {
     }
     fn passes(&self) -> u64 {
         (**self).passes()
+    }
+    fn skip(&mut self, n: u64) -> Result<bool> {
+        (**self).skip(n)
     }
 }
 
@@ -119,6 +136,17 @@ impl<C: Borrow<Capture> + Send> PacketSource for CaptureSource<C> {
     fn passes(&self) -> u64 {
         self.pass
     }
+
+    fn skip(&mut self, n: u64) -> Result<bool> {
+        let len = self.capture.borrow().len() as u64;
+        if len == 0 {
+            return Ok(false);
+        }
+        let at = self.pos as u64 + n;
+        self.pass = self.pass.saturating_add(at / len);
+        self.pos = (at % len) as usize;
+        Ok(self.loops == 0 || self.pass < self.loops)
+    }
 }
 
 #[cfg(test)]
@@ -142,6 +170,26 @@ mod tests {
         }
         // Period is span (2 s) + average gap (2 s).
         assert_eq!(seen, [(0, 1, 0), (2, 2, 1), (4, 1, 1), (6, 2, 2)]);
+    }
+
+    #[test]
+    fn skips_without_reading() {
+        let cap = Capture::new(
+            1,
+            (0..3u8)
+                .map(|i| Packet::new(Duration::from_secs(u64::from(i)), vec![i]))
+                .collect(),
+        );
+        let mut src = CaptureSource::new(&cap).loops(2);
+        let mut p = Packet::new(Duration::ZERO, Vec::new());
+        assert!(src.skip(4).unwrap());
+        assert!(src.next_into(&mut p).unwrap());
+        // Period 3 s: span 2 s plus a gap of 1 s.
+        assert_eq!((p.data[0], p.timestamp.as_secs(), src.passes()), (1, 4, 1));
+        assert!(src.next_into(&mut p).unwrap());
+        assert!(!src.next_into(&mut p).unwrap());
+        let mut src = CaptureSource::new(&cap).loops(2);
+        assert!(!src.skip(6).unwrap());
     }
 
     #[test]

@@ -9,6 +9,9 @@
 //!   reach the port through an AF_PACKET socket that only takes those.
 //! * Frames are sent on one queue's socket, in batches published at each
 //!   `flush`.
+//! * For a run on several workers, [`PacketPort::split`] hands each worker
+//!   the sockets of its own queues (it sends on the first of them); the
+//!   broadcasts go to worker 0.
 //!
 //! Needs Linux 5.9 or newer (BPF links) and root, or CAP_NET_ADMIN, CAP_NET_RAW
 //! and CAP_BPF. NICs that take VLAN tags off in hardware hide them from XDP;
@@ -19,6 +22,7 @@ mod packet;
 mod xsk;
 
 use std::ffi::CString;
+use std::sync::Arc;
 
 use ferotrx_core::{MacAddr, PacketPort, SinkError, XdpMode};
 
@@ -52,14 +56,20 @@ impl Default for XdpPortConfig {
 
 /// Sends and receives frames for emulated hosts through AF_XDP sockets.
 pub struct XdpPort {
-    // Dropped in this order: sockets first, then the program and its maps.
+    // Dropped in this order: sockets first, then the program and its maps
+    // (once the last lane of a split port is gone).
     xsks: Vec<Xsk>,
-    group: GroupSocket,
-    program: XdpProgram,
+    /// The queue of each socket in `xsks`.
+    queues: Vec<u32>,
+    group: Option<GroupSocket>,
+    program: Arc<XdpProgram>,
+    /// Index in `xsks` of the socket frames are sent on.
     tx: usize,
     next_rx: usize,
     name: String,
     macs: usize,
+    /// Which lane of a split port this is: (index, count).
+    lane: Option<(usize, usize)>,
 }
 
 /// The number of receive queues of an interface (1 if the system does not say).
@@ -114,21 +124,34 @@ impl XdpPort {
         }
         Ok(Self {
             xsks,
-            group,
-            program,
+            queues: (0..queues).collect(),
+            group: Some(group),
+            program: Arc::new(program),
             tx: usize::from(config.queue),
             next_rx: 0,
             name: name.to_string(),
             macs: macs.len(),
+            lane: None,
         })
     }
 
     /// One line on how the port is attached.
     pub fn describe(&self) -> String {
+        let queues = match self.lane {
+            Some((k, _)) => format!(
+                "worker {k}: queue(s) {}, sends on {}",
+                self.queues
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                self.queues[self.tx]
+            ),
+            None => format!("{} queue(s)", self.xsks.len()),
+        };
         format!(
-            "af_xdp on {}: {} queue(s), XDP {} mode, {}, {} host MAC(s)",
+            "af_xdp on {}: {queues}, XDP {} mode, {}, {} host MAC(s)",
             self.name,
-            self.xsks.len(),
             if self.program.generic {
                 "generic"
             } else {
@@ -159,7 +182,10 @@ impl PacketPort for XdpPort {
                 return Ok(true);
             }
         }
-        self.group.recv(buf)
+        match &mut self.group {
+            Some(g) => g.recv(buf),
+            None => Ok(false),
+        }
     }
 
     fn flush(&mut self) -> Result<(), SinkError> {
@@ -168,6 +194,46 @@ impl PacketPort for XdpPort {
 
     fn describe(&self) -> Option<String> {
         Some(XdpPort::describe(self))
+    }
+
+    /// One lane per worker, each with the sockets of every `n`-th queue
+    /// counting from the send queue; worker `k` sends on send queue + `k`.
+    /// Needs at least `n` queues.
+    fn split(&mut self, n: usize) -> Option<Vec<Box<dyn PacketPort>>> {
+        let total = self.xsks.len();
+        if n < 2 || total < n || self.lane.is_some() {
+            return None;
+        }
+        let base = self.tx;
+        let mut lanes: Vec<XdpPort> = (0..n)
+            .map(|k| XdpPort {
+                xsks: Vec::new(),
+                queues: Vec::new(),
+                group: None,
+                program: self.program.clone(),
+                tx: 0,
+                next_rx: 0,
+                name: self.name.clone(),
+                macs: self.macs,
+                lane: Some((k, n)),
+            })
+            .collect();
+        lanes[0].group = self.group.take();
+        // Walk the queues from the send queue, so each lane's first is the
+        // one it sends on.
+        let mut xsks: Vec<Option<Xsk>> = self.xsks.drain(..).map(Some).collect();
+        for i in 0..total {
+            let q = (base + i) % total;
+            let lane = &mut lanes[i % n];
+            lane.xsks.push(xsks[q].take().expect("each queue once"));
+            lane.queues.push(self.queues[q]);
+        }
+        Some(
+            lanes
+                .into_iter()
+                .map(|l| Box::new(l) as Box<dyn PacketPort>)
+                .collect(),
+        )
     }
 }
 

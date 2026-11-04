@@ -344,6 +344,7 @@ class AsyncClient:
         xdp_mode: str | None = None,
         batch: int | None = None,
         dpdk_args: str | Sequence[str] | None = None,
+        workers: int | None = None,
         rate: str | None = None,
         limit: int | None = None,
         duration: str | None = None,
@@ -361,6 +362,7 @@ class AsyncClient:
             xdp_mode=xdp_mode,
             batch=batch,
             dpdk_args=dpdk_args,
+            workers=workers,
         )
         return await self._run(
             _wire.start(
@@ -410,6 +412,7 @@ class AsyncClient:
         xdp_mode: str | None = None,
         batch: int | None = None,
         dpdk_args: str | Sequence[str] | None = None,
+        workers: int | None = None,
     ) -> TcpRunInfo:
         return await self._run(
             _wire.tcp_start(
@@ -427,6 +430,7 @@ class AsyncClient:
                 xdp_mode=xdp_mode,
                 batch=batch,
                 dpdk_args=dpdk_args,
+                workers=workers,
             )
         )
 
@@ -466,6 +470,7 @@ class AsyncClient:
         xdp_mode: str | None = None,
         batch: int | None = None,
         dpdk_args: str | Sequence[str] | None = None,
+        workers: int | None = None,
     ) -> UdpRunInfo:
         return await self._run(
             _wire.udp_start(
@@ -483,6 +488,7 @@ class AsyncClient:
                 xdp_mode=xdp_mode,
                 batch=batch,
                 dpdk_args=dpdk_args,
+                workers=workers,
             )
         )
 

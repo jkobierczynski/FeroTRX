@@ -45,6 +45,9 @@ each milestone added and what comes next.
 * **Fast backends**: libpcap/Npcap everywhere, AF_XDP on Linux, DPDK as a
   build option, for stateless and stateful runs.
   [Guide](docs/backends.md)
+* **Several cores**: `--workers N` spreads one run over N engine threads,
+  streams packet by packet and TCP/UDP runs by flow, one AF_XDP queue per
+  worker. [Guide](docs/multi-core.md)
 * **Remote control**: a JSON-RPC server with TLS, client certificates,
   read-only and operator roles and an audit log; a command line client and a
   Python package. [Guide](docs/remote-control.md),
@@ -107,6 +110,7 @@ The manual is in [docs/](docs/README.md):
 | [Stateful UDP and DNS](docs/stateful-udp.md) and [the engine](docs/udp-engine.md) | `udp`, DNS, NTP |
 | [Host emulation](docs/host-emulation.md) | `host`, DHCP, SLAAC, IGMP/MLD |
 | [TCP and UDP over AF_XDP and DPDK](docs/fast-ports.md) | fast ports for stateful runs |
+| [One run on several cores](docs/multi-core.md) | `--workers`, splitting streams and flows |
 | [Loss and latency](docs/loss-latency.md) | signatures, `--rx`, `rx` |
 | [Benchmarking](docs/benchmarking.md) | `bench`, RFC 2544 |
 | [Scenarios and regression tests](docs/scenarios.md) | `scenario` |

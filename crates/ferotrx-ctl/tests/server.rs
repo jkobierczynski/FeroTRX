@@ -58,6 +58,47 @@ fn rpc_code(e: ClientError) -> i64 {
 }
 
 #[test]
+fn runs_split_over_workers() {
+    let mut c = client(server(None));
+    load(&mut c);
+    let run = c
+        .start(&StartParams {
+            profile: "lab".into(),
+            output: OutputSpec {
+                workers: Some(2),
+                ..null_output()
+            },
+            duration: Some("300ms".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(run.workers, 2);
+    let mut last = run;
+    for _ in 0..100 {
+        last = c.stats(last.id).unwrap();
+        if !last.state.is_running() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(last.state, RunState::Finished, "{last:?}");
+    assert!(last.total.packets > 0, "{last:?}");
+    // Other send settings still need an interface.
+    let err = c
+        .start(&StartParams {
+            profile: "lab".into(),
+            output: OutputSpec {
+                workers: Some(2),
+                batch: Some(8),
+                ..null_output()
+            },
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_eq!(rpc_code(err), RpcError::INVALID_PARAMS);
+}
+
+#[test]
 fn load_start_watch_and_finish() {
     let addr = server(None);
     let mut c = client(addr);
@@ -426,6 +467,41 @@ fn tcp_runs_start_finish_and_report() {
         rpc_code(c.tcp_stats(endless.id).unwrap_err()),
         RpcError::NOT_FOUND
     );
+}
+
+#[test]
+fn tcp_runs_split_over_workers() {
+    let mut c = client(tcp_server());
+    let info = c
+        .tcp_start(&TcpStartParams {
+            toml: Some(TCP_PROFILE.into()),
+            workers: Some(3),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(info.workers, 3);
+    let mut last = info;
+    for _ in 0..100 {
+        last = c.tcp_stats(last.id).unwrap();
+        if !last.state.is_running() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(last.state, RunState::Finished, "{last:?}");
+    assert_eq!(last.client.completed, 20);
+    assert_eq!(last.server.completed, 20);
+    assert_eq!(last.client.mismatched, 0);
+
+    // More workers than connections cannot be shared out.
+    let err = c
+        .tcp_start(&TcpStartParams {
+            toml: Some(TCP_PROFILE.into()),
+            workers: Some(30),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("connections (20)"), "{err}");
 }
 
 #[test]

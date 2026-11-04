@@ -110,7 +110,8 @@ c.runs(); c.remove(run.id)        # runs stay listed until removed
 
 `start` takes exactly one of `iface`, `file` and `null=True`; with `iface`,
 `backend` (`pcap`, `af_xdp`, `dpdk`; see `c.info().backends`), `queue`,
-`xdp_mode`, `batch` and `dpdk_args` choose how to send, and the profile's
+`xdp_mode`, `batch`, `dpdk_args` and `workers` (engine threads, see
+[multi-core.md](multi-core.md)) choose how to send, and the profile's
 `[output]` fills in what is left out. `rate`, `limit` and `duration` stop or
 pace the run, `ignore_errors` counts failed sends instead of failing.
 

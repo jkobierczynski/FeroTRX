@@ -365,6 +365,12 @@ pub struct SendArgs {
     /// DPDK EAL arguments as one string, e.g. '-l 0-1 --no-huge -m 512'.
     #[arg(long, value_name = "ARGS", allow_hyphen_values = true)]
     pub dpdk_args: Option<String>,
+
+    /// Spread the run over this many engine threads (cores; default 1).
+    /// Streams are split packet by packet, TCP and UDP runs by flow; with
+    /// af_xdp each worker sends on its own queue from --queue up.
+    #[arg(long)]
+    pub workers: Option<u16>,
 }
 
 impl SendArgs {
@@ -378,6 +384,7 @@ impl SendArgs {
                 .dpdk_args
                 .as_deref()
                 .map(|a| a.split_whitespace().map(String::from).collect()),
+            workers: self.workers,
         };
         s.validate()?;
         Ok(s)
@@ -701,34 +708,38 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
             .interval
             .saturating_mul(u32::try_from(cap.len()).unwrap_or(u32::MAX));
         let linktype = cap.linktype;
-        let mut stream = Stream::new(
-            "built",
-            CaptureSource::new(Arc::new(cap))
-                .loops(args.loops)
-                .loop_period(period),
-        )
-        .with_rate(rate)
-        .with_model(model(rate, &args.model)?);
-        if !args.vary.is_empty() {
-            // A fresh engine, so the first loop sends what was shown above.
-            stream.push_transform(FieldEngine::new(args.vary.iter().cloned()));
-        }
-        if let Some(mut s) = args.sizes.clone() {
-            s.reset();
-            stream.push_transform(s);
-            stream.keep_size = true;
-        }
-        if args.rx.tags() {
-            stream = stream.with_latency(1);
-        }
+        let cap = Arc::new(cap);
+        let traffic = model(rate, &args.model)?;
+        let make = || {
+            let mut stream = Stream::new(
+                "built",
+                CaptureSource::new(cap.clone())
+                    .loops(args.loops)
+                    .loop_period(period),
+            )
+            .with_rate(rate)
+            .with_model(traffic.clone());
+            if !args.vary.is_empty() {
+                // A fresh engine, so the first loop sends what was shown above.
+                stream.push_transform(FieldEngine::new(args.vary.iter().cloned()));
+            }
+            if let Some(mut s) = args.sizes.clone() {
+                s.reset();
+                stream.push_transform(s);
+                stream.keep_size = true;
+            }
+            if args.rx.tags() {
+                stream = stream.with_latency(1);
+            }
+            stream
+        };
         let output = Output {
             iface: Some(iface.clone()),
             out: None,
             null: false,
         };
         let rx = args.rx.open()?;
-        let (sink, detail) = open_sink(&output, &args.send, linktype, args.common.quiet)?;
-        let job = Job::spawn_with_rx(vec![stream], sink, run_config(&args.common)?, rx)?;
+        let (job, detail) = spawn_stream(make, &output, &args.send, linktype, &args.common, rx)?;
         let (stats, report) = watch(job, &args.common)?;
         print_line(done_label(&stats.total), &stats.total);
         if let Some(mut r) = report {
@@ -793,7 +804,9 @@ impl Output {
                 send,
             });
         }
-        if !send.is_empty() {
+        let mut rest = send.clone();
+        rest.workers = None;
+        if !rest.is_empty() {
             eprintln!("note: --backend, --queue, --xdp-mode, --batch and --dpdk-args apply to --iface only");
         }
         if let Some(path) = &self.out {
@@ -806,21 +819,36 @@ impl Output {
     }
 }
 
-fn open_sink(
+/// Opens the output once per worker (`--workers`) and starts a job with one
+/// copy of the stream `make` builds per worker, each sending its share.
+fn spawn_stream(
+    make: impl Fn() -> Stream<'static>,
     output: &Output,
     send: &SendArgs,
     linktype: u32,
-    quiet: bool,
-) -> Result<(Box<dyn PacketSink + Send>, String)> {
+    common: &CommonArgs,
+    rx: Option<ferotrx_core::RxSettings>,
+) -> Result<(Job, String)> {
+    let workers = send.settings()?.workers();
     let output = output.to_io(send)?;
     warn_linktype(&output, linktype);
     let opened = output
-        .open_detailed(linktype)
+        .open_workers(linktype, workers)
         .map_err(|e| anyhow::anyhow!(e))?;
-    if !quiet && matches!(output, ferotrx_io::Output::Interface { .. }) {
-        eprintln!("sending with {}", opened.detail);
+    let mut details: Vec<String> = Vec::new();
+    let mut work: Vec<(Vec<Stream<'static>>, Box<dyn PacketSink + Send>)> = Vec::new();
+    for (k, o) in opened.into_iter().enumerate() {
+        if !details.contains(&o.detail) {
+            details.push(o.detail);
+        }
+        work.push((vec![make().shard(k, workers)], o.sink));
     }
-    Ok((opened.sink, opened.detail))
+    let detail = details.join("; ");
+    if !common.quiet && matches!(output, ferotrx_io::Output::Interface { .. }) {
+        eprintln!("sending with {detail}");
+    }
+    let job = Job::spawn_workers(work, run_config(common)?, rx)?;
+    Ok((job, detail))
 }
 
 fn warn_linktype(output: &ferotrx_io::Output, linktype: u32) {
@@ -848,28 +876,29 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
         );
     }
     let linktype = cap.linktype;
-    let mut stream = Stream::new(
-        "capture",
-        CaptureSource::new(Arc::new(cap)).loops(args.loops),
-    )
-    .with_rate(rate)
-    .with_model(model(rate, &args.model)?);
-    for r in args.rewrites {
-        stream.push_transform(r);
-    }
-    if !args.vary.is_empty() {
-        stream.push_transform(FieldEngine::new(args.vary));
-    }
-    if let Some(s) = args.sizes {
-        stream.push_transform(s);
-        stream.keep_size = true;
-    }
-    if args.rx.tags() {
-        stream = stream.with_latency(1);
-    }
+    let cap = Arc::new(cap);
+    let traffic = model(rate, &args.model)?;
+    let make = || {
+        let mut stream = Stream::new("capture", CaptureSource::new(cap.clone()).loops(args.loops))
+            .with_rate(rate)
+            .with_model(traffic.clone());
+        for r in &args.rewrites {
+            stream.push_transform(r.clone());
+        }
+        if !args.vary.is_empty() {
+            stream.push_transform(FieldEngine::new(args.vary.iter().cloned()));
+        }
+        if let Some(s) = args.sizes.clone() {
+            stream.push_transform(s);
+            stream.keep_size = true;
+        }
+        if args.rx.tags() {
+            stream = stream.with_latency(1);
+        }
+        stream
+    };
     let rx = args.rx.open()?;
-    let (sink, detail) = open_sink(&args.output, &args.send, linktype, args.common.quiet)?;
-    let job = Job::spawn_with_rx(vec![stream], sink, run_config(&args.common)?, rx)?;
+    let (job, detail) = spawn_stream(make, &args.output, &args.send, linktype, &args.common, rx)?;
     let (stats, report) = watch(job, &args.common)?;
     print_line(done_label(&stats.total), &stats.total);
     if let Some(mut r) = report {
@@ -921,6 +950,10 @@ fn cmd_run(args: RunArgs) -> Result<()> {
         }
     }
     let output = args.output.to_io(&args.send)?;
+    // Files and the null output take only the worker count, from the profile.
+    if let Some(w) = args.send.workers {
+        profile.output.workers = Some(w);
+    }
     let rx = args.rx.open()?;
     // The same function starts `run.start` runs on the control server.
     let started =

@@ -295,6 +295,7 @@ def output_spec(
     xdp_mode: str | None = None,
     batch: int | None = None,
     dpdk_args: str | Sequence[str] | None = None,
+    workers: int | None = None,
 ) -> dict[str, Any]:
     if sum((iface is not None, file is not None, bool(null))) != 1:
         raise ValueError("give exactly one of iface, file and null=True")
@@ -305,6 +306,7 @@ def output_spec(
         xdp_mode=xdp_mode,
         batch=batch,
         dpdk_args=_dpdk_args(dpdk_args),
+        workers=workers,
         file=_path(file),
         null=null,
     )

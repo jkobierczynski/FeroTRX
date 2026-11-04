@@ -314,6 +314,8 @@ class RunInfo(Record):
     id: int = 0
     profile: str = ""
     output: str = ""
+    #: Threads the streams run on.
+    workers: int = 1
     state: RunState = RunState.RUNNING
     error: str | None = None
     total: Counters = field(default_factory=Counters)
@@ -436,6 +438,8 @@ class TcpRunInfo(Record):
     interfaces: list[str] = field(default_factory=list)
     #: How each port sends and receives, where it says.
     ports: list[str] = field(default_factory=list)
+    #: Engine threads the run uses.
+    workers: int = 1
     state: RunState = RunState.RUNNING
     error: str | None = None
     #: All templates together.
@@ -507,6 +511,8 @@ class UdpRunInfo(Record):
     program: str = ""
     interfaces: list[str] = field(default_factory=list)
     ports: list[str] = field(default_factory=list)
+    #: Engine threads the run uses.
+    workers: int = 1
     state: RunState = RunState.RUNNING
     error: str | None = None
     client: UdpCounters = field(default_factory=UdpCounters)

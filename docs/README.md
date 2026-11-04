@@ -30,6 +30,8 @@ The [README](../README.md) has the overview and a quickstart.
 * [Host emulation](host-emulation.md): `ferotrx host`, DHCP, SLAAC, DHCPv6,
   IGMP/MLD, router advertisements.
 * [TCP and UDP over AF_XDP and DPDK](fast-ports.md).
+* [One run on several cores](multi-core.md): `--workers`, for streams and
+  for stateful TCP and UDP.
 
 ## Measuring and testing
 

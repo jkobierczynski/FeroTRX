@@ -1,11 +1,13 @@
 //! How many TCP connections per second the engine itself manages, with the
-//! client and the server joined by memory ports (no network, one thread).
+//! client and the server joined by memory ports (no network).
 //!
 //! `cargo run --release -p ferotrx-core --example engine_rate -- 20000`
 //! asks for 20000 connections per second for four seconds; each connection
 //! sends 144 bytes and gets 6198 back, as examples/http.pcap does. Where the
 //! rate reached falls short of the one asked for, or retransmissions show,
-//! the engine is the limit.
+//! the engine is the limit. A second argument spreads the run over that many
+//! workers (threads): `-- 60000 4`. The memory ports are then shared by the
+//! workers behind a lock, which costs some of the gain.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -17,6 +19,10 @@ fn main() {
         .nth(1)
         .map(|a| a.parse().expect("connections per second"))
         .unwrap_or(10_000.0);
+    let workers: usize = std::env::args()
+        .nth(2)
+        .map(|a| a.parse().expect("workers"))
+        .unwrap_or(1);
     let program = TcpProgram::new(
         80,
         vec![
@@ -39,7 +45,7 @@ fn main() {
     let mut client = TcpClientConfig::new(ep);
     client.connections = (cps * 4.0) as u64;
     client.cps = cps;
-    let engine = TcpEngine::new(TcpConfig {
+    let config = TcpConfig {
         templates: vec![TcpTemplate::new(
             Arc::new(program),
             "10.0.0.2:80".parse().unwrap(),
@@ -47,19 +53,34 @@ fn main() {
         client: Some(client),
         server: Some(TcpServerConfig::new(server)),
         options: TcpOptions::default(),
-    })
-    .unwrap();
+    };
     let start = Instant::now();
-    let job = TcpJob::spawn(
-        engine,
-        vec![Box::new(a), Box::new(b)],
-        TcpRunConfig::default(),
-    )
-    .unwrap();
+    let ports: Vec<Box<dyn PacketPort>> = vec![Box::new(a), Box::new(b)];
+    let job = if workers > 1 {
+        let (configs, router) = config.split(workers).unwrap();
+        let engines = configs
+            .into_iter()
+            .map(|c| TcpEngine::new(c).unwrap())
+            .collect();
+        TcpJob::spawn_workers(
+            engines,
+            split_ports(ports, workers),
+            router,
+            TcpRunConfig::default(),
+        )
+        .unwrap()
+    } else {
+        TcpJob::spawn(
+            TcpEngine::new(config).unwrap(),
+            ports,
+            TcpRunConfig::default(),
+        )
+        .unwrap()
+    };
     let s = job.join().unwrap();
     let secs = start.elapsed().as_secs_f64();
     println!(
-        "{} completed, {} timed out, {} retransmits: {:.0} connections per second over {secs:.2} s",
+        "{workers} worker(s): {} completed, {} timed out, {} retransmits: {:.0} connections per second over {secs:.2} s",
         s.client.completed,
         s.client.timed_out,
         s.client.retransmits,

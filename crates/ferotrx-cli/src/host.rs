@@ -249,6 +249,9 @@ pub fn cmd_host(args: HostArgs) -> Result<()> {
         profile.duration = args.duration;
     }
     profile.output = args.send.settings()?.or(&profile.output);
+    if profile.output.workers() > 1 {
+        anyhow::bail!("host runs use one worker: leave out --workers (and `workers` in [output])");
+    }
 
     let interfaces = profile.interfaces(args.iface.as_deref())?;
     let configs = profile.configs(&interfaces, args.iface.as_deref())?;

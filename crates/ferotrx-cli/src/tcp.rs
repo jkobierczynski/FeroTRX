@@ -480,6 +480,10 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
     )
     .map_err(|e| anyhow::anyhow!(e))?;
     if !args.quiet {
+        let workers = started.job.workers();
+        if workers > 1 {
+            eprintln!("workers: {workers} engine threads");
+        }
         for d in &started.port_details {
             eprintln!("port: {d}");
         }
@@ -662,12 +666,14 @@ pub fn print_tcp_run(r: &TcpRunInfo) {
         RunState::Stopped => "stopped",
         RunState::Failed => "failed",
     };
+    let on = if r.workers > 1 {
+        format!("{} ({} workers)", r.interfaces.join(", "), r.workers)
+    } else {
+        r.interfaces.join(", ")
+    };
     println!(
-        "tcp run {} on {}: {state}, {:.3} s, {:.1} cps",
-        r.id,
-        r.interfaces.join(", "),
-        r.elapsed_s,
-        r.cps
+        "tcp run {} on {on}: {state}, {:.3} s, {:.1} cps",
+        r.id, r.elapsed_s, r.cps
     );
     println!("  session: {}", r.program);
     if let Some(e) = &r.error {

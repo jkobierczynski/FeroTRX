@@ -4,8 +4,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::{
-    run_with_progress, Error, FlowReport, PacketReceiver, PacketSink, Rate, Result, RunConfig,
-    RunStats, RxConfig, RxJob, RxStats, Stream,
+    merge_all, run_with_progress, share, Error, FlowReport, PacketReceiver, PacketSink, Rate,
+    Result, RunConfig, RunStats, RxConfig, RxJob, RxStats, Stream,
 };
 
 /// How often a running [`Job`] publishes its counters.
@@ -68,6 +68,7 @@ pub struct Job {
     names: Vec<String>,
     rates: Vec<Rate>,
     flows: Vec<Option<u32>>,
+    workers: usize,
     rx: Option<Arc<RxJob>>,
     stop: Arc<AtomicBool>,
     shared: Arc<Shared>,
@@ -80,7 +81,10 @@ struct Shared {
 }
 
 struct Live {
+    /// All workers together.
     stats: RunStats,
+    /// Each worker's latest counters.
+    parts: Vec<RunStats>,
     state: JobState,
     start: Instant,
 }
@@ -122,25 +126,83 @@ impl Job {
     pub fn spawn_with_rx(
         streams: Vec<Stream<'static>>,
         sink: Box<dyn PacketSink + Send>,
+        config: RunConfig,
+        rx: Option<RxSettings>,
+    ) -> Result<Job> {
+        Self::spawn_workers(vec![(streams, sink)], config, rx)
+    }
+
+    /// Like [`spawn_with_rx`](Job::spawn_with_rx), on several threads: one per
+    /// worker, each with its own streams and sink. Every worker's streams are
+    /// the same streams, made with [`Stream::shard`] for that worker, so
+    /// together they send what one thread would; the counters are the
+    /// workers' added up. A total `config.limit` is shared out among them.
+    ///
+    /// ```
+    /// use ferotrx_core::*;
+    /// use std::sync::Arc;
+    /// use std::time::Duration;
+    ///
+    /// let cap = Arc::new(Capture::new(1, vec![Packet::new(Duration::ZERO, vec![0u8; 60])]));
+    /// let workers = (0..4)
+    ///     .map(|k| {
+    ///         let stream = Stream::new("a", CaptureSource::new(cap.clone()).loops(1000))
+    ///             .with_rate(Rate::TopSpeed)
+    ///             .shard(k, 4);
+    ///         (vec![stream], Box::new(NullSink) as Box<dyn PacketSink + Send>)
+    ///     })
+    ///     .collect();
+    /// let job = Job::spawn_workers(workers, RunConfig::default(), None).unwrap();
+    /// assert_eq!(job.workers(), 4);
+    /// let stats = job.join().unwrap();
+    /// assert_eq!(stats.total.packets, 1000);
+    /// assert_eq!(stats.streams[0].loops_completed, 1000);
+    /// ```
+    pub fn spawn_workers(
+        workers: Vec<(Vec<Stream<'static>>, Box<dyn PacketSink + Send>)>,
         mut config: RunConfig,
         rx: Option<RxSettings>,
     ) -> Result<Job> {
-        for s in &streams {
-            s.rate.validate()?;
-        }
-        if let Some(first) = streams.first() {
-            let lt = first.linktype();
-            if let Some(other) = streams.iter().map(Stream::linktype).find(|&l| l != lt) {
-                return Err(Error::MixedLinkTypes(lt, other));
+        let Some((first, _)) = workers.first() else {
+            return Err(Error::InvalidSpec("a run needs at least one worker".into()));
+        };
+        let count = workers.len();
+        for (streams, _) in &workers {
+            for s in streams {
+                s.rate.validate()?;
+            }
+            if let Some(first) = streams.first() {
+                let lt = first.linktype();
+                if let Some(other) = streams.iter().map(Stream::linktype).find(|&l| l != lt) {
+                    return Err(Error::MixedLinkTypes(lt, other));
+                }
+            }
+            if streams.len() != first.len() {
+                return Err(Error::InvalidSpec(
+                    "every worker needs the same streams".into(),
+                ));
             }
         }
         let stop = config
             .stop
             .get_or_insert_with(|| Arc::new(AtomicBool::new(false)))
             .clone();
-        let names: Vec<String> = streams.iter().map(|s| s.name.clone()).collect();
-        let flows: Vec<Option<u32>> = streams.iter().map(|s| s.latency).collect();
-        let rates: Vec<Rate> = streams.iter().map(|s| s.rate).collect();
+        let names: Vec<String> = first.iter().map(|s| s.name.clone()).collect();
+        let flows: Vec<Option<u32>> = first.iter().map(|s| s.latency).collect();
+        // The rate asked for: the workers' parts added up.
+        let rates: Vec<Rate> = (0..first.len())
+            .map(|i| {
+                workers
+                    .iter()
+                    .map(|(streams, _)| streams[i].rate)
+                    .reduce(|a, b| match (a, b) {
+                        (Rate::Pps(a), Rate::Pps(b)) => Rate::Pps(a + b),
+                        (Rate::Mbps(a), Rate::Mbps(b)) => Rate::Mbps(a + b),
+                        (a, _) => a,
+                    })
+                    .expect("at least one worker")
+            })
+            .collect();
         let (rx, rx_wait) = match rx {
             Some(r) => (
                 Some(Arc::new(RxJob::spawn(r.receiver, RxConfig::default())?)),
@@ -148,12 +210,14 @@ impl Job {
             ),
             None => (None, Duration::ZERO),
         };
+        let empty = RunStats {
+            total: Default::default(),
+            streams: vec![Default::default(); first.len()],
+        };
         let shared = Arc::new(Shared {
             live: Mutex::new(Live {
-                stats: RunStats {
-                    total: Default::default(),
-                    streams: vec![Default::default(); streams.len()],
-                },
+                stats: empty.clone(),
+                parts: vec![empty; count],
                 state: JobState::Running,
                 start: Instant::now(),
             }),
@@ -162,19 +226,12 @@ impl Job {
         let thread = {
             let shared = shared.clone();
             let rx = rx.clone();
+            let stop = stop.clone();
             std::thread::Builder::new()
                 .name("ferotrx-job".into())
                 .spawn(move || {
-                    let mut streams = streams;
-                    let mut sink = sink;
                     shared.lock().start = Instant::now();
-                    let mut result = run_with_progress(
-                        &mut streams,
-                        &mut *sink,
-                        &config,
-                        JOB_STATS_INTERVAL,
-                        |s| shared.lock().stats = s.clone(),
-                    );
+                    let mut result = run_workers(workers, &config, &shared, &stop);
                     if let Some(rx) = rx {
                         // Packets still on their way get `rx_wait` to arrive.
                         rx.wait(Some(rx_wait));
@@ -209,11 +266,17 @@ impl Job {
             names,
             rates,
             flows,
+            workers: count,
             rx,
             stop,
             shared,
             thread: Some(thread),
         })
+    }
+
+    /// The number of threads the streams run on (see [`spawn_workers`](Job::spawn_workers)).
+    pub fn workers(&self) -> usize {
+        self.workers
     }
 
     /// Names of the streams, in the order of [`RunStats::streams`].
@@ -322,6 +385,71 @@ impl Shared {
     fn lock(&self) -> MutexGuard<'_, Live> {
         self.live.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    /// Worker `k`'s latest counters, and the total again.
+    fn update(&self, k: usize, stats: &RunStats) {
+        let mut live = self.lock();
+        live.parts[k] = stats.clone();
+        live.stats = merge_all(&live.parts);
+    }
+}
+
+/// Runs each worker's streams on a thread of its own and adds up the counters.
+/// A worker that fails stops the others.
+fn run_workers(
+    workers: Vec<(Vec<Stream<'static>>, Box<dyn PacketSink + Send>)>,
+    config: &RunConfig,
+    shared: &Shared,
+    stop: &AtomicBool,
+) -> Result<RunStats> {
+    let count = workers.len();
+    if count == 1 {
+        let (mut streams, mut sink) = workers.into_iter().next().expect("one worker");
+        return run_with_progress(&mut streams, &mut *sink, config, JOB_STATS_INTERVAL, |s| {
+            shared.update(0, s)
+        });
+    }
+    let results: Vec<Result<RunStats>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = workers
+            .into_iter()
+            .enumerate()
+            .map(|(k, (mut streams, mut sink))| {
+                let mut config = config.clone();
+                config.limit = config.limit.map(|l| share(l, k, count));
+                std::thread::Builder::new()
+                    .name(format!("ferotrx-worker-{k}"))
+                    .spawn_scoped(scope, move || {
+                        let result = run_with_progress(
+                            &mut streams,
+                            &mut *sink,
+                            &config,
+                            JOB_STATS_INTERVAL,
+                            |s| shared.update(k, s),
+                        );
+                        match &result {
+                            Ok(s) => shared.update(k, s),
+                            Err(_) => stop.store(true, Ordering::Relaxed),
+                        }
+                        result
+                    })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| match h {
+                Ok(h) => h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)),
+                Err(e) => {
+                    stop.store(true, Ordering::Relaxed);
+                    Err(e.into())
+                }
+            })
+            .collect()
+    });
+    let mut parts = Vec::with_capacity(count);
+    for r in results {
+        parts.push(r?);
+    }
+    Ok(merge_all(&parts))
 }
 
 /// Dropping a job stops it, so traffic never outlives its handle.

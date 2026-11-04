@@ -147,7 +147,8 @@ pub struct TcpProfile {
     pub duration: Option<Duration>,
     pub options: TcpOptions,
     /// How the interfaces send and receive (the `[output]` table): libpcap,
-    /// AF_XDP or DPDK. The command line's settings win over these.
+    /// AF_XDP or DPDK, and the number of `workers` (engine threads) to
+    /// split the run over. The command line's settings win over these.
     pub output: SendSettings,
     /// Settings of the emulated hosts (the `[hosts]` table), for a client
     /// or server that gets its address by DHCP, SLAAC or DHCPv6, announces
@@ -1370,12 +1371,15 @@ mod tests {
         let p = TcpProfile::from_toml(&text(""), Path::new(".")).unwrap();
         assert!(p.output.is_empty());
         let p = TcpProfile::from_toml(
-            &text("[output]\nbackend = \"af_xdp\"\nqueue = 1\nbatch = 32\n"),
+            &text("[output]\nbackend = \"af_xdp\"\nqueue = 1\nbatch = 32\nworkers = 4\n"),
             Path::new("."),
         )
         .unwrap();
         assert_eq!(p.output.backend(), crate::Backend::AfXdp);
         assert_eq!((p.output.queue(), p.output.batch()), (1, 32));
+        assert_eq!(p.output.workers(), 4);
+        let e = TcpProfile::from_toml(&text("[output]\nworkers = 0\n"), Path::new("."));
+        assert!(e.unwrap_err().to_string().contains("workers"));
         let e = TcpProfile::from_toml(&text("[output]\nbackend = \"nope\"\n"), Path::new("."));
         assert!(e.unwrap_err().to_string().contains("[output]"));
     }

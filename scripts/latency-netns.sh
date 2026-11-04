@@ -26,9 +26,9 @@
 #             else it only routes.
 set -eu
 
-# The binary: the first argument, else a build in this checkout, else the
+# The binary: the first argument (unless it is an option), else a build in this checkout, else the
 # installed one.
-if [ $# -gt 0 ]; then
+if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
     BIN=$1
     shift
 else

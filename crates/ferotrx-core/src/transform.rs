@@ -11,11 +11,21 @@ use crate::{Error, Packet, Result};
 /// source and before pacing, so rates count the bytes that are really sent.
 pub trait Transform: Send {
     fn apply(&mut self, packet: &mut Packet);
+
+    /// Moves on as if `n` packets had passed, without seeing them. A stream
+    /// split over several workers ([`Stream::shard`](crate::Stream::shard))
+    /// calls it for the packets other workers send, so transforms that count
+    /// or draw random values give each packet the value it would have had in
+    /// a single run. Transforms without state ignore it.
+    fn skip(&mut self, _n: u64) {}
 }
 
 impl<T: Transform + ?Sized> Transform for Box<T> {
     fn apply(&mut self, packet: &mut Packet) {
         (**self).apply(packet)
+    }
+    fn skip(&mut self, n: u64) {
+        (**self).skip(n)
     }
 }
 
