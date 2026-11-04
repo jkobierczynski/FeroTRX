@@ -43,6 +43,13 @@ pub fn tcp_metrics(s: &TcpStats) -> Metrics {
     put(&mut m, "app_errors", a.errors as f64);
     put(&mut m, "protocol_errors", a.protocol_errors as f64);
     latency_metrics(&mut m, "response", &a.response_time);
+    if a.handshakes > 0 {
+        put(&mut m, "tls_handshakes", a.handshakes as f64);
+        put(&mut m, "tls_failed", a.handshake_failures as f64);
+        put(&mut m, "tls_unexpected", a.handshakes_unexpected as f64);
+        put(&mut m, "tls_resumed", a.resumed as f64);
+        latency_metrics(&mut m, "handshake", &a.handshake_time);
+    }
     m
 }
 

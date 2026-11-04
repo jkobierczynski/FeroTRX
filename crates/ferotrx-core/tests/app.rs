@@ -524,3 +524,158 @@ fn dns_from_a_table_in_udp_profiles_and_protocols_that_do_not_fit() {
     .to_string();
     assert!(e.contains("from its [dns] table"), "{e}");
 }
+
+#[test]
+fn https_over_a_lossy_reordering_link() {
+    use ferotrx_core::app::tls::{Tls, TlsSettings};
+    let tls = Tls::new(
+        App::new(web()),
+        TlsSettings {
+            alpn: vec!["http/1.1".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let t = TcpTemplate::with_app_protocol(App::new(tls), "10.0.0.80:443".parse().unwrap());
+    let (mut client, mut server) = tcp_pair(vec![t], 30);
+    let mut link = Link::new(41, 13);
+    let took = simulate(
+        &mut [&mut client, &mut server],
+        &mut link,
+        Duration::from_secs(120),
+    );
+    let c = &client.stats().client;
+    let s = &server.stats().server;
+    assert!(client.is_done(), "not done after {took:?}: {c:?}");
+    assert!(link.dropped > 10, "{}", link.dropped);
+    assert_eq!((c.completed, c.mismatched, c.failed()), (30, 0, 0), "{c:?}");
+    // The last server connections may still be closing when the clients
+    // are done.
+    assert_eq!((s.completed + s.active, s.mismatched), (30, 0), "{s:?}");
+    assert_eq!((c.app.transactions, c.app.failed), (90, 0), "{:?}", c.app);
+    assert_eq!(
+        (
+            c.app.handshakes,
+            c.app.handshake_failures,
+            c.app.handshakes_unexpected
+        ),
+        (30, 0, 0),
+        "{:?}",
+        c.app.negotiated
+    );
+    assert!(c.app.resumed > 0, "no session resumed: {:?}", c.app);
+    assert_eq!(c.app.handshake_time.count(), 30);
+    assert!(c
+        .app
+        .negotiated
+        .keys()
+        .all(|k| k.starts_with("TLSv1.3 ") && k.ends_with(" http/1.1")));
+    assert_eq!(s.app.handshakes, 30);
+}
+
+#[test]
+fn https_profiles_and_handshakes_that_must_fail() {
+    let run = |text: &str| {
+        let p = TcpProfile::from_toml(text, Path::new(".")).unwrap();
+        let programs: Vec<_> = p.programs().unwrap().into_iter().map(Arc::new).collect();
+        let config = p
+            .config(&programs, &["lo".to_string()], Some("lo"))
+            .unwrap();
+        assert_eq!(config.templates[0].listen_port, 443);
+        let mut client_cfg = config.clone();
+        client_cfg.server = None;
+        let mut server_cfg = config;
+        server_cfg.client = None;
+        let mut client = TcpEngine::new(client_cfg).unwrap();
+        let mut server = TcpEngine::new(server_cfg).unwrap();
+        simulate(
+            &mut [&mut client, &mut server],
+            &mut Link::new(0, 0),
+            Duration::from_secs(30),
+        );
+        (client.stats().client.clone(), server.stats().server.clone())
+    };
+    let base = r#"
+        connections = 6
+        cps = 200
+        app = "https"
+        [http]
+        requests = ["GET /"]
+        [client]
+        ip = "10.0.0.1/24"
+        [server]
+        ip = "10.0.0.80/24"
+    "#;
+    let (c, s) = run(base);
+    assert_eq!(
+        (c.completed, c.mismatched, c.app.transactions),
+        (6, 0, 6),
+        "{c:?}"
+    );
+    assert_eq!(s.app.handshakes, 6);
+
+    // TLS 1.2 with one suite, a verified certificate and client certificates.
+    let (c, s) = run(&format!(
+        r#"{base}
+        [tls]
+        versions = ["1.2"]
+        cipher_suites = ["TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"]
+        verify = true
+        server_name = "www.lab.local"
+        names = ["www.lab.local"]
+        client_auth = "required"
+    "#
+    ));
+    assert_eq!(
+        (c.completed, c.mismatched, c.app.transactions),
+        (6, 0, 6),
+        "{:?}",
+        c.app
+    );
+    assert_eq!(
+        c.app.negotiated.keys().collect::<Vec<_>>(),
+        ["TLSv1.2 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 http/1.1"]
+    );
+    assert_eq!(s.mismatched, 0);
+
+    // A client that offers only TLS 1.2 to a server that wants 1.3: refused,
+    // and expected to be.
+    let refused = |expect: &str| {
+        format!(
+            r#"{base}
+            [tls.client]
+            versions = ["1.2"]
+            {expect}
+            [tls.server]
+            versions = ["1.3"]
+            {expect}
+        "#
+        )
+    };
+    let (c, s) = run(&refused(r#"expect = "failure""#));
+    assert_eq!(c.app.handshake_failures, 6, "{:?}", c.app);
+    assert_eq!((c.mismatched, s.mismatched), (0, 0), "{:?}", c.app);
+    assert_eq!(c.app.transactions, 0);
+    let (c, _) = run(&refused(""));
+    assert_eq!(
+        (c.app.handshakes_unexpected, c.mismatched),
+        (6, 6),
+        "{:?}",
+        c.app
+    );
+
+    // Mistakes in the table.
+    for (bad, says) in [
+        ("[tls]\nversions = [\"1.0\"]", "not supported"),
+        (
+            "[tls]\ncipher_suites = [\"RC4_MD5\"]",
+            "unknown cipher suite",
+        ),
+        ("[tls]\nverion = [\"1.3\"]", "verion"),
+    ] {
+        let e = TcpProfile::from_toml(&format!("{base}\n{bad}"), Path::new("."))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(says) && e.contains("[tls]"), "{e}");
+    }
+}

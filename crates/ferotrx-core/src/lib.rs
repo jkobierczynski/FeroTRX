@@ -126,7 +126,7 @@ mod transform;
 mod udp;
 mod workers;
 
-pub use app::{App, AppProtocol, AppSession, AppStats, Transport};
+pub use app::{App, AppHandshake, AppProtocol, AppSession, AppStats, Transport};
 #[cfg(feature = "profile")]
 pub use bench::BenchProfile;
 pub use bench::{

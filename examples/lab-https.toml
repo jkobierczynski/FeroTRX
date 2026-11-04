@@ -1,0 +1,109 @@
+# FeroTRX stateful TCP profile: HTTPS and DNS over TLS with real TLS
+# handshakes, through a NAT router between two VLANs.
+#
+#   FeroTRX host --- switch (trunk) --- router --- VLAN 10: 192.168.10.0/24 (clients)
+#                                              \-- VLAN 20: 192.168.20.0/24 (server)
+#
+# Run it with:
+#   sudo ferotrx tcp -p examples/lab-https.toml -i <interface>
+#
+# Each template is TLS (versions, cipher suites, certificates) under an
+# application protocol. The server's certificates are made by a CA the run
+# generates, unless a template gives `cert` and `key` files; the clients
+# check them only with `verify = true` (against `ca`, or that generated CA).
+#
+#   only the server (leave out [client]):  curl -k https://192.168.20.80/
+#   only the client (leave out [server]), against a real server:
+#     sudo ferotrx tcp -p examples/lab-https.toml -i eth0 --connect 192.168.20.10
+#
+# As in examples/lab-tcp.toml, the `ip`s must be free addresses in each VLAN,
+# not addresses of the FeroTRX machine, and `gateway` the router's address.
+format = 1
+cps = 50
+connections = 400
+concurrency = 100
+
+# HTTPS as a browser would do it: TLS 1.3 (or 1.2), the certificate checked
+# against the name asked for, sessions resumed on later connections.
+[[template]]
+name = "https"
+app = "https"               # HTTP over TLS, port 443
+weight = 4
+
+[template.http]
+per_connection = 2
+host = "www.lab.local"
+requests = ["GET /", "GET /missing 404"]
+
+[[template.http.route]]
+path = "/"
+body = "<html><body>FeroTRX over TLS</body></html>\n"
+content_type = "text/html"
+
+[template.tls]
+server_name = "www.lab.local"   # SNI, and the name the certificate must have
+names = ["www.lab.local"]       # names in the generated server certificate
+verify = true                   # check the certificate (here: the generated CA)
+# versions = ["1.2", "1.3"]     # the default
+# cipher_suites = ["TLS13_AES_128_GCM_SHA256"]
+# groups = ["X25519", "secp256r1"]
+# alpn = ["http/1.1"]           # the default for HTTP
+# cert = "server.pem"           # the server's own certificate chain and key
+# key = "server-key.pem"
+# ca = "ca.pem"                 # the CA a client trusts (implies verify)
+# resumption = true
+
+# TLS 1.2 only, one cipher suite, and a client certificate both ends check.
+[[template]]
+name = "mtls12"
+app = "https"
+port = 8443
+weight = 2
+
+[template.http]
+requests = ["GET /"]
+
+[template.tls]
+versions = ["1.2"]
+cipher_suites = ["TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"]
+client_auth = "required"        # none, optional or required
+key_type = "ecdsa-p384"         # generated keys: ecdsa-p256, ecdsa-p384, ed25519
+
+# A server that only speaks TLS 1.3, and a client that only offers 1.2: every
+# handshake must fail, and does. [tls.client] and [tls.server] set keys for
+# one end.
+[[template]]
+name = "refused"
+app = "https"
+port = 9443
+weight = 1
+
+[template.tls]
+expect = "failure"
+[template.tls.client]
+versions = ["1.2"]
+[template.tls.server]
+versions = ["1.3"]
+
+# DNS over TLS (RFC 7858), port 853.
+[[template]]
+name = "dot"
+app = "dns"
+tls = true
+weight = 1
+
+[template.dns]
+per_connection = 2
+queries = ["www.lab.local A", "missing.lab.local A NXDOMAIN"]
+records = ["www.lab.local A 192.168.20.80"]
+
+[client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20

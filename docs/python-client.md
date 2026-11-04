@@ -169,8 +169,10 @@ whose table names none, `base_dir` for relative pcap paths in uploaded or
 
 With an [application protocol](app-protocols.md) (HTTP, DNS, NTP), each
 side also has `app`, an `AppCounters` (`transactions`, `failed`, `errors`,
-`protocol_errors`, `codes` by status or response code, `response_time`), or
-`None` when it counted nothing:
+`protocol_errors`, `codes` by status or response code, `response_time`, and
+over TLS `tls`, a `HandshakeCounters` with `handshakes`, `failed`,
+`unexpected`, `resumed`, `negotiated` and `time`), or `None` when it counted
+nothing:
 
 ```python
 web = done.template("web").client.app

@@ -25,13 +25,16 @@
 //!   their own protocols.
 //!
 //! The built-in protocols are [`http`] (HTTP/1.1 client and server), [`dns`]
-//! (over UDP, and over TCP with length prefixes) and [`ntp`].
+//! (over UDP, and over TCP with length prefixes) and [`ntp`]; [`tls`]
+//! (feature `tls`) runs any stream protocol over TLS (HTTPS = TLS + HTTP).
 
 pub mod dns;
 pub mod http;
 pub mod ntp;
 #[cfg(feature = "profile")]
 mod registry;
+#[cfg(feature = "tls")]
+pub mod tls;
 
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -177,6 +180,23 @@ impl AppTransaction {
 }
 
 /// What a session tells the engine while it handles an event.
+/// A finished TLS (or other) handshake, as a layer under a protocol counts
+/// it with [`AppCx::handshake`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppHandshake {
+    /// What was negotiated (`TLSv1.3 TLS13_AES_128_GCM_SHA256`), or why it
+    /// failed (`failed: alert HandshakeFailure`).
+    pub label: String,
+    /// The handshake succeeded.
+    pub succeeded: bool,
+    /// The outcome is the one expected (a failure can be).
+    pub expected: bool,
+    /// A resumed session (a ticket or session id).
+    pub resumed: bool,
+    /// From the first handshake message to the end.
+    pub time: Option<Duration>,
+}
+
 #[derive(Debug, Default)]
 pub struct AppCx {
     now: Duration,
@@ -186,6 +206,7 @@ pub struct AppCx {
     wake: Option<Duration>,
     transactions: Vec<AppTransaction>,
     protocol_errors: Vec<String>,
+    handshakes: Vec<AppHandshake>,
 }
 
 impl AppCx {
@@ -240,6 +261,26 @@ impl AppCx {
         self.protocol_errors.push(what.into());
     }
 
+    /// Counts a finished handshake; one with an unexpected outcome marks
+    /// the connection mismatched.
+    pub fn handshake(&mut self, h: AppHandshake) {
+        self.handshakes.push(h);
+    }
+
+    /// Takes over what a session run with `inner` (a protocol on top of
+    /// this one) did, except its bytes, which it returns: they are for the
+    /// layer in between to wrap.
+    pub fn absorb(&mut self, mut inner: AppCx) -> Vec<Vec<u8>> {
+        self.close |= inner.close;
+        if inner.wake.is_some() {
+            self.wake = inner.wake;
+        }
+        self.transactions.append(&mut inner.transactions);
+        self.protocol_errors.append(&mut inner.protocol_errors);
+        self.handshakes.append(&mut inner.handshakes);
+        inner.sends
+    }
+
     /// What was sent, in order. Empties it.
     pub fn take_sends(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.sends)
@@ -263,8 +304,14 @@ impl AppCx {
 
     /// True if nothing that happened failed: no protocol errors, every
     /// transaction as expected.
+    pub fn handshakes(&self) -> &[AppHandshake] {
+        &self.handshakes
+    }
+
     pub fn all_ok(&self) -> bool {
-        self.protocol_errors.is_empty() && self.transactions.iter().all(|t| t.ok)
+        self.protocol_errors.is_empty()
+            && self.transactions.iter().all(|t| t.ok)
+            && self.handshakes.iter().all(|h| h.expected)
     }
 
     /// True if a transaction ended with an error answer.
@@ -278,6 +325,9 @@ impl AppCx {
             stats.record(t);
         }
         stats.protocol_errors += self.protocol_errors.len() as u64;
+        for h in &self.handshakes {
+            stats.record_handshake(h);
+        }
     }
 }
 
@@ -372,6 +422,18 @@ pub struct AppStats {
     pub codes: BTreeMap<String, u64>,
     /// Client: from each request to its whole answer.
     pub response_time: LatencyStats,
+    /// Handshakes that ended, either way (TLS).
+    pub handshakes: u64,
+    /// Handshakes that failed, expected or not.
+    pub handshake_failures: u64,
+    /// Handshakes with another outcome than the expected one.
+    pub handshakes_unexpected: u64,
+    /// Handshakes that resumed a session.
+    pub resumed: u64,
+    /// What the handshakes negotiated, or why they failed, with counts.
+    pub negotiated: BTreeMap<String, u64>,
+    /// From each handshake's first message to its end.
+    pub handshake_time: LatencyStats,
 }
 
 impl AppStats {
@@ -385,8 +447,19 @@ impl AppStats {
         }
     }
 
+    pub fn record_handshake(&mut self, h: &AppHandshake) {
+        self.handshakes += 1;
+        self.handshake_failures += u64::from(!h.succeeded);
+        self.handshakes_unexpected += u64::from(!h.expected);
+        self.resumed += u64::from(h.resumed);
+        *self.negotiated.entry(h.label.clone()).or_default() += 1;
+        if let Some(t) = h.time {
+            self.handshake_time.record(Some(t));
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.transactions == 0 && self.protocol_errors == 0
+        self.transactions == 0 && self.protocol_errors == 0 && self.handshakes == 0
     }
 
     pub fn merge(&mut self, o: &Self) {
@@ -398,17 +471,35 @@ impl AppStats {
             *self.codes.entry(k.clone()).or_default() += v;
         }
         self.response_time.merge(&o.response_time);
+        self.handshakes += o.handshakes;
+        self.handshake_failures += o.handshake_failures;
+        self.handshakes_unexpected += o.handshakes_unexpected;
+        self.resumed += o.resumed;
+        for (k, v) in &o.negotiated {
+            *self.negotiated.entry(k.clone()).or_default() += v;
+        }
+        self.handshake_time.merge(&o.handshake_time);
+    }
+
+    /// What the handshakes negotiated, most first:
+    /// `TLSv1.3 TLS13_AES_128_GCM_SHA256 x40`.
+    pub fn negotiated_text(&self) -> String {
+        counts_text(&self.negotiated)
     }
 
     /// The labels and their counts, most first: `200 x40, 404 x2`.
     pub fn codes_text(&self) -> String {
-        let mut v: Vec<(&String, &u64)> = self.codes.iter().collect();
-        v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-        v.iter()
-            .map(|(k, n)| format!("{k} x{n}"))
-            .collect::<Vec<_>>()
-            .join(", ")
+        counts_text(&self.codes)
     }
+}
+
+fn counts_text(m: &BTreeMap<String, u64>) -> String {
+    let mut v: Vec<(&String, &u64)> = m.iter().collect();
+    v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    v.iter()
+        .map(|(k, n)| format!("{k} x{n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl fmt::Display for AppStats {
@@ -423,6 +514,15 @@ impl fmt::Display for AppStats {
         }
         if !self.codes.is_empty() {
             write!(f, " ({})", self.codes_text())?;
+        }
+        if self.handshakes > 0 {
+            write!(
+                f,
+                "; {} handshakes, {} failed ({})",
+                self.handshakes,
+                self.handshake_failures,
+                self.negotiated_text()
+            )?;
         }
         Ok(())
     }

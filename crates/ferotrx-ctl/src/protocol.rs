@@ -802,6 +802,31 @@ pub struct AppCounters {
     /// Client: from each request to its whole answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_time: Option<LatencyCounters>,
+    /// TLS handshakes, for protocols run over TLS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<HandshakeCounters>,
+}
+
+/// TLS handshakes of one side; see `ferotrx_core::AppStats`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HandshakeCounters {
+    /// Handshakes that ended, either way.
+    pub handshakes: u64,
+    /// Handshakes that failed, expected or not.
+    pub failed: u64,
+    /// Handshakes with another outcome than the profile expected.
+    #[serde(default)]
+    pub unexpected: u64,
+    /// Handshakes that resumed a session.
+    #[serde(default)]
+    pub resumed: u64,
+    /// What they negotiated or why they failed, e.g.
+    /// `{"TLSv1.3 TLS13_AES_256_GCM_SHA384 http/1.1": 200}`.
+    #[serde(default)]
+    pub negotiated: std::collections::BTreeMap<String, u64>,
+    /// From each handshake's first message to its end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<LatencyCounters>,
 }
 
 impl From<&ferotrx_core::AppStats> for AppCounters {
@@ -813,6 +838,14 @@ impl From<&ferotrx_core::AppStats> for AppCounters {
             protocol_errors: s.protocol_errors,
             codes: s.codes.clone(),
             response_time: (s.response_time.count() > 0).then(|| (&s.response_time).into()),
+            tls: (s.handshakes > 0).then(|| HandshakeCounters {
+                handshakes: s.handshakes,
+                failed: s.handshake_failures,
+                unexpected: s.handshakes_unexpected,
+                resumed: s.resumed,
+                negotiated: s.negotiated.clone(),
+                time: (s.handshake_time.count() > 0).then(|| (&s.handshake_time).into()),
+            }),
         }
     }
 }

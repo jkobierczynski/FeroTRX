@@ -83,7 +83,11 @@ A run has a `state` (`running`, `finished`, `stopped`, `failed` with `error`),
 ```
 
 A subscription to one run ends with an update marked `"last": true` when the
-run ends. Error codes are the JSON-RPC ones plus -32001 (log in first),
+run ends. TCP and UDP counters (`tcp.stats`, `udp.stats`) carry `app`
+for each side that ran an [application protocol](app-protocols.md#counters):
+transactions, failures, error answers, protocol errors, `codes`,
+`response_time`, and over TLS `tls` (handshakes, failures, resumed sessions,
+what was negotiated, handshake times). Error codes are the JSON-RPC ones plus -32001 (log in first),
 -32002 (no such profile, run or subscription), -32003 (could not be done,
 e.g. a profile that does not parse or an interface that will not open) and
 -32004 (forbidden: a read-only login changing something, or a path outside

@@ -8,13 +8,15 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["profile"]
+default = ["profile", "tls"]
 # Load multi-stream traffic profiles from TOML files.
 profile = ["serde", "dep:toml", "build"]
 # Serialize benchmark reports and run metadata (serde).
 serde = ["dep:serde"]
 # Build packets from text descriptions (ferotrx-packet), as a capture or stream source.
 build = ["dep:ferotrx-packet"]
+# TLS under stream protocols (HTTPS), with rustls and generated lab certificates.
+tls = ["dep:rustls", "dep:rcgen"]
 
 [dependencies]
 ferotrx-packet = { workspace = true, optional = true }
@@ -22,6 +24,8 @@ pcap-file.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true

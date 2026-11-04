@@ -178,7 +178,9 @@ arrived) fails. A misspelt metric is an error that lists the right names.
 also `app_transactions`, `app_failed`, `app_failed_pct`, `app_errors`
 (HTTP 4xx/5xx, DNS error codes), `protocol_errors` and `response_min`,
 `response_avg`, `response_p99`, `response_max` (ms, from a request to its
-whole answer).
+whole answer); over TLS `tls_handshakes`, `tls_failed`, `tls_unexpected`
+(another outcome than the profile's `expect`), `tls_resumed` and
+`handshake_min`, `handshake_avg`, `handshake_p99`, `handshake_max` (ms).
 
 **UDP**: `transactions`, `answered`, `answered_pct`, `timed_out`,
 `timed_out_pct`, `mismatched` (another answer than expected), `unmatched`
