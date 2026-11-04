@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ferotrx"
+version = "0.14.0"
+description = "Python client for the FeroTRX traffic generator's control server"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.10"
+authors = [{ name = "Jurgen Kobierczynski" }]
+keywords = ["traffic-generator", "pcap", "replay", "network-testing", "json-rpc"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Telecommunications Industry",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Networking",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+# Pinned below the next minor so a new lint or format rule does not break CI.
+dev = ["pytest>=7", "mypy>=2.4,<2.5", "ruff>=0.17,<0.18"]
+
+[project.urls]
+Homepage = "https://github.com/jkobierczynski/FeroTRX"
+Documentation = "https://github.com/jkobierczynski/FeroTRX/blob/main/docs/python-client.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ferotrx = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["lab: needs a root ferotrx server and a veth pair (FEROTRX_TEST_LAB)"]
+
+[tool.mypy]
+strict = true
+files = ["src", "tests", "examples"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]

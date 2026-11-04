@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Drive a FeroTRX control server from Python, with no extra packages.
 
+This shows the protocol in one file. For real use, the `ferotrx` package in
+../python (docs/python-client.md) does the same with types, asyncio and tests.
+
 Start the server first, for example:
     sudo ferotrx serve --listen 0.0.0.0:4510 --token s3cret
 

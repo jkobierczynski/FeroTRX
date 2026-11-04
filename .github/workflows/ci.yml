@@ -57,6 +57,49 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test -p ferotrx-ctl --no-default-features
 
+      # The Python client (python/) against real `ferotrx serve` processes:
+      # tokens, roles, TLS and client certificates, every method family,
+      # blocking and asyncio. Windows runs the server built without libpcap.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python client
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            cargo build -p ferotrx-cli --no-default-features
+          else
+            cargo build -p ferotrx-cli
+          fi
+          python -m pip install -e './python[dev]'
+          cd python
+          mypy
+          ruff check .
+          ruff format --check .
+          FEROTRX_REQUIRE_SERVER=1 python -m pytest -v
+
+      # The Python client's lab tests: TCP sessions, DNS transactions and a
+      # stream with a receiver across a veth pair, through a root server.
+      - name: Python client on a veth pair (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo ip link add pt0 type veth peer name pt1
+          sudo sysctl -qw net.ipv6.conf.pt0.disable_ipv6=1 net.ipv6.conf.pt1.disable_ipv6=1
+          sudo ip link set pt0 up
+          sudo ip link set pt1 up
+          sudo ./target/debug/ferotrx serve -l 127.0.0.1:4511 > "$RUNNER_TEMP/serve.log" 2>&1 &
+          for _ in $(seq 100); do
+            grep -q "control server on" "$RUNNER_TEMP/serve.log" && break
+            sleep 0.1
+          done
+          cat "$RUNNER_TEMP/serve.log"
+          status=0
+          FEROTRX_TEST_LAB=127.0.0.1:4511 FEROTRX_TEST_IFACES=pt0,pt1 \
+            python -m pytest -v -m lab python/tests || status=$?
+          sudo pkill -f 'ferotrx serve -l 127.0.0.1:4511' || true
+          sudo ip link del pt0
+          exit $status
+
       # AF_XDP needs root and an interface it may send on: a veth pair.
       - name: AF_XDP on a veth pair (Linux)
         if: runner.os == 'Linux'
