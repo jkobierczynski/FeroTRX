@@ -6,13 +6,15 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::{
-    parse_duration, Capture, CaptureSource, Error, FieldEngine, FieldVar, Rate, Result, Rewrite,
-    SendSettings, SizeMix, Stream, LINKTYPE_ETHERNET,
+    parse_duration, parse_shape_point, Capture, CaptureSource, Error, FieldEngine, FieldVar, Pacer,
+    Rate, Result, Rewrite, SendSettings, SizeMix, Stream, TrafficModel, LINKTYPE_ETHERNET,
 };
 
 /// A traffic profile: several streams that run together, read from a TOML file.
 ///
 /// ```toml
+/// format = 1                   # optional: the profile format version (see FORMAT_VERSION)
+///
 /// [[stream]]
 /// name = "dns"                 # optional; defaults to the pcap's file name
 /// pcap = "dns.pcap"            # relative to the profile's folder
@@ -32,6 +34,12 @@ use crate::{
 /// # With latency, the signature then takes the end of the payload, so the
 /// # frames keep these sizes.
 /// sizes = "imix"
+/// # Traffic model (needs a pps or mbps rate): Poisson arrivals, bursts of
+/// # packets back to back, and the rate over time (see `TrafficModel`).
+/// model = "poisson,burst=8,ramp_up=10s,hold=1m,ramp_down=10s"
+/// # Or the rate over time as points, straight lines between them; 0% at
+/// # the end stops the stream.
+/// shape = ["0s:20%", "30s:100%", "60s:0%"]
 ///
 /// [[stream]]
 /// name = "ping"
@@ -77,6 +85,8 @@ pub struct StreamSpec {
     /// Frame sizes, applied last; the signature then keeps the size
     /// ([`Stream::keep_size`]).
     pub sizes: Option<SizeMix>,
+    /// How packets spread around the rate.
+    pub model: TrafficModel,
 }
 
 /// Where a [`StreamSpec`] gets its packets.
@@ -103,12 +113,51 @@ impl std::fmt::Display for StreamSource {
     }
 }
 
+/// The profile format version this FeroTRX reads. Every kind of file
+/// (traffic, TCP, UDP, benchmark profiles and scenarios) may say
+/// `format = N` at the top; files without it are taken as this version, and
+/// newer versions are refused with a clear message instead of being half read.
+pub const FORMAT_VERSION: u32 = 1;
+
+/// Checks a file's `format` field against [`FORMAT_VERSION`].
+pub fn check_format(format: Option<u32>) -> Result<()> {
+    match format {
+        None => Ok(()),
+        Some(0) => Err(Error::Profile("format versions start at 1".into())),
+        Some(v) if v > FORMAT_VERSION => Err(Error::Profile(format!(
+            "format {v} is newer than this FeroTRX reads (format {FORMAT_VERSION}); \
+             update FeroTRX"
+        ))),
+        Some(_) => Ok(()),
+    }
+}
+
+/// A traffic model from a `model` string and `shape` points; the points
+/// replace any shape the string gives.
+pub fn parse_model(model: Option<&str>, shape: &[String]) -> Result<TrafficModel> {
+    let mut m: TrafficModel = model.map_or(Ok(TrafficModel::default()), str::parse)?;
+    if !shape.is_empty() {
+        if !m.shape.is_empty() {
+            return Err(Error::InvalidSpec(
+                "set the rate over time in either model or shape, not both".into(),
+            ));
+        }
+        m.shape = shape
+            .iter()
+            .map(|p| parse_shape_point(p))
+            .collect::<Result<_>>()?;
+        m.validate()?;
+    }
+    Ok(m)
+}
+
 /// Time between built packets when a stream does not set `interval`.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileFile {
+    format: Option<u32>,
     #[serde(default)]
     stream: Vec<StreamFile>,
     output: Option<OutputFile>,
@@ -168,6 +217,9 @@ struct StreamFile {
     vary: Vec<String>,
     latency: Option<LatencyFile>,
     sizes: Option<String>,
+    model: Option<String>,
+    #[serde(default)]
+    shape: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -189,6 +241,7 @@ impl Profile {
     /// Parses a profile. Relative pcap paths are taken from `base_dir`.
     pub fn from_toml(text: &str, base_dir: &Path) -> Result<Self> {
         let file: ProfileFile = toml::from_str(text).map_err(|e| Error::Profile(e.to_string()))?;
+        check_format(file.format)?;
         if file.stream.is_empty() {
             return Err(Error::Profile("no [[stream]] entries".into()));
         }
@@ -244,19 +297,23 @@ impl Profile {
                     Some(LatencyFile::On(true)) => Some(i as u32 + 1),
                     Some(LatencyFile::Flow(id)) => Some(id),
                 };
+                let rate = s
+                    .rate
+                    .as_deref()
+                    .map_or(Ok(Rate::default()), str::parse)
+                    .map_err(ctx)?;
+                let model = parse_model(s.model.as_deref(), &s.shape).map_err(ctx)?;
+                Pacer::check_model(rate, &model).map_err(ctx)?;
                 Ok(StreamSpec {
                     latency,
+                    model,
                     sizes: s
                         .sizes
                         .as_deref()
                         .map(str::parse)
                         .transpose()
                         .map_err(ctx)?,
-                    rate: s
-                        .rate
-                        .as_deref()
-                        .map_or(Ok(Rate::default()), str::parse)
-                        .map_err(ctx)?,
+                    rate,
                     delay: s
                         .delay
                         .as_deref()
@@ -366,7 +423,8 @@ impl Profile {
                 let mut stream = Stream::new(&spec.name, source.loops(spec.loops))
                     .with_rate(spec.rate)
                     .with_limit(spec.limit)
-                    .with_delay(spec.delay);
+                    .with_delay(spec.delay)
+                    .with_model(spec.model.clone());
                 for r in &spec.rewrite {
                     stream.push_transform(r.clone());
                 }

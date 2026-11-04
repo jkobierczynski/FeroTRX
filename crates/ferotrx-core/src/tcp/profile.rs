@@ -12,7 +12,9 @@ use super::engine::{
     TcpClientConfig, TcpConfig, TcpEndpoint, TcpOptions, TcpServerConfig, TcpTemplate,
 };
 use super::program::{TcpMessage, TcpProgram, TcpRole};
-use crate::{parse_duration, Capture, Error, MacAddr, Result};
+use crate::{
+    check_format, parse_duration, parse_model, Capture, Error, MacAddr, Result, TrafficModel,
+};
 
 /// A stateful TCP run: what to play, the emulated client and server hosts,
 /// and how many connections to open how fast.
@@ -21,6 +23,9 @@ use crate::{parse_duration, Capture, Error, MacAddr, Result};
 /// pcap = "http.pcap"          # the session to replay, relative to this file
 /// flow = 1                    # which TCP connection in it (default: the first with data)
 /// cps = 50                    # new connections per second (default 1)
+/// model = "poisson"           # optional: how they spread around cps (Poisson,
+///                             # bursts, ramp_up/hold/ramp_down; see TrafficModel)
+/// # shape = ["0s:10%", "1m:100%"]  # or the rate over time in points
 /// connections = 1000          # in all; 0 = until stopped (default 1)
 /// concurrency = 100           # most open at once; 0 = no limit (default)
 /// duration = "60s"            # optional
@@ -92,6 +97,7 @@ use crate::{parse_duration, Capture, Error, MacAddr, Result};
 /// pcap = "download.pcap"
 /// port = 8080
 /// cps = 2                     # its own rate, besides the 100 per second above
+/// model = "burst=5"           # its own traffic model (needs its own cps)
 /// connections = 50            # at most 50 of these
 /// concurrency = 4             # at most 4 open at once
 ///
@@ -130,6 +136,8 @@ pub struct TcpProfile {
     /// to it, else 1.
     pub connect_ips: Option<u32>,
     pub cps: f64,
+    /// How new connections spread around `cps`.
+    pub model: TrafficModel,
     pub connections: u64,
     pub concurrency: usize,
     pub source_ports: Range<u16>,
@@ -154,6 +162,8 @@ pub struct TcpTemplateSpec {
     pub connect_ips: Option<u32>,
     /// The template's own rate of new connections, apart from the profile's `cps`.
     pub cps: Option<f64>,
+    /// How the template's own connections spread around its `cps`.
+    pub model: TrafficModel,
     /// Most connections of this template (default: no limit of its own).
     pub connections: Option<u64>,
     /// Most connections of this template open at once (default: no limit of its own).
@@ -171,6 +181,7 @@ impl TcpTemplateSpec {
             connect: None,
             connect_ips: None,
             cps: None,
+            model: TrafficModel::default(),
             connections: None,
             concurrency: None,
         }
@@ -351,6 +362,7 @@ impl Default for TcpProfile {
             connect: None,
             connect_ips: None,
             cps: 1.0,
+            model: TrafficModel::default(),
             connections: 1,
             concurrency: 0,
             source_ports: 1024..65535,
@@ -363,6 +375,10 @@ impl Default for TcpProfile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawProfile {
+    format: Option<u32>,
+    model: Option<String>,
+    #[serde(default)]
+    shape: Vec<String>,
     pcap: Option<String>,
     flow: Option<usize>,
     port: Option<u16>,
@@ -397,6 +413,9 @@ struct RawTemplate {
     connect: Option<String>,
     connect_ips: Option<u32>,
     cps: Option<f64>,
+    model: Option<String>,
+    #[serde(default)]
+    shape: Vec<String>,
     connections: Option<u64>,
     concurrency: Option<usize>,
 }
@@ -645,6 +664,9 @@ impl TcpProfile {
     /// Parses a profile; `pcap` paths are relative to `base_dir`.
     pub fn from_toml(text: &str, base_dir: &Path) -> Result<Self> {
         let raw: RawProfile = toml::from_str(text).map_err(|e| Error::Profile(e.to_string()))?;
+        check_format(raw.format)?;
+        let model = parse_model(raw.model.as_deref(), &raw.shape)
+            .map_err(|e| Error::Profile(e.to_string()))?;
         let top_level = raw.pcap.is_some()
             || raw.flow.is_some()
             || raw.port.is_some()
@@ -688,6 +710,7 @@ impl TcpProfile {
                         .transpose()
                         .map_err(ctx)?,
                     connect_ips: t.connect_ips,
+                    model: parse_model(t.model.as_deref(), &t.shape).map_err(ctx)?,
                     cps: t.cps,
                     connections: t.connections,
                     concurrency: t.concurrency,
@@ -697,6 +720,7 @@ impl TcpProfile {
         };
         let mut p = TcpProfile {
             templates,
+            model,
             ..Default::default()
         };
         p.client = raw.client.map(|h| h.spec("client")).transpose()?;
@@ -861,6 +885,7 @@ impl TcpProfile {
                 listen_port: listen,
                 weight: t.weight,
                 cps: t.cps,
+                model: t.model.clone(),
                 connections: t.connections.unwrap_or(0),
                 concurrency: t.concurrency.unwrap_or(0),
             });
@@ -873,6 +898,7 @@ impl TcpProfile {
             Some(h) => {
                 let mut c = TcpClientConfig::new(h.endpoint(port(h)?));
                 c.cps = self.cps;
+                c.model = self.model.clone();
                 c.connections = self.connections;
                 c.concurrency = self.concurrency;
                 c.source_ports = self.source_ports.clone();

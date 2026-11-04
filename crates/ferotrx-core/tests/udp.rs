@@ -624,3 +624,33 @@ fn rejects_what_cannot_work() {
     let e = bad(vec![v6], Some(client(1, 1.0)));
     assert!(e.contains("IPv6"), "{e}");
 }
+
+#[test]
+fn traffic_models_start_transactions() {
+    // A Poisson template of its own next to a ramped shared rate that ends:
+    // the client finishes by itself with no transaction limit.
+    let mut c = client(0, 100.0);
+    c.model = "ramp_up=0s,hold=300ms,ramp_down=0s".parse().unwrap();
+    let ntp = tpl(UdpApp::Ntp, 123)
+        .with_rate(200.0)
+        .with_transactions(30)
+        .with_model("poisson,seed=5".parse().unwrap());
+    let dns = tpl(UdpApp::Dns(lab_dns()), 53);
+    let mut client = engine(
+        vec![dns.clone(), ntp.clone()],
+        Some(c),
+        false,
+        UdpOptions::default(),
+    );
+    let mut server = engine(vec![dns, ntp], None, true, UdpOptions::default());
+    let took = simulate(
+        &mut [&mut client, &mut server],
+        &mut UdpNat::new(0),
+        Duration::from_secs(30),
+    );
+    let st = client.stats();
+    assert!(client.is_done(), "not done after {took:?}: {:?}", st.client);
+    // DNS: 100/s for 0.3 s, and the one at the end; NTP: its own 30.
+    assert_eq!(st.client.sent, 31 + 30, "{:?}", st.client);
+    assert_eq!(st.client.answered, st.client.sent);
+}

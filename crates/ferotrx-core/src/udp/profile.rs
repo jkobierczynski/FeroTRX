@@ -13,7 +13,8 @@ use super::engine::{UdpApp, UdpClientConfig, UdpConfig, UdpOptions, UdpServerCon
 use super::program::{UdpMessage, UdpProgram};
 use crate::tcp::profile::{RawHost, RawMessage};
 use crate::{
-    parse_connect_addr, parse_duration, parse_port_range, Capture, Error, Result, TcpHostSpec,
+    check_format, parse_connect_addr, parse_duration, parse_model, parse_port_range, Capture,
+    Error, Result, TcpHostSpec, TrafficModel,
 };
 
 /// A stateful UDP run: what the transactions carry, the emulated client and
@@ -30,6 +31,8 @@ use crate::{
 /// ]
 /// # pcap = "dns-lookups.pcap"   # with app = "dns": queries and records from a capture
 /// rate = 200                  # transactions per second (default 1)
+/// model = "poisson"           # optional: how they spread around the rate, as
+///                             # for TCP profiles (see TrafficModel); also `shape`
 /// transactions = 10000        # in all; 0 = until stopped (default 1)
 /// concurrency = 100           # most open at once; 0 = no limit (default)
 /// duration = "60s"            # optional
@@ -70,6 +73,8 @@ pub struct UdpProfile {
     pub connect_ips: Option<u32>,
     /// Transactions per second, all templates without their own rate together.
     pub rate: f64,
+    /// How transactions spread around `rate`.
+    pub model: TrafficModel,
     pub transactions: u64,
     pub concurrency: usize,
     pub source_ports: Range<u16>,
@@ -87,6 +92,7 @@ pub struct UdpTemplateSpec {
     pub connect: Option<SocketAddr>,
     pub connect_ips: Option<u32>,
     pub rate: Option<f64>,
+    pub model: TrafficModel,
     pub transactions: Option<u64>,
     pub concurrency: Option<usize>,
     pub think_time: Option<Duration>,
@@ -102,6 +108,7 @@ impl UdpTemplateSpec {
             connect: None,
             connect_ips: None,
             rate: None,
+            model: TrafficModel::default(),
             transactions: None,
             concurrency: None,
             think_time: None,
@@ -207,6 +214,7 @@ impl Default for UdpProfile {
             connect: None,
             connect_ips: None,
             rate: 1.0,
+            model: TrafficModel::default(),
             transactions: 1,
             concurrency: 0,
             source_ports: 1024..65535,
@@ -231,6 +239,10 @@ struct RawWhat {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawProfile {
+    format: Option<u32>,
+    model: Option<String>,
+    #[serde(default)]
+    shape: Vec<String>,
     app: Option<String>,
     pcap: Option<String>,
     flow: Option<usize>,
@@ -271,6 +283,9 @@ struct RawTemplate {
     connect: Option<String>,
     connect_ips: Option<u32>,
     rate: Option<f64>,
+    model: Option<String>,
+    #[serde(default)]
+    shape: Vec<String>,
     transactions: Option<u64>,
     concurrency: Option<usize>,
     think_time: Option<String>,
@@ -400,6 +415,9 @@ impl UdpProfile {
     /// Parses a profile; `pcap` paths are relative to `base_dir`.
     pub fn from_toml(text: &str, base_dir: &Path) -> Result<Self> {
         let raw: RawProfile = toml::from_str(text).map_err(|e| Error::Profile(e.to_string()))?;
+        check_format(raw.format)?;
+        let model = parse_model(raw.model.as_deref(), &raw.shape)
+            .map_err(|e| Error::Profile(e.to_string()))?;
         let top = RawWhat {
             app: raw.app,
             pcap: raw.pcap,
@@ -449,6 +467,7 @@ impl UdpProfile {
                         .map_err(ctx)?,
                     connect_ips: t.connect_ips,
                     rate: t.rate,
+                    model: parse_model(t.model.as_deref(), &t.shape).map_err(ctx)?,
                     transactions: t.transactions,
                     concurrency: t.concurrency,
                     think_time: t
@@ -462,6 +481,7 @@ impl UdpProfile {
         };
         let mut p = UdpProfile {
             templates,
+            model,
             ..Default::default()
         };
         if let (Some(port), [t]) = (top_port, p.templates.as_mut_slice()) {
@@ -615,6 +635,7 @@ impl UdpProfile {
                 listen_port: listen,
                 weight: t.weight,
                 rate: t.rate,
+                model: t.model.clone(),
                 transactions: t.transactions.unwrap_or(0),
                 concurrency: t.concurrency.unwrap_or(0),
                 think_time: t.think_time,
@@ -628,6 +649,7 @@ impl UdpProfile {
             Some(h) => {
                 let mut c = UdpClientConfig::new(h.endpoint(port(h)?));
                 c.rate = self.rate;
+                c.model = self.model.clone();
                 c.transactions = self.transactions;
                 c.concurrency = self.concurrency;
                 c.source_ports = self.source_ports.clone();

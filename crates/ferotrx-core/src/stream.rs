@@ -3,7 +3,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::latency::{reserve, reserve_inside, stamp, wall_clock};
-use crate::{Error, Pacer, Packet, PacketSink, PacketSource, Rate, ReplayStats, Result, Transform};
+use crate::{
+    Error, Pacer, Packet, PacketSink, PacketSource, Rate, ReplayStats, Result, TrafficModel,
+    Transform,
+};
 
 /// One flow of traffic: a source, the transforms applied to it, and its own rate.
 ///
@@ -22,6 +25,9 @@ pub struct Stream<'a> {
     /// instead of after them, so packets keep the size they were given (see
     /// [`keep_size`](Stream::keep_size)).
     pub keep_size: bool,
+    /// How packets spread around the rate: Poisson arrivals, bursts, ramps.
+    /// Anything but the default needs a pps or Mbit/s rate.
+    pub model: TrafficModel,
     source: Box<dyn PacketSource + 'a>,
     transforms: Vec<Box<dyn Transform + 'a>>,
 }
@@ -36,6 +42,7 @@ impl<'a> Stream<'a> {
             delay: Duration::ZERO,
             latency: None,
             keep_size: false,
+            model: TrafficModel::default(),
             source: Box::new(source),
             transforms: Vec::new(),
         }
@@ -48,6 +55,12 @@ impl<'a> Stream<'a> {
 
     pub fn with_limit(mut self, limit: Option<u64>) -> Self {
         self.limit = limit;
+        self
+    }
+
+    /// Spreads the packets around the rate by `model`.
+    pub fn with_model(mut self, model: TrafficModel) -> Self {
+        self.model = model;
         self
     }
 
@@ -100,6 +113,7 @@ impl std::fmt::Debug for Stream<'_> {
             .field("delay", &self.delay)
             .field("latency", &self.latency)
             .field("keep_size", &self.keep_size)
+            .field("model", &self.model)
             .field("transforms", &self.transforms.len())
             .finish_non_exhaustive()
     }
@@ -168,6 +182,8 @@ where
 {
     for s in streams.iter() {
         s.rate.validate()?;
+        Pacer::check_model(s.rate, &s.model)
+            .map_err(|e| Error::InvalidSpec(format!("stream '{}': {e}", s.name)))?;
     }
     if let Some(first) = streams.first() {
         let lt = first.linktype();
@@ -183,7 +199,7 @@ where
     let mut lanes: Vec<Lane> = streams
         .iter()
         .map(|s| Lane {
-            pacer: Pacer::new(s.rate),
+            pacer: Pacer::with_model(s.rate, &s.model).expect("checked above"),
             packet: Packet::new(Duration::ZERO, Vec::new()),
             pending: false,
             done: false,
@@ -325,6 +341,11 @@ fn fill(stream: &mut Stream<'_>, lane: &mut Lane, st: &ReplayStats, start: Insta
         .next_deadline(lane.packet.timestamp, lane.packet.data.len())
     {
         Some(d) => stream.delay + d,
+        // The model's shape has ended: so has the stream.
+        None if lane.pacer.ended() => {
+            lane.done = true;
+            return Ok(());
+        }
         None => start.elapsed().max(stream.delay),
     };
     lane.passes = stream.source.passes();

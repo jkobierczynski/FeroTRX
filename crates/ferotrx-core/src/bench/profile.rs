@@ -58,6 +58,7 @@ pub struct BenchProfile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
+    format: Option<u32>,
     benchmark: BenchFile,
     output: Option<OutputFile>,
 }
@@ -132,6 +133,7 @@ impl BenchProfile {
 
     pub fn from_toml(text: &str) -> Result<Self> {
         let file: File = toml::from_str(text).map_err(|e| Error::Profile(e.to_string()))?;
+        crate::check_format(file.format)?;
         let b = file.benchmark;
         let ctx = |e: Error| Error::Profile(format!("[benchmark]: {e}"));
         let dur = |v: &Option<String>, default: Duration| {

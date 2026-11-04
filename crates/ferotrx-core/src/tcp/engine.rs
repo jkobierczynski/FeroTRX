@@ -15,7 +15,8 @@ use super::hosts::{self, Host, MAX_HOPS};
 use super::program::{TcpProgram, TcpRole};
 use super::wire::{self, Path, Segment, TcpHeader, TcpOpts, ACK, FIN, PSH, RST, SYN};
 use crate::net::{ETHERTYPE_IPV4, ETHERTYPE_IPV6, IPPROTO_ICMPV6};
-use crate::{Error, MacAddr, Result};
+use crate::traffic::EventClock;
+use crate::{Error, MacAddr, Result, TrafficModel};
 
 /// An address as a number, for address ranges of either IP version.
 pub(crate) fn ip_num(ip: IpAddr) -> u128 {
@@ -238,6 +239,9 @@ pub struct TcpTemplate {
     /// share the client's `cps` by weight; a template with one opens at that
     /// rate on its own, and its weight only matters if it is 0.
     pub cps: Option<f64>,
+    /// How this template's own connections spread around its `cps`
+    /// (Poisson arrivals, bursts, a ramp); only with `cps`.
+    pub model: TrafficModel,
     /// Most connections this template opens; 0 is no limit of its own.
     pub connections: u64,
     /// Most of this template's connections open at once; 0 is no limit of its own.
@@ -255,9 +259,16 @@ impl TcpTemplate {
             listen_port: connect.port(),
             weight: 1,
             cps: None,
+            model: TrafficModel::default(),
             connections: 0,
             concurrency: 0,
         }
+    }
+
+    /// Spreads this template's own connections around its `cps` by `model`.
+    pub fn with_model(mut self, model: TrafficModel) -> Self {
+        self.model = model;
+        self
     }
 
     /// Opens this template's connections at `cps` per second, on its own.
@@ -312,6 +323,9 @@ pub struct TcpClientConfig {
     /// New connections per second, for the templates without their own `cps`
     /// together.
     pub cps: f64,
+    /// How new connections spread around `cps`: Poisson arrivals, bursts,
+    /// a ramp up and down (a ramp that ends at 0% stops opening connections).
+    pub model: TrafficModel,
     /// Connections to open in all; 0 keeps opening them until the run stops.
     pub connections: u64,
     /// Most connections open at once; 0 is no limit.
@@ -325,6 +339,7 @@ impl TcpClientConfig {
         Self {
             endpoint,
             cps: 1.0,
+            model: TrafficModel::default(),
             connections: 1,
             concurrency: 0,
             source_ports: 1024..65535,
@@ -1698,14 +1713,14 @@ pub struct TcpEngine {
     ip_id: u16,
     stats: TcpStats,
     rng: Rng,
-    next_conn_at: Duration,
+    conn_clock: EventClock,
     port_cursor: u64,
     /// Smooth weighted round robin over the templates.
     wrr: Vec<i64>,
     /// Connections each template has opened, to step through its servers.
     opened: Vec<u64>,
     /// When each template with its own `cps` opens its next connection.
-    tpl_next: Vec<Duration>,
+    tpl_clock: Vec<Option<EventClock>>,
     next_timer_scan: Duration,
     error: Option<String>,
     started: bool,
@@ -1760,7 +1775,14 @@ impl TcpEngine {
                         "{what}: connections per second must be more than 0, not {cps}"
                     )));
                 }
+            } else if !t.model.is_steady() {
+                return Err(Error::Tcp(format!(
+                    "{what}: a traffic model needs the template's own cps"
+                )));
             }
+            t.model
+                .validate()
+                .map_err(|e| Error::Tcp(format!("{what}: {e}")))?;
             if client.is_some() && t.connect.port() == 0 {
                 return Err(Error::Tcp(format!("{what}: connect to port 0")));
             }
@@ -1783,6 +1805,7 @@ impl TcpEngine {
                     c.cps
                 )));
             }
+            c.model.validate().map_err(|e| Error::Tcp(e.to_string()))?;
             if c.source_ports.is_empty() || c.source_ports.start == 0 {
                 return Err(Error::Tcp("the source port range is empty".into()));
             }
@@ -1850,7 +1873,14 @@ impl TcpEngine {
             shared: shared.into(),
             wrr: vec![0; templates.len()],
             opened: vec![0; templates.len()],
-            tpl_next: vec![Duration::ZERO; templates.len()],
+            tpl_clock: templates
+                .iter()
+                .map(|t| t.cps.map(|cps| EventClock::new(cps, &t.model)))
+                .collect(),
+            conn_clock: client.as_ref().map_or_else(
+                || EventClock::new(1.0, &TrafficModel::default()),
+                |c| EventClock::new(c.cps, &c.model),
+            ),
             templates,
             listen,
             client,
@@ -1861,7 +1891,6 @@ impl TcpEngine {
             ip_id: 0,
             stats,
             rng: Rng(seed),
-            next_conn_at: Duration::ZERO,
             port_cursor: 0,
             next_timer_scan: Duration::ZERO,
             error: None,
@@ -1899,18 +1928,23 @@ impl TcpEngine {
         self.error.as_deref()
     }
 
-    /// True when the client has opened all its connections and they, and the
-    /// server's, have ended. Never true without a client or with an endless one.
+    /// True when the client has opened all its connections (or its traffic
+    /// model's ramp has ended) and they, and the server's, have ended. Never true without a client or with an endless one.
     pub fn is_done(&self) -> bool {
         let Some(c) = &self.client else {
             return false;
         };
         let all = c.connections > 0 && self.stats.client.started >= c.connections;
-        // Or every template that opens connections has opened all of its own.
-        let each =
-            self.templates.iter().enumerate().all(|(i, t)| {
-                t.weight == 0 || (t.connections > 0 && self.opened[i] >= t.connections)
-            });
+        // Or every template that opens connections has opened all of its own,
+        // or its traffic model's ramp has ended.
+        let each = self.templates.iter().enumerate().all(|(i, t)| {
+            t.weight == 0
+                || (t.connections > 0 && self.opened[i] >= t.connections)
+                || self.tpl_clock[i]
+                    .as_ref()
+                    .unwrap_or(&self.conn_clock)
+                    .ended()
+        });
         (all || each) && self.conns.values().all(|k| k.state == State::TimeWait)
     }
 
@@ -2077,8 +2111,10 @@ impl TcpEngine {
         }
         if !self.started {
             self.started = true;
-            self.next_conn_at = now;
-            self.tpl_next.fill(now);
+            self.conn_clock.start(now);
+            for clock in self.tpl_clock.iter_mut().flatten() {
+                clock.start(now);
+            }
         }
         let timeout = self.shared[0].options.arp_timeout;
         self.error = hosts::resolve(&mut self.hosts, &mut self.out, now, timeout);
@@ -2131,7 +2167,6 @@ impl TcpEngine {
         if !host.resolved() {
             return;
         }
-        let interval = Duration::from_secs_f64(1.0 / client.cps);
         let ep = host.ep.clone();
         let (connections, concurrency) = (client.connections, client.concurrency);
         let ports = client.source_ports.clone();
@@ -2143,21 +2178,24 @@ impl TcpEngine {
 
         // Templates with their own rate, each on its own schedule.
         for tpl in 0..self.templates.len() {
-            let Some(cps) = self.templates[tpl].cps else {
-                continue;
-            };
-            let every = Duration::from_secs_f64(1.0 / cps);
             let mut opened = 0;
-            while self.tpl_next[tpl] <= now && opened < 256 && !self.template_exhausted(tpl) {
+            while self.tpl_clock[tpl].as_ref().is_some_and(|c| c.due(now))
+                && opened < 256
+                && !self.template_exhausted(tpl)
+            {
                 if !room(self) || !self.template_ready(tpl) {
                     // Do not save up connections while at a limit.
-                    self.tpl_next[tpl] = self.tpl_next[tpl].max(now.saturating_sub(every));
+                    if let Some(c) = &mut self.tpl_clock[tpl] {
+                        c.hold(now);
+                    }
                     break;
                 }
                 if !self.open_one(tpl, &ep, &ports, now) {
                     break;
                 }
-                self.tpl_next[tpl] += every;
+                if let Some(c) = &mut self.tpl_clock[tpl] {
+                    c.advance();
+                }
                 opened += 1;
             }
         }
@@ -2170,7 +2208,7 @@ impl TcpEngine {
             return;
         }
         let mut opened = 0;
-        while self.next_conn_at <= now && opened < 256 {
+        while self.conn_clock.due(now) && opened < 256 {
             if connections > 0 && self.stats.client.started >= connections {
                 return;
             }
@@ -2184,7 +2222,7 @@ impl TcpEngine {
                     return;
                 }
                 // Do not save up connections while at the limit.
-                self.next_conn_at = self.next_conn_at.max(now.saturating_sub(interval));
+                self.conn_clock.hold(now);
                 return;
             }
             let tpl = self.pick_template(&ready);
@@ -2193,7 +2231,7 @@ impl TcpEngine {
                 self.unpick_template(tpl, &ready);
                 return;
             }
-            self.next_conn_at += interval;
+            self.conn_clock.advance();
             opened += 1;
         }
     }

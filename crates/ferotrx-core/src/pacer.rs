@@ -2,7 +2,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
-use crate::{Error, Result};
+use crate::{Error, Result, Schedule, TrafficModel};
 
 /// How fast a capture is replayed.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -115,12 +115,16 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
 /// Computes when each packet should be sent, as an offset from the start of the replay.
 ///
 /// The pacer is pure arithmetic, with no clock, so it is easy to test and reuse
-/// in other schedulers.
+/// in other schedulers. With a [`TrafficModel`] (see [`with_model`](Self::with_model))
+/// packets arrive in bursts, as a Poisson process or along a ramp around the rate.
 #[derive(Clone, Debug)]
 pub struct Pacer {
     rate: Rate,
     packets: u64,
     bits: u128,
+    /// The schedule of a non-steady model, for pps and Mbit/s rates.
+    schedule: Option<Schedule>,
+    ended: bool,
 }
 
 impl Pacer {
@@ -129,6 +133,37 @@ impl Pacer {
             rate,
             packets: 0,
             bits: 0,
+            schedule: None,
+            ended: false,
+        }
+    }
+
+    /// A pacer whose packets follow `model` around `rate`. Models need a
+    /// packet or bit rate; see [`check_model`](Self::check_model).
+    pub fn with_model(rate: Rate, model: &TrafficModel) -> Result<Self> {
+        Self::check_model(rate, model)?;
+        let mut p = Self::new(rate);
+        p.schedule = match rate {
+            _ if model.is_steady() => None,
+            Rate::Pps(pps) => Some(model.schedule(pps)),
+            Rate::Mbps(mbps) => Some(model.schedule(mbps * 1e6)),
+            Rate::Original { .. } | Rate::TopSpeed => None,
+        };
+        Ok(p)
+    }
+
+    /// Checks that `model` fits `rate`: anything but the steady model needs a
+    /// packet or bit rate, since a capture's own timing or top speed has no
+    /// mean rate to shape.
+    pub fn check_model(rate: Rate, model: &TrafficModel) -> Result<()> {
+        model.validate()?;
+        if model.is_steady() || matches!(rate, Rate::Pps(_) | Rate::Mbps(_)) {
+            Ok(())
+        } else {
+            Err(Error::InvalidRate(format!(
+                "traffic model '{model}' needs a packet or bit rate (such as 1000pps or \
+                 100mbps), not {rate}"
+            )))
         }
     }
 
@@ -136,15 +171,33 @@ impl Pacer {
         self.rate
     }
 
+    /// True once a traffic model's shape has run out: the stream is over.
+    pub fn ended(&self) -> bool {
+        self.ended
+    }
+
     /// Returns the send deadline of the next packet, or `None` to send it now.
     ///
     /// `capture_offset` is the packet's position on the original timeline, measured
     /// from the first packet of the replay; only [`Rate::Original`] uses it.
+    /// When a model's shape has ended, returns `None` and [`ended`](Self::ended)
+    /// turns true.
     pub fn next_deadline(
         &mut self,
         capture_offset: Duration,
         len_bytes: usize,
     ) -> Option<Duration> {
+        if let Some(schedule) = &mut self.schedule {
+            let units = match self.rate {
+                Rate::Mbps(_) => len_bytes as f64 * 8.0,
+                _ => 1.0,
+            };
+            let at = schedule.next(units);
+            self.ended = at.is_none();
+            self.packets += 1;
+            self.bits += len_bytes as u128 * 8;
+            return at;
+        }
         let deadline = match self.rate {
             Rate::Original { multiplier } => Some(capture_offset.div_f64(multiplier)),
             Rate::Pps(pps) => Some(Duration::from_secs_f64(self.packets as f64 / pps)),
@@ -206,6 +259,29 @@ mod tests {
     fn topspeed_has_no_deadline() {
         let mut p = Pacer::new(Rate::TopSpeed);
         assert_eq!(p.next_deadline(Duration::from_secs(5), 64), None);
+    }
+
+    #[test]
+    fn models_shape_pps_and_mbps() {
+        let model: TrafficModel = "burst=2".parse().unwrap();
+        let mut p = Pacer::with_model(Rate::Pps(100.0), &model).unwrap();
+        let d: Vec<_> = (0..4)
+            .map(|_| p.next_deadline(Duration::ZERO, 64).unwrap())
+            .collect();
+        assert_eq!(d[0], d[1]);
+        assert_eq!(d[2], Duration::from_millis(20));
+        // 1 Mbit/s, ramping off after 1 s: 125-byte packets, 1000 per second
+        // at 100%, about 1000 / 2 during the ramp down.
+        let model: TrafficModel = "ramp_up=0s,hold=0s,ramp_down=1s".parse().unwrap();
+        let mut p = Pacer::with_model(Rate::Mbps(1.0), &model).unwrap();
+        let mut n = 0;
+        while p.next_deadline(Duration::ZERO, 125).is_some() {
+            n += 1;
+        }
+        assert!(p.ended());
+        assert_eq!(n, 501);
+        assert!(Pacer::with_model(Rate::TopSpeed, &model).is_err());
+        assert!(Pacer::with_model(Rate::TopSpeed, &TrafficModel::default()).is_ok());
     }
 
     #[test]

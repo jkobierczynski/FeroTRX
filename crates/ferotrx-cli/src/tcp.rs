@@ -65,6 +65,12 @@ pub struct TcpArgs {
     #[arg(long)]
     cps: Option<f64>,
 
+    /// How new connections spread around the rate (see `ferotrx replay --help`):
+    /// poisson, burst=N, ramp_up=10s,hold=1m,ramp_down=10s, at=TIME:RATE, seed=N.
+    /// Replaces the profile's top-level model.
+    #[arg(long, value_name = "MODEL")]
+    model: Option<ferotrx_core::TrafficModel>,
+
     /// Connections to open in all; 0 keeps going until Ctrl-C or --duration
     /// (default 1, or the profile's).
     #[arg(short = 'n', long)]
@@ -356,6 +362,9 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
     }
     args.hosts.apply(&mut profile.client, &mut profile.server)?;
     set(&mut profile.cps, args.cps);
+    if let Some(m) = args.model.clone() {
+        profile.model = m;
+    }
     set(&mut profile.connections, args.connections);
     set(&mut profile.concurrency, args.concurrency);
     opt(&mut profile.connect, args.connect);
@@ -459,7 +468,12 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
             } else {
                 format!("{} connections", profile.connections)
             };
-            eprintln!("opening {n} at {} per second", profile.cps);
+            let model = if profile.model.is_steady() {
+                String::new()
+            } else {
+                format!(", model {}", profile.model)
+            };
+            eprintln!("opening {n} at {} per second{model}", profile.cps);
         } else {
             eprintln!("server only: waiting for connections until Ctrl-C or --duration");
         }
@@ -486,6 +500,9 @@ fn template_line(t: &TcpTemplateSpec, i: usize) -> String {
         Some(cps) => format!("template {} ({cps} per second of its own)", t.name(i)),
         None => format!("template {} (weight {})", t.name(i), t.weight),
     };
+    if !t.model.is_steady() {
+        line.push_str(&format!(", model {}", t.model));
+    }
     if let Some(n) = t.connections {
         line.push_str(&format!(", {n} connections"));
     }

@@ -38,11 +38,12 @@ license-file = ["../../LICENSE", "0"]
 extended-description = """\
 FeroTRX replays pcap and pcapng captures at a controlled rate, rewrites them \
 on the way, varies fields from packet to packet, builds packets from scratch, \
-runs several streams at once from a profile, replays TCP sessions \
+runs several streams at once from a profile, shapes them over time \
+(Poisson arrivals, bursts, ramps), replays TCP sessions \
 statefully, plays stateful UDP transactions, measures loss and latency on the \
 receive side, benchmarks devices the RFC 2544 way (throughput, latency, frame \
-loss, back-to-back, IMIX) and runs regression scenarios with JUnit reports. \
-Sends through libpcap or AF_XDP."""
+loss, back-to-back, IMIX), runs regression scenarios with JUnit reports and \
+checks profile files. Sends through libpcap or AF_XDP."""
 section = "net"
 priority = "optional"
 depends = "$auto"
