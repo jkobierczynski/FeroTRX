@@ -60,6 +60,11 @@ mod pcap_port {
                 Err(e) => Err(e.into()),
             }
         }
+
+        fn rx_dropped(&mut self) -> Option<u64> {
+            // Frames the kernel had for this capture but no room for.
+            self.capture.stats().ok().map(|s| u64::from(s.dropped))
+        }
     }
 }
 

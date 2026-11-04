@@ -41,6 +41,13 @@ pub trait PacketPort: Send {
     fn split(&mut self, _n: usize) -> Option<Vec<Box<dyn PacketPort>>> {
         None
     }
+
+    /// Frames that reached the port but that it dropped before they could be
+    /// read, such as a capture whose buffer was full; `None` if it cannot
+    /// tell.
+    fn rx_dropped(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 impl<P: PacketPort + ?Sized> PacketPort for Box<P> {
@@ -58,6 +65,9 @@ impl<P: PacketPort + ?Sized> PacketPort for Box<P> {
     }
     fn split(&mut self, n: usize) -> Option<Vec<Box<dyn PacketPort>>> {
         (**self).split(n)
+    }
+    fn rx_dropped(&mut self) -> Option<u64> {
+        (**self).rx_dropped()
     }
 }
 
@@ -148,6 +158,15 @@ impl PacketPort for SharedLane {
             .as_ref()
             .map(|d| format!("{d} (shared by the workers)"))
     }
+
+    fn rx_dropped(&mut self) -> Option<u64> {
+        // Only the reader counts, so the port's drops count once.
+        if self.reader {
+            lock(&self.port).rx_dropped()
+        } else {
+            None
+        }
+    }
 }
 
 type Queue = Arc<Mutex<VecDeque<Vec<u8>>>>;
@@ -221,6 +240,9 @@ pub trait PortEngine: Send {
     /// Queues what goes out when the run ends (lease releases, group
     /// leaves); [`run_engine`] sends it. Nothing by default.
     fn finish(&mut self) {}
+    /// Puts the frames the ports dropped before the engine read them
+    /// ([`PacketPort::rx_dropped`]) in the counters. Nothing by default.
+    fn set_rx_dropped(&mut self, _frames: u64) {}
     fn stats(&self) -> &Self::Stats;
     /// Wraps an error message in the engine's kind of [`Error`].
     fn wrap_error(message: String) -> Error;
@@ -245,6 +267,9 @@ impl PortEngine for TcpEngine {
     }
     fn set_elapsed(&mut self, elapsed: Duration, stopped: bool) {
         TcpEngine::set_elapsed(self, elapsed, stopped)
+    }
+    fn set_rx_dropped(&mut self, frames: u64) {
+        TcpEngine::set_rx_dropped(self, frames)
     }
     fn stats(&self) -> &TcpStats {
         TcpEngine::stats(self)
@@ -353,6 +378,7 @@ where
                 let _ = port.flush();
             }
             engine.set_elapsed(start.elapsed(), stopped && !engine.is_done());
+            engine.set_rx_dropped(ports.iter_mut().filter_map(|p| p.rx_dropped()).sum());
             let stats = engine.stats().clone();
             progress(&stats);
             return Ok(stats);
@@ -360,6 +386,7 @@ where
         if now >= next_progress {
             next_progress = now + interval;
             engine.set_elapsed(now, false);
+            engine.set_rx_dropped(ports.iter_mut().filter_map(|p| p.rx_dropped()).sum());
             progress(engine.stats());
         }
         if !busy {
@@ -775,11 +802,13 @@ where
                 let _ = port.flush();
             }
             engine.set_elapsed(start.elapsed(), stopped && !engine.is_done());
+            engine.set_rx_dropped(ports.iter_mut().filter_map(|p| p.rx_dropped()).sum());
             return Ok(engine.stats().clone());
         }
         if now >= next_progress {
             next_progress = now + interval;
             engine.set_elapsed(now, false);
+            engine.set_rx_dropped(ports.iter_mut().filter_map(|p| p.rx_dropped()).sum());
             let mut live = lock(&shared.live);
             live.parts[k] = engine.stats().clone();
             live.stats = merge_all(&live.parts);

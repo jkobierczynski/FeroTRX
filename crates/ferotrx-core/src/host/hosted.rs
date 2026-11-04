@@ -513,6 +513,13 @@ where
         self.hosts.finish();
     }
 
+    fn set_rx_dropped(&mut self, frames: u64) {
+        if let Some(e) = self.inner.as_mut() {
+            e.set_rx_dropped(frames);
+        }
+        self.refresh();
+    }
+
     fn stats(&self) -> &E::Stats {
         &self.stats
     }

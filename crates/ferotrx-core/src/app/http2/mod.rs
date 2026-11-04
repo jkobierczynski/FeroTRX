@@ -1061,7 +1061,7 @@ struct H2Server {
     requests: BTreeMap<u32, (Option<String>, Option<String>)>,
     /// Answers waiting for their route's delay: when, stream, route, HEAD.
     queue: Vec<(Duration, u32, HttpRoute, bool)>,
-    /// Close once the answers are out (a route said so, or the client went).
+    /// Close once the answers are out (a route said so).
     closing: bool,
     /// The client sent GOAWAY: no GOAWAY back.
     peer_goaway: bool,
@@ -1188,8 +1188,9 @@ impl H2Server {
                     if code != NO_ERROR {
                         cx.protocol_error(format!("GOAWAY {}", error_name(code)));
                     }
-                    // The client is done: close once its streams are answered.
-                    self.closing = true;
+                    // The client is done, but it closes: closing here
+                    // too would race its close_notify and FIN, and the
+                    // kernel would answer what we had not read with a RST.
                     self.peer_goaway = true;
                 }
             }
