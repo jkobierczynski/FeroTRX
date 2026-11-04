@@ -4,7 +4,8 @@
 # examples/lab-tcp.toml, a UDP run of examples/lab-udp-mix.toml and a replay
 # of examples/lab-built-packets.toml (to the router's MAC 02:00:00:00:00:01)
 # on ftrx-lab, then examples/lab-scenario.toml as a scenario run on the server
-# (`scenario.start`), then `lab.stop`. Checks that connections complete and
+# (`scenario.start`), then every other examples/lab-scenario-*.toml, then
+# `lab.stop`. Checks that connections complete and
 # that transactions are answered, through NAT, that every check of the
 # scenario passes, and that the lab is gone after.
 #
@@ -121,6 +122,18 @@ wait_scenario "$id" >"$tmp/scenario.json"
 jq -r '.checks[] | "  " + .state + "  " + .name + ": " + (.report.summary // "")' "$tmp/scenario.json"
 [ "$(jq -r '.report.summary | "\(.passed)/\(.checks)"' "$tmp/scenario.json")" = 6/6 ] ||
     fail "lab-scenario.toml: $(jq -c .report.summary "$tmp/scenario.json")"
+
+# The other lab scenarios, each on the lab it names.
+for f in examples/lab-scenario-*.toml; do
+    echo "== scenario: $f"
+    id=$(ctl call scenario.start "{\"path\": \"$f\"}" --json | jq .id)
+    [ "$id" != null ] || { fail "$f did not start"; continue; }
+    wait_scenario "$id" >"$tmp/scenario.json"
+    jq -r '.checks[] | "  " + .state + "  " + .name + ": " + (.report.summary // "") + ((.report.error // "") | if . == "" then "" else " (" + . + ")" end)' "$tmp/scenario.json"
+    jq -r '.checks[].report.conditions[]? | select(.pass | not) | "    not met: " + .condition + " (was " + (.actual | tostring) + ")"' "$tmp/scenario.json"
+    jq -e '.report.summary | .passed == .checks' "$tmp/scenario.json" >/dev/null ||
+        fail "$f: $(jq -c .report.summary "$tmp/scenario.json")"
+done
 
 if [ "${BLOCK:-}" = 1 ]; then
     echo "== lab with TCP port 80 reset"

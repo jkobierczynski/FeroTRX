@@ -1,5 +1,6 @@
 //! Running scenario checks on real interfaces: [`LabRunner`].
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -13,15 +14,33 @@ use ferotrx_core::{
     SinkError, TcpProfile, TcpRunConfig, UdpProfile, LINKTYPE_ETHERNET,
 };
 
-use crate::controller::ReceiverOpener;
+use crate::controller::{ReceiverOpener, Run};
 use crate::protocol::{RunState, ScenarioCheckInfo, ScenarioInfo, ScenarioRunInfo};
+use crate::tcp::TcpRun;
 use crate::tcp::{start_tcp_with, PortOpener};
 use crate::udp::start_udp_with;
+use crate::udp::UdpRun;
 
 /// Opens an interface to send stateless traffic on: its name, the profile's
 /// `[output]` settings and the link type.
 pub type SinkOpener =
     dyn Fn(&str, &SendSettings, u32) -> Result<Box<dyn PacketSink + Send>, SinkError> + Send + Sync;
+
+/// The run lists of a control server: a scenario's checks show up there as
+/// TCP, UDP and stream runs while they go, in its statistics and charts.
+#[derive(Clone)]
+pub(crate) struct RunLists {
+    pub runs: Arc<Mutex<BTreeMap<u64, Arc<Run>>>>,
+    pub tcp: Arc<Mutex<BTreeMap<u64, Arc<TcpRun>>>>,
+    pub udp: Arc<Mutex<BTreeMap<u64, Arc<UdpRun>>>>,
+    pub next: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl RunLists {
+    fn id(&self) -> u64 {
+        self.next.fetch_add(1, Ordering::Relaxed)
+    }
+}
 
 /// What [`LabRunner::with_progress`] calls: the check, and a line on its counters.
 type ProgressFn = dyn FnMut(&Check, &str) + Send;
@@ -37,6 +56,7 @@ pub struct LabRunner {
     open_receiver: Box<ReceiverOpener>,
     open_sink: Box<SinkOpener>,
     progress: Option<Box<ProgressFn>>,
+    lists: Option<RunLists>,
 }
 
 impl Default for LabRunner {
@@ -70,7 +90,18 @@ impl LabRunner {
             open_receiver: Box::new(ferotrx_io::open_receiver),
             open_sink: Box::new(open_interface),
             progress: None,
+            lists: None,
         }
+    }
+
+    /// Lists every run in `lists` too, where the control API shows it.
+    pub(crate) fn with_runs(mut self, lists: RunLists) -> Self {
+        self.lists = Some(lists);
+        self
+    }
+
+    fn next_id(&self) -> u64 {
+        self.lists.as_ref().map_or(0, RunLists::id)
     }
 
     /// Opens the ports of TCP and UDP checks with `open`.
@@ -150,7 +181,18 @@ impl LabRunner {
         };
         let started = start_tcp_with(p, check.iface.as_deref(), config, &*self.open_port)
             .map_err(|e| e.to_string())?;
-        let job = started.job;
+        let run = Arc::new(TcpRun {
+            id: self.next_id(),
+            program: format!("scenario: {}", check.name),
+            interfaces: started.interfaces,
+            ports: started.port_details,
+            job: started.job,
+            stopped_by_request: Default::default(),
+        });
+        if let Some(l) = &self.lists {
+            lock(&l.tcp).insert(run.id, run.clone());
+        }
+        let job = &run.job;
         self.watch(
             check,
             stop,
@@ -158,7 +200,10 @@ impl LabRunner {
             || job.stop(),
             || tcp_summary(&job.stats()),
         );
-        let stats = job.join().map_err(|e| e.to_string())?;
+        if let Some(e) = job.error() {
+            return Err(e);
+        }
+        let stats = job.stats();
         Ok(CheckRun {
             metrics: tcp_metrics(&stats),
             summary: tcp_summary(&stats),
@@ -177,7 +222,18 @@ impl LabRunner {
         };
         let started = start_udp_with(p, check.iface.as_deref(), config, &*self.open_port)
             .map_err(|e| e.to_string())?;
-        let job = started.job;
+        let run = Arc::new(UdpRun {
+            id: self.next_id(),
+            program: format!("scenario: {}", check.name),
+            interfaces: started.interfaces,
+            ports: started.port_details,
+            job: started.job,
+            stopped_by_request: Default::default(),
+        });
+        if let Some(l) = &self.lists {
+            lock(&l.udp).insert(run.id, run.clone());
+        }
+        let job = &run.job;
         self.watch(
             check,
             stop,
@@ -185,7 +241,10 @@ impl LabRunner {
             || job.stop(),
             || udp_summary(&job.stats()),
         );
-        let stats = job.join().map_err(|e| e.to_string())?;
+        if let Some(e) = job.error() {
+            return Err(e);
+        }
+        let stats = job.stats();
         Ok(CheckRun {
             metrics: udp_metrics(&stats),
             summary: udp_summary(&stats),
@@ -237,6 +296,18 @@ impl LabRunner {
             }),
         )
         .map_err(|e| e.to_string())?;
+        let run = Arc::new(Run {
+            id: self.next_id(),
+            profile: check.name.clone(),
+            output: format!("{iface} (scenario: {})", check.name),
+            rx_iface: Some(rx.clone()),
+            job,
+            stopped_by_request: Default::default(),
+        });
+        if let Some(l) = &self.lists {
+            lock(&l.runs).insert(run.id, run.clone());
+        }
+        let job = &run.job;
         self.watch(
             check,
             stop,
@@ -250,7 +321,10 @@ impl LabRunner {
         );
         let rx_stats = job.rx_stats();
         let flows = job.flow_reports();
-        let stats = job.join().map_err(|e| e.to_string())?;
+        if let ferotrx_core::JobState::Failed(e) = job.state() {
+            return Err(e);
+        }
+        let stats = job.stats();
         let metrics = traffic_metrics(&stats, rx_stats.as_ref(), &flows);
         let summary = traffic_summary(&metrics);
         Ok(CheckRun { metrics, summary })
