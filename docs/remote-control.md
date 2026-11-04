@@ -70,6 +70,9 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 | `rx.stop` | `id`, `wait` (default true) | the receiver, final counters |
 | `rx.stats`, `rx.remove` | `id` | the receiver |
 | `rx.list` | | every receiver |
+| `lab.start` | optional `ipv6`, `nat`, `loss`, `delay`, `block_tcp`, `block_udp`, `dhcp`, `queues` | the lab router, built (server started with `--lab`; see [lab scripts](lab-scripts.md#a-standing-lab-router)) |
+| `lab.stop` | | the lab router, removed |
+| `lab.get` | | the lab router, or why there can be none |
 | `stats.subscribe` | optional `id`, `interval_ms` (default 1000) | `{subscription}` |
 | `stats.unsubscribe` | `subscription` | `true` |
 

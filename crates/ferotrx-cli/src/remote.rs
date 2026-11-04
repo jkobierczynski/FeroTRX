@@ -95,6 +95,12 @@ pub struct ServeArgs {
     #[arg(long)]
     insecure: bool,
 
+    /// Let operators build a lab router on this machine from the GUI or
+    /// `ferotrx ctl` (`lab.start`: a network namespace routing VLAN 10 to
+    /// VLAN 20 on the link ftrx-lab, see `ferotrx lab`). Linux, as root.
+    #[arg(long)]
+    lab: bool,
+
     /// Load this profile at start, under its file name (or NAME=PATH). Repeatable.
     #[arg(short, long = "profile", value_name = "[NAME=]PATH")]
     profiles: Vec<String>,
@@ -156,7 +162,14 @@ pub fn cmd_serve(args: ServeArgs) -> Result<()> {
     let tls_on = config.tls.is_some();
     let has_tokens = !config.tokens.is_empty();
 
-    let controller = Controller::new().with_file_policy(files.clone());
+    let controller = Controller::new()
+        .with_file_policy(files.clone())
+        .with_lab(args.lab);
+    if args.lab {
+        if let Some(why) = ferotrx_io::lab_unavailable() {
+            eprintln!("warning: --lab: {why}");
+        }
+    }
     for p in &args.profiles {
         let (name, path) = match p.split_once('=') {
             Some((n, path)) => (n.to_string(), PathBuf::from(path)),
@@ -191,6 +204,7 @@ pub fn cmd_serve(args: ServeArgs) -> Result<()> {
         ctrlc::set_handler(move || {
             eprintln!("stopping runs");
             controller.stop_all();
+            controller.lab_stop();
             std::process::exit(0);
         })
         .context("cannot install Ctrl-C handler")?;

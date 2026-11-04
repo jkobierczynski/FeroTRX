@@ -65,6 +65,18 @@ The lines between the stream table and the editor, the layers and the
 packet view, the decode tree and the bytes, and the capture list and the
 packet can all be dragged.
 
+## The lab router
+
+A server started with `--lab` (Linux, as root) can build a router for the
+lab examples on its own machine: **Lab router…** under the server opens it.
+The router is in a network namespace, reached on the link `ftrx-lab`, and
+routes and masquerades between VLAN 10 (clients, 192.168.10.0/24) and VLAN
+20 (servers, 192.168.20.0/24), as the `examples/lab-*.toml` profiles expect.
+Options add loss, delay, ports the firewall refuses (to see a test fail on
+purpose) and DHCP on VLAN 10. Once it runs, the port `ftrx-lab` is selected
+and is the interface of the Stateful tab: open `examples/lab-udp-mix.toml`
+there and press Start. Details: [lab scripts](lab-scripts.md#a-standing-lab-router).
+
 ## Ports and their settings
 
 A port's streams are sent together, as one profile named `gui-<port>`

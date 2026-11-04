@@ -41,10 +41,14 @@ pub use xdp::{XdpPort, XdpPortConfig};
 mod dpdk;
 
 mod host;
+mod lab;
 mod port;
 #[cfg(feature = "dpdk")]
 pub use dpdk::{DpdkConfig, DpdkPort, DpdkSink};
 pub use host::{describe_host, describe_interface};
+pub use lab::{
+    lab_unavailable, remove_lab, Lab, LabConfig, LAB_INTERFACE, LAB_NAMESPACE, LAB_ROUTER_MAC,
+};
 pub use port::{interface_mac, open_port, open_port_with, open_receiver, PortSettings};
 #[cfg(feature = "pcap")]
 pub use port::{PcapPort, PcapReceiver};
@@ -160,9 +164,11 @@ impl Output {
                         send.queue = Some(u16::try_from(queue).map_err(|_| "queue out of range")?);
                     }
                     let mut opened = open_interface(name, &send).map_err(|e| {
-                        if send.backend() == Backend::AfXdp {
+                        // A missing interface is not about queues.
+                        if send.backend() == Backend::AfXdp && interface_exists(name) {
                             format!(
-                                "worker {k} sends on queue {}: {e} (each AF_XDP worker needs                                  a queue of its own; see `ethtool -L {name}`)",
+                                "worker {k} sends on queue {}: {e} (each AF_XDP worker needs \
+                                 a queue of its own; see `ethtool -l {name}`)",
                                 send.queue()
                             )
                             .into()
@@ -350,6 +356,15 @@ mod interface {
 
 #[cfg(feature = "pcap")]
 pub use interface::{list_interfaces, InterfaceSink};
+
+/// True when this machine (this network namespace) has an interface `name`.
+fn interface_exists(name: &str) -> bool {
+    if cfg!(target_os = "linux") {
+        Path::new("/sys/class/net").join(name).exists()
+    } else {
+        true
+    }
+}
 
 #[cfg(test)]
 mod tests {

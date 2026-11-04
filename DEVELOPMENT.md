@@ -122,6 +122,12 @@ checked against 0.4.0. Each issue has the full checklist.
       `ferotrx-gui`, a client of the control API with ports, a stream and
       packet editor, captures, TCP/UDP runs and live statistics; a protocol
       editor registry for application layers and packet editing to come
+- [x] **GUI from the first lab session**: draggable splits, file dialogs,
+      profile-relative paths, and a lab router the control server builds
+      (`serve --lab`, `lab.*`, `ferotrx lab up`) so the lab examples run on
+      one machine
+- [ ] **Scenarios in the GUI**: prepare a scenario locally, run it on the
+      server (`scenario.*` methods), see its report
 - [ ] **Distributed agents**, [#21](https://github.com/jkobierczynski/FeroTRX/issues/21)
 
 **Not planned for now:** a packet-analysis suite (use Wireshark), a long

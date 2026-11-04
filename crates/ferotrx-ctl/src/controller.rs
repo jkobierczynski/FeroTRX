@@ -136,6 +136,9 @@ pub struct Controller {
     files: FilePolicy,
     open_port: Box<PortOpener>,
     open_receiver: Box<ReceiverOpener>,
+    /// Whether `lab.start` may build a lab, and the one running.
+    lab_allowed: bool,
+    lab: Mutex<Option<ferotrx_io::Lab>>,
 }
 
 struct RxRun {
@@ -175,7 +178,72 @@ impl Controller {
             files: FilePolicy::unrestricted(),
             open_port: Box::new(ferotrx_io::open_port_with),
             open_receiver: Box::new(ferotrx_io::open_receiver),
+            lab_allowed: false,
+            lab: Mutex::default(),
         }
+    }
+
+    /// Lets clients with the operator role build a lab router on this
+    /// machine (`lab.start`, see [`ferotrx_io::Lab`]). Off unless asked
+    /// for: a lab changes the machine's network (a namespace and a link).
+    pub fn with_lab(mut self, allowed: bool) -> Self {
+        self.lab_allowed = allowed;
+        self
+    }
+
+    /// Why `lab.start` is refused, or `None`.
+    fn lab_unavailable(&self) -> Option<String> {
+        if !self.lab_allowed {
+            return Some("labs are off on this server: start it with ferotrx serve --lab".into());
+        }
+        ferotrx_io::lab_unavailable()
+    }
+
+    pub fn lab_info(&self) -> LabInfo {
+        let lab = lock(&self.lab);
+        let unavailable = self.lab_unavailable();
+        match lab.as_ref() {
+            Some(l) => lab_info(l, unavailable),
+            None => LabInfo {
+                unavailable,
+                interface: ferotrx_io::LAB_INTERFACE.into(),
+                namespace: ferotrx_io::LAB_NAMESPACE.into(),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Builds the lab, replacing a running one.
+    pub fn lab_start(&self, p: LabStartParams) -> Result<LabInfo, RpcError> {
+        if let Some(why) = self.lab_unavailable() {
+            return Err(RpcError::failed(why));
+        }
+        let d = ferotrx_io::LabConfig::default();
+        let config = ferotrx_io::LabConfig {
+            ipv6: p.ipv6.unwrap_or(d.ipv6),
+            nat: p.nat.unwrap_or(d.nat),
+            loss: p.loss.unwrap_or(0.0),
+            delay: p.delay.clone().unwrap_or_default(),
+            block_tcp: p.block_tcp.clone(),
+            block_udp: p.block_udp.clone(),
+            dhcp: p.dhcp,
+            queues: p.queues.unwrap_or(1).clamp(1, 64),
+        };
+        let mut lab = lock(&self.lab);
+        if let Some(old) = lab.take() {
+            old.down();
+        }
+        let l = ferotrx_io::Lab::up(config).map_err(|e| RpcError::failed(format!("lab: {e}")))?;
+        let info = lab_info(&l, None);
+        *lab = Some(l);
+        Ok(info)
+    }
+
+    pub fn lab_stop(&self) -> LabInfo {
+        if let Some(l) = lock(&self.lab).take() {
+            l.down();
+        }
+        self.lab_info()
     }
 
     /// Opens the interfaces runs receive on with `open` instead of
@@ -300,6 +368,9 @@ impl Controller {
                 lock(&self.rx_runs).remove(&p.id);
                 to_value(info)
             }
+            "lab.get" => to_value(self.lab_info()),
+            "lab.start" => to_value(self.lab_start(parse(params)?)?),
+            "lab.stop" => to_value(self.lab_stop()),
             _ => Err(RpcError::new(
                 RpcError::METHOD_NOT_FOUND,
                 format!("unknown method '{method}'"),
@@ -321,6 +392,7 @@ impl Controller {
             tls: false,
             role: None,
             user: None,
+            lab: self.lab_unavailable().is_none(),
         }
     }
 
@@ -945,4 +1017,88 @@ pub(crate) fn to_value<T: Serialize>(v: T) -> Result<Value, RpcError> {
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn lab_info(l: &ferotrx_io::Lab, unavailable: Option<String>) -> LabInfo {
+    let c = l.config();
+    let mut summary = vec![
+        format!(
+            "send on {}: clients on VLAN 10, 192.168.10.0/24, gateway 192.168.10.1",
+            l.interface()
+        ),
+        "servers on VLAN 20, 192.168.20.0/24, gateway 192.168.20.1".to_string(),
+        format!(
+            "router MAC {} on both VLANs (mac_dst for replayed streams)",
+            ferotrx_io::LAB_ROUTER_MAC
+        ),
+    ];
+    if c.ipv6 {
+        summary
+            .push("IPv6: fd00:10::/64 (gateway fd00:10::1) and fd00:20::/64 (fd00:20::1)".into());
+    }
+    let mut opts = Vec::new();
+    if c.nat {
+        opts.push("NAT towards the servers".to_string());
+    }
+    if c.loss > 0.0 {
+        opts.push(format!("drops {:.1}%", c.loss * 100.0));
+    }
+    if !c.delay.is_empty() {
+        opts.push(format!("delay {}", c.delay));
+    }
+    if !c.block_tcp.is_empty() {
+        opts.push(format!("resets TCP to {:?}", c.block_tcp));
+    }
+    if !c.block_udp.is_empty() {
+        opts.push(format!("drops UDP to {:?}", c.block_udp));
+    }
+    if c.dhcp {
+        opts.push("DHCP on VLAN 10 (.200-.250)".into());
+    }
+    if c.queues > 1 {
+        opts.push(format!("{} queues on the link", c.queues));
+    }
+    if !opts.is_empty() {
+        summary.push(format!("router: {}", opts.join(", ")));
+    }
+    LabInfo {
+        running: true,
+        interface: l.interface().into(),
+        namespace: ferotrx_io::LAB_NAMESPACE.into(),
+        summary,
+        notes: l.notes().to_vec(),
+        config: LabStartParams {
+            ipv6: Some(c.ipv6),
+            nat: Some(c.nat),
+            loss: (c.loss > 0.0).then_some(c.loss),
+            delay: (!c.delay.is_empty()).then(|| c.delay.clone()),
+            block_tcp: c.block_tcp.clone(),
+            block_udp: c.block_udp.clone(),
+            dhcp: c.dhcp,
+            queues: Some(c.queues),
+        },
+        unavailable,
+    }
+}
+
+#[cfg(test)]
+mod lab_tests {
+    use super::*;
+
+    #[test]
+    fn labs_are_off_unless_asked_for() {
+        let c = Controller::new();
+        assert!(!c.info().lab);
+        let e = c.call("lab.start", serde_json::json!({})).unwrap_err();
+        assert!(e.message.contains("--lab"), "{}", e.message);
+        let info: LabInfo =
+            serde_json::from_value(c.call("lab.get", Value::Null).unwrap()).unwrap();
+        assert!(!info.running);
+        assert_eq!(info.interface, "ftrx-lab");
+        assert!(info.unavailable.is_some());
+        let bad = c.call("lab.start", serde_json::json!({"colour": "red"}));
+        assert!(bad.is_err());
+        assert_eq!(Role::required_for("lab.get"), Some(Role::Read));
+        assert_eq!(Role::required_for("lab.start"), Some(Role::Operator));
+    }
 }
