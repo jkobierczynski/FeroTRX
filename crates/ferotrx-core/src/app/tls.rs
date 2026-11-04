@@ -356,6 +356,7 @@ impl AppProtocol for Tls {
         match self.inner.name() {
             "http" => 443,
             "dns" => 853,
+            "mqtt" => 8883,
             _ => self.inner.default_port(),
         }
     }

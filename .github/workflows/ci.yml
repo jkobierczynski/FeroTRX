@@ -217,12 +217,13 @@ jobs:
       # against a real one (python3 -m http.server); then HTTPS and DNS over
       # TLS (TLS 1.2 and 1.3, client certificates, refused handshakes), curl
       # against the emulated HTTPS server and the emulated client against
-      # openssl s_server; with 3% loss, over IPv6, and over AF_XDP with two
-      # workers.
+      # openssl s_server; MQTT between emulated ends, mosquitto_pub/sub
+      # against the emulated broker and the emulated clients against
+      # mosquitto; with 3% loss, over IPv6, and over AF_XDP with two workers.
       - name: Application protocols through a NAT router (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get install -y ethtool curl openssl
+          sudo apt-get install -y ethtool curl openssl mosquitto mosquitto-clients
           cargo build -p ferotrx-cli
           sudo modprobe 8021q || true
           sudo scripts/app-netns.sh ./target/debug/ferotrx
