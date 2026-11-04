@@ -71,7 +71,11 @@ done in 19.980 s: 17012 frames (7314720 bytes) sent, 17012 (7268504 bytes) recei
 * **Checks.** Each end compares every byte it receives with the capture.
   The summary counts completed, reset, timed out and mismatched connections and
   retransmits per side, and the command exits with an error if any connection
-  failed or carried other bytes, so it can gate a test.
+  failed or carried other bytes, so it can gate a test. When the first line
+  ends with `N dropped here before they were read`, the capture on this
+  machine overflowed (libpcap's buffer, 32 MB per port): those frames reached
+  the interface and the retransmits that follow are not network loss. A
+  faster backend (`-B af_xdp`) or fewer connections at once avoids it.
 
 * **IPv6.** Give IPv6 addresses (`--client-ip fd00:10::100/64 --client-gw
   fd00:10::1`, `--connect '[fd00:20::50]:80'`; the prefix defaults to /64) and

@@ -589,13 +589,21 @@ fn progress_line(s: &TcpStats) -> String {
 
 fn print_summary(s: &TcpStats) {
     eprintln!(
-        "{} in {:.3} s: {} frames ({} bytes) sent, {} ({} bytes) received",
+        "{} in {:.3} s: {} frames ({} bytes) sent, {} ({} bytes) received{}",
         if s.stopped { "stopped" } else { "done" },
         s.elapsed.as_secs_f64(),
         s.tx_packets,
         s.tx_bytes,
         s.rx_packets,
-        s.rx_bytes
+        s.rx_bytes,
+        if s.rx_dropped > 0 {
+            format!(
+                "; {} dropped here before they were read (capture buffer full; not network loss)",
+                s.rx_dropped
+            )
+        } else {
+            String::new()
+        }
     );
     for (what, side) in [("client", &s.client), ("server", &s.server)] {
         if side.started == 0 && side.payload_rx == 0 {

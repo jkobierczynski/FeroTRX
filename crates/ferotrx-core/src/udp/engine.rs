@@ -354,6 +354,9 @@ pub struct UdpStats {
     pub tx_bytes: u64,
     pub rx_packets: u64,
     pub rx_bytes: u64,
+    /// Frames the ports dropped before the engine could read them (a full
+    /// capture buffer): lost on this machine, not on the network.
+    pub rx_dropped: u64,
     pub elapsed: Duration,
     /// True if the run was stopped or hit its duration before the client finished.
     pub stopped: bool,
@@ -1068,6 +1071,11 @@ impl UdpEngine {
         self.stats.stopped = stopped;
     }
 
+    /// Sets the frames the ports dropped before the engine read them.
+    pub fn set_rx_dropped(&mut self, frames: u64) {
+        self.stats.rx_dropped = frames;
+    }
+
     /// Frames to send, as (port, frame). Empties the queue.
     pub fn take_output(&mut self) -> Vec<(usize, Vec<u8>)> {
         let out = std::mem::take(&mut self.out);
@@ -1553,6 +1561,9 @@ impl PortEngine for UdpEngine {
     }
     fn set_elapsed(&mut self, elapsed: Duration, stopped: bool) {
         UdpEngine::set_elapsed(self, elapsed, stopped)
+    }
+    fn set_rx_dropped(&mut self, frames: u64) {
+        UdpEngine::set_rx_dropped(self, frames)
     }
     fn stats(&self) -> &UdpStats {
         UdpEngine::stats(self)

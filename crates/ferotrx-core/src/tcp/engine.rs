@@ -594,6 +594,9 @@ pub struct TcpStats {
     pub tx_bytes: u64,
     pub rx_packets: u64,
     pub rx_bytes: u64,
+    /// Frames the ports dropped before the engine could read them (a full
+    /// capture buffer): lost on this machine, not on the network.
+    pub rx_dropped: u64,
     pub elapsed: Duration,
     /// True if the run was stopped or hit its duration before the client finished.
     pub stopped: bool,
@@ -2141,6 +2144,11 @@ impl TcpEngine {
     pub fn set_elapsed(&mut self, elapsed: Duration, stopped: bool) {
         self.stats.elapsed = elapsed;
         self.stats.stopped = stopped;
+    }
+
+    /// Sets the frames the ports dropped before the engine read them.
+    pub fn set_rx_dropped(&mut self, frames: u64) {
+        self.stats.rx_dropped = frames;
     }
 
     /// Frames to send, as (port, frame). Empties the queue.
