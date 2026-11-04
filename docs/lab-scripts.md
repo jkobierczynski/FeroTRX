@@ -74,7 +74,14 @@ sudo ferotrx run examples/lab-two-vlans.toml -i ftrx-lab
 
 Every lab example fits it as it is: clients on VLAN 10 with gateway
 192.168.10.1, servers on VLAN 20 with gateway 192.168.20.1, the same with
-`fd00:10::1` and `fd00:20::1` for IPv6. The router tracks connections and
+`fd00:10::1` and `fd00:20::1` for IPv6. The router's MAC is
+`02:00:00:00:00:01` on both VLANs, the `mac_dst` that the replay examples
+(`lab-two-vlans.toml`, `lab-built-packets.toml`) already use. A replayed
+stream is routed when it carries that MAC, VLAN 10 and a source in
+192.168.10.0/24; for it to leave on VLAN 20, the router needs a neighbor for
+the destination, which nothing answers for in a replay:
+`sudo ip netns exec ferotrx-lab ip neigh replace 192.168.20.50 lladdr 02:00:00:00:00:50 dev rt.20`
+(then `--rx ftrx-lab` sees it come back). The router tracks connections and
 drops what conntrack calls INVALID, as a firewall does, and masquerades
 towards the servers. Options:
 

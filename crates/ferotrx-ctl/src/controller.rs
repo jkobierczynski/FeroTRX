@@ -1027,6 +1027,10 @@ fn lab_info(l: &ferotrx_io::Lab, unavailable: Option<String>) -> LabInfo {
             l.interface()
         ),
         "servers on VLAN 20, 192.168.20.0/24, gateway 192.168.20.1".to_string(),
+        format!(
+            "router MAC {} on both VLANs (mac_dst for replayed streams)",
+            ferotrx_io::LAB_ROUTER_MAC
+        ),
     ];
     if c.ipv6 {
         summary

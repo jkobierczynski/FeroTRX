@@ -81,6 +81,10 @@ pub fn cmd_lab(args: LabArgs) -> Result<()> {
             eprintln!("lab up: send on {LAB_INTERFACE}");
             eprintln!("  clients: VLAN 10, 192.168.10.0/24, gateway 192.168.10.1");
             eprintln!("  servers: VLAN 20, 192.168.20.0/24, gateway 192.168.20.1");
+            eprintln!(
+                "  router MAC: {} (mac_dst for replayed streams)",
+                ferotrx_io::LAB_ROUTER_MAC
+            );
             if lab.config().ipv6 {
                 eprintln!("  IPv6: fd00:10::/64 and fd00:20::/64, gateways ::1");
             }

@@ -1,8 +1,9 @@
 #!/bin/sh
 # Plays the lab examples through the lab router the control server builds
 # (`ferotrx serve --lab`, `lab.start`), as the GUI does: a TCP run of
-# examples/lab-tcp.toml and a UDP run of examples/lab-udp-mix.toml on
-# ftrx-lab, then `lab.stop`. Checks that connections complete and that
+# examples/lab-tcp.toml, a UDP run of examples/lab-udp-mix.toml and a replay
+# of examples/lab-built-packets.toml (to the router's MAC 02:00:00:00:00:01)
+# on ftrx-lab, then `lab.stop`. Checks that connections complete and that
 # transactions are answered, through NAT, and that the lab is gone after.
 #
 # Usage: sudo scripts/lab-examples.sh [path/to/ferotrx]
@@ -85,6 +86,17 @@ answered=$(jq .client.answered "$tmp/udp.json")
 [ "$sent" -gt 100 ] || fail "only $sent UDP transactions sent"
 # Transactions still open when the duration ends are not answered.
 [ $((answered * 100)) -ge $((sent * 95)) ] || fail "only $answered of $sent UDP transactions answered"
+
+echo "== replay: examples/lab-built-packets.toml, routed to VLAN 20"
+# Nothing answers ARP for the replay's destination: give the router a neighbor.
+ip netns exec ferotrx-lab ip neigh replace 192.168.20.50 lladdr 02:00:00:00:00:50 dev rt.20
+fwd() { ip netns exec ferotrx-lab cat /sys/class/net/rt.20/statistics/tx_packets; }
+before=$(fwd)
+"$BIN" run examples/lab-built-packets.toml -i ftrx-lab -d 4s >"$tmp/run.log" 2>&1 || { cat "$tmp/run.log" >&2; fail "ferotrx run failed"; }
+routed=$(($(fwd) - before))
+echo "the router sent $routed packets out of rt.20"
+# 50 DNS packets per second from 2 s on, a ping a second: about 100.
+[ "$routed" -ge 60 ] || fail "only $routed replayed packets were routed (router MAC $(ip netns exec ferotrx-lab cat /sys/class/net/ftrxlab-rt/address))"
 
 if [ "${BLOCK:-}" = 1 ]; then
     echo "== lab with TCP port 80 reset"

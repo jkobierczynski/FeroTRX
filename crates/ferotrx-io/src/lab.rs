@@ -28,6 +28,9 @@ use std::process::{Child, Command, Stdio};
 pub const LAB_NAMESPACE: &str = "ferotrx-lab";
 /// The interface to send on, in this namespace.
 pub const LAB_INTERFACE: &str = "ftrx-lab";
+/// The router's MAC on both VLANs: the `02:00:00:00:00:01` that the lab
+/// examples put in `mac_dst` and `eth(dst=...)`, so they need no editing.
+pub const LAB_ROUTER_MAC: &str = "02:00:00:00:00:01";
 const ROUTER_LINK: &str = "ftrxlab-rt";
 
 /// How to build the lab.
@@ -217,6 +220,7 @@ impl Lab {
             &format!("net/ipv6/conf/{LAB_INTERFACE}/disable_ipv6=1"),
         ]);
         run(&["ip", "link", "set", LAB_INTERFACE, "up"])?;
+        r(&["ip", "link", "set", ROUTER_LINK, "address", LAB_ROUTER_MAC])?;
         r(&["ip", "link", "set", ROUTER_LINK, "up"])?;
         // Tags in the frames, not beside them, so that AF_XDP sees them.
         if have("ethtool") {
