@@ -6,7 +6,7 @@ at a controlled rate on Linux, macOS and Windows, rewrites them on the way
 (addresses, ports, VLAN tags), varies fields from packet to packet, builds packets from scratch, runs several streams
 at once from a profile, replays TCP sessions statefully (real connections, both ends emulated, through NAT
 routers and firewalls, many sessions at once from templates), plays stateful UDP
-transactions (DNS lookups, NTP, replayed UDP sessions, with matching, timeouts and retries), measures loss and latency on the receive side, benchmarks devices the RFC 2544 way (throughput, latency, frame loss, back-to-back, with IMIX and other size mixes), all over IPv4 and IPv6, and its engine is a library you can use from your own programs.
+transactions (DNS lookups, NTP, replayed UDP sessions, with matching, timeouts and retries), measures loss and latency on the receive side, benchmarks devices the RFC 2544 way (throughput, latency, frame loss, back-to-back, with IMIX and other size mixes), runs regression scenarios (checks with expected outcomes, pass/fail for CI, comparing runs), all over IPv4 and IPv6, and its engine is a library you can use from your own programs.
 
 ## Status
 
@@ -23,17 +23,18 @@ transactions (DNS lookups, NTP, replayed UDP sessions, with matching, timeouts a
 * **M11, IPv6 everywhere (stateful TCP with neighbor discovery, IPv6 extension headers and neighbor discovery in the packet builder, IPv6 lab scripts):** done (0.4.0).
 * **M12, TCP maturity (window scaling, timestamps and PAWS, SACK, RTT-based timeouts, windows and timeouts in profiles, per-template rates):** done (0.5.0).
 * **M13, secure remote control (TLS and mutual TLS, read-only and operator roles, data directories, limits, audit log, `ferotrx certs`):** done (0.6.0).
-* **M15, stateful UDP and transactions (`ferotrx udp`: DNS, NTP and UDP sessions with matching, timeouts and retries, per-template rates and think time; message timing for TCP):** this release (0.8.0).
-* **M14, benchmarking (`ferotrx bench`: RFC 2544 throughput, latency, frame loss and back-to-back; IMIX and size mixes; run metadata and text reports):** this release (0.8.0).
+* **M14, benchmarking (`ferotrx bench`: RFC 2544 throughput, latency, frame loss and back-to-back; IMIX and size mixes; run metadata and text reports):** done (0.8.0).
+* **M15, stateful UDP and transactions (`ferotrx udp`: DNS, NTP and UDP sessions with matching, timeouts and retries, per-template rates and think time; message timing for TCP):** done (0.8.0).
+* **M16, scenario and regression tests (`ferotrx scenario`: checks with expected outcomes, JSON and JUnit reports, run history and comparisons):** this release (0.9.0).
 
 ## Crates
 
 | Crate | What it is |
 | --- | --- |
-| `ferotrx-core` | The core API: captures, rewrites, streams, profiles, pacing, the scheduler, the stateful TCP and UDP engines and loss and latency counting. No platform code. |
+| `ferotrx-core` | The core API: captures, rewrites, streams, profiles, pacing, the scheduler, the stateful TCP and UDP engines, loss and latency counting, and scenarios (checks, verdicts, reports, comparisons). No platform code. |
 | `ferotrx-packet` | Packet decoding (layers, fields with byte ranges, checksum checks, summaries) and building. No dependencies. |
 | `ferotrx-io` | Packet sinks: network interfaces through libpcap/Npcap, AF_XDP or DPDK; pcap files. Send-and-receive ports for stateful TCP and UDP, receivers for loss and latency. |
-| `ferotrx-ctl` | Remote control: a JSON-RPC server and client to load profiles, start and stop runs, and read live counters. |
+| `ferotrx-ctl` | Remote control: a JSON-RPC server and client to load profiles, start and stop runs, and read live counters; the runner that plays scenario checks on interfaces. |
 | `ferotrx-cli` | The `ferotrx` command line tool. |
 
 ## Install
@@ -961,6 +962,89 @@ counters with response times.
 then runs the DNS server alone and asks it with `dig` (A, AAAA, MX, NXDOMAIN,
 SERVFAIL); `LOSS=0.03`, `MIX=1`, `IPV6=1` and `NO_VLAN=1` work as for the TCP
 script. CI runs all of them.
+
+### Regression scenarios
+
+Did the firewall change break anything? A scenario file lists checks, each a
+TCP, UDP or traffic run FeroTRX already knows (a profile file, or the
+profile's tables inline) with an expected outcome: the sessions complete,
+or they are blocked, plus conditions on what was measured.
+
+```toml
+name = "nat-router"
+attempts = 2                       # run a failing check once more (jittery VMs)
+
+[vars]                             # ${NAME} below and in the profiles; --set NAME=VALUE
+server_net = "192.168.20"
+
+[[check]]
+name = "web through NAT"
+tcp = "lab-tcp.toml"               # every connection completes, byte for byte
+require = ["cps > 10", "timed_out == 0"]
+
+[[check]]
+name = "port 8080 blocked"
+expect = "blocked"                 # no handshake completes
+duration = "3s"
+[check.tcp]
+port = 8080
+# ... [[check.tcp.message]], [check.tcp.client], [check.tcp.server]
+
+[[check]]
+name = "voice stream"
+iface = "c0"                       # sent here, received on rx, with signatures
+rx = "s0"
+duration = "3s"
+require = ["loss_pct < 2%", "latency_avg < 50ms", "rx_mbps > 1Mbit/s"]
+traffic = "lab-latency.toml"
+```
+
+```sh
+ferotrx scenario show examples/scenario-nat.toml         # the checks and their conditions
+sudo ferotrx scenario run examples/scenario-nat.toml --history runs/ --junit nat.xml
+# ... change the router ...
+sudo ferotrx scenario run examples/scenario-nat.toml --history runs/ --baseline last
+ferotrx scenario compare --history runs/
+```
+
+```text
+PASS   web through NAT (tcp, 1.1 s): 50 connections: 50 established, 50 completed; 0 retransmits; 51.0 cps
+PASS   port 8080 blocked (tcp, 3.1 s) expect blocked: 3 connections: 0 established, 0 completed, 3 still open; 8 retransmits; 0.0 cps
+PASS   DNS through NAT (udp, 1.1 s): 100 transactions: 100 answered, 25 with error codes; answers in 0.35ms on average; 101.0 per second
+PASS   NTP blocked (udp, 3.1 s) expect blocked: 3 transactions: 0 answered, 2 timed out, 3 retries; 0.0 per second
+PASS   voice stream (traffic, 3.6 s): 3001 packets sent at 1.841 Mbit/s, 3001 received, 0 lost (0.00%); latency avg 0.02ms, p99 0.08ms
+PASSED: 5 passed, 0 failed, 0 errors, 0 skipped in 12.0 s
+```
+
+and after the router starts resetting TCP to port 80:
+
+```text
+FAIL   web through NAT (tcp, 11.1 s, 2 attempts): 50 connections: 0 established, 0 completed, 50 timed out; 100 retransmits; 0.0 cps
+        not met: completed_pct == 100 (was 0%)
+        not met: cps > 10 (was 0/s)
+        not met: timed_out == 0 (was 50)
+...
+REGRESSED  web through NAT (tcp): pass -> fail
+same       port 8080 blocked (tcp): pass -> pass
+...
+1 regressed, 0 fixed, 0 worse, 0 added, 0 removed, 4 the same (metrics moved by more than 20% shown)
+error: 1 of 5 checks failed
+```
+
+Each check ends as pass, fail, or error (the run could not be made), and
+the command exits with 1 unless all pass. `--report` writes JSON,
+`--junit` JUnit XML for CI test results, `--history DIR` keeps every run,
+and `ferotrx scenario compare` matches two runs check by check: regressed,
+fixed, and metrics that moved by more than `--tolerance` (`--strict` counts
+those as regressions too). Conditions test metrics such as `completed_pct`,
+`retransmits`, `answered_pct`, `response_p99`, `loss_pct`, `latency_p99`,
+`jitter`, `rx_mbps` (`ferotrx scenario metrics` lists them all), with units:
+`1%`, `20ms`, `500us`, `50Mbit/s`, `100/s`.
+[docs/scenarios.md](docs/scenarios.md) has the whole format.
+
+`sudo scripts/scenario-netns.sh` runs [`examples/scenario-nat.toml`](examples/scenario-nat.toml)
+against the namespace router, breaks the router and checks that the second
+run catches it. CI runs it and keeps the reports.
 
 ## Library
 

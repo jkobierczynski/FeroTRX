@@ -1,6 +1,7 @@
 mod bench;
 mod latency;
 mod remote;
+mod scenario;
 mod tcp;
 mod udp;
 
@@ -52,6 +53,10 @@ enum Command {
     /// rate), latency, frame loss and back-to-back bursts, for a list of frame
     /// sizes or mixes such as IMIX; writes a JSON and a text report.
     Bench(bench::BenchArgs),
+    /// Regression tests: run a scenario file's checks (TCP, UDP, streams
+    /// with a receiver) against expected outcomes, write JSON and JUnit
+    /// reports, keep a history and compare runs.
+    Scenario(scenario::ScenarioArgs),
     /// Show what a capture contains.
     Info {
         /// The pcap or pcapng file.
@@ -413,6 +418,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Udp(args) => udp::cmd_udp(args),
         Command::Rx(args) => latency::cmd_rx(args),
         Command::Bench(args) => bench::cmd_bench(args),
+        Command::Scenario(args) => scenario::cmd_scenario(args),
         #[cfg(feature = "pcap")]
         Command::Interfaces => cmd_interfaces(),
         Command::Backends => cmd_backends(),

@@ -160,6 +160,24 @@ jobs:
           sudo modprobe sch_netem || true
           sudo scripts/bench-netns.sh ./target/debug/ferotrx -q
 
+      # A regression scenario (examples/scenario-nat.toml) against the NAT
+      # router: web and DNS pass, TCP 8080 and NTP are blocked, a voice
+      # stream arrives. Then the router resets TCP to port 80, and the second
+      # run, compared with the first, must fail and name that check.
+      - name: Regression scenario through a NAT router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo KEEP="$RUNNER_TEMP/scenario" scripts/scenario-netns.sh ./target/debug/ferotrx
+
+      - name: Scenario reports (Linux)
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: scenario-reports
+          path: ${{ runner.temp }}/scenario
+          if-no-files-found: ignore
+
   # DPDK is an optional feature: build it against Ubuntu's DPDK and send
   # through DPDK's af_packet driver on a veth pair, without hugepages.
   dpdk:

@@ -41,6 +41,10 @@
 //!   binary search on the rate, latency, frame loss, back-to-back bursts) as
 //!   trials of a [`TrialRunner`], such as [`JobTrialRunner`]; [`BenchReport`]
 //!   holds the results and [`RunInfo`] what they were measured on.
+//! * Regression tests: a [`scenario::Scenario`] lists checks (TCP, UDP or
+//!   streams with a receiver) with expected outcomes, such as "completes",
+//!   "is blocked" or `loss_pct < 1%`; [`scenario::run_scenario`] judges each
+//!   and [`scenario::compare`] holds two runs against each other.
 //!
 //! Sinks that talk to real interfaces or files live in the `ferotrx-io` crate,
 //! so this crate has no platform specific code. [`SendSettings`] names the
@@ -93,6 +97,8 @@ mod pacer;
 #[cfg(feature = "profile")]
 mod profile;
 mod replay;
+#[cfg(feature = "profile")]
+pub mod scenario;
 mod send;
 mod sink;
 mod size_mix;

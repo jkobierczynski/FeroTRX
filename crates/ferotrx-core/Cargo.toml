@@ -22,3 +22,6 @@ pcap-file.workspace = true
 thiserror.workspace = true
 serde = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true

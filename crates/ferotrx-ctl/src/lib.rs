@@ -75,6 +75,13 @@
 //! `ferotrx run` uses, so a profile behaves the same from the command line and
 //! from the control API.
 //!
+//! # Scenarios
+//!
+//! [`LabRunner`] runs the checks of a `ferotrx_core::scenario::Scenario` on
+//! this machine's interfaces with the same functions: [`start_tcp`],
+//! [`start_udp`] and a [`ferotrx_core::Job`] with a receiver. `ferotrx
+//! scenario run` uses it.
+//!
 //! # Security
 //!
 //! The server can send traffic on the machine's interfaces and read and
@@ -109,6 +116,7 @@ mod client;
 mod controller;
 mod files;
 pub mod protocol;
+mod scenario;
 mod server;
 mod tcp;
 mod tls;
@@ -123,6 +131,7 @@ pub use controller::{
 };
 pub use files::{FilePolicy, DEFAULT_MAX_UPLOAD};
 pub use protocol::{Role, RpcError};
+pub use scenario::{LabRunner, SinkOpener};
 pub use server::{Server, ServerConfig, MAX_LINE};
 pub use tcp::{start_tcp, start_tcp_with, PortOpener, TcpStarted};
 pub use tls::{common_name, fingerprint, ClientTls, Issued, LabPki, ServerTls, TlsError};
