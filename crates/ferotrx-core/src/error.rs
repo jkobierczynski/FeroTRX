@@ -19,6 +19,8 @@ pub enum Error {
     Tcp(String),
     #[error("udp: {0}")]
     Udp(String),
+    #[error("benchmark: {0}")]
+    Bench(String),
     #[error("profile: {0}")]
     Profile(String),
     #[error("sending packet {index} failed: {source}")]

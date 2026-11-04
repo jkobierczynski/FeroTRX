@@ -36,6 +36,11 @@
 //!   loss, duplicates, reordering, and latency with jitter and percentiles.
 //!   [`Job::spawn_with_rx`] sends and receives together, and [`FlowReport`]
 //!   compares the two.
+//! * Benchmarks: [`SizeMix`] gives packets sizes from a list or a mix such as
+//!   IMIX, and [`run_benchmark`] runs RFC 2544-style tests (throughput by a
+//!   binary search on the rate, latency, frame loss, back-to-back bursts) as
+//!   trials of a [`TrialRunner`], such as [`JobTrialRunner`]; [`BenchReport`]
+//!   holds the results and [`RunInfo`] what they were measured on.
 //!
 //! Sinks that talk to real interfaces or files live in the `ferotrx-io` crate,
 //! so this crate has no platform specific code. [`SendSettings`] names the
@@ -77,6 +82,7 @@
 //! assert_eq!(stats.streams[0].bytes, 5 * 64);
 //! ```
 
+mod bench;
 mod capture;
 mod error;
 mod field_engine;
@@ -89,19 +95,27 @@ mod profile;
 mod replay;
 mod send;
 mod sink;
+mod size_mix;
 mod source;
 mod stream;
 mod tcp;
 mod transform;
 mod udp;
 
+#[cfg(feature = "profile")]
+pub use bench::BenchProfile;
+pub use bench::{
+    run_benchmark, utc_timestamp, BenchConfig, BenchReport, BenchTest, BurstResult, ConfigSummary,
+    InterfaceDetails, JobTrialRunner, LatencyResult, LatencySummary, LossPoint, RunInfo,
+    SizeReport, ThroughputResult, Trial, TrialRecord, TrialResult, TrialRunner,
+};
 pub use capture::{Capture, Packet, LINKTYPE_ETHERNET};
 pub use error::{Error, Result};
 pub use field_engine::{FieldEngine, FieldVar, Side, VarField, VarOp};
 pub use job::{Job, JobState, RxSettings, JOB_STATS_INTERVAL};
 pub use latency::{
-    wall_clock, FlowReport, FlowStats, LatencyStats, PacketReceiver, PortReceiver, RxConfig, RxJob,
-    RxStats, Signature, SIGNATURE_LEN,
+    signed_len, wall_clock, FlowReport, FlowStats, LatencyStats, PacketReceiver, PortReceiver,
+    RxConfig, RxJob, RxStats, Signature, SIGNATURE_LEN,
 };
 pub use net::{MacAddr, TPID_QINQ, TPID_VLAN};
 pub use pacer::{parse_duration, Pacer, Rate};
@@ -110,6 +124,7 @@ pub use profile::{Profile, StreamSource, StreamSpec, DEFAULT_INTERVAL};
 pub use replay::{replay, replay_with_progress, ReplayConfig, ReplayStats};
 pub use send::{Backend, SendSettings, XdpMode, DEFAULT_BATCH};
 pub use sink::{NullSink, PacketSink, SinkError, VecSink};
+pub use size_mix::{SizeMix, FCS_LEN, L1_OVERHEAD, RFC2544_SIZES};
 pub use source::{CaptureSource, PacketSource};
 pub use stream::{run, run_with_progress, RunConfig, RunStats, Stream};
 pub use tcp::{

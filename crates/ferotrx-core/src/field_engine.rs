@@ -637,7 +637,7 @@ fn parse_ip_range(s: &str) -> std::result::Result<(u128, u128, bool), String> {
 /// Gives every engine made without a seed different random values.
 static SEED_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn fresh_seed() -> u64 {
+pub(crate) fn fresh_seed() -> u64 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -646,7 +646,7 @@ fn fresh_seed() -> u64 {
 }
 
 /// splitmix64: small, fast and good enough for traffic.
-fn next_random(state: &mut u64) -> u64 {
+pub(crate) fn next_random(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
     let mut z = *state;
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
