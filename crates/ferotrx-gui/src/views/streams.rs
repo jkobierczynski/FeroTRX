@@ -8,7 +8,8 @@ use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
 use ferotrx_packet::{decode, format_layers, parse_layers, Decoded, PacketSpec, RawLayer};
 
-use crate::app::{FeroApp, FilePrompt, Status};
+use crate::app::{FeroApp, Status};
+use crate::files::{Kind, Target};
 use crate::model::{Latency, Pacing, PortKind, ProfileDraft, SourceKind, StreamDraft};
 use crate::packet_view::{self, state_color, Selection};
 use crate::protocols::{Category, Registry};
@@ -28,6 +29,11 @@ pub struct EditorState {
     pub(crate) cache: Option<(String, Result<Built, String>)>,
     /// A stream table filter.
     pub filter: String,
+    /// True when the server is on this computer, so its files can be
+    /// picked with a dialog. Set each frame.
+    pub server_local: bool,
+    /// "Browse…" was pressed for the stream's capture.
+    pub browse_pcap: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -93,8 +99,20 @@ impl FeroApp {
         let work = self.work.ports.entry(key).or_default();
         let streams = &mut work.profile.streams;
         let ed = &mut self.editor;
-        stream_table(ui, streams, ed, &mut action);
-        ui.separator();
+        ed.server_local = self.servers[i].settings.is_local();
+        // The table and the editor share the tab; the line between them drags.
+        let h = ui.available_height();
+        egui::TopBottomPanel::top("stream-table")
+            .resizable(true)
+            .frame(egui::Frame::NONE)
+            .default_height((h * 0.3).clamp(110.0, 260.0))
+            .height_range(70.0..=(h - 120.0).max(80.0))
+            .show_inside(ui, |ui| {
+                // Keep the panel's height: the table alone would shrink it.
+                ui.set_min_height(ui.available_height());
+                stream_table(ui, streams, ed, &mut action)
+            });
+        ui.add_space(4.0);
         match ed.stream {
             Some(s) if s < streams.len() => {
                 stream_editor(ui, &self.registry, ed, &mut streams[s]);
@@ -109,18 +127,41 @@ impl FeroApp {
             Some(Action::Stop(id)) => self.stop_run(i, "run", id),
             Some(Action::Check) => self.check_port(i, &port),
             Some(Action::Open) => {
-                self.file_prompt = Some(FilePrompt {
-                    save: false,
-                    path: String::new(),
-                })
+                let dir = self.port_work(i, &port).base_dir.clone();
+                self.files
+                    .pick(Target::OpenProfile, "Open a profile", Kind::Profile, &dir);
             }
             Some(Action::Save) => {
-                self.file_prompt = Some(FilePrompt {
-                    save: true,
-                    path: format!("{}.toml", port.profile_name()),
-                })
+                let dir = self.port_work(i, &port).base_dir.clone();
+                let name = format!("{}.toml", port.profile_name());
+                self.files.save(
+                    Target::SaveProfile,
+                    "Save the streams as a profile",
+                    Kind::Profile,
+                    &dir,
+                    &name,
+                );
             }
             None => {}
+        }
+        if std::mem::take(&mut self.editor.browse_pcap) {
+            if let Some(s) = self.editor.stream {
+                let work = self.port_work(i, &port);
+                let current = match work.profile.streams.get(s) {
+                    Some(st) if !st.pcap.is_empty() => {
+                        crate::files::absolute(&std::path::Path::new(&work.base_dir).join(&st.pcap))
+                            .display()
+                            .to_string()
+                    }
+                    _ => work.base_dir.clone(),
+                };
+                self.files.pick(
+                    Target::ReplayPcap(s),
+                    "Capture to replay",
+                    Kind::Capture,
+                    &current,
+                );
+            }
         }
     }
 
@@ -145,14 +186,31 @@ impl FeroApp {
             .collect();
         let run = self.port_run(i, port).cloned();
         let addr = self.servers[i].settings.addr.clone();
+        let local = self.servers[i].settings.is_local();
         let file_out = &mut self.work.file_out;
         if let PortKind::File = port {
+            let mut browse = false;
             ui.horizontal(|ui| {
                 ui.label("Output file on the server");
                 ui.add(
                     egui::TextEdit::singleline(file_out).hint_text(crate::model::DEFAULT_FILE_OUT),
-                );
+                )
+                .on_hover_text("A relative path is in the server's data directory (where it was started, or --data-dir)");
+                browse = ui
+                    .add_enabled(local, egui::Button::new("Browse…"))
+                    .on_disabled_hover_text("The server is on another computer: type a path there")
+                    .clicked();
             });
+            if browse {
+                let current = file_out.clone();
+                self.files.save(
+                    Target::FileOut,
+                    "Pcap file the port writes",
+                    Kind::Capture,
+                    &current,
+                    crate::model::DEFAULT_FILE_OUT,
+                );
+            }
         }
         let key = format!("{}|{}", self.servers[i].settings.address(), port.key());
         let cfg = &mut self.work.ports.entry(key).or_default().config;
@@ -286,63 +344,82 @@ impl FeroApp {
             });
     }
 
+    /// Draws the file dialog and puts what it picked where it belongs.
     pub fn file_dialog(&mut self, ctx: &egui::Context) {
-        let Some(prompt) = &mut self.file_prompt else {
+        let Some((target, path)) = self.files.update(ctx) else {
             return;
         };
-        let (Some(port), i) = (self.sel_port.clone(), self.sel_server) else {
-            self.file_prompt = None;
-            return;
-        };
-        let mut done = None;
-        egui::Window::new(if prompt.save { "Save profile" } else { "Open profile" })
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.label("Path on this computer");
-                ui.add(egui::TextEdit::singleline(&mut prompt.path).desired_width(360.0));
-                if !prompt.save {
-                    ui.label(
-                        RichText::new("Its streams replace this port's. Relative pcap paths are read on the server.")
-                            .small()
-                            .weak(),
-                    );
+        let shown = path.display().to_string();
+        let i = self.sel_server;
+        match target {
+            Target::Capture => {
+                self.capture.path = shown;
+                self.capture.open();
+            }
+            Target::StatefulProfile => {
+                self.stateful.path = shown;
+                self.stateful.check = None;
+            }
+            Target::Pem(n) => {
+                if let Some(s) = &mut self.add_server {
+                    match n {
+                        0 => s.ca = shown,
+                        1 => s.cert = shown,
+                        _ => s.key = shown,
+                    }
                 }
-                ui.horizontal(|ui| {
-                    if ui.button(if prompt.save { "Save" } else { "Open" }).clicked() {
-                        done = Some(Some(prompt.clone()));
-                    }
-                    if ui.button("Cancel").clicked() {
-                        done = Some(None);
-                    }
-                });
-            });
-        let Some(result) = done else {
-            return;
-        };
-        self.file_prompt = None;
-        let Some(p) = result else {
-            return;
-        };
-        let key = self.port_key(i, &port);
-        let work = self.port_work(i, &port);
-        let outcome = if p.save {
-            std::fs::write(&p.path, work.profile.to_toml(false))
-                .map(|_| format!("saved {}", p.path))
-                .map_err(|e| format!("{}: {e}", p.path))
+            }
+            Target::FileOut => self.work.file_out = shown,
+            Target::ReplayPcap(n) => {
+                let Some(port) = self.sel_port.clone().filter(|_| i < self.servers.len()) else {
+                    return;
+                };
+                let work = self.port_work(i, &port);
+                let rel = crate::files::relative_to(&path, &work.base_dir);
+                if let Some(s) = work.profile.streams.get_mut(n) {
+                    s.pcap = rel;
+                }
+            }
+            Target::OpenProfile | Target::SaveProfile => {
+                let Some(port) = self.sel_port.clone().filter(|_| i < self.servers.len()) else {
+                    return;
+                };
+                let save = target == Target::SaveProfile;
+                self.profile_file(i, &port, &path, save);
+            }
+        }
+    }
+
+    /// Opens a profile file into a port, or saves the port's streams to one.
+    pub fn profile_file(&mut self, i: usize, port: &PortKind, path: &std::path::Path, save: bool) {
+        let key = self.port_key(i, port);
+        let work = self.port_work(i, port);
+        let shown = path.display();
+        let outcome = if save {
+            std::fs::write(path, work.profile.to_toml(false))
+                .map(|_| format!("saved {shown}"))
+                .map_err(|e| format!("{shown}: {e}"))
         } else {
-            std::fs::read_to_string(&p.path)
-                .map_err(|e| format!("{}: {e}", p.path))
-                .and_then(|t| ProfileDraft::from_toml(&t).map_err(|e| format!("{}: {e}", p.path)))
+            std::fs::read_to_string(path)
+                .map_err(|e| format!("{shown}: {e}"))
+                .and_then(|t| ProfileDraft::from_toml(&t).map_err(|e| format!("{shown}: {e}")))
                 .map(|d| {
                     let n = d.streams.len();
                     work.profile = d;
-                    format!("opened {} ({n} streams)", p.path)
+                    format!("opened {shown} ({n} streams)")
                 })
         };
+        if outcome.is_ok() {
+            work.base_dir = crate::files::folder_of(path);
+        }
         match outcome {
             Ok(m) => {
-                if !p.save {
-                    self.editor = EditorState::default();
+                if !save {
+                    let n = self.port_work(i, port).profile.streams.len();
+                    self.editor = EditorState {
+                        stream: (n > 0).then_some(0),
+                        ..Default::default()
+                    };
                 }
                 self.info(&key, m)
             }
@@ -429,25 +506,19 @@ fn stream_table(
     });
 
     let row_h = 20.0;
-    let max_h = (ui.available_height() * 0.3)
-        .clamp(80.0, 240.0)
-        .min(row_h * (streams.len().max(2) as f32 + 0.5));
     let mut clicked = None;
-    // A box of fixed height, so the column lines stop at the table.
-    let width = ui.available_width();
-    ui.allocate_ui_with_layout(
-        egui::vec2(width, max_h + row_h + 8.0),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
+    {
+        {
             // Clicks on a row select it, rather than starting a text selection.
             ui.style_mut().interaction.selectable_labels = false;
-            ui.set_min_height(max_h + row_h + 8.0);
+            let max_h = (ui.available_height() - row_h - 4.0).max(row_h);
             TableBuilder::new(ui)
                 .id_salt("streams")
                 .striped(true)
                 .sense(egui::Sense::click())
+                .auto_shrink([false, false])
                 .max_scroll_height(max_h)
-                .min_scrolled_height(max_h.min(80.0))
+                .min_scrolled_height(max_h)
                 .column(Column::exact(24.0))
                 .column(Column::initial(120.0).resizable(true))
                 .column(Column::initial(360.0).resizable(true).clip(true))
@@ -510,8 +581,8 @@ fn stream_table(
                         });
                     }
                 });
-        },
-    );
+        }
+    }
     if let Some(n) = clicked {
         if ed.stream != Some(n) {
             select(ed, Some(n));
@@ -579,7 +650,15 @@ fn protocols_page(
         ui.label("This stream replays a capture on the server:");
         ui.horizontal(|ui| {
             ui.label("pcap");
-            ui.text_edit_singleline(&mut s.pcap);
+            ui.add(egui::TextEdit::singleline(&mut s.pcap).desired_width(360.0))
+                .on_hover_text("A relative path starts at the folder of the profile file, or the server's data directory");
+            if ui
+                .add_enabled(ed.server_local, egui::Button::new("Browse…"))
+                .on_disabled_hover_text("The server is on another computer: type a path there")
+                .clicked()
+            {
+                ed.browse_pcap = true;
+            }
         });
         if ui.button("Build packets instead").clicked() {
             s.source = SourceKind::Packets;
@@ -639,21 +718,23 @@ fn protocols_page(
     });
 
     let spec = &mut s.packets[ed.packet];
-    egui_extras::StripBuilder::new(ui)
-        .size(egui_extras::Size::relative(0.5).at_least(320.0))
-        .size(egui_extras::Size::remainder().at_least(300.0))
-        .horizontal(|mut strip| {
-            strip.cell(|ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("layers")
-                    .show(ui, |ui| {
-                        layer_editor(ui, registry, ed, spec);
-                    });
-            });
-            strip.cell(|ui| {
-                packet_pane(ui, ed, spec);
-            });
+    // Layers on the left, the packet view on the right; the line between drags.
+    let w = ui.available_width();
+    egui::SidePanel::left("layer-editor")
+        .resizable(true)
+        .frame(egui::Frame::NONE)
+        .default_width((w * 0.5).max(300.0))
+        .width_range(240.0..=(w - 240.0).max(260.0))
+        .show_inside(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("layers")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    layer_editor(ui, registry, ed, spec);
+                });
         });
+    ui.add_space(2.0);
+    packet_pane(ui, ed, spec);
 }
 
 /// The layer stack and the selected layer's form. Writes changes back to `spec`.
@@ -836,13 +917,20 @@ fn packet_pane(ui: &mut egui::Ui, ed: &mut EditorState, spec: &str) {
                     ui.ctx().copy_text(h);
                 }
             });
+            // The tree above the bytes; the line between them drags.
             let h = ui.available_height();
-            egui::ScrollArea::vertical()
-                .id_salt("tree")
-                .max_height(h * 0.55)
-                .auto_shrink([false, true])
-                .show(ui, |ui| packet_view::tree(ui, &b.decoded, &mut ed.sel));
-            ui.separator();
+            egui::TopBottomPanel::top("packet-tree")
+                .resizable(true)
+                .frame(egui::Frame::NONE)
+                .default_height(h * 0.55)
+                .height_range(60.0..=(h - 60.0).max(70.0))
+                .show_inside(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("tree")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| packet_view::tree(ui, &b.decoded, &mut ed.sel));
+                });
+            ui.add_space(2.0);
             packet_view::hex(ui, &b.decoded, &b.bytes, &mut ed.sel);
         }
     }

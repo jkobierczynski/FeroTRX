@@ -43,8 +43,24 @@ pub struct StatefulState {
     pub check: Option<Result<String, String>>,
 }
 
+/// What the Profile row asked for.
+enum Browse {
+    Local,
+    Server,
+}
+
 impl StatefulState {
     /// `tcp.start` / `udp.start` parameters; reads the file when uploading.
+    /// A server on this computer (`local`) reads the relative paths of an
+    /// uploaded profile from the profile's own folder, as `ferotrx tcp` does.
+    pub fn params_for(&self, local: bool) -> Result<Value, String> {
+        let mut p = self.params()?;
+        if local && self.upload {
+            p["base_dir"] = crate::files::folder_of(Path::new(self.path.trim())).into();
+        }
+        Ok(p)
+    }
+
     pub fn params(&self) -> Result<Value, String> {
         let mut p = Map::new();
         if self.path.trim().is_empty() {
@@ -126,6 +142,8 @@ impl FeroApp {
             .map(|i| i.backends.clone())
             .unwrap_or_default();
         let addr = server.settings.addr.clone();
+        let local = server.settings.is_local();
+        let mut browse = None;
         if let Some(PortKind::Interface(n)) = &self.sel_port {
             if self.stateful.iface.is_empty() {
                 self.stateful.iface = n.clone();
@@ -152,8 +170,15 @@ impl FeroApp {
             ui.label("Profile");
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut st.path).hint_text("examples/lab-tcp.toml").desired_width(320.0));
+                if ui
+                    .add_enabled(st.upload || local, egui::Button::new("Browse…"))
+                    .on_disabled_hover_text("The server is on another computer: type a path there, or tick “from this computer”")
+                    .clicked()
+                {
+                    browse = Some(if st.upload { Browse::Local } else { Browse::Server });
+                }
                 ui.checkbox(&mut st.upload, "from this computer")
-                    .on_hover_text("Upload the file; otherwise the path is on the server, inside its data directory");
+                    .on_hover_text("Upload the file; otherwise the path is on the server, relative to its data directory");
                 if st.upload && ui.button("Check").clicked() {
                     st.check_local();
                 }
@@ -216,13 +241,26 @@ impl FeroApp {
         }
         if start {
             let method = format!("{}.start", st.kind.method());
-            match st.params() {
+            match st.params_for(local) {
                 Ok(p) => {
                     let what = format!("{method} sent");
                     self.call(i, &method, p, Pending::Done(what));
                 }
                 Err(e) => self.error(&addr, e),
             }
+        }
+        if let Some(b) = browse {
+            let title = match b {
+                Browse::Local => "Profile on this computer",
+                Browse::Server => "Profile on the server",
+            };
+            let current = self.stateful.path.clone();
+            self.files.pick(
+                crate::files::Target::StatefulProfile,
+                title,
+                crate::files::Kind::Profile,
+                &current,
+            );
         }
         ui.add_space(10.0);
         ui.separator();

@@ -46,6 +46,9 @@ pub struct LastView {
 pub struct PortWork {
     pub profile: ProfileDraft,
     pub config: PortConfig,
+    /// The folder of the profile file the streams came from (absolute):
+    /// relative pcap paths start there when the server is on this computer.
+    pub base_dir: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -200,15 +203,9 @@ pub struct FeroApp {
     pub started: Instant,
     /// The "add server" dialog, while open.
     pub add_server: Option<ConnSettings>,
-    /// Open/save dialogs for local profile files.
-    pub file_prompt: Option<FilePrompt>,
+    /// The file dialog, while open.
+    pub files: crate::files::Dialogs,
     pub ctx: egui::Context,
-}
-
-#[derive(Clone, Debug)]
-pub struct FilePrompt {
-    pub save: bool,
-    pub path: String,
 }
 
 /// Command line choices for [`FeroApp::new`].
@@ -250,7 +247,7 @@ impl FeroApp {
             next_tag: 1,
             started: Instant::now(),
             add_server: None,
-            file_prompt: None,
+            files: Default::default(),
             ctx,
         };
         if let Some(last) = app.work.last.clone() {
@@ -304,7 +301,9 @@ impl FeroApp {
             {
                 Ok(d) => {
                     let n = d.streams.len();
-                    app.port_work(i, &port).profile = d;
+                    let work = app.port_work(i, &port);
+                    work.profile = d;
+                    work.base_dir = crate::files::folder_of(std::path::Path::new(path));
                     app.editor = EditorState {
                         stream: (n > 0).then_some(0),
                         ..Default::default()
@@ -542,7 +541,7 @@ impl FeroApp {
         }
         let name = port.profile_name();
         let params = start_params(port, &work.config, &name, &self.work.file_out);
-        let load = serde_json::json!({ "name": name, "toml": work.profile.to_toml(true) });
+        let load = self.load_params(i, &name, &work);
         self.call(
             i,
             "profile.load",
@@ -554,11 +553,19 @@ impl FeroApp {
     pub fn check_port(&mut self, i: usize, port: &PortKind) {
         let key = self.port_key(i, port);
         let work = self.port_work(i, port).clone();
-        let load = serde_json::json!({
-            "name": port.profile_name(),
-            "toml": work.profile.to_toml(true),
-        });
+        let load = self.load_params(i, &port.profile_name(), &work);
         self.call(i, "profile.load", load, Pending::Checked { port: key });
+    }
+
+    /// `profile.load` with the port's streams. A server on this computer
+    /// reads relative pcap paths from the folder the profile file was in, as
+    /// `ferotrx run` does; a server elsewhere from its data directory.
+    fn load_params(&self, i: usize, name: &str, work: &PortWork) -> Value {
+        let mut load = serde_json::json!({ "name": name, "toml": work.profile.to_toml(true) });
+        if self.servers[i].settings.is_local() && !work.base_dir.is_empty() {
+            load["base_dir"] = work.base_dir.clone().into();
+        }
+        load
     }
 
     pub fn stop_run(&mut self, i: usize, kind: &str, id: u64) {

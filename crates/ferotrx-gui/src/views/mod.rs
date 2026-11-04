@@ -270,6 +270,7 @@ impl FeroApp {
     fn dialogs(&mut self, ctx: &egui::Context) {
         let mut close = false;
         let mut connect = None;
+        let mut browse = None;
         if let Some(s) = &mut self.add_server {
             egui::Window::new("Server")
                 .collapsible(false)
@@ -291,14 +292,22 @@ impl FeroApp {
                         ui.checkbox(&mut s.tls, "Verify the server with a CA certificate");
                         ui.end_row();
                         if s.tls {
-                            for (label, v, hint) in [
+                            for (n, (label, v, hint)) in [
                                 ("CA certificate", &mut s.ca, "ca.pem"),
                                 ("Client certificate", &mut s.cert, "optional, for mutual TLS"),
                                 ("Client key", &mut s.key, "optional"),
                                 ("Server name", &mut s.server_name, "if not the host above"),
-                            ] {
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            {
                                 ui.label(label);
-                                ui.add(egui::TextEdit::singleline(v).hint_text(hint).desired_width(280.0));
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::TextEdit::singleline(v).hint_text(hint).desired_width(280.0));
+                                    if n < 3 && ui.button("Browse…").clicked() {
+                                        browse = Some((n as u8, v.clone(), label));
+                                    }
+                                });
                                 ui.end_row();
                             }
                         }
@@ -318,6 +327,14 @@ impl FeroApp {
                         }
                     });
                 });
+        }
+        if let Some((n, current, label)) = browse {
+            self.files.pick(
+                crate::files::Target::Pem(n),
+                label,
+                crate::files::Kind::Pem,
+                &current,
+            );
         }
         if close {
             self.add_server = None;
