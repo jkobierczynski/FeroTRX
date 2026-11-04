@@ -9,7 +9,7 @@ macOS and Windows. Its engine is a library you can use from your own
 programs, and a control server lets scripts and the Python client drive it
 remotely.
 
-The current version is 0.14.0; see [DEVELOPMENT.md](DEVELOPMENT.md) for what
+The current version is 0.15.0; see [DEVELOPMENT.md](DEVELOPMENT.md) for what
 each milestone added and what comes next.
 
 ## Features
@@ -52,6 +52,10 @@ each milestone added and what comes next.
   read-only and operator roles and an audit log; a command line client and a
   Python package. [Guide](docs/remote-control.md),
   [Python](docs/python-client.md)
+* **Desktop GUI**: `ferotrx-gui` drives local and remote servers: ports,
+  streams built layer by layer with a live packet view, captures turned into
+  editable streams, TCP and UDP runs, counters in a grid and rate charts.
+  [Guide](docs/gui.md)
 * **IPv4 and IPv6** throughout.
 
 ## Install
@@ -116,6 +120,7 @@ The manual is in [docs/](docs/README.md):
 | [Scenarios and regression tests](docs/scenarios.md) | `scenario` |
 | [Remote control](docs/remote-control.md) | `serve`, `ctl`, the protocol, security |
 | [The Python client](docs/python-client.md) | the `ferotrx` Python package |
+| [The desktop GUI](docs/gui.md) | `ferotrx-gui`: ports, stream and packet editor, statistics |
 | [Using FeroTRX as a library](docs/library.md) | the Rust API |
 | [Lab scripts](docs/lab-scripts.md) | network namespace labs, as run in CI |
 
@@ -126,10 +131,11 @@ Every command also has `--help`.
 | Crate | What it is |
 | --- | --- |
 | `ferotrx-core` | The core API: captures, rewrites, streams, profiles, pacing, the scheduler, the stateful TCP and UDP engines, host emulation, loss and latency counting, benchmarks and scenarios. No platform code. |
-| `ferotrx-packet` | Packet decoding (layers, fields with byte ranges, checksum checks, summaries) and building. No dependencies. |
+| `ferotrx-packet` | Packet decoding (layers, fields with byte ranges, checksum checks, summaries), building, and import of captured packets back into the text form. No dependencies. |
 | `ferotrx-io` | Network interfaces through libpcap/Npcap, AF_XDP or DPDK; pcap files; ports for stateful runs; receivers for loss and latency. |
 | `ferotrx-ctl` | Remote control: the JSON-RPC server and client, and the runner that plays scenario checks on interfaces. |
 | `ferotrx-cli` | The `ferotrx` command line tool. |
+| `ferotrx-gui` | The `ferotrx-gui` desktop GUI (egui), a client of the control server. |
 | `python/` | The Python client for the control server (package `ferotrx`); not a crate. |
 
 ```rust

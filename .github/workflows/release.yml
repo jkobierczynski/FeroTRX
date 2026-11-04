@@ -14,6 +14,7 @@ on:
     paths:
       - .github/workflows/release.yml
       - crates/ferotrx-cli/Cargo.toml
+      - crates/ferotrx-gui/Cargo.toml
       - python/pyproject.toml
   workflow_dispatch:
 
@@ -68,9 +69,10 @@ jobs:
         with:
           tool: cargo-deb
       - name: Build
-        run: cargo build --release --locked -p ferotrx-cli
+        run: cargo build --release --locked -p ferotrx-cli -p ferotrx-gui
       - name: Smoke test
         run: |
+          ./target/release/ferotrx-gui --version
           ./target/release/ferotrx --version
           ./target/release/ferotrx backends
           ./target/release/ferotrx info examples/web.pcap
@@ -85,7 +87,7 @@ jobs:
       - name: Archive
         run: |
           mkdir -p "$NAME"
-          cp target/release/ferotrx README.md LICENSE "$NAME/"
+          cp target/release/ferotrx target/release/ferotrx-gui README.md LICENSE "$NAME/"
           cp -r examples docs "$NAME/"
           tar czf "dist/$NAME.tar.gz" "$NAME"
       - uses: actions/upload-artifact@v4
@@ -119,7 +121,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Build
-        run: cargo build --release --locked -p ferotrx-cli --target ${{ matrix.target }}
+        run: cargo build --release --locked -p ferotrx-cli -p ferotrx-gui --target ${{ matrix.target }}
       - name: Smoke test
         if: matrix.arch == 'aarch64'
         run: |
@@ -128,7 +130,7 @@ jobs:
       - name: Archive
         run: |
           mkdir -p dist "$NAME"
-          cp target/${{ matrix.target }}/release/ferotrx README.md LICENSE "$NAME/"
+          cp target/${{ matrix.target }}/release/ferotrx target/${{ matrix.target }}/release/ferotrx-gui README.md LICENSE "$NAME/"
           cp -r examples docs "$NAME/"
           tar czf "dist/$NAME.tar.gz" "$NAME"
       - uses: actions/upload-artifact@v4
@@ -155,12 +157,12 @@ jobs:
           Expand-Archive npcap-sdk.zip -DestinationPath npcap-sdk
           "LIB=$PWD\npcap-sdk\Lib\x64;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Build
-        run: cargo build --release --locked -p ferotrx-cli
+        run: cargo build --release --locked -p ferotrx-cli -p ferotrx-gui
       - name: Archive
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist, $env:NAME | Out-Null
-          Copy-Item target\release\ferotrx.exe, README.md, LICENSE $env:NAME
+          Copy-Item target\release\ferotrx.exe, target\release\ferotrx-gui.exe, README.md, LICENSE $env:NAME
           Copy-Item -Recurse examples, docs $env:NAME
           Compress-Archive -Path $env:NAME -DestinationPath "dist\$env:NAME.zip"
       - uses: actions/upload-artifact@v4

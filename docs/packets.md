@@ -70,3 +70,17 @@ line ending in `/` continues on the next. See
 Numbers can be decimal or `0x` hex; on/off fields take 1/0, true/false or
 yes/no. A packet that starts with `ipv4` or `ipv6` is written with the raw IP
 link type instead of Ethernet.
+
+## From a capture back to the text form
+
+`ferotrx_packet::import` turns a captured packet into layers of the text
+form, ready to edit and build again: Ethernet, VLAN and QinQ tags, ARP,
+IPv4, IPv6, TCP (with MSS, window scale and SACK permitted), UDP and
+ICMP/ICMPv6 echo become fields, the rest a `raw` payload (as `text` when it
+is printable, else `hex`). Lengths and checksums are left out so the builder
+computes them, which means a packet with correct checksums builds back to
+the same bytes. `Imported::notes` lists what could not be carried over. The
+[GUI](gui.md) uses it to make streams from captures;
+`ferotrx_packet::parse_layers` and `format_layers` split and join the text
+form layer by layer without checking fields, for editors.
+

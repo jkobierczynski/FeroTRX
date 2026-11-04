@@ -12,8 +12,8 @@ profiles, a sans-IO TCP engine for stateful sessions, and the receive-side
 statistics. Everything that touches the operating system (libpcap/Npcap,
 AF_XDP, DPDK, pcap files) is in `ferotrx-io`, behind the `PacketSink` and
 `PacketPort` traits. `ferotrx-packet` decodes and builds packets,
-`ferotrx-ctl` is the JSON-RPC remote control, and `ferotrx-cli` is the
-`ferotrx` command. The CLI, the control server and your own programs all use
+`ferotrx-ctl` is the JSON-RPC remote control, `ferotrx-cli` is the
+`ferotrx` command, and `ferotrx-gui` is a desktop client of the control API. The CLI, the control server and your own programs all use
 the same library.
 
 ## Done
@@ -42,6 +42,7 @@ the same library.
 | M19, host emulation | `HostEngine` (sans-IO) and `ferotrx host`: DHCPv4 clients (discover/offer/request/ack, renew at T1, rebind at T2, release, NAK handling), SLAAC (router solicitations, EUI-64 addresses from advertised prefixes, duplicate address detection), DHCPv6 (IA_NA solicit/advertise/request/reply, renew, rebind, release; gateway from router advertisements), gratuitous ARP and unsolicited neighbor advertisements, IGMPv1-3 and MLDv1-2 joins, query answers with version fallback, leaves, per-group receive counters, solicited-node MLD reports, IPv6 router advertisements (prefixes, M/O flags, lifetime, answers to solicitations); host profiles (`[[host]]` with `count`, `[host.router]`, `[options]`); `Hosted` in front of the TCP and UDP engines: `ip = "dhcp"`/`"slaac"`/`"dhcpv6"`, `announce`, `groups`, `hostname` for a client or server and a `[hosts]` table, `--client-ip dhcp`, `--client-join`, `--announce`; `hosts` in `tcp.*`/`udp.*` run info; `ferotrx check` for host profiles; [docs/host-emulation.md](docs/host-emulation.md); `scripts/hosts-netns.sh` (dnsmasq, a bridge with IGMP/MLD snooping) in CI over IPv4/IPv6, libpcap and AF_XDP | #31 | 0.12.0 |
 | M20, one run on several cores | `--workers N` (and `workers` in `[output]`, `run.start`, `tcp.start`, `udp.start`) for `replay`, `build`, `run`, `bench`, `tcp` and `udp`: streams split packet by packet over worker threads (`Stream::shard`: packet `i` from worker `i mod N`, sources and the field engine skip the others' packets, rates and limits shared out, latency sequence numbers kept), one libpcap handle or AF_XDP queue per worker (`Output::open_workers`), `Job::spawn_workers`; stateful TCP and UDP split by flow (`TcpConfig::split`/`UdpConfig::split`: a slice of the client's source ports, rates, limits and a seed per worker, the same servers everywhere), `FlowRouter` (client ports by slice, server flows by hash, ARP requests/solicitations/pings to worker 0, replies and advertisements to all), AF_XDP ports split by receive queue (`PacketPort::split`), shared ports with one reader for libpcap and DPDK, `PortJob::spawn_workers`, counters added up (`MergeStats`); `workers` in run info; `QUEUES=` in the TCP and UDP lab scripts and multi-worker lab runs in CI; [docs/multi-core.md](docs/multi-core.md); `engine_rate` takes a worker count | #34 | 0.14.0 (merged after M21; 0.13.0 not released on its own) |
 | M21, Python client | `python/`: the `ferotrx` package (pip-installable, standard library only, Python 3.10+, `py.typed`): blocking `Client` (thread-safe) and asyncio `AsyncClient` (concurrent calls, several live subscriptions) for every control method (`profile.*`, `run.*`, `tcp.*`, `udp.*`, `rx.*`, `stats.*`), uploads of local profiles, `watch()` and `wait()` helpers, TLS, client certificates and tokens (also from `FEROTRX_*` like `ferotrx ctl`), dataclass results that keep unknown fields, an exception per error code; [docs/python-client.md](docs/python-client.md), examples; tests against real `ferotrx serve` processes (roles, TLS, mTLS from `ferotrx certs`) on Linux, macOS and Windows, and TCP, DNS and loss/latency across a veth pair on Linux | | 0.14.0 |
+| M22, desktop GUI | `ferotrx-gui` (egui/eframe; Linux X11/Wayland, macOS, Windows), a client of the control API: several servers at once (plain, TLS, client certificates, tokens; `--connect`, `FEROTRX_*`), their interfaces plus `file` and `null` as ports; per port a stream table (enable, duplicate, reorder) sent as one profile (`profile.load` + `run.start`) with backend, AF_XDP mode, workers, duration, rate and receive interface; a stream editor with protocol layers (forms from a protocol registry, values checked as typed, defaults as hints, text form kept in step), stream control (rate or interval, loops, limit, delay, model, shape, sizes, latency) and variable fields/rewrites, checked locally with the engine's profile parser; a packet view (decode tree and hex, field to bytes and back); TCP/UDP runs from server or uploaded profiles with local `check`; a capture viewer whose packets become editable streams; statistics grid (column per run, row per counter, stop/remove) and rate charts; workspace kept between sessions; `ferotrx_packet::import` (captured packet back to editable layers, rebuilding to the same bytes), `parse_layers`/`format_layers`/`RawLayer`; extension point `ProtocolEditor` + `Registry` for new protocols and editors; [docs/gui.md](docs/gui.md); tests against an in-process server | | 0.15.0 |
 
 The lab scripts (`scripts/*.sh`) build a NAT router (or, for host
 emulation, a bridged LAN with a DHCP server) in network namespaces
@@ -105,7 +106,11 @@ checked against 0.4.0. Each issue has the full checklist.
 
 **P3: when the engine is stable**
 
-- [ ] **Distributed agents and a GUI**, [#21](https://github.com/jkobierczynski/FeroTRX/issues/21)
+- [x] **M22, desktop GUI (0.15.0)**, from [#21](https://github.com/jkobierczynski/FeroTRX/issues/21):
+      `ferotrx-gui`, a client of the control API with ports, a stream and
+      packet editor, captures, TCP/UDP runs and live statistics; a protocol
+      editor registry for application layers and packet editing to come
+- [ ] **Distributed agents**, [#21](https://github.com/jkobierczynski/FeroTRX/issues/21)
 
 **Not planned for now:** a packet-analysis suite (use Wireshark), a long
 list of shallow protocols, DPDK as the main backend, Kubernetes

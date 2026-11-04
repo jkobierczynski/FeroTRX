@@ -27,6 +27,11 @@ You need a stable Rust toolchain and libpcap:
 cargo build --release
 ```
 
+The desktop GUI is its own binary (see [the GUI guide](gui.md)); it needs no
+libpcap, only a graphics driver with OpenGL:
+`cargo build --release -p ferotrx-gui` (`target/release/ferotrx-gui`). On
+Linux it runs on X11 or Wayland.
+
 To build without libpcap (file and null output only):
 `cargo build -p ferotrx-cli --no-default-features`.
 

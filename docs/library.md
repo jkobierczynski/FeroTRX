@@ -69,6 +69,16 @@ let frame = PacketSpec::new()
 let capture = ferotrx_core::Capture::from_specs(&["eth/ipv4/udp/dns(q=example.com)"], Duration::from_millis(10))?;
 ```
 
+A captured packet goes back to the text form with `ferotrx_packet::import`,
+for editing ([packets](packets.md#from-a-capture-back-to-the-text-form)):
+
+```rust
+let capture = ferotrx_core::Capture::from_path("web.pcap")?;
+let imported = ferotrx_packet::import(capture.linktype, &capture.packets[0].data).unwrap();
+let text = ferotrx_packet::format_layers(&imported.layers); // eth(...)/ipv4(...)/tcp(...)
+let again: PacketSpec = text.parse()?;                       // edit, then build
+```
+
 ## Runs in the background
 
 Running in the background, as the CLI and the control server do:
