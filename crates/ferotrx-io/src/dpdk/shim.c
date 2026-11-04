@@ -85,7 +85,7 @@ int ftrx_dpdk_setup(uint16_t port, uint16_t queue, uint16_t nb_desc, struct rte_
     r = rte_eth_dev_configure(port, 1, queue + 1, &conf);
     if (r < 0)
         return r;
-    uint16_t nb_rx = 128, nb_tx = nb_desc;
+    uint16_t nb_rx = 1024, nb_tx = nb_desc;
     r = rte_eth_dev_adjust_nb_rx_tx_desc(port, &nb_rx, &nb_tx);
     if (r < 0)
         return r;
@@ -168,4 +168,42 @@ int ftrx_dpdk_port_name(uint16_t port, char *name, size_t len) {
         return r;
     snprintf(name, len, "%s", buf);
     return 0;
+}
+
+/* Takes in every frame (promiscuous and all-multicast), for a port that
+ * receives for emulated hosts with MAC addresses of their own. */
+int ftrx_dpdk_promisc(uint16_t port) {
+    int r = rte_eth_promiscuous_enable(port);
+    if (r < 0 && r != -ENOTSUP)
+        return r;
+    r = rte_eth_allmulticast_enable(port);
+    if (r < 0 && r != -ENOTSUP)
+        return r;
+    return 0;
+}
+
+/* Receives up to `max` (at most FTRX_BURST) frames from RX queue 0 of
+ * `port` and copies them into `out`, one every `slot` bytes, their lengths
+ * into `lens`. Frames longer than `slot` are dropped. Returns how many were
+ * copied. */
+int ftrx_dpdk_recv(uint16_t port, uint8_t *out, size_t slot, uint16_t *lens, uint16_t max) {
+    struct rte_mbuf *bufs[FTRX_BURST];
+    if (max > FTRX_BURST)
+        max = FTRX_BURST;
+    uint16_t got = rte_eth_rx_burst(port, 0, bufs, max);
+    uint16_t n = 0;
+    for (uint16_t i = 0; i < got; i++) {
+        struct rte_mbuf *m = bufs[i];
+        uint32_t len = rte_pktmbuf_pkt_len(m);
+        if (len <= slot && len <= UINT16_MAX) {
+            uint8_t *dst = out + (size_t)n * slot;
+            for (struct rte_mbuf *s = m; s != NULL; s = s->next) {
+                memcpy(dst, rte_pktmbuf_mtod(s, const uint8_t *), s->data_len);
+                dst += s->data_len;
+            }
+            lens[n++] = (uint16_t)len;
+        }
+        rte_pktmbuf_free(m);
+    }
+    return n;
 }

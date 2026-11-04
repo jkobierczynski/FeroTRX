@@ -26,7 +26,8 @@ transactions (DNS lookups, NTP, replayed UDP sessions, with matching, timeouts a
 * **M14, benchmarking (`ferotrx bench`: RFC 2544 throughput, latency, frame loss and back-to-back; IMIX and size mixes; run metadata and text reports):** done (0.8.0).
 * **M15, stateful UDP and transactions (`ferotrx udp`: DNS, NTP and UDP sessions with matching, timeouts and retries, per-template rates and think time; message timing for TCP):** done (0.8.0).
 * **M16, scenario and regression tests (`ferotrx scenario`: checks with expected outcomes, JSON and JUnit reports, run history and comparisons):** done (0.9.0).
-* **M17, traffic models and file checks (Poisson arrivals, bursts, ramps and rate shapes for streams, TCP connections and UDP transactions; `ferotrx check`; a `format` version in every file):** this release (0.10.0).
+* **M17, traffic models and file checks (Poisson arrivals, bursts, ramps and rate shapes for streams, TCP connections and UDP transactions; `ferotrx check`; a `format` version in every file):** done (0.10.0).
+* **M18, stateful TCP and UDP over AF_XDP and DPDK (an XDP program of its own for receiving, `-B` for `ferotrx tcp` and `ferotrx udp`, a timer queue in the engines):** this release (0.11.0).
 
 ## Crates
 
@@ -373,6 +374,17 @@ On a VirtualBox VM such as the lab's Debian host, the virtual NIC has no
 zero-copy support, so AF_XDP runs in copy mode; it still saves the per-packet
 system call of libpcap. On a veth pair here it sends about 1.0 Mpps against
 0.66 Mpps for libpcap. Bridged adapters need promiscuous mode "Allow all" as before.
+
+Stateful TCP and UDP runs (`ferotrx tcp`, `ferotrx udp`) take the same
+options and `[output]` table, and then receive through AF_XDP or DPDK too:
+FeroTRX loads a small XDP program that hands frames for the emulated hosts'
+MAC addresses to its AF_XDP sockets and leaves the rest to the kernel. That
+roughly doubles to triples the connection rate one run reaches; see
+[docs/fast-ports.md](docs/fast-ports.md).
+
+```sh
+sudo ferotrx tcp -p examples/lab-tcp.toml -i enp0s3 -B af_xdp --cps 5000 -n 50000
+```
 
 ### Remote control
 
@@ -898,8 +910,10 @@ runs it on the VLAN trunk, and on two links with 3% loss.
   the capture shows between messages, and `--think-time 50ms` adds a pause
   before every answer; `--show` lists the gaps.
 
-Limits of this release: libpcap or Npcap for sending and receiving (AF_XDP
-and DPDK are for stateless runs); see [docs/tcp-engine.md](docs/tcp-engine.md).
+Sending and receiving goes through libpcap or Npcap by default; `-B af_xdp`
+or `-B dpdk` uses the fast ports for higher connection rates (see
+[docs/fast-ports.md](docs/fast-ports.md)). More on the engine in
+[docs/tcp-engine.md](docs/tcp-engine.md).
 
 ### Stateful UDP and DNS
 

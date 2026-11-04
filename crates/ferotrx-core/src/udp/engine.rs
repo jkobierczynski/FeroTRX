@@ -4,7 +4,8 @@
 //! Like the TCP engine it does no I/O and reads no clock: it is fed received
 //! frames and the time, and queues the frames it wants sent.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Range;
@@ -440,6 +441,9 @@ struct Session {
     error: bool,
     /// Server: everything played; the session stays to answer repeats.
     done: bool,
+    /// The earliest time the session is queued for in the engine's timers
+    /// (`Duration::MAX`: not queued).
+    scheduled: Duration,
 }
 
 /// Small, fast, seeded random numbers for DNS ids.
@@ -689,6 +693,20 @@ impl Session {
         }
     }
 
+    /// When [`on_timer`](Self::on_timer) next has something to do.
+    fn next_wake(&self, o: &UdpOptions) -> Duration {
+        let mut at = self.hold.unwrap_or(Duration::MAX);
+        match self.role {
+            UdpRole::Server => at = at.min(self.last_rx.saturating_add(o.session_timeout)),
+            UdpRole::Client => {
+                if let Some(d) = self.deadline {
+                    at = at.min(d);
+                }
+            }
+        }
+        at
+    }
+
     fn on_timer(&mut self, cx: &mut Ctx, now: Duration) -> Fate {
         if self.hold.is_some_and(|t| now >= t) && self.advance(cx, now) == Fate::Remove {
             return Fate::Remove;
@@ -772,6 +790,9 @@ pub struct UdpEngine {
     client: Option<UdpClientConfig>,
     hosts: Vec<Host>,
     sessions: HashMap<Key, Session>,
+    /// When sessions need their timers looked at; only the entry at a
+    /// session's `scheduled` time counts.
+    timers: BinaryHeap<Reverse<(Duration, Key)>>,
     out: Vec<(usize, Vec<u8>)>,
     ip_id: u16,
     stats: UdpStats,
@@ -968,6 +989,7 @@ impl UdpEngine {
             client,
             hosts,
             sessions: HashMap::new(),
+            timers: BinaryHeap::new(),
             out: Vec::new(),
             ip_id: 0,
             stats,
@@ -984,6 +1006,18 @@ impl UdpEngine {
     /// The templates, in the order of [`UdpStats::templates`].
     pub fn templates(&self) -> &[UdpTemplate] {
         &self.templates
+    }
+
+    /// The MAC addresses of the emulated hosts on port `port`: the frames the
+    /// port must receive, besides broadcasts and multicasts.
+    pub fn port_macs(&self, port: usize) -> Vec<crate::MacAddr> {
+        let mut macs: Vec<crate::MacAddr> = Vec::new();
+        for h in self.hosts.iter().filter(|h| h.ep.port == port) {
+            if !macs.contains(&h.ep.mac) {
+                macs.push(h.ep.mac);
+            }
+        }
+        macs
     }
 
     pub fn stats(&self) -> &UdpStats {
@@ -1137,6 +1171,8 @@ impl UdpEngine {
             if !fresh {
                 if s.on_datagram(&mut cx, d.data, now) == Fate::Remove {
                     sessions.remove(&key);
+                } else {
+                    self.schedule(key);
                 }
                 return;
             }
@@ -1172,6 +1208,7 @@ impl UdpEngine {
             mismatched: false,
             error: false,
             done: false,
+            scheduled: Duration::MAX,
         };
         // Only a datagram that can start the transaction opens a session.
         if let Fit::No = s.fits(&cx, d.data) {
@@ -1189,6 +1226,43 @@ impl UdpEngine {
         });
         if s.on_datagram(&mut cx, d.data, now) == Fate::Keep {
             sessions.insert(key, s);
+            self.schedule(key);
+        }
+    }
+
+    /// Queues session `key` for when it next needs its timer, if that is
+    /// sooner than it is queued for.
+    fn schedule(&mut self, key: Key) {
+        if let Some(s) = self.sessions.get_mut(&key) {
+            let wake = s.next_wake(&self.options);
+            if wake < s.scheduled {
+                s.scheduled = wake;
+                self.timers.push(Reverse((wake, key)));
+            }
+        }
+    }
+
+    fn run_timers(&mut self, now: Duration) {
+        while let Some(&Reverse((at, key))) = self.timers.peek() {
+            if at > now {
+                break;
+            }
+            self.timers.pop();
+            let (mut cx, sessions) = self.ctx();
+            let Some(s) = sessions.get_mut(&key) else {
+                continue; // gone
+            };
+            if s.scheduled != at {
+                continue; // queued again since, for another time
+            }
+            s.scheduled = Duration::MAX;
+            if s.on_timer(&mut cx, now) == Fate::Keep {
+                let wake = s.next_wake(cx.options).max(now + TIMER_TICK);
+                s.scheduled = wake;
+                self.timers.push(Reverse((wake, key)));
+            } else {
+                sessions.remove(&key);
+            }
         }
     }
 
@@ -1215,8 +1289,7 @@ impl UdpEngine {
         }
         if now >= self.next_timer_scan {
             self.next_timer_scan = now + TIMER_TICK;
-            let (mut cx, sessions) = self.ctx();
-            sessions.retain(|_, s| s.on_timer(&mut cx, now) == Fate::Keep);
+            self.run_timers(now);
         }
         self.start_due(now);
     }
@@ -1381,6 +1454,7 @@ impl UdpEngine {
             mismatched: false,
             error: false,
             done: false,
+            scheduled: Duration::MAX,
         };
         let (mut cx, sessions) = self.ctx();
         cx.add(UdpRole::Client, tpl, |c| {
@@ -1389,6 +1463,7 @@ impl UdpEngine {
         });
         if s.advance(&mut cx, now) == Fate::Keep {
             sessions.insert(key, s);
+            self.schedule(key);
         }
         true
     }

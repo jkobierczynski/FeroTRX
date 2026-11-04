@@ -5,7 +5,8 @@
 //! connects it to real ports. That keeps it platform free and lets tests run it
 //! on a simulated network with a simulated clock.
 
-use std::collections::{HashMap, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::Range;
 use std::sync::Arc;
@@ -730,6 +731,9 @@ struct Conn {
     deadline: Option<Duration>,
     last_rx: Duration,
     counted: bool,
+    /// The earliest time this connection is queued for in the engine's
+    /// timers (`Duration::MAX`: not queued).
+    scheduled: Duration,
 }
 
 type Key = (SocketAddr, SocketAddr);
@@ -871,7 +875,24 @@ impl Conn {
             deadline: Some(now + o.rto),
             last_rx: now,
             counted: false,
+            scheduled: Duration::MAX,
         }
+    }
+
+    /// When [`on_timer`](Self::on_timer) next has something to do: the
+    /// retransmission or TIME_WAIT deadline, the end of a message's wait, or
+    /// the idle timeout.
+    fn next_wake(&self, o: &TcpOptions) -> Duration {
+        let mut at = self.deadline.unwrap_or(Duration::MAX);
+        if self.state != State::TimeWait {
+            at = at.min(self.last_rx.saturating_add(o.idle_timeout));
+        }
+        if self.state == State::Open {
+            if let Some(h) = self.hold {
+                at = at.min(h);
+            }
+        }
+        at
     }
 
     /// Takes what the other end's SYN or SYN-ACK says it can do: each
@@ -1709,6 +1730,9 @@ pub struct TcpEngine {
     server: Option<TcpServerConfig>,
     hosts: Vec<Host>,
     conns: HashMap<Key, Conn>,
+    /// When connections need their timers looked at. A connection may be in
+    /// here more than once; only the entry at its `scheduled` time counts.
+    timers: BinaryHeap<Reverse<(Duration, Key)>>,
     out: Vec<(usize, Vec<u8>)>,
     ip_id: u16,
     stats: TcpStats,
@@ -1728,6 +1752,21 @@ pub struct TcpEngine {
 
 /// How often connection timers are looked at.
 const TIMER_TICK: Duration = Duration::from_millis(1);
+
+/// Queues `conn` in `timers` for when it next needs its timer, if that is
+/// sooner than it is queued for.
+fn schedule(
+    timers: &mut BinaryHeap<Reverse<(Duration, Key)>>,
+    key: Key,
+    conn: &mut Conn,
+    o: &TcpOptions,
+) {
+    let wake = conn.next_wake(o);
+    if wake < conn.scheduled {
+        conn.scheduled = wake;
+        timers.push(Reverse((wake, key)));
+    }
+}
 
 impl TcpEngine {
     pub fn new(config: TcpConfig) -> Result<Self> {
@@ -1887,6 +1926,7 @@ impl TcpEngine {
             server,
             hosts,
             conns: HashMap::new(),
+            timers: BinaryHeap::new(),
             out: Vec::new(),
             ip_id: 0,
             stats,
@@ -1901,6 +1941,18 @@ impl TcpEngine {
     /// The templates, in the order of [`TcpStats::templates`].
     pub fn templates(&self) -> &[TcpTemplate] {
         &self.templates
+    }
+
+    /// The MAC addresses of the emulated hosts on port `port`: the frames the
+    /// port must receive, besides broadcasts and multicasts.
+    pub fn port_macs(&self, port: usize) -> Vec<MacAddr> {
+        let mut macs: Vec<MacAddr> = Vec::new();
+        for h in self.hosts.iter().filter(|h| h.ep.port == port) {
+            if !macs.contains(&h.ep.mac) {
+                macs.push(h.ep.mac);
+            }
+        }
+        macs
     }
 
     pub fn stats(&self) -> &TcpStats {
@@ -2041,6 +2093,8 @@ impl TcpEngine {
                         out.add(c.role, c.tpl, |s| s.active = s.active.saturating_sub(1));
                     }
                 }
+            } else {
+                schedule(&mut self.timers, key, conn, &shared[conn.tpl].options);
             }
             return;
         }
@@ -2074,6 +2128,7 @@ impl TcpEngine {
                 s.started += 1;
                 s.active += 1;
             });
+            schedule(&mut self.timers, key, &mut conn, opts);
             self.conns.insert(key, conn);
             return;
         }
@@ -2135,13 +2190,31 @@ impl TcpEngine {
             ip_id: &mut self.ip_id,
             stats: &mut self.stats,
         };
-        self.conns.retain(|_, c| {
-            let keep = c.on_timer(&shared[c.tpl], &mut out, now) == Fate::Keep;
-            if !keep && !c.counted {
-                out.add(c.role, c.tpl, |s| s.active = s.active.saturating_sub(1));
+        while let Some(&Reverse((at, key))) = self.timers.peek() {
+            if at > now {
+                break;
             }
-            keep
-        });
+            self.timers.pop();
+            let Some(c) = self.conns.get_mut(&key) else {
+                continue; // gone
+            };
+            if c.scheduled != at {
+                continue; // queued again since, for another time
+            }
+            c.scheduled = Duration::MAX;
+            let sh = &shared[c.tpl];
+            if c.on_timer(sh, &mut out, now) == Fate::Keep {
+                // Something still due (a message that cannot go yet) is
+                // looked at again on the next tick.
+                let wake = c.next_wake(&sh.options).max(now + TIMER_TICK);
+                c.scheduled = wake;
+                self.timers.push(Reverse((wake, key)));
+            } else if let Some(c) = self.conns.remove(&key) {
+                if !c.counted {
+                    out.add(c.role, c.tpl, |s| s.active = s.active.saturating_sub(1));
+                }
+            }
+        }
     }
 
     /// True if template `tpl` may open a connection now, by its own limits.
@@ -2301,7 +2374,7 @@ impl TcpEngine {
         let opts = &self.shared[tpl].options;
         let iss = self.rng.next();
         let ts_offset = self.rng.next();
-        let conn = Conn::new(
+        let mut conn = Conn::new(
             ConnInit {
                 role: TcpRole::Client,
                 tpl,
@@ -2333,6 +2406,7 @@ impl TcpEngine {
             s.started += 1;
             s.active += 1;
         });
+        schedule(&mut self.timers, key, &mut conn, opts);
         self.conns.insert(key, conn);
         true
     }

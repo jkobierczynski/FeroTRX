@@ -107,6 +107,12 @@ if [ $vlan = yes ]; then
     no_dad rt
     ip link set t0 up
     r ip link set rt up
+    # Tags in the frames, not beside them: a veth hands a tag it was given
+    # aside to the other end aside too, where XDP (-B af_xdp) cannot see it,
+    # as a NIC that strips tags on receive would.
+    if command -v ethtool >/dev/null 2>&1; then
+        r ethtool -K rt txvlan off >/dev/null 2>&1 || true
+    fi
     r ip link add link rt name rt.10 type vlan id 10
     r ip link add link rt name rt.20 type vlan id 20
     no_dad rt.10

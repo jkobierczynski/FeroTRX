@@ -151,7 +151,7 @@ impl Controller {
             next_run: AtomicU64::new(1),
             auth_required: false,
             files: FilePolicy::unrestricted(),
-            open_port: Box::new(ferotrx_io::open_port),
+            open_port: Box::new(ferotrx_io::open_port_with),
             open_receiver: Box::new(ferotrx_io::open_receiver),
         }
     }
@@ -170,7 +170,10 @@ impl Controller {
     /// for example to run on in-memory ports in tests.
     pub fn with_port_opener(
         mut self,
-        open: impl Fn(&str) -> Result<Box<dyn ferotrx_core::PacketPort>, ferotrx_core::SinkError>
+        open: impl Fn(
+                &str,
+                &ferotrx_io::PortSettings,
+            ) -> Result<Box<dyn ferotrx_core::PacketPort>, ferotrx_core::SinkError>
             + Send
             + Sync
             + 'static,
@@ -575,6 +578,16 @@ impl Controller {
             duration,
             stop: None,
         };
+        let output = OutputSpec {
+            backend: p.backend,
+            queue: p.queue,
+            xdp_mode: p.xdp_mode,
+            batch: p.batch,
+            dpdk_args: p.dpdk_args,
+            ..Default::default()
+        }
+        .send_settings()?;
+        profile.output = output.or(&profile.output);
         let started = start_tcp_with(&profile, p.iface.as_deref(), config, &*self.open_port)
             .map_err(RpcError::failed)?;
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
@@ -582,6 +595,7 @@ impl Controller {
             id,
             program: started.program,
             interfaces: started.interfaces,
+            ports: started.port_details,
             job: started.job,
             stopped_by_request: Default::default(),
         });
@@ -652,6 +666,16 @@ impl Controller {
             duration,
             stop: None,
         };
+        let output = OutputSpec {
+            backend: p.backend,
+            queue: p.queue,
+            xdp_mode: p.xdp_mode,
+            batch: p.batch,
+            dpdk_args: p.dpdk_args,
+            ..Default::default()
+        }
+        .send_settings()?;
+        profile.output = output.or(&profile.output);
         let started = start_udp_with(&profile, p.iface.as_deref(), config, &*self.open_port)
             .map_err(RpcError::failed)?;
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
@@ -659,6 +683,7 @@ impl Controller {
             id,
             program: started.program,
             interfaces: started.interfaces,
+            ports: started.port_details,
             job: started.job,
             stopped_by_request: Default::default(),
         });

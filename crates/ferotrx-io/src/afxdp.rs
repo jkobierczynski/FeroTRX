@@ -21,7 +21,7 @@ use ferotrx_core::{PacketSink, SinkError, XdpMode};
 use libc::{c_int, c_void, socklen_t};
 
 // AF_XDP is in glibc's headers but not in every libc the crate supports.
-const AF_XDP: c_int = 44;
+pub(crate) const AF_XDP: c_int = 44;
 
 /// Number of frames in the UMEM, and the size of the TX and completion rings.
 const FRAMES: u32 = 4096;
@@ -33,7 +33,7 @@ const FILL_RING: u32 = 64;
 /// link stuck.
 const STALL_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long to keep trying a queue that is still held by a closed socket.
-const BIND_RETRY: Duration = Duration::from_secs(2);
+pub(crate) const BIND_RETRY: Duration = Duration::from_secs(2);
 
 /// How to open an [`AfXdpSink`].
 #[derive(Clone, Debug)]
@@ -67,26 +67,26 @@ pub struct AfXdpSink {
 unsafe impl Send for AfXdpSink {}
 
 /// One mmapped ring shared with the kernel.
-struct Ring {
-    map: *mut c_void,
-    map_len: usize,
-    producer: *const AtomicU32,
-    consumer: *const AtomicU32,
-    flags: *const AtomicU32,
-    descs: *mut u8,
-    mask: u32,
+pub(crate) struct Ring {
+    pub(crate) map: *mut c_void,
+    pub(crate) map_len: usize,
+    pub(crate) producer: *const AtomicU32,
+    pub(crate) consumer: *const AtomicU32,
+    pub(crate) flags: *const AtomicU32,
+    pub(crate) descs: *mut u8,
+    pub(crate) mask: u32,
     /// Our copy of the index we own (producer of TX, consumer of the completion ring).
-    cached: u32,
+    pub(crate) cached: u32,
 }
 
 impl Ring {
-    fn producer(&self) -> &AtomicU32 {
+    pub(crate) fn producer(&self) -> &AtomicU32 {
         unsafe { &*self.producer }
     }
-    fn consumer(&self) -> &AtomicU32 {
+    pub(crate) fn consumer(&self) -> &AtomicU32 {
         unsafe { &*self.consumer }
     }
-    fn flags(&self) -> u32 {
+    pub(crate) fn flags(&self) -> u32 {
         unsafe { (*self.flags).load(Ordering::Relaxed) }
     }
 }
@@ -99,7 +99,7 @@ impl Drop for Ring {
     }
 }
 
-fn os_err(what: &str) -> SinkError {
+pub(crate) fn os_err(what: &str) -> SinkError {
     let e = io::Error::last_os_error();
     let hint = match e.raw_os_error() {
         Some(libc::EPERM) | Some(libc::EACCES) => {
@@ -114,7 +114,12 @@ fn os_err(what: &str) -> SinkError {
     format!("AF_XDP {what}: {e}{hint}").into()
 }
 
-fn setsockopt<T>(fd: c_int, name: c_int, value: &T, what: &str) -> Result<(), SinkError> {
+pub(crate) fn setsockopt<T>(
+    fd: c_int,
+    name: c_int,
+    value: &T,
+    what: &str,
+) -> Result<(), SinkError> {
     let r = unsafe {
         libc::setsockopt(
             fd,
@@ -429,7 +434,7 @@ impl Drop for AfXdpSink {
     }
 }
 
-fn map_ring(
+pub(crate) fn map_ring(
     fd: c_int,
     off: &libc::xdp_ring_offset,
     entries: u32,

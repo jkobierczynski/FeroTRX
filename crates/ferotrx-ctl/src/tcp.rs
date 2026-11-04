@@ -8,11 +8,15 @@ use ferotrx_core::{
     PacketPort, SinkError, TcpEngine, TcpJob, TcpProfile, TcpProgram, TcpRunConfig,
 };
 
+use ferotrx_io::PortSettings;
+
 use crate::controller::StartError;
 use crate::protocol::{RunState, TcpRunInfo};
 
-/// Opens an interface by name as a port that sends and receives.
-pub type PortOpener = dyn Fn(&str) -> Result<Box<dyn PacketPort>, SinkError> + Send + Sync;
+/// Opens an interface by name as a port that sends and receives, with the
+/// backend and emulated hosts' MACs given ([`ferotrx_io::open_port_with`]).
+pub type PortOpener =
+    dyn Fn(&str, &PortSettings) -> Result<Box<dyn PacketPort>, SinkError> + Send + Sync;
 
 /// A TCP run started by [`start_tcp`].
 pub struct TcpStarted {
@@ -22,6 +26,8 @@ pub struct TcpStarted {
     pub program: String,
     /// The interfaces, in port order.
     pub interfaces: Vec<String>,
+    /// How each port sends and receives, where it says (AF_XDP, DPDK).
+    pub port_details: Vec<String>,
 }
 
 /// Loads a TCP profile's program, opens its interfaces and starts a [`TcpJob`].
@@ -33,7 +39,7 @@ pub fn start_tcp(
     iface: Option<&str>,
     config: TcpRunConfig,
 ) -> Result<TcpStarted, StartError> {
-    start_tcp_with(profile, iface, config, &ferotrx_io::open_port)
+    start_tcp_with(profile, iface, config, &ferotrx_io::open_port_with)
 }
 
 /// Like [`start_tcp`], opening ports with `open` (for tests and embedding).
@@ -58,8 +64,15 @@ pub fn start_tcp_with(
             .join("; "),
     };
     let mut ports = Vec::with_capacity(interfaces.len());
-    for name in &interfaces {
-        ports.push(open(name)?);
+    let mut port_details = Vec::new();
+    for (i, name) in interfaces.iter().enumerate() {
+        let settings = PortSettings {
+            send: profile.output.clone(),
+            macs: engine.port_macs(i),
+        };
+        let port = open(name, &settings)?;
+        port_details.extend(port.describe());
+        ports.push(port);
     }
     if config.duration.is_none() {
         config.duration = profile.duration;
@@ -68,6 +81,7 @@ pub fn start_tcp_with(
         job: TcpJob::spawn(engine, ports, config)?,
         program,
         interfaces,
+        port_details,
     })
 }
 
@@ -75,6 +89,7 @@ pub(crate) struct TcpRun {
     pub id: u64,
     pub program: String,
     pub interfaces: Vec<String>,
+    pub ports: Vec<String>,
     pub job: TcpJob,
     pub stopped_by_request: AtomicBool,
 }
@@ -95,6 +110,7 @@ impl TcpRun {
             id: self.id,
             program: self.program.clone(),
             interfaces: self.interfaces.clone(),
+            ports: self.ports.clone(),
             state,
             error: self.job.error(),
             client: Default::default(),

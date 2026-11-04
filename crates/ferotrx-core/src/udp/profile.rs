@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::profile::OutputFile;
+use crate::SendSettings;
+
 use super::dns::DnsWorkload;
 use super::engine::{UdpApp, UdpClientConfig, UdpConfig, UdpOptions, UdpServerConfig, UdpTemplate};
 use super::program::{UdpMessage, UdpProgram};
@@ -80,6 +83,9 @@ pub struct UdpProfile {
     pub source_ports: Range<u16>,
     pub duration: Option<Duration>,
     pub options: UdpOptions,
+    /// How the interfaces send and receive (the `[output]` table): libpcap,
+    /// AF_XDP or DPDK. The command line's settings win over these.
+    pub output: SendSettings,
 }
 
 /// One template of a [`UdpProfile`].
@@ -220,6 +226,7 @@ impl Default for UdpProfile {
             source_ports: 1024..65535,
             duration: None,
             options: UdpOptions::default(),
+            output: SendSettings::default(),
         }
     }
 }
@@ -264,6 +271,7 @@ struct RawProfile {
     client: Option<RawHost>,
     server: Option<RawHost>,
     udp: Option<RawOptions>,
+    output: Option<OutputFile>,
 }
 
 #[derive(Deserialize)]
@@ -509,6 +517,9 @@ impl UdpProfile {
             p.source_ports = parse_port_range(&r)?;
         }
         p.duration = raw.duration.map(|d| parse_duration(&d)).transpose()?;
+        p.output = raw
+            .output
+            .map_or(Ok(SendSettings::default()), OutputFile::settings)?;
         if let Some(o) = raw.udp {
             let d = |v: Option<String>, dflt: Duration| -> Result<Duration> {
                 v.map_or(Ok(dflt), |s| parse_duration(&s))
@@ -673,6 +684,18 @@ mod tests {
 
     fn examples() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples")
+    }
+
+    #[test]
+    fn output_table_picks_the_backend() {
+        let p = UdpProfile::from_toml(
+            "app = \"ntp\"\n[client]\nip = \"10.0.0.1\"\n[output]\nbackend = \"dpdk\"\n\
+             dpdk_args = [\"--no-huge\"]\n",
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(p.output.backend(), crate::Backend::Dpdk);
+        assert_eq!(p.output.dpdk_args(), ["--no-huge".to_string()]);
     }
 
     #[test]

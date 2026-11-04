@@ -15,7 +15,7 @@ fn runner() -> LabRunner {
     let tx: Arc<Mutex<Option<MemoryPort>>> = Arc::default();
     let tx2 = tx.clone();
     LabRunner::new()
-        .with_port_opener(move |name| {
+        .with_port_opener(move |name, _| {
             let mut spare = spare.lock().unwrap();
             match name {
                 "a" => {

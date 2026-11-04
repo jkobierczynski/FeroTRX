@@ -69,7 +69,7 @@ jobs:
           sudo ip link set xt1 up
           bin=$(cargo test -p ferotrx-io --lib --no-run --message-format=json \
                 | jq -r 'select(.executable != null and .target.kind == ["lib"]) | .executable')
-          sudo FEROTRX_TEST_XDP_IFACE=xt0 "$bin" af_xdp --nocapture
+          sudo FEROTRX_TEST_XDP_IFACE=xt0 "$bin" af_xdp --nocapture --test-threads=1
           cargo build -p ferotrx-cli
           before=$(cat /sys/class/net/xt1/statistics/rx_packets)
           sudo ./target/debug/ferotrx replay examples/web.pcap -i xt0 -B af_xdp --xdp-mode copy -t -l 100
@@ -138,6 +138,24 @@ jobs:
           sudo MIX=1 scripts/udp-netns.sh ./target/debug/ferotrx
           sudo IPV6=1 scripts/udp-netns.sh ./target/debug/ferotrx
           sudo IPV6=1 MIX=1 NO_VLAN=1 LOSS=0.03 scripts/udp-netns.sh ./target/debug/ferotrx
+
+      # Stateful TCP and UDP over AF_XDP: the emulated hosts' frames come in
+      # through an XDP program and AF_XDP sockets, broadcasts and multicasts
+      # (ARP, neighbor discovery) through an AF_PACKET socket. On the VLAN
+      # trunk, without VLANs with 3% loss, over IPv6, the template mix, and a
+      # higher connection rate.
+      - name: Stateful TCP and UDP over AF_XDP (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo modprobe 8021q || true
+          sudo scripts/tcp-nat-netns.sh ./target/debug/ferotrx -B af_xdp -n 300 --cps 100
+          sudo NO_VLAN=1 LOSS=0.03 scripts/tcp-nat-netns.sh ./target/debug/ferotrx -B af_xdp -n 300 --cps 100
+          sudo IPV6=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx -B af_xdp -n 300 --cps 100
+          sudo MIX=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx -B af_xdp
+          sudo NO_VLAN=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx -B af_xdp -n 5000 --cps 1000
+          sudo scripts/udp-netns.sh ./target/debug/ferotrx -B af_xdp
+          sudo IPV6=1 MIX=1 NO_VLAN=1 scripts/udp-netns.sh ./target/debug/ferotrx -B af_xdp
 
       # Loss and latency through a router in a network namespace: routing and
       # masquerading, a 5 ms delay (netem), then 3% packet loss on top.
@@ -213,3 +231,16 @@ jobs:
           test $((after - before)) -ge 2100
           sudo ./target/debug/ferotrx replay examples/web.pcap -i net_null0 \
             -B dpdk --dpdk-args "$eal" --pps 2000 -l 5
+
+      # Stateful TCP and UDP through the NAT router, with DPDK's af_packet
+      # driver on the router's links: on the VLAN trunk, then one link per side.
+      - name: Stateful TCP and UDP over DPDK
+        run: |
+          sudo modprobe 8021q || true
+          eal='--no-huge -m 512 --no-pci -l 0 --log-level=warning'
+          sudo scripts/tcp-nat-netns.sh ./target/debug/ferotrx -B dpdk --dpdk-args "$eal" \
+            -i net_af_packet0,iface=t0 -n 300 --cps 100
+          sudo NO_VLAN=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx -B dpdk --dpdk-args "$eal" \
+            --client-iface net_af_packet0,iface=c0 --server-iface net_af_packet1,iface=s0 -n 300 --cps 100
+          sudo scripts/udp-netns.sh ./target/debug/ferotrx -B dpdk --dpdk-args "$eal" \
+            -i net_af_packet0,iface=t0

@@ -364,7 +364,7 @@ ip = "10.9.0.2"
 fn tcp_server() -> SocketAddr {
     use std::sync::Mutex;
     let spare: Mutex<Option<ferotrx_core::MemoryPort>> = Mutex::new(None);
-    let controller = Controller::new().with_port_opener(move |name| {
+    let controller = Controller::new().with_port_opener(move |name, _| {
         let mut spare = spare.lock().unwrap();
         match name {
             "a" => {

@@ -65,7 +65,7 @@ const POLL: Duration = Duration::from_millis(100);
 impl LabRunner {
     pub fn new() -> Self {
         Self {
-            open_port: Box::new(ferotrx_io::open_port),
+            open_port: Box::new(ferotrx_io::open_port_with),
             open_receiver: Box::new(ferotrx_io::open_receiver),
             open_sink: Box::new(open_interface),
             progress: None,
@@ -75,7 +75,10 @@ impl LabRunner {
     /// Opens the ports of TCP and UDP checks with `open`.
     pub fn with_port_opener(
         mut self,
-        open: impl Fn(&str) -> Result<Box<dyn PacketPort>, SinkError> + Send + Sync + 'static,
+        open: impl Fn(&str, &ferotrx_io::PortSettings) -> Result<Box<dyn PacketPort>, SinkError>
+            + Send
+            + Sync
+            + 'static,
     ) -> Self {
         self.open_port = Box::new(open);
         self

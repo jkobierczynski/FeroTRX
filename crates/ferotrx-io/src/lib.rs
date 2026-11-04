@@ -9,7 +9,9 @@
 //! * `DpdkSink` sends through DPDK. Enabled by the `dpdk` feature, which needs
 //!   DPDK installed to build.
 //! * [`PcapPort`] sends and receives on an interface through libpcap/Npcap,
-//!   for stateful TCP (`ferotrx_core::TcpEngine`); [`open_port`] opens one.
+//!   for stateful TCP and UDP (`ferotrx_core::TcpEngine`); [`open_port`]
+//!   opens one. `XdpPort` (Linux, AF_XDP with an XDP program of its own) and
+//!   `DpdkPort` do the same faster; [`open_port_with`] opens any of the three.
 //! * [`PcapReceiver`] receives on an interface with the kernel's timestamps,
 //!   to measure loss and latency (`ferotrx_core::RxStats`); [`open_receiver`]
 //!   opens one.
@@ -30,6 +32,10 @@ pub use ferotrx_core::{Backend, NullSink, SendSettings, XdpMode};
 mod afxdp;
 #[cfg(all(feature = "af-xdp", target_os = "linux"))]
 pub use afxdp::{AfXdpConfig, AfXdpSink};
+#[cfg(all(feature = "af-xdp", target_os = "linux"))]
+mod xdp;
+#[cfg(all(feature = "af-xdp", target_os = "linux"))]
+pub use xdp::{XdpPort, XdpPortConfig};
 
 #[cfg(feature = "dpdk")]
 mod dpdk;
@@ -37,9 +43,9 @@ mod dpdk;
 mod host;
 mod port;
 #[cfg(feature = "dpdk")]
-pub use dpdk::{DpdkConfig, DpdkSink};
+pub use dpdk::{DpdkConfig, DpdkPort, DpdkSink};
 pub use host::{describe_host, describe_interface};
-pub use port::{interface_mac, open_port, open_receiver};
+pub use port::{interface_mac, open_port, open_port_with, open_receiver, PortSettings};
 #[cfg(feature = "pcap")]
 pub use port::{PcapPort, PcapReceiver};
 

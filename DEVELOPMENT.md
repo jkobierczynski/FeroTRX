@@ -38,6 +38,7 @@ the same library.
 | M14, benchmarking | `ferotrx bench`: RFC 2544 throughput (binary search on the rate with a loss threshold), latency, frame loss and back-to-back; frame sizes and size mixes (IMIX, weighted, random) also in profiles and on `replay`/`build`; signatures that keep the frame size; warm-up, repetitions, stop conditions in a benchmark profile; offered against achieved rates and run metadata (version, kernel, CPU, sender, drivers, NICs, profile) in JSON and text reports; [docs/benchmarking.md](docs/benchmarking.md); `scripts/bench-netns.sh` | #25 | 0.8.0 |
 | M16, scenario and regression tests | Scenario files: checks that each run TCP, UDP or streams with a receiver, from profile files or inline, with an expected outcome (`complete`, `blocked`) and conditions on metrics with units (`loss_pct < 1%`, `latency_p99 < 20ms`, `rx_mbps > 50Mbit/s`); variables (`--set`); attempts for jittery labs; pass/fail/error per check and the exit code; JSON and JUnit XML reports; run history and comparisons (regressed, fixed, metrics that moved, `--strict`, `--baseline`); `ferotrx scenario run/show/compare/history/metrics`; `ferotrx_ctl::LabRunner`; [docs/scenarios.md](docs/scenarios.md); `scripts/scenario-netns.sh` (a firewall change caught) | #28 | 0.9.0 |
 | M17, traffic models and file checks | Traffic models for streams (`model`, `shape`, `--model`): Poisson arrivals, bursts that keep the mean rate, ramps up/hold/down and rate shapes from points (exact, with a quadratic solve per piece), a ramp that ends ends the stream; the same for TCP connections and UDP transactions (top level and per template with its own rate); `ferotrx check` for every kind of file (captures read, packets built, engines set up; summary, warnings, `--strict`, `--kind`); `format = 1` version field in all files; `StreamInfo.model` in the control API; [docs/traffic-models.md](docs/traffic-models.md); `examples/lab-models.toml` | #29 | 0.10.0 |
+| M18, stateful TCP and UDP over AF_XDP and DPDK | AF_XDP ports that receive: an XDP program loaded with raw `bpf()` calls (MAC map, XSKMAP, BPF link, driver or generic mode), one full-duplex AF_XDP socket per receive queue, broadcasts and multicasts through a filtered AF_PACKET socket with VLAN tags put back; DPDK ports that receive (promiscuous, burst copy-out in the C shim); `ferotrx_io::open_port_with` and `PortSettings`, `PacketPort::describe`; `-B/--xdp-mode/--queue/--batch/--dpdk-args` and `[output]` for `ferotrx tcp` and `ferotrx udp`, the same fields and `ports` in `tcp.*`/`udp.*`; timer queues instead of per-millisecond scans in the TCP and UDP engines (about 13k to 25k cps for the engine alone); AF_XDP and DPDK runs of the NAT lab scripts in CI; [docs/fast-ports.md](docs/fast-ports.md); `engine_rate` example | #30 | 0.11.0 |
 
 The lab scripts (`scripts/*.sh`) build a NAT router in network namespaces
 and run in CI, over IPv4 and IPv6, with and without loss, for UDP and DNS also
@@ -79,8 +80,12 @@ checked against 0.4.0. Each issue has the full checklist.
 - [x] **M17, traffic models and file checks (0.10.0)**, from [#20](https://github.com/jkobierczynski/FeroTRX/issues/20):
       bursts, Poisson arrivals, ramps and rate shapes; `ferotrx check` and a
       profile format version (session length distributions are not done yet)
+- [x] **M18, stateful TCP and UDP over AF_XDP and DPDK (0.11.0)**, from [#20](https://github.com/jkobierczynski/FeroTRX/issues/20):
+      receiving through an XDP program of FeroTRX's own and AF_XDP sockets,
+      or DPDK; timer queues in the engines (one engine thread per run; a
+      run spread over several cores is not done yet)
 - [ ] **Later**, [#20](https://github.com/jkobierczynski/FeroTRX/issues/20):
-      stateful TCP over AF_XDP/DPDK, host emulation (DHCP, RA, IGMP/MLD), a
+      host emulation (DHCP, RA, IGMP/MLD), a
       Python client package, generated TLS and HTTP workloads, session length
       distributions
 

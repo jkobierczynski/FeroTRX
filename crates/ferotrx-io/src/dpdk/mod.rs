@@ -7,13 +7,16 @@
 //! EAL, DPDK's runtime, is started once per process, with the `dpdk_args` of
 //! the first DPDK output opened. Packets are copied into mbufs and handed to
 //! the NIC in bursts of `batch`.
+//!
+//! [`DpdkPort`] also receives, for stateful TCP and UDP: the port is put in
+//! promiscuous mode and frames are taken from its RX queue 0.
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::sync::{Mutex, OnceLock};
 use std::thread::ThreadId;
 
-use ferotrx_core::{PacketSink, SinkError};
+use ferotrx_core::{PacketPort, PacketSink, SinkError};
 
 #[repr(C)]
 struct RteMempool {
@@ -43,6 +46,8 @@ extern "C" {
         spin_limit: u64,
     ) -> c_int;
     fn ftrx_dpdk_stop(port: u16, queue: u16);
+    fn ftrx_dpdk_promisc(port: u16) -> c_int;
+    fn ftrx_dpdk_recv(port: u16, out: *mut u8, slot: usize, lens: *mut u16, max: u16) -> c_int;
 }
 
 /// Largest packet: the data room of one mbuf (see shim.c).
@@ -193,6 +198,15 @@ impl DpdkSink {
         self.describe.clone()
     }
 
+    /// Registers the calling thread with EAL, once per thread.
+    fn register(&mut self) {
+        let me = std::thread::current().id();
+        if self.thread != Some(me) {
+            unsafe { ftrx_dpdk_register_thread() };
+            self.thread = Some(me);
+        }
+    }
+
     fn submit(&mut self) -> Result<(), SinkError> {
         if self.ends.is_empty() {
             return Ok(());
@@ -243,11 +257,7 @@ impl PacketSink for DpdkSink {
             )
             .into());
         }
-        let me = std::thread::current().id();
-        if self.thread != Some(me) {
-            unsafe { ftrx_dpdk_register_thread() };
-            self.thread = Some(me);
-        }
+        self.register();
         self.bytes.extend_from_slice(data);
         self.ends.push(self.bytes.len());
         if self.ends.len() >= self.batch {
@@ -273,5 +283,89 @@ impl Drop for DpdkSink {
         if let Some(state) = ports.as_mut().and_then(|p| p.get_mut(&self.port)) {
             state.in_use = false;
         }
+    }
+}
+
+/// Largest frame a [`DpdkPort`] receives (jumbo frames); longer ones are dropped.
+const MAX_RX_FRAME: usize = 9216;
+/// Frames taken from the NIC per receive call (FTRX_BURST in shim.c).
+const RX_BURST: usize = 64;
+
+/// Sends and receives on a DPDK port, for stateful TCP and UDP.
+pub struct DpdkPort {
+    tx: DpdkSink,
+    /// Frames received but not handed out yet, one every MAX_RX_FRAME bytes.
+    rx: Vec<u8>,
+    lens: [u16; RX_BURST],
+    count: usize,
+    next: usize,
+}
+
+impl DpdkPort {
+    /// Opens `device` as for [`DpdkSink::open`], and receives every frame on
+    /// it (promiscuous mode).
+    pub fn open(device: &str, config: &DpdkConfig) -> Result<Self, SinkError> {
+        let tx = DpdkSink::open(device, config)?;
+        let r = unsafe { ftrx_dpdk_promisc(tx.port) };
+        if r < 0 {
+            return Err(dpdk_err(
+                &format!("promiscuous mode on port {}", tx.port),
+                r,
+            ));
+        }
+        Ok(Self {
+            tx,
+            rx: vec![0; MAX_RX_FRAME * RX_BURST],
+            lens: [0; RX_BURST],
+            count: 0,
+            next: 0,
+        })
+    }
+
+    pub fn describe(&self) -> String {
+        self.tx.describe()
+    }
+}
+
+impl PacketPort for DpdkPort {
+    fn send(&mut self, frame: &[u8]) -> Result<(), SinkError> {
+        PacketSink::send(&mut self.tx, frame)
+    }
+
+    fn recv(&mut self, buf: &mut Vec<u8>) -> Result<bool, SinkError> {
+        if self.next == self.count {
+            self.tx.register();
+            let r = unsafe {
+                ftrx_dpdk_recv(
+                    self.tx.port,
+                    self.rx.as_mut_ptr(),
+                    MAX_RX_FRAME,
+                    self.lens.as_mut_ptr(),
+                    RX_BURST as u16,
+                )
+            };
+            if r < 0 {
+                return Err(dpdk_err(&format!("receive on port {}", self.tx.port), r));
+            }
+            self.count = r as usize;
+            self.next = 0;
+            if self.count == 0 {
+                return Ok(false);
+            }
+        }
+        let at = self.next * MAX_RX_FRAME;
+        let len = usize::from(self.lens[self.next]);
+        self.next += 1;
+        buf.clear();
+        buf.extend_from_slice(&self.rx[at..at + len]);
+        Ok(true)
+    }
+
+    fn flush(&mut self) -> Result<(), SinkError> {
+        self.tx.submit()
+    }
+
+    fn describe(&self) -> Option<String> {
+        Some(DpdkPort::describe(self))
     }
 }

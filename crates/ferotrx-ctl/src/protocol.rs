@@ -675,6 +675,22 @@ pub struct TcpStartParams {
     /// Stop after this long, e.g. `30s`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<String>,
+    /// How the interfaces send and receive: `pcap` (default), `af_xdp` or
+    /// `dpdk`; any left out come from the profile's `[output]` table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Transmit queue (af_xdp, dpdk).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<u16>,
+    /// AF_XDP mode: `auto`, `copy` or `zerocopy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xdp_mode: Option<String>,
+    /// Frames handed over at once (af_xdp, dpdk).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<u32>,
+    /// DPDK EAL arguments. EAL starts once per server process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dpdk_args: Option<Vec<String>>,
 }
 
 /// A stateful TCP run, as `tcp.start`, `tcp.stats`, `tcp.stop` and `tcp.list` report it.
@@ -686,6 +702,10 @@ pub struct TcpRunInfo {
     pub program: String,
     /// The interfaces the run uses.
     pub interfaces: Vec<String>,
+    /// How each port sends and receives, where it says, e.g. `af_xdp on
+    /// eth0: 4 queue(s), XDP driver mode, zero-copy, 2 host MAC(s)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<String>,
     pub state: RunState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -807,6 +827,22 @@ pub struct UdpStartParams {
     /// Stop after this long, e.g. `30s`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<String>,
+    /// How the interfaces send and receive: `pcap` (default), `af_xdp` or
+    /// `dpdk`; any left out come from the profile's `[output]` table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    /// Transmit queue (af_xdp, dpdk).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<u16>,
+    /// AF_XDP mode: `auto`, `copy` or `zerocopy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xdp_mode: Option<String>,
+    /// Frames handed over at once (af_xdp, dpdk).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<u32>,
+    /// DPDK EAL arguments. EAL starts once per server process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dpdk_args: Option<Vec<String>>,
 }
 
 /// A stateful UDP run, as `udp.start`, `udp.stats`, `udp.stop` and `udp.list` report it.
@@ -817,6 +853,10 @@ pub struct UdpRunInfo {
     /// What the transactions carry, e.g. `DNS: 8 queries, 8 records`.
     pub program: String,
     pub interfaces: Vec<String>,
+    /// How each port sends and receives, where it says, e.g. `af_xdp on
+    /// eth0: 4 queue(s), XDP driver mode, zero-copy, 2 host MAC(s)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<String>,
     pub state: RunState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
