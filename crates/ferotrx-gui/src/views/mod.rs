@@ -198,17 +198,19 @@ impl FeroApp {
                                     "Build a router on the server for the lab examples",
                                 )
                             };
-                            let mut t = RichText::new(text).small();
-                            if lab.running {
-                                t = t.color(egui::Color32::from_rgb(0x2e, 0xa0, 0x43));
-                            }
-                            if ui
-                                .add(egui::Button::new(t).frame(false))
-                                .on_hover_text(tip)
-                                .clicked()
-                            {
-                                action = Some(PanelAction::Lab(i));
-                            }
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                let green = egui::Color32::from_rgb(0x2e, 0xa0, 0x43);
+                                let dot = if lab.running {
+                                    green
+                                } else {
+                                    ui.visuals().weak_text_color()
+                                };
+                                ui.colored_label(dot, if lab.running { "●" } else { "○" });
+                                if ui.button(text).on_hover_text(tip).clicked() {
+                                    action = Some(PanelAction::Lab(i));
+                                }
+                            });
                         }
                     });
             }
