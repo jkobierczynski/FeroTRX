@@ -184,7 +184,8 @@ pub(crate) fn resolve(
                 Some(seen) => format!(
                     "no {reply} from {hop} (the {}'s next hop) {} within {:?}{more}, but its replies \
                      arrive {}: the switch or interface changes the tag; set the {}'s VLAN to match, \
-                     or use a VLAN the switch keeps tagged (VLAN 1 is often sent untagged)",
+                     or use a VLAN the switch keeps tagged (VLAN 1 is often sent untagged); \
+                     with AF_XDP, also check that the NIC keeps tags (ethtool -K IFACE rxvlan off)",
                     host.role,
                     vlan(host.ep.vlan),
                     timeout,

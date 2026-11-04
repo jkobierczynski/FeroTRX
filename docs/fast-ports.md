@@ -49,7 +49,10 @@ Needs Linux 5.9 or newer and root, or `CAP_NET_ADMIN`, `CAP_NET_RAW` and
   ranges (`ips`) share one MAC, so this is rarely a limit.
 * NICs that take VLAN tags off in hardware hide them from XDP. For VLAN labs,
   turn that off: `ethtool -K enp0s3 rxvlan off`. Broadcasts come through the
-  AF_PACKET socket with their tags put back either way.
+  AF_PACKET socket with their tags put back either way. A veth pair passes a
+  tag the sending side kept aside (VLAN transmit offload) to the other end
+  aside too, out of XDP's sight: the lab scripts turn that off on the
+  router's end with `ethtool -K rt txvlan off`.
 * Frames sent through AF_XDP skip the kernel's packet taps, so tcpdump on the
   sending machine does not show them; frames received through it do not show
   either. Capture on the router or the other end.
