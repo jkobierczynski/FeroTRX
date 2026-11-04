@@ -91,6 +91,12 @@ else
     addr() { r ip addr add "$1" dev "$2"; }
 fi
 
+# QUEUES=4: four queues on each veth link, for `--workers 4 -B af_xdp`.
+queues=
+if [ -n "${QUEUES:-}" ]; then
+    queues="numtxqueues $QUEUES numrxqueues $QUEUES"
+fi
+
 vlan=yes
 if [ "${NO_VLAN:-}" = 1 ]; then
     vlan=no
@@ -101,7 +107,8 @@ fi
 r ip link del dummy0 2>/dev/null || true
 
 if [ $vlan = yes ]; then
-    ip link add t0 type veth peer name rt
+    # shellcheck disable=SC2086
+    ip link add t0 $queues type veth peer name rt $queues
     ip link set rt netns $NS
     quiet_v6 t0
     no_dad rt
@@ -127,7 +134,8 @@ if [ $vlan = yes ]; then
 else
     for side in c:10 s:20; do
         n=${side%%:*}; net=${side##*:}
-        ip link add ${n}0 type veth peer name r$n
+        # shellcheck disable=SC2086
+        ip link add ${n}0 $queues type veth peer name r$n $queues
         ip link set r$n netns $NS
         quiet_v6 ${n}0
         no_dad r$n

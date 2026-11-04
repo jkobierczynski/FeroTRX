@@ -38,6 +38,10 @@
 # The router masquerades with ip6tables when the kernel has IPv6 NAT, else it
 # only routes.
 #
+# QUEUES=4 gives the veth links four queues each, so a run with
+# `--workers 4 -B af_xdp` has a queue per worker (veth needs XDP attached to
+# use them; ferotrx's AF_XDP port does that).
+#
 # Without VLAN support in the kernel (no 8021q module), or with NO_VLAN=1, the
 # client and the server get a link each instead of sharing a trunk:
 #   c0 --- rc 192.168.10.1/24 (router) rs 192.168.20.1/24 --- s0
@@ -105,6 +109,11 @@ else
     addr() { r ip addr add "$1" dev "$2"; }
 fi
 
+queues=
+if [ -n "${QUEUES:-}" ]; then
+    queues="numtxqueues $QUEUES numrxqueues $QUEUES"
+fi
+
 vlan=yes
 if [ "${NO_VLAN:-}" = 1 ]; then
     vlan=no
@@ -116,7 +125,8 @@ r ip link del dummy0 2>/dev/null || true
 
 set +e
 if [ $vlan = yes ]; then
-    ip link add t0 type veth peer name rt
+    # shellcheck disable=SC2086
+    ip link add t0 $queues type veth peer name rt $queues
     ip link set rt netns $NS
     # No IPv6 on the trunk: router solicitations would only add noise.
     quiet_v6 t0
@@ -141,7 +151,8 @@ if [ $vlan = yes ]; then
 else
     for side in c:10 s:20; do
         n=${side%%:*}; net=${side##*:}
-        ip link add ${n}0 type veth peer name r$n
+        # shellcheck disable=SC2086
+        ip link add ${n}0 $queues type veth peer name r$n $queues
         ip link set r$n netns $NS
         quiet_v6 ${n}0
         no_dad r$n

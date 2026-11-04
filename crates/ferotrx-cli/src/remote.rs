@@ -320,6 +320,9 @@ enum CtlCommand {
         /// Stop after this long, e.g. 30s.
         #[arg(short, long)]
         duration: Option<String>,
+        /// Engine threads on the server to spread the run over.
+        #[arg(long)]
+        workers: Option<u16>,
     },
     /// Show the counters of one TCP run, or of every TCP run.
     TcpStats { id: Option<u64> },
@@ -347,6 +350,9 @@ enum CtlCommand {
         /// Stop after this long, e.g. 30s.
         #[arg(short, long)]
         duration: Option<String>,
+        /// Engine threads on the server to spread the run over.
+        #[arg(long)]
+        workers: Option<u16>,
     },
     /// Show the counters of one UDP run, or of every UDP run.
     UdpStats { id: Option<u64> },
@@ -570,6 +576,7 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                         xdp_mode: send.xdp_mode.map(|m| m.name().to_string()),
                         batch: send.batch,
                         dpdk_args: send.dpdk_args,
+                        workers: send.workers,
                     }
                 },
                 rate: s.rate,
@@ -635,12 +642,14 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
             cps,
             connections,
             duration,
+            workers,
         } => {
             let mut params = TcpStartParams {
                 iface,
                 cps,
                 connections,
                 duration,
+                workers,
                 ..Default::default()
             };
             if upload {
@@ -692,12 +701,14 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
             rate,
             transactions,
             duration,
+            workers,
         } => {
             let mut params = UdpStartParams {
                 iface,
                 rate,
                 transactions,
                 duration,
+                workers,
                 ..Default::default()
             };
             if upload {

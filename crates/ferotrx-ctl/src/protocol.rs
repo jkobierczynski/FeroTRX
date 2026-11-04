@@ -300,6 +300,14 @@ pub struct StreamInfo {
 
 // ----- run.* -----
 
+fn one() -> usize {
+    1
+}
+
+fn is_one(n: &usize) -> bool {
+    *n == 1
+}
+
 /// Where a run sends its packets: set exactly one of `iface`, `file` and `null`.
 ///
 /// With `iface`, the other fields choose how to send; any left out come from
@@ -326,6 +334,9 @@ pub struct OutputSpec {
     /// DPDK EAL arguments. EAL starts once per server process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dpdk_args: Option<Vec<String>>,
+    /// Engine threads (cores) to spread the run over (default 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<u16>,
     /// A pcap file on the server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<PathBuf>,
@@ -424,6 +435,9 @@ pub struct RunInfo {
     pub id: u64,
     pub profile: String,
     pub output: String,
+    /// Threads the streams run on.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub workers: usize,
     pub state: RunState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -691,6 +705,9 @@ pub struct TcpStartParams {
     /// DPDK EAL arguments. EAL starts once per server process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dpdk_args: Option<Vec<String>>,
+    /// Engine threads (cores) to spread the run over (default 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<u16>,
 }
 
 /// A stateful TCP run, as `tcp.start`, `tcp.stats`, `tcp.stop` and `tcp.list` report it.
@@ -706,6 +723,9 @@ pub struct TcpRunInfo {
     /// eth0: 4 queue(s), XDP driver mode, zero-copy, 2 host MAC(s)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<String>,
+    /// Engine threads the run uses.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub workers: usize,
     pub state: RunState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -848,6 +868,9 @@ pub struct UdpStartParams {
     /// DPDK EAL arguments. EAL starts once per server process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dpdk_args: Option<Vec<String>>,
+    /// Engine threads (cores) to spread the run over (default 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<u16>,
 }
 
 /// A stateful UDP run, as `udp.start`, `udp.stats`, `udp.stop` and `udp.list` report it.
@@ -862,6 +885,9 @@ pub struct UdpRunInfo {
     /// eth0: 4 queue(s), XDP driver mode, zero-copy, 2 host MAC(s)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<String>,
+    /// Engine threads the run uses.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub workers: usize,
     pub state: RunState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,

@@ -56,6 +56,7 @@ use crate::{
 /// queue = 0                    # transmit queue (default 0)
 /// batch = 64                   # packets handed over at once (default 64)
 /// dpdk_args = ["-l", "0-1"]    # DPDK EAL arguments
+/// workers = 4                  # engine threads (cores), default 1
 /// ```
 ///
 /// See [`Rewrite`] for the rewrite syntax, [`FieldVar`] for the `vary` syntax
@@ -171,6 +172,7 @@ pub(crate) struct OutputFile {
     queue: Option<u16>,
     batch: Option<u32>,
     dpdk_args: Option<Vec<String>>,
+    workers: Option<u16>,
 }
 
 impl OutputFile {
@@ -192,6 +194,7 @@ impl OutputFile {
             queue: self.queue,
             batch: self.batch,
             dpdk_args: self.dpdk_args,
+            workers: self.workers,
         };
         settings.validate().map_err(ctx)?;
         Ok(settings)

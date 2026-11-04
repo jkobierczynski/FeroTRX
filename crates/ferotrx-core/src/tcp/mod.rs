@@ -43,6 +43,6 @@ pub use profile::{
 };
 pub use program::{TcpFlow, TcpMessage, TcpProgram, TcpRole};
 pub use run::{
-    memory_ports, run_engine, run_tcp, MemoryPort, PacketPort, PortEngine, PortJob, TcpJob,
-    TcpRunConfig,
+    memory_ports, run_engine, run_tcp, split_port, split_ports, MemoryPort, PacketPort, PortEngine,
+    PortJob, TcpJob, TcpRunConfig,
 };

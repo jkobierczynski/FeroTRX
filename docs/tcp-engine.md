@@ -109,7 +109,8 @@ with SACK-based loss recovery after RFC 6675:
 
 The engine sends and receives through ports: libpcap/Npcap by default, or
 AF_XDP and DPDK with `-B` ([fast-ports.md](fast-ports.md)). One run is one
-engine on one thread. Connection timers (retransmission, idle, TIME_WAIT,
+engine on one thread, or one engine per worker with `--workers`
+([multi-core.md](multi-core.md)). Connection timers (retransmission, idle, TIME_WAIT,
 message waits) sit in a queue ordered by time, so connections in TIME_WAIT
 cost nothing until theirs ends.
 

@@ -6,7 +6,7 @@ at a controlled rate on Linux, macOS and Windows, rewrites them on the way
 (addresses, ports, VLAN tags), varies fields from packet to packet, builds packets from scratch, runs several streams
 at once from a profile, shapes traffic over time (Poisson arrivals, bursts, ramps), replays TCP sessions statefully (real connections, both ends emulated, through NAT
 routers and firewalls, many sessions at once from templates), plays stateful UDP
-transactions (DNS lookups, NTP, replayed UDP sessions, with matching, timeouts and retries), measures loss and latency on the receive side, benchmarks devices the RFC 2544 way (throughput, latency, frame loss, back-to-back, with IMIX and other size mixes), runs regression scenarios (checks with expected outcomes, pass/fail for CI, comparing runs), checks profile files without sending, all over IPv4 and IPv6, and its engine is a library you can use from your own programs.
+transactions (DNS lookups, NTP, replayed UDP sessions, with matching, timeouts and retries), measures loss and latency on the receive side, benchmarks devices the RFC 2544 way (throughput, latency, frame loss, back-to-back, with IMIX and other size mixes), runs regression scenarios (checks with expected outcomes, pass/fail for CI, comparing runs), checks profile files without sending, spreads one run over several cores, all over IPv4 and IPv6, and its engine is a library you can use from your own programs.
 
 ## Status
 
@@ -28,7 +28,8 @@ transactions (DNS lookups, NTP, replayed UDP sessions, with matching, timeouts a
 * **M16, scenario and regression tests (`ferotrx scenario`: checks with expected outcomes, JSON and JUnit reports, run history and comparisons):** done (0.9.0).
 * **M17, traffic models and file checks (Poisson arrivals, bursts, ramps and rate shapes for streams, TCP connections and UDP transactions; `ferotrx check`; a `format` version in every file):** done (0.10.0).
 * **M18, stateful TCP and UDP over AF_XDP and DPDK (an XDP program of its own for receiving, `-B` for `ferotrx tcp` and `ferotrx udp`, a timer queue in the engines):** done (0.11.0).
-* **M19, host emulation (`ferotrx host`; DHCP, SLAAC and DHCPv6 addresses, gratuitous ARP and unsolicited neighbor advertisements, IGMP/MLD joins, router advertisements; `ip = "dhcp"` for TCP and UDP ends):** this release (0.12.0).
+* **M19, host emulation (`ferotrx host`; DHCP, SLAAC and DHCPv6 addresses, gratuitous ARP and unsolicited neighbor advertisements, IGMP/MLD joins, router advertisements; `ip = "dhcp"` for TCP and UDP ends):** done (0.12.0).
+* **M20, one run on several cores (`--workers`: streams split packet by packet, TCP and UDP runs by flow, one AF_XDP queue per worker):** this release (0.13.0). See [docs/multi-core.md](docs/multi-core.md).
 
 ## Crates
 

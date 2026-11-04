@@ -56,6 +56,12 @@ MAC addresses and routers resolve the next hop before anything is measured.
 
 ## Rates, loads and sizes
 
+When one thread cannot send fast enough, `--workers N` (or `workers` in
+`[output]`) sends each trial from `N` threads, each with its share of the rate,
+on its own AF_XDP queue or libpcap handle ([multi-core.md](multi-core.md)).
+The receiver still counts one flow; frames from different workers may arrive
+slightly out of order.
+
 Rates are given as a **load**: percent of `line_rate`, the speed of the link.
 Every frame takes its length plus 24 bytes on the wire (4 bytes of FCS, 8 of
 preamble and start delimiter, 12 of inter-frame gap), as RFC 2544 counts. So

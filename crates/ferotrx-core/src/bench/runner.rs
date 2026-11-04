@@ -60,6 +60,7 @@ pub struct JobTrialRunner {
     pub rx_wait: Duration,
     stop: Option<Arc<AtomicBool>>,
     next_flow: u32,
+    workers: usize,
 }
 
 impl JobTrialRunner {
@@ -73,7 +74,16 @@ impl JobTrialRunner {
             rx_wait: RxSettings::DEFAULT_WAIT,
             stop: None,
             next_flow: 1,
+            workers: 1,
         }
+    }
+
+    /// Sends each trial from `workers` threads, each with its share of the
+    /// rate ([`Stream::shard`]); the sink opener is called once per worker
+    /// for every trial.
+    pub fn with_workers(mut self, workers: usize) -> Self {
+        self.workers = workers.max(1);
+        self
     }
 
     /// Changes fields from packet to packet (see [`FieldVar`]), before the
@@ -103,20 +113,25 @@ impl TrialRunner for JobTrialRunner {
     fn run(&mut self, trial: &Trial) -> Result<TrialResult> {
         let flow = self.next_flow;
         self.next_flow = self.next_flow.checked_add(1).unwrap_or(1);
-        let mut size = trial.size.clone();
-        size.reset();
-        let mut stream = Stream::new("bench", CaptureSource::new(self.capture.clone()).loops(0))
-            .with_rate(Rate::Pps(trial.pps))
-            .with_limit(trial.packets)
-            .with_latency(flow)
-            .keep_size(true);
-        if !self.vary.is_empty() {
-            stream.push_transform(FieldEngine::new(self.vary.iter().cloned()));
-        }
-        stream.push_transform(size);
         let failed =
             |what: &str, e: SinkError| Error::Bench(format!("cannot open the {what}: {e}"));
-        let sink = (self.open_sink)().map_err(|e| failed("output", e))?;
+        let mut workers = Vec::with_capacity(self.workers);
+        for k in 0..self.workers {
+            let mut size = trial.size.clone();
+            size.reset();
+            let mut stream =
+                Stream::new("bench", CaptureSource::new(self.capture.clone()).loops(0))
+                    .with_rate(Rate::Pps(trial.pps))
+                    .with_limit(trial.packets)
+                    .with_latency(flow)
+                    .keep_size(true);
+            if !self.vary.is_empty() {
+                stream.push_transform(FieldEngine::new(self.vary.iter().cloned()));
+            }
+            stream.push_transform(size);
+            let sink = (self.open_sink)().map_err(|e| failed("output", e))?;
+            workers.push((vec![stream.shard(k, self.workers)], sink));
+        }
         let rx = if trial.warmup {
             None
         } else {
@@ -132,7 +147,7 @@ impl TrialRunner for JobTrialRunner {
             duration: trial.duration,
             ..Default::default()
         };
-        let job = Job::spawn_with_rx(vec![stream], sink, config, rx)?;
+        let job = Job::spawn_workers(workers, config, rx)?;
         while !job.wait(Some(Duration::from_millis(50))) {
             if self
                 .stop

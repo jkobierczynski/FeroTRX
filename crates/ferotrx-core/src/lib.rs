@@ -52,6 +52,10 @@
 //!   streams with a receiver) with expected outcomes, such as "completes",
 //!   "is blocked" or `loss_pct < 1%`; [`scenario::run_scenario`] judges each
 //!   and [`scenario::compare`] holds two runs against each other.
+//! * Several cores: [`Stream::shard`] and [`Job::spawn_workers`] split
+//!   streams packet by packet over worker threads; [`TcpConfig::split`],
+//!   [`UdpConfig::split`], a [`FlowRouter`] and [`PortJob::spawn_workers`]
+//!   split stateful runs by flow (`docs/multi-core.md`).
 //!
 //! Sinks that talk to real interfaces or files live in the `ferotrx-io` crate,
 //! so this crate has no platform specific code. [`SendSettings`] names the
@@ -99,6 +103,7 @@ mod capture;
 pub mod check;
 mod error;
 mod field_engine;
+mod flows;
 mod host;
 mod job;
 mod latency;
@@ -118,6 +123,7 @@ mod tcp;
 mod traffic;
 mod transform;
 mod udp;
+mod workers;
 
 #[cfg(feature = "profile")]
 pub use bench::BenchProfile;
@@ -129,6 +135,7 @@ pub use bench::{
 pub use capture::{Capture, Packet, LINKTYPE_ETHERNET};
 pub use error::{Error, Result};
 pub use field_engine::{FieldEngine, FieldVar, Side, VarField, VarOp};
+pub use flows::{FlowRouter, Route};
 #[cfg(feature = "profile")]
 pub use host::{parse_ipv4_mode, parse_ipv6_mode, parse_prefix6, HostProfile, HostSpec};
 pub use host::{
@@ -148,16 +155,16 @@ pub use profile::{
     check_format, parse_model, Profile, StreamSource, StreamSpec, DEFAULT_INTERVAL, FORMAT_VERSION,
 };
 pub use replay::{replay, replay_with_progress, ReplayConfig, ReplayStats};
-pub use send::{Backend, SendSettings, XdpMode, DEFAULT_BATCH};
-pub use sink::{NullSink, PacketSink, SinkError, VecSink};
+pub use send::{Backend, SendSettings, XdpMode, DEFAULT_BATCH, MAX_WORKERS};
+pub use sink::{share_sink, NullSink, PacketSink, SinkError, VecSink};
 pub use size_mix::{SizeMix, FCS_LEN, L1_OVERHEAD, RFC2544_SIZES};
 pub use source::{CaptureSource, PacketSource};
 pub use stream::{run, run_with_progress, RunConfig, RunStats, Stream};
 pub use tcp::{
-    memory_ports, run_engine, run_tcp, MemoryPort, PacketPort, PortEngine, PortJob,
-    TcpClientConfig, TcpConfig, TcpEndpoint, TcpEngine, TcpFlow, TcpJob, TcpMessage, TcpOptions,
-    TcpProgram, TcpRole, TcpRunConfig, TcpServerConfig, TcpSideStats, TcpStats, TcpTemplate,
-    TcpTemplateStats,
+    memory_ports, run_engine, run_tcp, split_port, split_ports, MemoryPort, PacketPort, PortEngine,
+    PortJob, TcpClientConfig, TcpConfig, TcpEndpoint, TcpEngine, TcpFlow, TcpJob, TcpMessage,
+    TcpOptions, TcpProgram, TcpRole, TcpRunConfig, TcpServerConfig, TcpSideStats, TcpStats,
+    TcpTemplate, TcpTemplateStats,
 };
 #[cfg(feature = "profile")]
 pub use tcp::{
@@ -176,3 +183,4 @@ pub use udp::{
 };
 #[cfg(feature = "profile")]
 pub use udp::{UdpProfile, UdpSource, UdpTemplateSpec};
+pub use workers::{merge_all, share, worker_seed, MergeStats};

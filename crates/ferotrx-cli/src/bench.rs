@@ -149,9 +149,20 @@ pub fn cmd_bench(args: BenchArgs) -> Result<()> {
         send,
     };
     let capture = Arc::new(profile.capture()?);
-    let opened = output
-        .open_detailed(capture.linktype)
+    let workers = match &output {
+        ferotrx_io::Output::Interface { send, .. } => send.workers(),
+        _ => 1,
+    };
+    let mut opened = output
+        .open_workers(capture.linktype, workers)
         .map_err(|e| anyhow::anyhow!(e))?;
+    let mut details: Vec<String> = Vec::new();
+    for o in &opened {
+        if !details.contains(&o.detail) {
+            details.push(o.detail.clone());
+        }
+    }
+    let detail = details.join("; ");
     let receiver = ferotrx_io::open_receiver(&args.rx)
         .map_err(|e| anyhow::anyhow!(e))
         .with_context(|| format!("cannot receive on {}", args.rx))?;
@@ -161,7 +172,7 @@ pub fn cmd_bench(args: BenchArgs) -> Result<()> {
     info.command = Some(std::env::args().collect::<Vec<_>>().join(" "));
     info.profile = Some(args.profile.display().to_string());
     info.profile_text = Some(text);
-    info.backend = Some(opened.detail.clone());
+    info.backend = Some(detail);
     info.tx_interface = Some(ferotrx_io::describe_interface(&args.iface));
     info.rx_interface = Some(ferotrx_io::describe_interface(&args.rx));
     info.timestamps = Some(
@@ -183,15 +194,25 @@ pub fn cmd_bench(args: BenchArgs) -> Result<()> {
         );
     }
 
-    let sink = Arc::new(Mutex::new(opened.sink));
+    // One sink per worker, opened once and handed out in turn to each trial.
+    let sinks: Vec<_> = opened
+        .drain(..)
+        .map(|o| Arc::new(Mutex::new(o.sink)))
+        .collect();
+    let mut next = 0;
     let receiver: Arc<Mutex<Box<dyn PacketReceiver>>> = Arc::new(Mutex::new(receiver));
     let mut runner = JobTrialRunner::new(
         capture,
-        Box::new(move || Ok(Box::new(SharedSink(sink.clone())) as Box<dyn PacketSink + Send>)),
+        Box::new(move || {
+            let sink = sinks[next % sinks.len()].clone();
+            next += 1;
+            Ok(Box::new(SharedSink(sink)) as Box<dyn PacketSink + Send>)
+        }),
         Box::new(move || Ok(Box::new(SharedReceiver(receiver.clone())) as Box<dyn PacketReceiver>)),
     )
     .with_vary(profile.vary.clone())
-    .with_stop(stop);
+    .with_stop(stop)
+    .with_workers(workers);
     runner.rx_wait = profile.rx_wait;
 
     let quiet = args.quiet;

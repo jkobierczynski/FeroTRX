@@ -76,7 +76,8 @@ sudo ferotrx tcp examples/http.pcap -B dpdk --dpdk-args '--no-huge -m 512 --no-p
 ## How fast
 
 One run is one engine on one thread, playing both ends if the profile has
-both. With the HTTP session of `examples/http.pcap` (17 frames, 6 KB from
+both, unless `--workers` spreads it over several (see
+[multi-core.md](multi-core.md); with AF_XDP each worker gets its own queues). With the HTTP session of `examples/http.pcap` (17 frames, 6 KB from
 the server per connection), measured in the development sandbox (4 virtual
 cores, a veth pair, release build):
 

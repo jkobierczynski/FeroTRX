@@ -331,6 +331,10 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
     )
     .map_err(|e| anyhow::anyhow!(e))?;
     if !args.quiet {
+        let workers = started.job.workers();
+        if workers > 1 {
+            eprintln!("workers: {workers} engine threads");
+        }
         for d in &started.port_details {
             eprintln!("port: {d}");
         }
@@ -519,12 +523,14 @@ pub fn print_udp_run(r: &UdpRunInfo) {
         RunState::Stopped => "stopped",
         RunState::Failed => "failed",
     };
+    let on = if r.workers > 1 {
+        format!("{} ({} workers)", r.interfaces.join(", "), r.workers)
+    } else {
+        r.interfaces.join(", ")
+    };
     println!(
-        "udp run {} on {}: {state}, {:.3} s, {:.1} per second",
-        r.id,
-        r.interfaces.join(", "),
-        r.elapsed_s,
-        r.tps
+        "udp run {} on {on}: {state}, {:.3} s, {:.1} per second",
+        r.id, r.elapsed_s, r.tps
     );
     println!("  transactions: {}", r.program);
     if let Some(e) = &r.error {

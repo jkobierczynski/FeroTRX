@@ -111,6 +111,9 @@ impl fmt::Display for XdpMode {
 /// [`SendSettings::batch`] is not set.
 pub const DEFAULT_BATCH: u32 = 64;
 
+/// Most worker threads one run can use.
+pub const MAX_WORKERS: u16 = 64;
+
 /// How to send on an interface. Every field is optional, so settings from
 /// several places can be layered with [`SendSettings::or`]: the command line or
 /// control request first, then the profile's `[output]` table, then the defaults.
@@ -140,6 +143,10 @@ pub struct SendSettings {
     pub batch: Option<u32>,
     /// Arguments for DPDK's EAL, e.g. `["-l", "0-1", "--no-huge", "-m", "512"]`.
     pub dpdk_args: Option<Vec<String>>,
+    /// Engine threads (cores) the run is spread over (default 1). Streams
+    /// are split packet by packet, stateful runs by flow; with AF_XDP each
+    /// worker sends on its own queue, from `queue` up. See `docs/multi-core.md`.
+    pub workers: Option<u16>,
 }
 
 impl SendSettings {
@@ -152,6 +159,7 @@ impl SendSettings {
         if self.dpdk_args.is_none() {
             self.dpdk_args.clone_from(&fallback.dpdk_args);
         }
+        self.workers = self.workers.or(fallback.workers);
         self
     }
 
@@ -179,12 +187,24 @@ impl SendSettings {
         self.dpdk_args.as_deref().unwrap_or(&[])
     }
 
+    /// Engine threads the run uses (default 1).
+    pub fn workers(&self) -> usize {
+        usize::from(self.workers.unwrap_or(1).max(1))
+    }
+
     /// Checks the values that have limits.
     pub fn validate(&self) -> Result<()> {
         if let Some(b) = self.batch {
             if !(1..=4096).contains(&b) {
                 return Err(Error::InvalidSpec(format!(
                     "batch must be between 1 and 4096, got {b}"
+                )));
+            }
+        }
+        if let Some(w) = self.workers {
+            if !(1..=MAX_WORKERS).contains(&w) {
+                return Err(Error::InvalidSpec(format!(
+                    "workers must be between 1 and {MAX_WORKERS}, got {w}"
                 )));
             }
         }

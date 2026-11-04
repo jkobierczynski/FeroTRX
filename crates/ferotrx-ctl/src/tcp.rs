@@ -54,7 +54,28 @@ pub fn start_tcp_with(
     let engine_config = profile.config(&programs, &interfaces, iface)?;
     // With DHCP, SLAAC or DHCPv6 the hosts get their addresses first, and
     // the engine is built with them; checked now with example addresses.
-    let (engine, hosted) = match profile.endpoint_hosts(&engine_config)? {
+    let workers = profile.output.workers();
+    let plan = profile.endpoint_hosts(&engine_config)?;
+    if workers > 1 && plan.is_some() {
+        return Err(ferotrx_core::Error::Tcp(
+            "hosts that get their addresses by DHCP, SLAAC or DHCPv6, announce them or join \
+             groups cannot be split over several workers yet; use workers = 1"
+                .into(),
+        )
+        .into());
+    }
+    // Each worker gets its share of the client and the same servers.
+    let split = if workers > 1 {
+        let (configs, router) = engine_config.split(workers)?;
+        let engines = configs
+            .into_iter()
+            .map(TcpEngine::new)
+            .collect::<ferotrx_core::Result<Vec<_>>>()?;
+        Some((engines, router))
+    } else {
+        None
+    };
+    let (engine, hosted) = match plan {
         Some(plan) => {
             let (checked, hosted) =
                 plan.hosted(engine_config, profile.host_options.clone(), TcpEngine::new)?;
@@ -87,9 +108,21 @@ pub fn start_tcp_with(
     if config.duration.is_none() {
         config.duration = profile.duration;
     }
-    let job = match hosted {
-        Some(h) => TcpJob::spawn(h, ports, config)?,
-        None => TcpJob::spawn(engine, ports, config)?,
+    let job = match (hosted, split) {
+        (Some(h), _) => TcpJob::spawn(h, ports, config)?,
+        (None, Some((engines, router))) => {
+            let lanes = ferotrx_core::split_ports(ports, workers);
+            port_details.clear();
+            for lane in lanes.iter().flatten() {
+                if let Some(d) = lane.describe() {
+                    if !port_details.contains(&d) {
+                        port_details.push(d);
+                    }
+                }
+            }
+            TcpJob::spawn_workers(engines, lanes, router, config)?
+        }
+        (None, None) => TcpJob::spawn(engine, ports, config)?,
     };
     Ok(TcpStarted {
         job,
@@ -125,6 +158,7 @@ impl TcpRun {
             program: self.program.clone(),
             interfaces: self.interfaces.clone(),
             ports: self.ports.clone(),
+            workers: self.job.workers(),
             state,
             error: self.job.error(),
             client: Default::default(),

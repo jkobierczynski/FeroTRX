@@ -772,6 +772,14 @@ impl Transform for FieldEngine {
             v.var.write(&mut packet.data, value);
         }
     }
+
+    fn skip(&mut self, n: u64) {
+        for v in &mut self.vars {
+            for _ in 0..n {
+                v.next();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
