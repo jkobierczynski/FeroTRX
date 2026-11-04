@@ -983,14 +983,22 @@ impl ClientSession {
                     self.answered
                 ));
             }
+            // GOAWAY, then let the server close first: a server that
+            // closes on GOAWAY (nghttpd) would otherwise reset the
+            // connection over bytes it never read (our FIN, TLS
+            // close_notify). Close ourselves if it does not.
             self.conn.goaway(NO_ERROR, cx);
             self.done = true;
-            cx.close();
+            cx.wake_at(cx.now() + LINGER);
         } else {
             self.fill(cx);
         }
     }
 }
+
+/// How long a client that is done waits for the server to close after its
+/// GOAWAY.
+const LINGER: Duration = Duration::from_millis(200);
 
 impl AppSession for ClientSession {
     fn start(&mut self, cx: &mut AppCx) {
@@ -1022,7 +1030,9 @@ impl AppSession for ClientSession {
     }
 
     fn timer(&mut self, cx: &mut AppCx) {
-        if !self.done {
+        if self.done {
+            cx.close(); // the server did not close after our GOAWAY
+        } else {
             self.fill(cx);
         }
     }
@@ -1053,6 +1063,8 @@ struct H2Server {
     queue: Vec<(Duration, u32, HttpRoute, bool)>,
     /// Close once the answers are out (a route said so, or the client went).
     closing: bool,
+    /// The client sent GOAWAY: no GOAWAY back.
+    peer_goaway: bool,
     peer_done: bool,
     done: bool,
 }
@@ -1132,7 +1144,7 @@ impl H2Server {
         }
         let drained = self.queue.is_empty() && (self.peer_done || !self.conn.pending());
         if (self.closing || self.peer_done) && drained && !self.done {
-            if !self.peer_done {
+            if !self.peer_done && !self.peer_goaway {
                 self.conn.goaway(NO_ERROR, cx);
             }
             self.done = true;
@@ -1176,6 +1188,9 @@ impl H2Server {
                     if code != NO_ERROR {
                         cx.protocol_error(format!("GOAWAY {}", error_name(code)));
                     }
+                    // The client is done: close once its streams are answered.
+                    self.closing = true;
+                    self.peer_goaway = true;
                 }
             }
         }
@@ -1201,6 +1216,7 @@ impl ServerSession {
             requests: BTreeMap::new(),
             queue: Vec::new(),
             closing: false,
+            peer_goaway: false,
             peer_done: false,
             done: false,
         }
@@ -1419,6 +1435,13 @@ mod tests {
                 }
                 c_closed |= cx.wants_close();
                 call.absorb(cx);
+            }
+            if s_closed && !c_closed && to_client.is_empty() {
+                let mut cx = AppCx::new(now, now);
+                c.peer_closed(&mut cx);
+                c_closed |= cx.wants_close();
+                call.absorb(cx);
+                to_server.clear(); // the server is gone
             }
             if c_closed && !s_closed && to_server.is_empty() {
                 let mut cx = AppCx::new(now, now);
