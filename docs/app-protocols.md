@@ -1,6 +1,6 @@
 # Application protocols
 
-FeroTRX 0.16.0 (M22) runs application protocols on top of the stateful TCP
+FeroTRX 0.16.0 (M23) runs application protocols on top of the stateful TCP
 and UDP engines. A replayed capture plays fixed bytes: each end waits for
 as many bytes as the capture had and sends what the capture had. An
 application protocol reacts to what the other end sends instead. The web
@@ -13,7 +13,7 @@ against nginx or a cloud service.
 The protocols plug into the engines through a small interface
 (`ferotrx_core::app`) and are not built into the TCP code. HTTP/1.1, DNS
 (over UDP and over TCP) and NTP are built in, and a program can add its own.
-TLS handshake emulation comes next (M23); the plan for the other protocols
+TLS handshake emulation comes next (M24); the plan for the other protocols
 is [at the end](#what-comes-next).
 
 ## Quick start
@@ -271,7 +271,7 @@ Tracked in [#36](https://github.com/jkobierczynski/FeroTRX/issues/36) (TLS),
 
 | Protocol | Importance | Plan |
 |---|---|---|
-| HTTPS/TLS | very high | M23: TLS handshake emulation with configurable versions, cipher suites and certificates, as a layer under any stream protocol (HTTPS = TLS + HTTP) |
+| HTTPS/TLS | very high | M24: TLS handshake emulation with configurable versions, cipher suites and certificates, as a layer under any stream protocol (HTTPS = TLS + HTTP) |
 | SSH | high | banner and key exchange, then encrypted-looking traffic |
 | DHCP | high | done as [host emulation](host-emulation.md) (M19); a DHCP server role later |
 | SIP/RTP | high | SIP dialogs over UDP (needs multi-message UDP transactions), RTP media streams at codec rates |

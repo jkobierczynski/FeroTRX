@@ -1,0 +1,358 @@
+//! Connections to control servers.
+//!
+//! Each server gets a worker thread that owns a blocking
+//! [`ferotrx_ctl::Client`]. The GUI sends it [`Request`]s and reads
+//! [`Event`]s back without ever waiting on the network, so a slow or remote
+//! server never freezes the window. While idle the worker polls the run lists
+//! (`run.list`, `tcp.list`, `udp.list`, `rx.list`) and hands over a
+//! [`Snapshot`], which is what the statistics views draw.
+//!
+//! Calls go through [`Request::Call`] with a method name and JSON params, so
+//! new control methods need no change here.
+
+use std::path::Path;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use ferotrx_ctl::protocol::{
+    InterfaceEntry, RunInfo, RxRunInfo, ServerInfo, TcpRunInfo, UdpRunInfo,
+};
+use ferotrx_ctl::{Client, ClientError, ClientTls};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// How to reach a server. Saved with the GUI's state, except the token.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConnSettings {
+    /// `host:port`; the port defaults to 4510.
+    pub addr: String,
+    pub tls: bool,
+    /// CA certificate (PEM) that signed the server's certificate.
+    pub ca: String,
+    /// Client certificate and key (PEM) for mutual TLS.
+    pub cert: String,
+    pub key: String,
+    /// Name to check in the server's certificate, if not the host in `addr`.
+    pub server_name: String,
+    #[serde(skip)]
+    pub token: String,
+}
+
+impl Default for ConnSettings {
+    fn default() -> Self {
+        Self {
+            addr: "127.0.0.1:4510".into(),
+            tls: false,
+            ca: String::new(),
+            cert: String::new(),
+            key: String::new(),
+            server_name: String::new(),
+            token: String::new(),
+        }
+    }
+}
+
+impl ConnSettings {
+    /// The address with the default port added when it has none.
+    pub fn address(&self) -> String {
+        let a = self.addr.trim();
+        let has_port = match a.rsplit_once(':') {
+            // `[::1]:4510` or `host:4510`; a bare IPv6 address has several colons.
+            Some((h, p)) => p.parse::<u16>().is_ok() && (!h.contains(':') || h.ends_with(']')),
+            None => false,
+        };
+        if has_port {
+            a.to_string()
+        } else if a.contains(':') && !a.starts_with('[') {
+            format!("[{a}]:{}", ferotrx_ctl::protocol::DEFAULT_PORT)
+        } else {
+            format!("{a}:{}", ferotrx_ctl::protocol::DEFAULT_PORT)
+        }
+    }
+
+    /// True when the server runs on this computer (a loopback address), so
+    /// paths on it can be picked with this computer's file dialog.
+    pub fn is_local(&self) -> bool {
+        let a = self.address();
+        let host = a.rsplit_once(':').map(|(h, _)| h).unwrap_or(&a);
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    }
+
+    /// Settings from the same environment variables `ferotrx ctl` reads.
+    pub fn from_env() -> Option<Self> {
+        let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let addr = var("FEROTRX_CTL")?;
+        let ca = var("FEROTRX_CA").unwrap_or_default();
+        Some(Self {
+            addr,
+            tls: !ca.is_empty(),
+            ca,
+            cert: var("FEROTRX_CERT").unwrap_or_default(),
+            key: var("FEROTRX_KEY").unwrap_or_default(),
+            server_name: String::new(),
+            token: var("FEROTRX_TOKEN")
+                .or_else(|| var("FEROTRX_READ_TOKEN"))
+                .unwrap_or_default(),
+        })
+    }
+
+    fn connect(&self) -> Result<Client, String> {
+        let addr = self.address();
+        let client = if self.tls {
+            if self.ca.trim().is_empty() {
+                return Err("TLS needs the CA certificate that signed the server's".into());
+            }
+            let mut tls = ClientTls::from_ca_file(Path::new(self.ca.trim()))
+                .map_err(|e| format!("CA certificate: {e}"))?;
+            if !self.cert.trim().is_empty() {
+                tls = tls
+                    .with_client_cert_files(Path::new(self.cert.trim()), Path::new(self.key.trim()))
+                    .map_err(|e| format!("client certificate: {e}"))?;
+            }
+            if !self.server_name.trim().is_empty() {
+                tls = tls.with_server_name(self.server_name.trim());
+            }
+            Client::connect_tls(&addr, &tls).map_err(|e| e.to_string())?
+        } else {
+            Client::connect(addr.as_str()).map_err(|e| format!("{addr}: {e}"))?
+        };
+        client
+            .set_timeout(Some(Duration::from_secs(30)))
+            .map_err(|e| e.to_string())?;
+        Ok(client)
+    }
+}
+
+/// What the GUI asks a worker for.
+#[derive(Debug)]
+pub enum Request {
+    /// Call a method; the answer comes back as [`Event::Reply`] with `tag`.
+    Call {
+        method: String,
+        params: Value,
+        tag: u64,
+    },
+    /// Poll the run lists now instead of at the next tick.
+    Refresh,
+    Disconnect,
+}
+
+/// Every run on a server at one moment.
+#[derive(Clone, Debug, Default)]
+pub struct Snapshot {
+    pub runs: Vec<RunInfo>,
+    pub tcp: Vec<TcpRunInfo>,
+    pub udp: Vec<UdpRunInfo>,
+    pub rx: Vec<RxRunInfo>,
+}
+
+/// What a worker tells the GUI.
+#[derive(Debug)]
+pub enum Event {
+    Connected {
+        info: ServerInfo,
+        interfaces: Vec<InterfaceEntry>,
+    },
+    /// Connecting failed, or the connection broke; the worker has ended.
+    Closed(String),
+    Reply {
+        tag: u64,
+        result: Result<Value, String>,
+    },
+    Snapshot(Box<Snapshot>),
+}
+
+/// The GUI's end of a worker.
+pub struct Connection {
+    tx: Sender<Request>,
+    rx: Receiver<Event>,
+}
+
+impl Connection {
+    /// Starts a worker that connects with `settings`. `wake` is called after
+    /// every event, to repaint the window.
+    pub fn open(
+        settings: ConnSettings,
+        poll: Duration,
+        wake: impl Fn() + Send + 'static,
+    ) -> Connection {
+        let (tx, req_rx) = mpsc::channel();
+        let (ev_tx, rx) = mpsc::channel();
+        thread::Builder::new()
+            .name(format!("ctl {}", settings.addr))
+            .spawn(move || worker(settings, poll, req_rx, ev_tx, wake))
+            .expect("spawn connection thread");
+        Connection { tx, rx }
+    }
+
+    pub fn send(&self, r: Request) {
+        let _ = self.tx.send(r);
+    }
+
+    pub fn call(&self, method: &str, params: Value, tag: u64) {
+        self.send(Request::Call {
+            method: method.into(),
+            params,
+            tag,
+        });
+    }
+
+    /// Events that arrived since the last call.
+    pub fn events(&self) -> Vec<Event> {
+        self.rx.try_iter().collect()
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        let _ = self.tx.send(Request::Disconnect);
+    }
+}
+
+fn worker(
+    settings: ConnSettings,
+    poll: Duration,
+    requests: Receiver<Request>,
+    events: Sender<Event>,
+    wake: impl Fn(),
+) {
+    let send = |e: Event| {
+        let ok = events.send(e).is_ok();
+        wake();
+        ok
+    };
+    let mut client = match settings.connect().and_then(|mut c| {
+        if !settings.token.is_empty() {
+            c.call_value("auth", serde_json::json!({ "token": settings.token }))
+                .map_err(|e| format!("login: {e}"))?;
+        }
+        let info = c.info().map_err(|e| e.to_string())?;
+        // A server built without libpcap lists no interfaces.
+        let interfaces = c.interfaces().unwrap_or_default();
+        Ok((c, info, interfaces))
+    }) {
+        Ok((c, info, interfaces)) => {
+            if !send(Event::Connected { info, interfaces }) {
+                return;
+            }
+            c
+        }
+        Err(e) => {
+            send(Event::Closed(e));
+            return;
+        }
+    };
+
+    let mut next_poll = Instant::now();
+    loop {
+        let wait = next_poll.saturating_duration_since(Instant::now());
+        let req = match requests.recv_timeout(wait) {
+            Ok(r) => Some(r),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        match req {
+            Some(Request::Disconnect) => return,
+            Some(Request::Call {
+                method,
+                params,
+                tag,
+            }) => {
+                let result = client.call_value(&method, params);
+                if let Err(e) = &result {
+                    if broken(e) {
+                        send(Event::Closed(e.to_string()));
+                        return;
+                    }
+                }
+                let result = result.map_err(|e| e.to_string());
+                if !send(Event::Reply { tag, result }) {
+                    return;
+                }
+                // Show the effect of a start or stop right away.
+                next_poll = Instant::now();
+            }
+            Some(Request::Refresh) => next_poll = Instant::now(),
+            None => {
+                match snapshot(&mut client) {
+                    Ok(s) => {
+                        if !send(Event::Snapshot(Box::new(s))) {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        send(Event::Closed(e.to_string()));
+                        return;
+                    }
+                }
+                next_poll = Instant::now() + poll;
+            }
+        }
+    }
+}
+
+/// The connection is gone, as opposed to a call that failed.
+fn broken(e: &ClientError) -> bool {
+    matches!(e, ClientError::Io(_) | ClientError::Tls(_))
+}
+
+fn snapshot(c: &mut Client) -> Result<Snapshot, ClientError> {
+    // A list a server does not have (older version) is just empty.
+    fn list<T>(r: Result<Vec<T>, ClientError>) -> Result<Vec<T>, ClientError> {
+        match r {
+            Err(e) if broken(&e) => Err(e),
+            Err(_) => Ok(Vec::new()),
+            Ok(v) => Ok(v),
+        }
+    }
+    Ok(Snapshot {
+        runs: list(c.runs())?,
+        tcp: list(c.tcp_runs())?,
+        udp: list(c.udp_runs())?,
+        rx: list(c.rx_runs())?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn addresses_get_the_default_port() {
+        let a = |s: &str| {
+            ConnSettings {
+                addr: s.into(),
+                ..Default::default()
+            }
+            .address()
+        };
+        assert_eq!(a("lab-vm"), "lab-vm:4510");
+        assert_eq!(a("lab-vm:4600"), "lab-vm:4600");
+        assert_eq!(a("::1"), "[::1]:4510");
+        assert_eq!(a("[::1]:4600"), "[::1]:4600");
+        assert_eq!(a(" 10.0.0.1 "), "10.0.0.1:4510");
+    }
+
+    #[test]
+    fn loopback_servers_are_local() {
+        let l = |s: &str| {
+            ConnSettings {
+                addr: s.into(),
+                ..Default::default()
+            }
+            .is_local()
+        };
+        assert!(l("127.0.0.1:4510"));
+        assert!(l("localhost"));
+        assert!(l("::1"));
+        assert!(l("[::1]:4600"));
+        assert!(!l("192.168.56.10"));
+        assert!(!l("lab-vm:4510"));
+    }
+}

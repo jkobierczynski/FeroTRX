@@ -48,6 +48,8 @@ The [README](../README.md) has the overview and a quickstart.
 * [Remote control](remote-control.md): `ferotrx serve` and `ferotrx ctl`,
   the JSON-RPC protocol and its methods, TLS, roles and the security model.
 * [The Python client](python-client.md).
+* [The desktop GUI](gui.md): `ferotrx-gui`, ports, the stream and packet
+  editor, captures, live statistics, local or remote servers.
 * [Using FeroTRX as a library](library.md): the Rust API.
 
 ## Project

@@ -6,6 +6,7 @@ members = [
     "crates/ferotrx-packet",
     "crates/ferotrx-ctl",
     "crates/ferotrx-cli",
+    "crates/ferotrx-gui",
 ]
 
 [workspace.package]
