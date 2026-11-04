@@ -1,0 +1,170 @@
+"""Records, addresses and parameters, without a server."""
+
+from __future__ import annotations
+
+import pytest
+
+from ferotrx import RunInfo, RunState, ServerInfo, TcpRunInfo, _wire
+from ferotrx.errors import Forbidden, NotFound, RpcError
+
+
+def test_run_info_from_server_json() -> None:
+    info = RunInfo.from_dict(
+        {
+            "id": 3,
+            "profile": "lab",
+            "output": "iface enp0s3",
+            "state": "running",
+            "total": {
+                "packets": 10,
+                "bytes": 640,
+                "send_errors": 0,
+                "loops_completed": 0,
+                "elapsed_s": 1,
+                "pps": 10,
+                "mbps": 0.005,
+            },
+            "streams": [
+                {
+                    "name": "a",
+                    "packets": 10,
+                    "bytes": 640,
+                    "send_errors": 0,
+                    "loops_completed": 0,
+                    "elapsed_s": 1.0,
+                    "pps": 10.0,
+                    "mbps": 0.005,
+                    "latency": {
+                        "flow": 1,
+                        "tx": 10,
+                        "rx": 9,
+                        "lost": 1,
+                        "loss_pct": 10.0,
+                        "duplicates": 0,
+                        "out_of_order": 0,
+                        "latency": {"min_us": 5000.0, "p99_us": 5200.0},
+                    },
+                }
+            ],
+            "rx": {"iface": "enp0s8", "packets": 9, "bytes": 600, "untagged": 0, "elapsed_s": 1},
+            "cores": 4,
+        }
+    )
+    assert info.running and info.state is RunState.RUNNING
+    assert isinstance(info.total.elapsed_s, float) and info.total.pps == 10.0
+    s = info.stream("a")
+    assert s.latency is not None
+    assert s.latency.latency.min_us == 5000.0
+    assert s.latency.latency.avg_us is None
+    assert info.rx is not None and info.rx.iface == "enp0s8"
+    # A member this client does not know is kept, and given back.
+    assert info.extra == {"cores": 4}
+    assert info.to_dict()["cores"] == 4
+    assert RunInfo.from_dict(info.to_dict()) == info
+    with pytest.raises(KeyError):
+        info.stream("b")
+
+
+def test_unknown_state_and_missing_members() -> None:
+    info = TcpRunInfo.from_dict({"id": 1, "state": "paused"})
+    assert info.state == "paused"
+    assert info.client.completed == 0 and info.templates == []
+    assert ServerInfo.from_dict({"role": "operator"}).role == "operator"
+
+
+@pytest.mark.parametrize(
+    "addr, want",
+    [
+        ("lab", ("lab", 4510)),
+        ("lab:4600", ("lab", 4600)),
+        ("192.168.56.10", ("192.168.56.10", 4510)),
+        ("[::1]:4600", ("::1", 4600)),
+        ("[fe80::1]", ("fe80::1", 4510)),
+        ("::1", ("::1", 4510)),
+        (("h", 1), ("h", 1)),
+    ],
+)
+def test_addresses(addr: str | tuple[str, int], want: tuple[str, int]) -> None:
+    assert _wire.parse_address(addr) == want
+
+
+def test_default_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FEROTRX_CTL", raising=False)
+    assert _wire.parse_address(None) == ("127.0.0.1", 4510)
+    monkeypatch.setenv("FEROTRX_CTL", "lab:9")
+    assert _wire.parse_address(None) == ("lab", 9)
+
+
+def test_start_params() -> None:
+    out = _wire.output_spec(iface="eth0", backend="af_xdp", dpdk_args="--no-huge -l 0")
+    assert out == {"iface": "eth0", "backend": "af_xdp", "dpdk_args": ["--no-huge", "-l", "0"]}
+    call = _wire.start(
+        "lab",
+        output=_wire.output_spec(null=True),
+        rate=None,
+        limit=0,
+        duration="5s",
+        ignore_errors=False,
+        latency=True,
+        rx="eth1",
+        rx_wait=None,
+    )
+    assert call.method == "run.start"
+    assert call.params == {
+        "profile": "lab",
+        "output": {"null": True},
+        "limit": 0,
+        "duration": "5s",
+        "latency": True,
+        "rx": {"iface": "eth1"},
+    }
+    for bad in ({}, {"iface": "a", "file": "b"}):
+        with pytest.raises(ValueError):
+            _wire.output_spec(**bad)  # type: ignore[arg-type]
+
+
+def test_errors_by_code() -> None:
+    e = RpcError.from_error({"code": -32004, "message": "no"}, "run.start")
+    assert isinstance(e, Forbidden) and str(e) == "run.start: no (code -32004)"
+    assert isinstance(RpcError.from_error({"code": -32002, "message": "x"}), NotFound)
+    other = RpcError.from_error({"code": 7, "message": "odd", "data": [1]})
+    assert type(other) is RpcError and other.data == [1]
+
+
+def test_versions_agree() -> None:
+    import re
+    from pathlib import Path
+
+    import ferotrx
+
+    root = Path(__file__).resolve().parents[2]
+    cargo = (root / "Cargo.toml").read_text()
+    workspace = re.search(r'\[workspace\.package\]\s*\nversion = "([^"]+)"', cargo)
+    pyproject = re.search(
+        r'^version = "([^"]+)"', (root / "python/pyproject.toml").read_text(), re.M
+    )
+    assert workspace and pyproject
+    assert ferotrx.__version__ == pyproject.group(1) == workspace.group(1)
+
+
+def test_tcp_run_hosts() -> None:
+    info = TcpRunInfo.from_dict(
+        {
+            "id": 2,
+            "state": "finished",
+            "hosts": [
+                {
+                    "mac": "02:00:0a:09:00:01",
+                    "state": "ready",
+                    "ready_after_s": 1,
+                    "ipv4": {"address": "10.9.0.50/24", "source": "dhcp", "lease_s": 3600},
+                    "groups": [
+                        {"group": "239.1.1.1", "reports": 2, "rx_packets": 5, "rx_bytes": 0}
+                    ],
+                }
+            ],
+        }
+    )
+    (h,) = info.hosts
+    assert h.ipv4 is not None and h.ipv4.source == "dhcp" and h.ipv4.lease_s == 3600.0
+    assert h.groups[0].rx_packets == 5 and h.ipv6 is None

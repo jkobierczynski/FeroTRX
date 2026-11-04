@@ -10,6 +10,7 @@ when a version tag `vX.Y.Z` is pushed. The release gets:
 | `ferotrx-vX.Y.Z-aarch64-macos.tar.gz` | macOS on Apple silicon |
 | `ferotrx-vX.Y.Z-x86_64-macos.tar.gz` | macOS on Intel |
 | `ferotrx-vX.Y.Z-x86_64-windows.zip` | Windows x86_64; needs [Npcap](https://npcap.com/) |
+| `ferotrx-X.Y.Z-py3-none-any.whl`, `ferotrx-X.Y.Z.tar.gz` | The Python client (`pip install ferotrx-X.Y.Z-py3-none-any.whl`), any OS |
 | `SHA256SUMS` | Checksums of all of the above |
 
 Each archive holds the `ferotrx` binary, `README.md`, `LICENSE` and `examples/`.
@@ -22,9 +23,13 @@ Each milestone bumps the minor version: v0.1.0, v0.2.0, v0.3.0, …
 The milestone's pull request bumps `version` under `[workspace.package]` in
 `Cargo.toml`, and the `version = "…"` of the internal crates under
 `[workspace.dependencies]`, then runs `cargo build` so `Cargo.lock` follows.
+The Python client's version goes up with it: `version` in
+`python/pyproject.toml` and `__version__` in `python/src/ferotrx/__init__.py`
+(a test checks that the three agree).
 
 The workflow refuses a tag that does not match the workspace version
-(tag `v0.2.0` needs `version = "0.2.0"`).
+(tag `v0.2.0` needs `version = "0.2.0"`), and a Python client whose version
+is not the workspace's.
 
 ## Cutting a release
 

@@ -14,6 +14,7 @@ on:
     paths:
       - .github/workflows/release.yml
       - crates/ferotrx-cli/Cargo.toml
+      - python/pyproject.toml
   workflow_dispatch:
 
 env:
@@ -31,6 +32,11 @@ jobs:
         run: |
           version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
           echo "Workspace version: $version"
+          python=$(sed -n 's/^version = "\(.*\)"/\1/p' python/pyproject.toml)
+          if [ "$python" != "$version" ]; then
+            echo "::error::python/pyproject.toml has version $python, the workspace $version. Bump both."
+            exit 1
+          fi
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             if [ "$GITHUB_REF_NAME" != "v$version" ]; then
               echo "::error::Tag $GITHUB_REF_NAME does not match the workspace version $version (Cargo.toml). Bump the version or fix the tag."
@@ -163,10 +169,31 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # The Python client: a pure-Python wheel and the source archive.
+  python:
+    name: Python client (.whl, .tar.gz)
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          python -m pip install build
+          python -m build python --outdir dist
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python
+          path: dist/*
+          if-no-files-found: error
+
   publish:
     name: Publish release
     if: github.ref_type == 'tag'
-    needs: [version, linux, macos, windows]
+    needs: [version, linux, macos, windows, python]
     runs-on: ubuntu-latest
     permissions:
       contents: write
