@@ -71,7 +71,8 @@ A server started with `--lab` (Linux, as root) can build a router for the
 lab examples on its own machine: **Lab router…** under the server opens it.
 The router is in a network namespace, reached on the link `ftrx-lab`, and
 routes and masquerades between VLAN 10 (clients, 192.168.10.0/24) and VLAN
-20 (servers, 192.168.20.0/24), as the `examples/lab-*.toml` profiles expect.
+20 (servers, 192.168.20.0/24), as the `examples/lab-*.toml` profiles expect;
+streams sent to 192.168.20.2 come back on `ftrx-lab`, for "Receive on".
 Options add loss, delay, ports the firewall refuses (to see a test fail on
 purpose) and DHCP on VLAN 10. Once it runs, the port `ftrx-lab` is selected
 and is the interface of the Stateful tab: open `examples/lab-udp-mix.toml`
@@ -99,7 +100,10 @@ outcome (`complete`, `blocked`) and conditions on their counters.
   (`ferotrx scenario compare` reads it), JUnit… the XML for CI.
 
 `ferotrx-gui --scenario examples/lab-scenario.toml` opens a scenario in the
-tab at start. The lab scenario needs the lab router running.
+tab at start. A scenario that names the lab router it needs (`[lab]`, as the
+lab scenario does) gets it built by the server before the run (a server
+started with `--lab`); untick "Build the lab it names" to run on the lab as
+it is, after you changed it in "Lab router…" on purpose.
 
 ## Ports and their settings
 

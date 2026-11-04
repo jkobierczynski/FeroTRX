@@ -104,6 +104,11 @@ struct RunArgs {
     /// Print no progress, only the verdicts.
     #[arg(short, long)]
     quiet: bool,
+
+    /// Build the lab router the scenario names in [lab] for the run, and
+    /// remove it after (Linux, as root; see `ferotrx lab up`).
+    #[arg(long)]
+    lab: bool,
 }
 
 #[derive(Args)]
@@ -217,6 +222,20 @@ fn run(args: RunArgs) -> Result<()> {
         None => None,
     };
 
+    let _lab = match (&scenario.lab, args.lab) {
+        (Some(spec), true) => Some(build_lab(spec)?),
+        (None, true) => bail!("--lab: the scenario names no lab router ([lab])"),
+        (Some(_), false) => {
+            if !args.quiet {
+                eprintln!(
+                    "the scenario is written for the lab router ([lab]): --lab builds it, \
+                     or start it with ferotrx lab up"
+                );
+            }
+            None
+        }
+        (None, false) => None,
+    };
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = stop.clone();
@@ -310,6 +329,29 @@ fn run(args: RunArgs) -> Result<()> {
     Ok(())
 }
 
+/// The lab router of a scenario's `[lab]`, removed when dropped.
+fn build_lab(spec: &ferotrx_core::scenario::LabSpec) -> Result<ferotrx_io::Lab> {
+    if let Some(why) = ferotrx_io::lab_unavailable() {
+        bail!("--lab: {why}");
+    }
+    let d = ferotrx_io::LabConfig::default();
+    let lab = ferotrx_io::Lab::up(ferotrx_io::LabConfig {
+        ipv6: spec.ipv6.unwrap_or(d.ipv6),
+        nat: spec.nat.unwrap_or(d.nat),
+        loss: spec.loss.unwrap_or(0.0),
+        delay: spec.delay.clone().unwrap_or_default(),
+        block_tcp: spec.block_tcp.clone(),
+        block_udp: spec.block_udp.clone(),
+        dhcp: spec.dhcp,
+        queues: spec.queues.unwrap_or(1).clamp(1, 64),
+    })
+    .context("cannot build the lab")?;
+    for n in lab.notes() {
+        eprintln!("lab: {n}");
+    }
+    Ok(lab)
+}
+
 /// `1 check`, `3 checks`.
 fn checks(n: usize) -> String {
     format!("{n} check{}", if n == 1 { "" } else { "s" })
@@ -320,6 +362,9 @@ fn show(args: ShowArgs) -> Result<()> {
     println!("scenario {}", s.name);
     if let Some(d) = &s.description {
         println!("  {d}");
+    }
+    if let Some(l) = &s.lab {
+        println!("runs on {} (--lab builds it)", l.describe());
     }
     if !s.vars.is_empty() {
         let v: Vec<String> = s.vars.iter().map(|(k, v)| format!("{k}={v}")).collect();

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use ferotrx_core::scenario::{CheckReport, ScenarioReport};
+use ferotrx_core::scenario::{CheckReport, LabSpec, ScenarioReport};
 use ferotrx_core::{
     FlowReport, FlowStats, HostAddress, HostStatus, LatencyStats, ReplayStats, RunStats, RxStats,
     TcpSideStats, TcpStats, UdpSideStats, UdpStats,
@@ -1191,6 +1191,21 @@ pub struct LabStartParams {
     pub queues: Option<u32>,
 }
 
+impl From<&LabSpec> for LabStartParams {
+    fn from(l: &LabSpec) -> Self {
+        LabStartParams {
+            ipv6: l.ipv6,
+            nat: l.nat,
+            loss: l.loss,
+            delay: l.delay.clone(),
+            block_tcp: l.block_tcp.clone(),
+            block_udp: l.block_udp.clone(),
+            dhcp: l.dhcp,
+            queues: l.queues,
+        }
+    }
+}
+
 /// Result of `lab.start` and `lab.get`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1236,6 +1251,11 @@ pub struct ScenarioStartParams {
     /// The interface of checks that name none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iface: Option<String>,
+    /// `scenario.start` of a scenario with a `[lab]` table: build that lab
+    /// router first (default true; the server must allow labs). False runs
+    /// the checks on whatever is there, e.g. a lab changed on purpose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lab: Option<bool>,
 }
 
 /// A check of a scenario, as `scenario.check` reads it and a scenario run
@@ -1287,6 +1307,9 @@ pub struct ScenarioInfo {
     /// The variables, after `set`.
     pub vars: BTreeMap<String, String>,
     pub checks: Vec<ScenarioCheckInfo>,
+    /// The lab router the scenario is written for (`[lab]`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lab: Option<LabSpec>,
 }
 
 /// A scenario run, as `scenario.start`, `scenario.get`, `scenario.stop` and

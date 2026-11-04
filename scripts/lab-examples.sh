@@ -115,25 +115,26 @@ wait_scenario() { # id
     ctl call scenario.get "{\"id\": $1}" --json
 }
 
-echo "== scenario: examples/lab-scenario.toml, run by the server"
+echo "== scenario: examples/lab-scenario.toml, run by the server on the lab it names"
 id=$(ctl call scenario.start '{"path": "examples/lab-scenario.toml"}' --json | jq .id)
 wait_scenario "$id" >"$tmp/scenario.json"
 jq -r '.checks[] | "  " + .state + "  " + .name + ": " + (.report.summary // "")' "$tmp/scenario.json"
-[ "$(jq -r '.report.summary | "\(.passed)/\(.checks)"' "$tmp/scenario.json")" = 4/4 ] ||
+[ "$(jq -r '.report.summary | "\(.passed)/\(.checks)"' "$tmp/scenario.json")" = 6/6 ] ||
     fail "lab-scenario.toml: $(jq -c .report.summary "$tmp/scenario.json")"
 
 if [ "${BLOCK:-}" = 1 ]; then
     echo "== lab with TCP port 80 reset"
-    lab '{"block_tcp": [80], "ipv6": false}'
+    lab '{"block_tcp": [80, 8080], "block_udp": [123], "ipv6": false}'
     id=$(ctl call tcp.start '{"path": "examples/lab-tcp.toml", "iface": "ftrx-lab", "connections": 50, "cps": 50}' --json | jq .id)
     wait_run tcp "$id" >"$tmp/tcp.json"
     jq -c '.client | {started, completed, reset, timed_out}' "$tmp/tcp.json"
     [ "$(jq .client.completed "$tmp/tcp.json")" = 0 ] || fail "connections completed through a blocked port"
     echo "== scenario with TCP port 80 reset: only the web check fails"
-    id=$(ctl call scenario.start '{"path": "examples/lab-scenario.toml"}' --json | jq .id)
+    # On the lab as it is ("lab": false), not the one the scenario names.
+    id=$(ctl call scenario.start '{"path": "examples/lab-scenario.toml", "lab": false}' --json | jq .id)
     wait_scenario "$id" >"$tmp/scenario.json"
     jq -r '.checks[] | "  " + .state + "  " + .name' "$tmp/scenario.json"
-    [ "$(jq -r '[.checks[].state] | join(",")' "$tmp/scenario.json")" = fail,pass,pass,pass ] ||
+    [ "$(jq -r '[.checks[].state] | join(",")' "$tmp/scenario.json")" = fail,pass,pass,pass,pass,pass ] ||
         fail "lab-scenario.toml with port 80 reset: $(jq -c '[.checks[].state]' "$tmp/scenario.json")"
 fi
 

@@ -79,6 +79,8 @@ pub struct ScenarioState {
     pub checked: Option<Result<ScenarioInfo, String>>,
     /// Checks not to run.
     pub skip: BTreeSet<String>,
+    /// Build the lab router a scenario names in `[lab]` before the run.
+    pub build_lab: bool,
     /// The run shown.
     pub run: Option<u64>,
     /// The check whose details are shown.
@@ -97,6 +99,7 @@ impl Default for ScenarioState {
             server_dir: String::new(),
             checked: None,
             skip: BTreeSet::new(),
+            build_lab: true,
             run: None,
             sel_check: None,
         }
@@ -245,6 +248,9 @@ impl ScenarioState {
         }
         if !self.iface.is_empty() {
             p["iface"] = self.iface.clone().into();
+        }
+        if !self.build_lab {
+            p["lab"] = false.into();
         }
         let names = self.check_names();
         if !self.skip.is_empty() && !names.is_empty() {
@@ -403,6 +409,19 @@ impl FeroApp {
                 .clicked()
             {
                 a.start = true;
+            }
+            if let Some(Ok(Some(lab))) = st
+                .checked
+                .as_ref()
+                .map(|c| c.as_ref().map(|i| i.lab.as_ref()))
+            {
+                ui.checkbox(&mut st.build_lab, "Build the lab it names")
+                    .on_hover_text(format!(
+                        "The scenario is written for {} ([lab]): the server builds it first \
+                     (it needs ferotrx serve --lab). Untick to run on the lab as it is, \
+                     e.g. one you changed on purpose.",
+                        lab.describe()
+                    ));
             }
             if let Some(r) = runs
                 .iter()
@@ -880,33 +899,51 @@ mod tests {
         st.set = "iface=eth9".into();
         st.check_local();
         let info = st.checked.clone().unwrap().unwrap();
-        assert_eq!(info.name, "lab-router");
+        assert_eq!(info.name, "lab-nat");
         assert_eq!(info.checks[0].iface.as_deref(), Some("eth9"));
-        assert_eq!(info.checks.len(), 4);
+        assert_eq!(info.checks.len(), 6);
+        assert_eq!(info.lab.as_ref().unwrap().block_tcp, [8080]);
 
         // A server here reads the profiles from the scenario's folder.
         let p = st.params(true).unwrap();
         assert!(p["base_dir"].as_str().unwrap().ends_with("examples"));
         assert_eq!(p["set"]["iface"], "eth9");
         assert!(p.get("only").is_none());
+        assert!(p.get("lab").is_none());
         let shown = ferotrx_ctl::protocol::ScenarioStartParams {
             toml: Some(st.text.clone()),
             ..serde_json::from_value(p.clone()).unwrap()
         };
         assert_eq!(shown.set["iface"], "eth9");
 
-        // A server elsewhere gets the profiles in the scenario.
+        st.skip.insert("voice stream".into());
+        st.build_lab = false;
+        let p = st.params(true).unwrap();
+        assert_eq!(p["only"].as_array().unwrap().len(), 5);
+        assert_eq!(p["lab"], false);
+    }
+
+    #[test]
+    fn a_server_elsewhere_gets_the_profiles_in_the_scenario() {
+        let mut st = ScenarioState {
+            path: examples().join("unsaved.toml").display().to_string(),
+            text: "name = \"x\"\n[[check]]\nname = \"web\"\ntcp = \"lab-tcp.toml\"\n\
+                   [[check]]\nname = \"mix\"\nudp = \"lab-udp-mix.toml\"\nexpect = \"any\"\n\
+                   require = [\"answered_pct > 95%\"]\n"
+                .into(),
+            ..Default::default()
+        };
+        st.check_local();
+        assert!(st.checked.as_ref().unwrap().is_ok(), "{:?}", st.checked);
         let p = st.params(false).unwrap();
         assert!(p.get("base_dir").is_none());
         let text = p["toml"].as_str().unwrap();
         assert!(!text.contains("lab-tcp.toml"), "{text}");
-        let s = Scenario::from_toml(text, &examples(), &[]).unwrap();
+        let s = Scenario::from_toml(text, Path::new("/nowhere"), &[]).unwrap();
         assert_eq!(s.checks[0].source, "inline");
-        assert_eq!(s.checks.len(), 4);
-
-        st.skip.insert("UDP mix".into());
-        let p = st.params(true).unwrap();
-        assert_eq!(p["only"].as_array().unwrap().len(), 3);
+        assert_eq!(s.checks[1].source, "inline");
+        st.server_dir = "profiles".into();
+        assert_eq!(st.params(false).unwrap()["base_dir"], "profiles");
     }
 
     #[test]

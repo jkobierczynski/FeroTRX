@@ -338,3 +338,26 @@ fn scenario_files_stay_inside_the_data_directories() {
     assert_eq!(v["name"], "s");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn a_scenario_that_names_a_lab_needs_one_or_lab_false() {
+    use serde_json::json;
+    let c = controller();
+    let text = format!("{}\n[lab]\nblock_tcp = [8080]\n", port_checks());
+    let v = c.call("scenario.check", json!({ "toml": text })).unwrap();
+    assert_eq!(v["lab"]["block_tcp"], json!([8080]));
+    // This controller allows no labs.
+    let e = c
+        .call("scenario.start", json!({ "toml": text }))
+        .unwrap_err();
+    assert!(e.message.contains("serve --lab"), "{}", e.message);
+    // On what is there.
+    let v = c
+        .call(
+            "scenario.start",
+            json!({ "toml": text, "lab": false, "only": ["echo"] }),
+        )
+        .unwrap();
+    let done = wait_for(&c, v["id"].as_u64().unwrap());
+    assert!(done.report.unwrap().passed());
+}

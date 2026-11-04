@@ -82,9 +82,11 @@ Every lab example fits it as it is: clients on VLAN 10 with gateway
 (`lab-two-vlans.toml`, `lab-built-packets.toml`) already use. A replayed
 stream is routed when it carries that MAC, VLAN 10 and a source in
 192.168.10.0/24; for it to leave on VLAN 20, the router needs a neighbor for
-the destination, which nothing answers for in a replay:
-`sudo ip netns exec ferotrx-lab ip neigh replace 192.168.20.50 lladdr 02:00:00:00:00:50 dev rt.20`
-(then `--rx ftrx-lab` sees it come back). The router tracks connections and
+the destination, which nothing answers for in a replay. One is always there:
+**192.168.20.2** (and `fd00:20::2`) at `02:00:00:00:00:02`, the stream
+receiver: send to it and `--rx ftrx-lab` sees the stream come back on VLAN
+20, for loss and latency through the router. For another address:
+`sudo ip netns exec ferotrx-lab ip neigh replace 192.168.20.50 lladdr 02:00:00:00:00:50 dev rt.20`. The router tracks connections and
 drops what conntrack calls INVALID, as a firewall does, and masquerades
 towards the servers. Options:
 

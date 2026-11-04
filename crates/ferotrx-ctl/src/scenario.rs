@@ -290,6 +290,7 @@ pub fn scenario_info(s: &Scenario) -> ScenarioInfo {
         description: s.description.clone(),
         vars: s.vars.clone(),
         checks: s.checks.iter().map(check_info).collect(),
+        lab: s.lab.clone(),
     }
 }
 

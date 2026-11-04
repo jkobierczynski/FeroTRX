@@ -593,6 +593,8 @@ impl FeroApp {
                                     &name,
                                     format!("scenario {} started as run {}", r.scenario, r.id),
                                 );
+                                // It may have built the lab router.
+                                self.call(i, "lab.get", Value::Null, Pending::Lab(String::new()));
                             }
                             Err(e) => self.error(&name, format!("scenario.start: {e}")),
                         }

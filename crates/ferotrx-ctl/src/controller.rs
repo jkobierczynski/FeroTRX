@@ -222,17 +222,7 @@ impl Controller {
         if let Some(why) = self.lab_unavailable() {
             return Err(RpcError::failed(why));
         }
-        let d = ferotrx_io::LabConfig::default();
-        let config = ferotrx_io::LabConfig {
-            ipv6: p.ipv6.unwrap_or(d.ipv6),
-            nat: p.nat.unwrap_or(d.nat),
-            loss: p.loss.unwrap_or(0.0),
-            delay: p.delay.clone().unwrap_or_default(),
-            block_tcp: p.block_tcp.clone(),
-            block_udp: p.block_udp.clone(),
-            dhcp: p.dhcp,
-            queues: p.queues.unwrap_or(1).clamp(1, 64),
-        };
+        let config = lab_config(&p);
         let mut lab = lock(&self.lab);
         if let Some(old) = lab.take() {
             old.down();
@@ -241,6 +231,24 @@ impl Controller {
         let info = lab_info(&l, None);
         *lab = Some(l);
         Ok(info)
+    }
+
+    /// Builds the lab a scenario names, unless one built the same way runs.
+    fn scenario_lab(&self, spec: &ferotrx_core::scenario::LabSpec) -> Result<(), RpcError> {
+        if !self.lab_allowed {
+            return Err(RpcError::failed(
+                "the scenario needs the lab router ([lab]), and labs are off on this server: \
+                 start it with ferotrx serve --lab, or run with \"lab\": false on what is there",
+            ));
+        }
+        let p = LabStartParams::from(spec);
+        let same = lock(&self.lab)
+            .as_ref()
+            .is_some_and(|l| *l.config() == lab_config(&p));
+        if !same {
+            self.lab_start(p)?;
+        }
+        Ok(())
     }
 
     pub fn lab_stop(&self) -> LabInfo {
@@ -769,6 +777,9 @@ impl Controller {
     /// of its own; `scenario.get` follows it.
     pub fn scenario_start(&self, p: ScenarioStartParams) -> Result<ScenarioRunInfo, RpcError> {
         let scenario = self.read_scenario(&p)?;
+        if let (Some(spec), true) = (&scenario.lab, p.lab.unwrap_or(true)) {
+            self.scenario_lab(spec)?;
+        }
         let open_port = self.open_port.clone();
         let open_receiver = self.open_receiver.clone();
         let runner = LabRunner::new()
@@ -1179,6 +1190,21 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The lab router `lab.start` builds from its parameters.
+fn lab_config(p: &LabStartParams) -> ferotrx_io::LabConfig {
+    let d = ferotrx_io::LabConfig::default();
+    ferotrx_io::LabConfig {
+        ipv6: p.ipv6.unwrap_or(d.ipv6),
+        nat: p.nat.unwrap_or(d.nat),
+        loss: p.loss.unwrap_or(0.0),
+        delay: p.delay.clone().unwrap_or_default(),
+        block_tcp: p.block_tcp.clone(),
+        block_udp: p.block_udp.clone(),
+        dhcp: p.dhcp,
+        queues: p.queues.unwrap_or(1).clamp(1, 64),
+    }
+}
+
 fn lab_info(l: &ferotrx_io::Lab, unavailable: Option<String>) -> LabInfo {
     let c = l.config();
     let mut summary = vec![
@@ -1190,6 +1216,11 @@ fn lab_info(l: &ferotrx_io::Lab, unavailable: Option<String>) -> LabInfo {
         format!(
             "router MAC {} on both VLANs (mac_dst for replayed streams)",
             ferotrx_io::LAB_ROUTER_MAC
+        ),
+        format!(
+            "stream receiver {} (always reachable, received on {})",
+            ferotrx_io::LAB_RECEIVER_IP,
+            l.interface()
         ),
     ];
     if c.ipv6 {

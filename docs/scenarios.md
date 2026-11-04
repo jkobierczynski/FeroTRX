@@ -112,6 +112,27 @@ The value is a path to the profile or the profile's tables under
 Everything the profile files allow works here. Pcap paths are relative to
 the file they are written in.
 
+### The lab router a scenario needs
+
+A scenario written for the [lab router](lab-scripts.md#a-standing-lab-router)
+says how the router is built in a `[lab]` table, with the options of
+`ferotrx lab up`:
+
+```toml
+[lab]
+block_tcp = [8080]     # the firewall resets TCP to 8080
+block_udp = [123]      # and drops NTP
+# ipv6 = false, nat = false, loss = 0.03, delay = "5ms", dhcp = true, queues = 4
+```
+
+A control server started with `--lab` builds that router before the run
+(`scenario.start`, the GUI's Scenario tab), unless one built the same way
+is running; `"lab": false` (GUI: untick "Build the lab it names") runs on the
+lab as it is, for example one broken on purpose. `ferotrx scenario run --lab`
+builds it for the run and removes it after; without `--lab` the checks run
+on what is there. [`examples/lab-scenario.toml`](../examples/lab-scenario.toml)
+is `scenario-nat.toml` for the lab router.
+
 Other keys of a check: `name`, `description`, `expect`, `require`, `iface`,
 `rx`, `rx_wait`, `duration`, `attempts`. Unknown keys are an error, so a typo
 does not silently turn into a check that tests nothing.
@@ -300,7 +321,8 @@ The GUI's Scenario tab is built on this: edit or open a scenario on your
 own computer, check it there (the profiles too), run it on the server and
 read the verdict, conditions and counters of each check (see
 [the GUI](gui.md#scenarios)). [`examples/lab-scenario.toml`](../examples/lab-scenario.toml)
-fits the lab router (`ferotrx lab up`, or "Lab router…" in the GUI).
+holds the checks of `scenario-nat.toml` for the lab router, which it names
+in `[lab]`: the server builds that router, firewall rules and all, first.
 
 ## From a program
 

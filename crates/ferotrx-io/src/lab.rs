@@ -31,6 +31,14 @@ pub const LAB_INTERFACE: &str = "ftrx-lab";
 /// The router's MAC on both VLANs: the `02:00:00:00:00:01` that the lab
 /// examples put in `mac_dst` and `eth(dst=...)`, so they need no editing.
 pub const LAB_ROUTER_MAC: &str = "02:00:00:00:00:01";
+/// An address on the server VLAN that the router always finds, at
+/// [`LAB_RECEIVER_MAC`]: where streams measured for loss and latency go
+/// (`ipv4(dst=192.168.20.2)`), received on [`LAB_INTERFACE`] as they leave
+/// the router on VLAN 20. Nothing has to answer ARP for it.
+pub const LAB_RECEIVER_IP: &str = "192.168.20.2";
+/// The IPv6 receiver address, with the same MAC.
+pub const LAB_RECEIVER_IP6: &str = "fd00:20::2";
+pub const LAB_RECEIVER_MAC: &str = "02:00:00:00:00:02";
 const ROUTER_LINK: &str = "ftrxlab-rt";
 
 /// How to build the lab.
@@ -285,6 +293,34 @@ impl Lab {
                 ])?;
             }
             r(&["ip", "link", "set", &dev, "up"])?;
+        }
+        // The stream receiver: a neighbor that is always there.
+        r(&[
+            "ip",
+            "neigh",
+            "replace",
+            LAB_RECEIVER_IP,
+            "lladdr",
+            LAB_RECEIVER_MAC,
+            "dev",
+            "rt.20",
+            "nud",
+            "permanent",
+        ])?;
+        if v6 {
+            r(&[
+                "ip",
+                "-6",
+                "neigh",
+                "replace",
+                LAB_RECEIVER_IP6,
+                "lladdr",
+                LAB_RECEIVER_MAC,
+                "dev",
+                "rt.20",
+                "nud",
+                "permanent",
+            ])?;
         }
         let tables: &[&str] = if v6 {
             &["iptables", "ip6tables"]

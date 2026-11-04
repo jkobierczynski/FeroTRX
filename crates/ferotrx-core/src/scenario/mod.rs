@@ -202,6 +202,74 @@ pub struct Scenario {
     /// The variables, after `--set` overrides.
     pub vars: BTreeMap<String, String>,
     pub checks: Vec<Check>,
+    /// The lab router the checks are written for (`[lab]`), when they are.
+    pub lab: Option<LabSpec>,
+}
+
+/// The lab router a scenario needs (`[lab]`): the `ferotrx lab up` options.
+/// `ferotrx serve --lab` builds it before the run, and `ferotrx scenario run
+/// --lab` for the run; without it the checks run on what is there.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LabSpec {
+    /// IPv6 besides IPv4 (default true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ipv6: Option<bool>,
+    /// Masquerade towards the servers (default true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nat: Option<bool>,
+    /// Share of forwarded packets dropped, 0 to 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loss: Option<f64>,
+    /// netem delay on the router's links (`5ms`, `20ms 5ms`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delay: Option<String>,
+    /// TCP ports the router refuses with a reset.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub block_tcp: Vec<u16>,
+    /// UDP ports the router drops.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub block_udp: Vec<u16>,
+    /// DHCP and router advertisements on VLAN 10.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dhcp: bool,
+    /// Queues on each end of the link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queues: Option<u32>,
+}
+
+impl LabSpec {
+    /// One line on how the lab is built: "the lab router, IPv4 only,
+    /// resetting TCP to 8080, dropping UDP to 123".
+    pub fn describe(&self) -> String {
+        let mut parts = vec!["the lab router".to_string()];
+        let ports = |v: &[u16]| v.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
+        if self.ipv6 == Some(false) {
+            parts.push("IPv4 only".into());
+        }
+        if self.nat == Some(false) {
+            parts.push("no NAT".into());
+        }
+        if let Some(l) = self.loss.filter(|l| *l > 0.0) {
+            parts.push(format!("dropping {:.1}%", l * 100.0));
+        }
+        if let Some(d) = self.delay.as_deref().filter(|d| !d.trim().is_empty()) {
+            parts.push(format!("delay {d}"));
+        }
+        if !self.block_tcp.is_empty() {
+            parts.push(format!("resetting TCP to {}", ports(&self.block_tcp)));
+        }
+        if !self.block_udp.is_empty() {
+            parts.push(format!("dropping UDP to {}", ports(&self.block_udp)));
+        }
+        if self.dhcp {
+            parts.push("DHCP on VLAN 10".into());
+        }
+        if let Some(q) = self.queues.filter(|q| *q > 1) {
+            parts.push(format!("{q} queues"));
+        }
+        parts.join(", ")
+    }
 }
 
 #[derive(Deserialize)]
@@ -219,6 +287,7 @@ struct RawScenario {
     rx_wait: Option<String>,
     duration: Option<String>,
     attempts: Option<u32>,
+    lab: Option<LabSpec>,
     #[serde(default)]
     check: Vec<RawCheck>,
 }
@@ -406,6 +475,7 @@ impl Scenario {
             path: None,
             vars,
             checks,
+            lab: raw.lab,
         })
     }
 
