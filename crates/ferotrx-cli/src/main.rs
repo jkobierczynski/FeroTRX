@@ -1,5 +1,6 @@
 mod latency;
 mod remote;
+mod scenario;
 mod tcp;
 mod udp;
 
@@ -47,6 +48,10 @@ enum Command {
     /// latency of the flows with FeroTRX signatures, sent by `--latency` or
     /// `--rx` on another machine.
     Rx(latency::RxCmdArgs),
+    /// Regression tests: run a scenario file's checks (TCP, UDP, streams
+    /// with a receiver) against expected outcomes, write JSON and JUnit
+    /// reports, keep a history and compare runs.
+    Scenario(scenario::ScenarioArgs),
     /// Show what a capture contains.
     Info {
         /// The pcap or pcapng file.
@@ -395,6 +400,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Tcp(args) => tcp::cmd_tcp(args),
         Command::Udp(args) => udp::cmd_udp(args),
         Command::Rx(args) => latency::cmd_rx(args),
+        Command::Scenario(args) => scenario::cmd_scenario(args),
         #[cfg(feature = "pcap")]
         Command::Interfaces => cmd_interfaces(),
         Command::Backends => cmd_backends(),
