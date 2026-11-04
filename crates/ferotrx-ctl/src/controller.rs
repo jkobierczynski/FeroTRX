@@ -830,6 +830,7 @@ fn profile_info(name: &str, p: &Profile) -> ProfileInfo {
                 vary: s.vary.iter().map(ToString::to_string).collect(),
                 latency: s.latency,
                 sizes: s.sizes.as_ref().map(ToString::to_string),
+                model: (!s.model.is_steady()).then(|| s.model.to_string()),
             })
             .collect(),
     }

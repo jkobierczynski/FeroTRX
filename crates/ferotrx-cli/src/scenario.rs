@@ -46,7 +46,7 @@ struct VarArgs {
     iface: Option<String>,
 }
 
-fn parse_var(s: &str) -> std::result::Result<(String, String), String> {
+pub(crate) fn parse_var(s: &str) -> std::result::Result<(String, String), String> {
     let (k, v) = s
         .split_once('=')
         .ok_or_else(|| format!("'{s}': give NAME=VALUE"))?;

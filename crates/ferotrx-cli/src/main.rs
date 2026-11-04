@@ -1,4 +1,5 @@
 mod bench;
+mod check;
 mod latency;
 mod remote;
 mod scenario;
@@ -14,9 +15,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use ferotrx_core::{
-    parse_duration, Backend, Capture, CaptureSource, FieldEngine, FieldVar, Job, PacketSink,
+    parse_duration, Backend, Capture, CaptureSource, FieldEngine, FieldVar, Job, Pacer, PacketSink,
     Profile, Rate, ReplayStats, Rewrite, RunConfig, RunStats, SendSettings, SizeMix, Stream,
-    Transform, XdpMode, LINKTYPE_ETHERNET,
+    TrafficModel, Transform, XdpMode, LINKTYPE_ETHERNET,
 };
 
 /// FeroTRX: replay captured traffic at a controlled rate.
@@ -57,6 +58,10 @@ enum Command {
     /// with a receiver) against expected outcomes, write JSON and JUnit
     /// reports, keep a history and compare runs.
     Scenario(scenario::ScenarioArgs),
+    /// Check profile and scenario files without sending anything: reads the
+    /// captures, builds the packets and sets the engines up as a run would,
+    /// and prints a summary and warnings. Exits with 1 if any file has errors.
+    Check(check::CheckArgs),
     /// Show what a capture contains.
     Info {
         /// The pcap or pcapng file.
@@ -90,6 +95,13 @@ struct ReplayArgs {
 
     #[command(flatten)]
     rate: RateArgs,
+
+    /// Traffic model: how packets spread around the rate (needs --pps or
+    /// --mbps). Comma separated: poisson (exponential gaps), burst=N (N
+    /// packets back to back, same mean rate), ramp_up=10s,hold=1m,ramp_down=10s
+    /// (then stop), at=TIME:RATE points such as at=0s:10%,at=30s:100%, seed=N.
+    #[arg(long, value_name = "MODEL")]
+    model: Option<TrafficModel>,
 
     /// Times to play the capture; 0 loops until Ctrl-C.
     #[arg(short = 'l', long = "loop", default_value_t = 1)]
@@ -217,6 +229,11 @@ struct BuildArgs {
     #[arg(short = 'n', long, value_name = "N")]
     count: Option<usize>,
 
+    /// Traffic model when sending (see `ferotrx replay --help`): how packets spread around the rate, e.g.
+    /// --pps 1000 --model poisson.
+    #[arg(long, value_name = "MODEL")]
+    model: Option<TrafficModel>,
+
     /// Cut or pad the packets to the sizes of a mix, in turn (see `ferotrx
     /// replay --help`), e.g. --sizes imix -n 12.
     #[arg(long, value_name = "MIX")]
@@ -267,6 +284,11 @@ struct RunArgs {
 
     #[command(flatten)]
     send: SendArgs,
+
+    /// Traffic model for every stream instead of the profile's (see
+    /// `ferotrx replay --help`); the streams need pps or mbps rates.
+    #[arg(long, value_name = "MODEL")]
+    model: Option<TrafficModel>,
 
     #[command(flatten)]
     rx: latency::RxArgs,
@@ -419,6 +441,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Rx(args) => latency::cmd_rx(args),
         Command::Bench(args) => bench::cmd_bench(args),
         Command::Scenario(args) => scenario::cmd_scenario(args),
+        Command::Check(args) => check::cmd_check(args),
         #[cfg(feature = "pcap")]
         Command::Interfaces => cmd_interfaces(),
         Command::Backends => cmd_backends(),
@@ -426,6 +449,13 @@ fn run(cli: Cli) -> Result<()> {
         Command::Ctl(args) => remote::cmd_ctl(args),
         Command::Certs(args) => remote::cmd_certs(args),
     }
+}
+
+/// The traffic model of `--model`, checked against the rate.
+fn model(rate: Rate, model: &Option<TrafficModel>) -> Result<TrafficModel> {
+    let model = model.clone().unwrap_or_default();
+    Pacer::check_model(rate, &model)?;
+    Ok(model)
 }
 
 fn load(file: &PathBuf) -> Result<Capture> {
@@ -671,7 +701,8 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
                 .loops(args.loops)
                 .loop_period(period),
         )
-        .with_rate(rate);
+        .with_rate(rate)
+        .with_model(model(rate, &args.model)?);
         if !args.vary.is_empty() {
             // A fresh engine, so the first loop sends what was shown above.
             stream.push_transform(FieldEngine::new(args.vary.iter().cloned()));
@@ -815,7 +846,8 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
         "capture",
         CaptureSource::new(Arc::new(cap)).loops(args.loops),
     )
-    .with_rate(rate);
+    .with_rate(rate)
+    .with_model(model(rate, &args.model)?);
     for r in args.rewrites {
         stream.push_transform(r);
     }
@@ -856,6 +888,12 @@ fn cmd_run(args: RunArgs) -> Result<()> {
     if args.rx.latency || (args.rx.rx.is_some() && !profile.has_latency()) {
         profile.enable_latency();
     }
+    if let Some(m) = &args.model {
+        for spec in &mut profile.streams {
+            spec.model = model(spec.rate, &Some(m.clone()))
+                .with_context(|| format!("stream {}", spec.name))?;
+        }
+    }
     if !args.common.quiet {
         for spec in &profile.streams {
             let mut line = format!("stream {}: {} at {}", spec.name, spec.source, spec.rate);
@@ -869,6 +907,9 @@ fn cmd_run(args: RunArgs) -> Result<()> {
             }
             if let Some(flow) = spec.latency {
                 line.push_str(&format!(", latency flow {flow}"));
+            }
+            if !spec.model.is_steady() {
+                line.push_str(&format!(", model {}", spec.model));
             }
             eprintln!("{line}");
         }

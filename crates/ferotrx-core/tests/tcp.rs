@@ -1052,3 +1052,75 @@ fn keeps_message_timing_and_think_time() {
         "{thinking:?}"
     );
 }
+
+#[test]
+fn a_ramp_that_ends_stops_opening_connections() {
+    // 100 connections per second at the top: up in 200 ms, 300 ms flat, down
+    // in 200 ms, then the client is done by itself, with no connection limit.
+    let program = Arc::new(web_program(1000));
+    let mut c = client(0, 100.0, 0);
+    c.model = "ramp_up=200ms,hold=300ms,ramp_down=200ms".parse().unwrap();
+    let mut client = TcpEngine::new(TcpConfig {
+        templates: vec![tpl(program.clone())],
+        client: Some(c),
+        server: None,
+        options: TcpOptions::default(),
+    })
+    .unwrap();
+    let mut server = TcpEngine::new(TcpConfig {
+        templates: vec![tpl(program)],
+        client: None,
+        server: Some(TcpServerConfig::new(server_endpoint())),
+        options: TcpOptions::default(),
+    })
+    .unwrap();
+    let took = simulate(
+        &mut [&mut client, &mut server],
+        &mut NatRouter::new(0),
+        Duration::from_secs(30),
+    );
+    let st = &client.stats().client;
+    assert!(client.is_done(), "not done after {took:?}: {st:?}");
+    // 100/s × (0.1 + 0.3 + 0.1) s = 50, and the one at the very end.
+    assert_eq!((st.started, st.completed), (51, 51), "{st:?}");
+}
+
+#[test]
+fn poisson_and_burst_models_open_connections() {
+    let program = Arc::new(web_program(100));
+    for model in ["poisson,seed=3", "burst=5"] {
+        let mut c = client(40, 400.0, 0);
+        c.model = model.parse().unwrap();
+        let mut client = TcpEngine::new(TcpConfig {
+            templates: vec![tpl(program.clone())],
+            client: Some(c),
+            server: None,
+            options: TcpOptions::default(),
+        })
+        .unwrap();
+        let mut server = TcpEngine::new(TcpConfig {
+            templates: vec![tpl(program.clone())],
+            client: None,
+            server: Some(TcpServerConfig::new(server_endpoint())),
+            options: TcpOptions::default(),
+        })
+        .unwrap();
+        simulate(
+            &mut [&mut client, &mut server],
+            &mut NatRouter::new(0),
+            Duration::from_secs(30),
+        );
+        let st = &client.stats().client;
+        assert_eq!((st.started, st.completed), (40, 40), "{model}: {st:?}");
+    }
+    // A model on a template without its own cps is a mistake.
+    let mut t = tpl(Arc::new(web_program(100)));
+    t.model = TrafficModel::poisson();
+    assert!(TcpEngine::new(TcpConfig {
+        templates: vec![t],
+        client: Some(client(1, 1.0, 0)),
+        server: None,
+        options: TcpOptions::default(),
+    })
+    .is_err());
+}

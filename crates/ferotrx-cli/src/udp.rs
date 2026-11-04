@@ -91,6 +91,12 @@ pub struct UdpArgs {
     #[arg(long)]
     rate: Option<f64>,
 
+    /// How new transactions spread around the rate (see `ferotrx replay --help`):
+    /// poisson, burst=N, ramp_up=10s,hold=1m,ramp_down=10s, at=TIME:RATE, seed=N.
+    /// Replaces the profile's top-level model.
+    #[arg(long, value_name = "MODEL")]
+    model: Option<ferotrx_core::TrafficModel>,
+
     /// Transactions in all; 0 keeps going until Ctrl-C or --duration
     /// (default 1, or the profile's).
     #[arg(short = 'n', long)]
@@ -258,6 +264,9 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
     };
     args.hosts.apply(&mut profile.client, &mut profile.server)?;
     set(&mut profile.rate, args.rate);
+    if let Some(m) = args.model.clone() {
+        profile.model = m;
+    }
     set(&mut profile.transactions, args.transactions);
     set(&mut profile.concurrency, args.concurrency);
     opt(&mut profile.connect, args.connect);
@@ -347,7 +356,12 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
             } else {
                 format!("{} transactions", profile.transactions)
             };
-            eprintln!("sending {n} at {} per second", profile.rate);
+            let model = if profile.model.is_steady() {
+                String::new()
+            } else {
+                format!(", model {}", profile.model)
+            };
+            eprintln!("sending {n} at {} per second{model}", profile.rate);
         } else {
             eprintln!("server only: answering until Ctrl-C or --duration");
         }
@@ -374,6 +388,9 @@ fn template_line(t: &UdpTemplateSpec, i: usize) -> String {
         Some(r) => format!("template {} ({r} per second of its own)", t.name(i)),
         None => format!("template {} (weight {})", t.name(i), t.weight),
     };
+    if !t.model.is_steady() {
+        line.push_str(&format!(", model {}", t.model));
+    }
     if let Some(n) = t.transactions {
         line.push_str(&format!(", {n} transactions"));
     }

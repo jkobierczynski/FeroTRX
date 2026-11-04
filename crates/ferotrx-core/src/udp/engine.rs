@@ -18,7 +18,8 @@ use crate::net::{ETHERTYPE_IPV4, ETHERTYPE_IPV6, IPPROTO_ICMPV6};
 use crate::tcp::engine::{ip_add, ip_max, ip_num, ip_version, TcpEndpoint};
 use crate::tcp::hosts::{self, Host, MAX_HOPS};
 use crate::tcp::wire::{self, Path};
-use crate::{Error, LatencyStats, PortEngine, Result};
+use crate::traffic::EventClock;
+use crate::{Error, LatencyStats, PortEngine, Result, TrafficModel};
 
 /// An emulated host of a UDP run: the same as a TCP one.
 pub type UdpEndpoint = TcpEndpoint;
@@ -90,6 +91,9 @@ pub struct UdpTemplate {
     pub weight: u32,
     /// This template's own transactions per second, apart from the client's.
     pub rate: Option<f64>,
+    /// How this template's own transactions spread around its `rate`; only
+    /// with `rate`.
+    pub model: TrafficModel,
     /// Most transactions of this template; 0 is no limit of its own.
     pub transactions: u64,
     /// Most of this template's transactions open at once; 0 is no limit.
@@ -109,10 +113,17 @@ impl UdpTemplate {
             listen_port: connect.port(),
             weight: 1,
             rate: None,
+            model: TrafficModel::default(),
             transactions: 0,
             concurrency: 0,
             think_time: None,
         }
+    }
+
+    /// Spreads this template's own transactions around its `rate` by `model`.
+    pub fn with_model(mut self, model: TrafficModel) -> Self {
+        self.model = model;
+        self
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
@@ -170,6 +181,9 @@ pub struct UdpClientConfig {
     pub endpoint: UdpEndpoint,
     /// Transactions per second, for the templates without their own `rate`.
     pub rate: f64,
+    /// How transactions spread around `rate`: Poisson arrivals, bursts, a
+    /// ramp (one that ends at 0% stops starting transactions).
+    pub model: TrafficModel,
     /// Transactions in all; 0 keeps going until the run stops.
     pub transactions: u64,
     /// Most transactions open at once; 0 is no limit.
@@ -183,6 +197,7 @@ impl UdpClientConfig {
         Self {
             endpoint,
             rate: 1.0,
+            model: TrafficModel::default(),
             transactions: 1,
             concurrency: 0,
             source_ports: 1024..65535,
@@ -761,11 +776,11 @@ pub struct UdpEngine {
     ip_id: u16,
     stats: UdpStats,
     rng: Rng,
-    next_txn_at: Duration,
+    txn_clock: EventClock,
     port_cursor: u64,
     wrr: Vec<i64>,
     opened: Vec<u64>,
-    tpl_next: Vec<Duration>,
+    tpl_clock: Vec<Option<EventClock>>,
     txn_count: u64,
     next_timer_scan: Duration,
     error: Option<String>,
@@ -852,7 +867,14 @@ impl UdpEngine {
                         "{what}: transactions per second must be more than 0, not {r}"
                     )));
                 }
+            } else if !t.model.is_steady() {
+                return Err(Error::Udp(format!(
+                    "{what}: a traffic model needs the template's own rate"
+                )));
             }
+            t.model
+                .validate()
+                .map_err(|e| Error::Udp(format!("{what}: {e}")))?;
             if server.is_some() {
                 if let Some(j) = listen.insert(t.listen_port, i) {
                     return Err(Error::Udp(format!(
@@ -872,6 +894,7 @@ impl UdpEngine {
                     c.rate
                 )));
             }
+            c.model.validate().map_err(|e| Error::Udp(e.to_string()))?;
             if c.source_ports.is_empty() || c.source_ports.start == 0 {
                 return Err(Error::Udp("the source port range is empty".into()));
             }
@@ -930,6 +953,14 @@ impl UdpEngine {
         let n = templates.len();
         Ok(Self {
             plans: templates.iter().map(|t| plan(t, &options)).collect(),
+            tpl_clock: templates
+                .iter()
+                .map(|t| t.rate.map(|r| EventClock::new(r, &t.model)))
+                .collect(),
+            txn_clock: client.as_ref().map_or_else(
+                || EventClock::new(1.0, &TrafficModel::default()),
+                |c| EventClock::new(c.rate, &c.model),
+            ),
             rng: Rng(options.seed | 1),
             options,
             templates,
@@ -940,11 +971,9 @@ impl UdpEngine {
             out: Vec::new(),
             ip_id: 0,
             stats,
-            next_txn_at: Duration::ZERO,
             port_cursor: 0,
             wrr: vec![0; n],
             opened: vec![0; n],
-            tpl_next: vec![Duration::ZERO; n],
             txn_count: 0,
             next_timer_scan: Duration::ZERO,
             error: None,
@@ -990,7 +1019,15 @@ impl UdpEngine {
             return false;
         };
         let all = c.transactions > 0 && self.stats.client.sent >= c.transactions;
-        let each = (0..self.templates.len()).all(|i| self.exhausted(i));
+        // Or every template has started all of its own, or its traffic
+        // model's ramp has ended.
+        let each = (0..self.templates.len()).all(|i| {
+            self.exhausted(i)
+                || self.tpl_clock[i]
+                    .as_ref()
+                    .unwrap_or(&self.txn_clock)
+                    .ended()
+        });
         (all || each)
             && self
                 .sessions
@@ -1162,8 +1199,10 @@ impl UdpEngine {
         }
         if !self.started {
             self.started = true;
-            self.next_txn_at = now;
-            self.tpl_next.fill(now);
+            self.txn_clock.start(now);
+            for clock in self.tpl_clock.iter_mut().flatten() {
+                clock.start(now);
+            }
         }
         self.error = hosts::resolve(
             &mut self.hosts,
@@ -1200,27 +1239,29 @@ impl UdpEngine {
         if !self.hosts[0].resolved() {
             return;
         }
-        let interval = Duration::from_secs_f64(1.0 / client.rate);
         let (total, concurrency) = (client.transactions, client.concurrency);
         let room = |e: &Self| {
             !(total > 0 && e.stats.client.sent >= total)
                 && !(concurrency > 0 && e.stats.client.active as usize >= concurrency)
         };
         for tpl in 0..self.templates.len() {
-            let Some(rate) = self.templates[tpl].rate else {
-                continue;
-            };
-            let every = Duration::from_secs_f64(1.0 / rate);
             let mut started = 0;
-            while self.tpl_next[tpl] <= now && started < 256 && !self.exhausted(tpl) {
+            while self.tpl_clock[tpl].as_ref().is_some_and(|c| c.due(now))
+                && started < 256
+                && !self.exhausted(tpl)
+            {
                 if !room(self) || !self.ready(tpl) {
-                    self.tpl_next[tpl] = self.tpl_next[tpl].max(now.saturating_sub(every));
+                    if let Some(c) = &mut self.tpl_clock[tpl] {
+                        c.hold(now);
+                    }
                     break;
                 }
                 if !self.start_one(tpl, now) {
                     break;
                 }
-                self.tpl_next[tpl] += every;
+                if let Some(c) = &mut self.tpl_clock[tpl] {
+                    c.advance();
+                }
                 started += 1;
             }
         }
@@ -1231,13 +1272,13 @@ impl UdpEngine {
             return;
         }
         let mut started = 0;
-        while self.next_txn_at <= now && started < 256 {
+        while self.txn_clock.due(now) && started < 256 {
             if total > 0 && self.stats.client.sent >= total {
                 return;
             }
             let ready: Vec<usize> = shared.iter().copied().filter(|&i| self.ready(i)).collect();
             if !room(self) || ready.is_empty() {
-                self.next_txn_at = self.next_txn_at.max(now.saturating_sub(interval));
+                self.txn_clock.hold(now);
                 return;
             }
             let tpl = self.pick(&ready);
@@ -1245,7 +1286,7 @@ impl UdpEngine {
                 self.unpick(tpl, &ready);
                 return;
             }
-            self.next_txn_at += interval;
+            self.txn_clock.advance();
             started += 1;
         }
     }

@@ -278,3 +278,58 @@ fn idle_errors_stop_the_run_unless_ignored() {
         3
     );
 }
+
+#[test]
+fn a_ramp_that_ends_ends_the_stream() {
+    // 2000 pps for 50 ms, then the shape drops to 0%: about 100 packets
+    // even though the stream loops forever.
+    let a = one_packet(1);
+    let model: TrafficModel = "at=0s:100%,at=50ms:100%,at=50ms:0%".parse().unwrap();
+    let mut streams = [Stream::new("a", CaptureSource::new(&a).loops(0))
+        .with_rate(Rate::Pps(2000.0))
+        .with_model(model)];
+    let start = Instant::now();
+    let stats = run(&mut streams, &mut NullSink, &RunConfig::default()).unwrap();
+    assert_eq!(stats.total.packets, 101);
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn bursts_leave_back_to_back() {
+    let a = one_packet(1);
+    let mut streams = [Stream::new("a", CaptureSource::new(&a).loops(12))
+        .with_rate(Rate::Pps(200.0))
+        .with_model("burst=4".parse().unwrap())];
+    let start = Instant::now();
+    let stats = run(&mut streams, &mut NullSink, &RunConfig::default()).unwrap();
+    assert_eq!(stats.total.packets, 12);
+    // Three bursts 20 ms apart: the last leaves at 40 ms.
+    let took = start.elapsed();
+    assert!(took >= Duration::from_millis(40), "{took:?}");
+}
+
+#[test]
+fn models_need_a_packet_or_bit_rate() {
+    let a = one_packet(1);
+    let mut streams = [Stream::new("a", CaptureSource::new(&a))
+        .with_rate(Rate::TopSpeed)
+        .with_model(TrafficModel::poisson())];
+    let err = run(&mut streams, &mut NullSink, &RunConfig::default()).unwrap_err();
+    assert!(err.to_string().contains("packet or bit rate"), "{err}");
+}
+
+#[cfg(feature = "profile")]
+#[test]
+fn example_files_pass_the_check() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let mut found = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "toml") {
+            found += 1;
+            check::check_file(&path, None, &[])
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        }
+    }
+    assert!(found >= 10);
+}

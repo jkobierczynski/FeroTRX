@@ -14,7 +14,8 @@
 //!   (MAC, IP and port rewrites, VLAN tags, checksum repair), and
 //!   [`FieldEngine`] changes fields from packet to packet (address, port, VLAN
 //!   and payload ranges, packet sizes), keeping checksums and lengths right.
-//! * [`Rate`] and [`Pacer`] decide when each packet should leave.
+//! * [`Rate`] and [`Pacer`] decide when each packet should leave; a
+//!   [`TrafficModel`] adds Poisson arrivals, bursts and ramps around the rate.
 //! * A [`Stream`] ties a source, its transforms and a rate together, and [`run`]
 //!   plays several streams at once into one [`PacketSink`].
 //! * A [`Profile`] describes streams in a TOML file (feature `profile`, on by default).
@@ -88,6 +89,8 @@
 
 mod bench;
 mod capture;
+#[cfg(feature = "profile")]
+pub mod check;
 mod error;
 mod field_engine;
 mod job;
@@ -105,6 +108,7 @@ mod size_mix;
 mod source;
 mod stream;
 mod tcp;
+mod traffic;
 mod transform;
 mod udp;
 
@@ -126,7 +130,9 @@ pub use latency::{
 pub use net::{MacAddr, TPID_QINQ, TPID_VLAN};
 pub use pacer::{parse_duration, Pacer, Rate};
 #[cfg(feature = "profile")]
-pub use profile::{Profile, StreamSource, StreamSpec, DEFAULT_INTERVAL};
+pub use profile::{
+    check_format, parse_model, Profile, StreamSource, StreamSpec, DEFAULT_INTERVAL, FORMAT_VERSION,
+};
 pub use replay::{replay, replay_with_progress, ReplayConfig, ReplayStats};
 pub use send::{Backend, SendSettings, XdpMode, DEFAULT_BATCH};
 pub use sink::{NullSink, PacketSink, SinkError, VecSink};
@@ -144,6 +150,7 @@ pub use tcp::{
     parse_connect_addr, parse_ip_prefix, parse_port_range, parse_size, TcpHostSpec, TcpProfile,
     TcpSource, TcpTemplateSpec,
 };
+pub use traffic::{parse_shape_point, Arrivals, Schedule, ShapePoint, TrafficModel};
 pub use transform::{
     Field, FixChecksums, IpRewrite, MacRewrite, PortRewrite, Rewrite, Transform, VlanPop, VlanPush,
     VlanSet,

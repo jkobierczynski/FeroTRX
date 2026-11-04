@@ -292,6 +292,10 @@ pub struct StreamInfo {
     /// Frame sizes (the profile's `sizes`), e.g. `imix`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sizes: Option<String>,
+    /// Traffic model (the profile's `model` and `shape`), e.g. `poisson,burst=8`;
+    /// left out for evenly spaced packets at a flat rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 // ----- run.* -----

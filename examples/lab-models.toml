@@ -1,0 +1,38 @@
+# Traffic models: the same lab as lab-two-vlans.toml, with traffic that is
+# not evenly spaced. Run it with:
+#   sudo ferotrx run examples/lab-models.toml -i <interface> --duration 2m
+# Check it first, without sending:
+#   ferotrx check examples/lab-models.toml
+#
+# A model needs a packet or bit rate (pps, mbps); the rate is the mean.
+format = 1
+
+# DNS-like queries as a Poisson process: independent clients, exponentially
+# distributed gaps, 200 per second on average.
+[[stream]]
+name = "dns"
+pcap = "dns.pcap"
+rate = "200pps"
+loops = 0
+model = "poisson"
+rewrite = ["vlan_push=10", "mac_dst=02:00:00:00:00:01", "ip_src=192.168.10.100", "ip_dst=192.168.20.50"]
+
+# Web traffic in bursts of 16 frames back to back, 20 Mbit/s on average:
+# what a switch buffer or a policer sees from a bursty application.
+[[stream]]
+name = "web-bursts"
+pcap = "web.pcap"
+rate = "20mbps"
+loops = 0
+model = "burst=16"
+rewrite = ["vlan_push=10", "mac_dst=02:00:00:00:00:01", "ip_src=192.168.10.101", "ip_dst=192.168.20.50"]
+
+# A load ramp: 0 to 5000 packets per second in 30 s, held for a minute,
+# back to 0 in 30 s, then the stream ends. Watch where the router starts
+# to drop.
+[[stream]]
+name = "ramp"
+packet = "eth(dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.102,dst=192.168.20.50)/udp(sport=4000,dport=9000)/raw(len=64)"
+rate = "5kpps"
+loops = 0
+model = "ramp_up=30s,hold=1m,ramp_down=30s"

@@ -4,9 +4,9 @@ FeroTRX is a traffic replay tool written in Rust, inspired by
 [Cisco TRex](https://trex-tgn.cisco.com/). It replays pcap and pcapng captures
 at a controlled rate on Linux, macOS and Windows, rewrites them on the way
 (addresses, ports, VLAN tags), varies fields from packet to packet, builds packets from scratch, runs several streams
-at once from a profile, replays TCP sessions statefully (real connections, both ends emulated, through NAT
+at once from a profile, shapes traffic over time (Poisson arrivals, bursts, ramps), replays TCP sessions statefully (real connections, both ends emulated, through NAT
 routers and firewalls, many sessions at once from templates), plays stateful UDP
-transactions (DNS lookups, NTP, replayed UDP sessions, with matching, timeouts and retries), measures loss and latency on the receive side, benchmarks devices the RFC 2544 way (throughput, latency, frame loss, back-to-back, with IMIX and other size mixes), runs regression scenarios (checks with expected outcomes, pass/fail for CI, comparing runs), all over IPv4 and IPv6, and its engine is a library you can use from your own programs.
+transactions (DNS lookups, NTP, replayed UDP sessions, with matching, timeouts and retries), measures loss and latency on the receive side, benchmarks devices the RFC 2544 way (throughput, latency, frame loss, back-to-back, with IMIX and other size mixes), runs regression scenarios (checks with expected outcomes, pass/fail for CI, comparing runs), checks profile files without sending, all over IPv4 and IPv6, and its engine is a library you can use from your own programs.
 
 ## Status
 
@@ -25,7 +25,8 @@ transactions (DNS lookups, NTP, replayed UDP sessions, with matching, timeouts a
 * **M13, secure remote control (TLS and mutual TLS, read-only and operator roles, data directories, limits, audit log, `ferotrx certs`):** done (0.6.0).
 * **M14, benchmarking (`ferotrx bench`: RFC 2544 throughput, latency, frame loss and back-to-back; IMIX and size mixes; run metadata and text reports):** done (0.8.0).
 * **M15, stateful UDP and transactions (`ferotrx udp`: DNS, NTP and UDP sessions with matching, timeouts and retries, per-template rates and think time; message timing for TCP):** done (0.8.0).
-* **M16, scenario and regression tests (`ferotrx scenario`: checks with expected outcomes, JSON and JUnit reports, run history and comparisons):** this release (0.9.0).
+* **M16, scenario and regression tests (`ferotrx scenario`: checks with expected outcomes, JSON and JUnit reports, run history and comparisons):** done (0.9.0).
+* **M17, traffic models and file checks (Poisson arrivals, bursts, ramps and rate shapes for streams, TCP connections and UDP transactions; `ferotrx check`; a `format` version in every file):** this release (0.10.0).
 
 ## Crates
 
@@ -275,6 +276,40 @@ loops = 0
 ```
 
 [`examples/lab-built-packets.toml`](examples/lab-built-packets.toml) has more.
+
+#### Traffic models: Poisson, bursts, ramps
+
+With a packet or bit rate, `model` (or `--model` on `replay`, `build`, `run`,
+`tcp` and `udp`) spreads the packets around the rate instead of spacing them
+evenly; the rate stays the mean. `poisson` gives exponentially distributed
+gaps, `burst=N` sends N packets back to back, `ramp_up=30s,hold=1m,ramp_down=30s`
+ramps the rate up and down and then ends the stream, and `shape` (or
+`at=TIME:RATE` points) draws any rate over time. TCP and UDP profiles take the
+same for their connections and transactions.
+
+```toml
+[[stream]]
+pcap = "dns.pcap"
+rate = "2000pps"
+loops = 0
+model = "poisson,burst=4"
+shape = ["0s:10%", "30s:100%", "120s:100%", "150s:0%"]
+```
+
+```sh
+sudo ferotrx replay web.pcap -i eth0 --mbps 100 -l 0 --model ramp_up=1m,hold=5m,ramp_down=1m
+```
+
+[`examples/lab-models.toml`](examples/lab-models.toml) has examples, and
+[docs/traffic-models.md](docs/traffic-models.md) the details.
+
+#### Checking files
+
+`ferotrx check FILE...` reads traffic, TCP, UDP and benchmark profiles and
+scenarios as a run would (captures, built packets, engine setup) without
+sending, prints a summary and warnings, and exits with 1 on errors (`--strict`:
+on warnings too), which suits CI. Every file may say `format = 1`; a file
+from a newer FeroTRX with a higher format is refused with a clear message.
 
 Sending on an interface needs root or `CAP_NET_RAW` on Linux, access to
 `/dev/bpf*` on macOS, and Npcap on Windows.

@@ -207,6 +207,7 @@ pub struct Scenario {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawScenario {
+    format: Option<u32>,
     name: Option<String>,
     description: Option<String>,
     /// Read in a first pass, before the variables are filled in.
@@ -349,6 +350,7 @@ impl Scenario {
         let text = substitute(text, &vars, "scenario")?;
         let raw: RawScenario =
             toml::from_str(&text).map_err(|e| Error::Profile(format!("scenario: {e}")))?;
+        crate::check_format(raw.format)?;
         let defaults_wait = duration(raw.rx_wait, "rx_wait")?;
         let defaults_duration = duration(raw.duration, "duration")?;
         if raw.check.is_empty() {
