@@ -567,6 +567,10 @@ pub struct TcpStats {
     pub elapsed: Duration,
     /// True if the run was stopped or hit its duration before the client finished.
     pub stopped: bool,
+    /// The emulated hosts behind the client and server, when they get their
+    /// addresses by DHCP, SLAAC or DHCPv6, announce them or join groups
+    /// (see [`Hosted`](crate::Hosted)); empty otherwise.
+    pub hosts: Vec<crate::HostStatus>,
 }
 
 impl TcpStats {

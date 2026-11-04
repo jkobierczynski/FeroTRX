@@ -265,7 +265,11 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
             ..Default::default()
         },
     };
-    args.hosts.apply(&mut profile.client, &mut profile.server)?;
+    args.hosts.apply(
+        &mut profile.client,
+        &mut profile.server,
+        &mut profile.host_options,
+    )?;
     set(&mut profile.rate, args.rate);
     if let Some(m) = args.model.clone() {
         profile.model = m;
@@ -339,9 +343,8 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
         for (what, h) in [("client", &profile.client), ("server", &profile.server)] {
             if let Some(h) = h {
                 let mut line = format!(
-                    "{what}: {}/{} mac {} on {}",
-                    h.ip,
-                    h.prefix,
+                    "{what}: {} mac {} on {}",
+                    h.address_text(),
                     h.mac(),
                     h.iface.as_deref().or(args.iface.as_deref()).unwrap_or("?")
                 );
@@ -381,6 +384,7 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
     }
     let stats = job.join()?;
     print_summary(&stats);
+    crate::host::print_hosts(&stats.hosts, "  ");
     let c = &stats.client;
     let failed = c.timed_out + stats.server.timed_out;
     let mismatched = c.mismatched + stats.server.mismatched;
@@ -542,4 +546,5 @@ pub fn print_udp_run(r: &UdpRunInfo) {
         "  frames: {} sent ({} bytes), {} received ({} bytes)",
         r.tx_packets, r.tx_bytes, r.rx_packets, r.rx_bytes
     );
+    crate::host::print_host_infos(&r.hosts, "  ");
 }

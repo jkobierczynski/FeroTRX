@@ -231,7 +231,7 @@ pub(crate) fn checksum(data: &[u8], mut sum: u32) -> u16 {
     !(sum as u16)
 }
 
-fn pseudo_sum(src: IpAddr, dst: IpAddr, proto: u8, len: usize) -> u32 {
+pub(crate) fn pseudo_sum(src: IpAddr, dst: IpAddr, proto: u8, len: usize) -> u32 {
     let words = |a: IpAddr| -> u32 {
         let b = match a {
             IpAddr::V4(a) => a.octets().to_vec(),
@@ -263,7 +263,7 @@ pub(crate) fn push_link(
 }
 
 /// Pads a frame to the Ethernet minimum of 60 bytes (without FCS).
-fn pad(mut frame: Vec<u8>) -> Vec<u8> {
+pub(crate) fn pad(mut frame: Vec<u8>) -> Vec<u8> {
     if frame.len() < 60 {
         frame.resize(60, 0);
     }
@@ -315,7 +315,14 @@ impl Path {
 
 /// Writes the Ethernet and IP headers of a datagram on `path`. `id` is the
 /// IPv4 identification; IPv6 has none.
-fn push_ip(f: &mut Vec<u8>, path: &Path, proto: u8, payload_len: usize, id: u16, ttl: u8) {
+pub(crate) fn push_ip(
+    f: &mut Vec<u8>,
+    path: &Path,
+    proto: u8,
+    payload_len: usize,
+    id: u16,
+    ttl: u8,
+) {
     push_link(f, path.dst_mac, path.src_mac, path.vlan, path.ethertype());
     let start = f.len();
     match (path.src, path.dst) {
@@ -632,7 +639,13 @@ pub(crate) fn multicast_mac(ip: Ipv6Addr) -> MacAddr {
     MacAddr([0x33, 0x33, o[12], o[13], o[14], o[15]])
 }
 
-fn ndp_frame(path: &Path, kind: u8, flags: u8, target: Ipv6Addr, lladdr: MacAddr) -> Vec<u8> {
+pub(crate) fn ndp_frame(
+    path: &Path,
+    kind: u8,
+    flags: u8,
+    target: Ipv6Addr,
+    lladdr: MacAddr,
+) -> Vec<u8> {
     let mut f = Vec::with_capacity(18 + 40 + 32);
     push_ip(&mut f, path, IPPROTO_ICMPV6, 32, 0, 255);
     let start = f.len();

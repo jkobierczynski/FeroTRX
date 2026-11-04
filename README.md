@@ -27,7 +27,8 @@ transactions (DNS lookups, NTP, replayed UDP sessions, with matching, timeouts a
 * **M15, stateful UDP and transactions (`ferotrx udp`: DNS, NTP and UDP sessions with matching, timeouts and retries, per-template rates and think time; message timing for TCP):** done (0.8.0).
 * **M16, scenario and regression tests (`ferotrx scenario`: checks with expected outcomes, JSON and JUnit reports, run history and comparisons):** done (0.9.0).
 * **M17, traffic models and file checks (Poisson arrivals, bursts, ramps and rate shapes for streams, TCP connections and UDP transactions; `ferotrx check`; a `format` version in every file):** done (0.10.0).
-* **M18, stateful TCP and UDP over AF_XDP and DPDK (an XDP program of its own for receiving, `-B` for `ferotrx tcp` and `ferotrx udp`, a timer queue in the engines):** this release (0.11.0).
+* **M18, stateful TCP and UDP over AF_XDP and DPDK (an XDP program of its own for receiving, `-B` for `ferotrx tcp` and `ferotrx udp`, a timer queue in the engines):** done (0.11.0).
+* **M19, host emulation (`ferotrx host`; DHCP, SLAAC and DHCPv6 addresses, gratuitous ARP and unsolicited neighbor advertisements, IGMP/MLD joins, router advertisements; `ip = "dhcp"` for TCP and UDP ends):** this release (0.12.0).
 
 ## Crates
 
@@ -1011,6 +1012,51 @@ counters with response times.
 then runs the DNS server alone and asks it with `dig` (A, AAAA, MX, NXDOMAIN,
 SERVFAIL); `LOSS=0.03`, `MIX=1`, `IPV6=1` and `NO_VLAN=1` work as for the TCP
 script. CI runs all of them.
+
+### Host emulation
+
+Emulated hosts can get their addresses the way real ones do, announce them
+and join multicast groups. `ferotrx host` runs hosts on their own; in
+`ferotrx tcp` and `ferotrx udp` the client or server can do the same before
+the run starts.
+
+```sh
+# 20 DHCP clients on VLAN 10 that join 239.1.2.3, for a minute
+sudo ferotrx host -i enp0s3 --vlan 10 -n 20 --ipv4 dhcp --join 239.1.2.3 -d 1m
+# 50 dual-stack hosts (DHCP and SLAAC), a static host, an IPv6 router
+sudo ferotrx host examples/lab-hosts.toml -i enp0s3
+# advertise fd00:99::/64 as a router, for devices that autoconfigure
+sudo ferotrx host -i enp0s3 --ra fd00:99::/64 --ra-interval 5s
+# a TCP client that gets its address (and gateway) by DHCP first
+sudo ferotrx tcp -p examples/lab-tcp-dhcp.toml -i enp0s3
+sudo ferotrx tcp examples/http.pcap --client-ip slaac --server-ip fd00:20::50/64 -i enp0s3 ...
+```
+
+```text
+host 02:dc:00:00:01:01 ready after 0.01 s: ipv4 10.77.0.174/24 via 10.77.0.1 (dhcp from 10.77.0.1, lease 120 s); group 239.1.2.3 (1 reports, 0 frames received)
+```
+
+* **DHCPv4**: discover/offer/request/ack with the client id and host name,
+  renewal at T1 (unicast) and rebinding at T2, release at the end.
+* **SLAAC**: router solicitation, the advertised /64 plus the EUI-64,
+  duplicate address detection, the router as gateway.
+* **DHCPv6**: solicit/advertise/request/reply for one address, renew,
+  rebind, release; the gateway from router advertisements.
+* **Announcements**: gratuitous ARP, unsolicited neighbor advertisements.
+* **Multicast**: IGMPv1-3 and MLDv1-2 reports when joining, answers to
+  queries (falling back to an older querier's version), leaves at the end,
+  received frames counted per group; IPv6 hosts also report their
+  solicited-node groups.
+* **Routers**: a host with `--ra` (a `[host.router]` table) sends router
+  advertisements with prefixes and flags and answers solicitations.
+
+In TCP and UDP profiles, `ip = "dhcp"` (or `"slaac"`, `"dhcpv6"`) with
+`hostname`, `announce` and `groups` in `[client]` or `[server]`, and a
+`[hosts]` table for the settings; on the command line `--client-ip dhcp`,
+`--client-join GROUP`, `--announce`. The summary and `tcp.stats`/`udp.stats`
+show each host's lease. [docs/host-emulation.md](docs/host-emulation.md) has
+the details; `sudo scripts/hosts-netns.sh` (and `IPV6=1`) checks it against
+dnsmasq and a bridge with IGMP/MLD snooping, in CI too.
 
 ### Regression scenarios
 

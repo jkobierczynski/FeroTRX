@@ -24,6 +24,8 @@ pub enum FileKind {
     Tcp,
     /// A stateful UDP profile.
     Udp,
+    /// Emulated hosts for `ferotrx host`.
+    Hosts,
     /// A benchmark profile: a `[benchmark]` table.
     Bench,
     /// A scenario: `[[check]]` tables.
@@ -36,6 +38,7 @@ impl FileKind {
             FileKind::Traffic => "traffic",
             FileKind::Tcp => "tcp",
             FileKind::Udp => "udp",
+            FileKind::Hosts => "hosts",
             FileKind::Bench => "bench",
             FileKind::Scenario => "scenario",
         }
@@ -56,6 +59,7 @@ impl FromStr for FileKind {
             "traffic" | "stream" | "streams" => FileKind::Traffic,
             "tcp" => FileKind::Tcp,
             "udp" => FileKind::Udp,
+            "host" | "hosts" => FileKind::Hosts,
             "bench" | "benchmark" => FileKind::Bench,
             "scenario" => FileKind::Scenario,
             other => {
@@ -80,7 +84,7 @@ pub struct FileCheck {
 /// Works out the kind of a file from its top-level keys.
 ///
 /// `[[check]]` is a scenario, `[benchmark]` a benchmark profile and
-/// `[[stream]]` a traffic profile. A UDP profile has `rate`, `app`,
+/// `[[stream]]` a traffic profile, `[[host]]` a host profile. A UDP profile has `rate`, `app`,
 /// `queries`, `records`, `transactions` or a `[udp]` table (at the top or
 /// in a template); anything else is taken as a TCP profile.
 pub fn detect_kind(text: &str) -> Result<FileKind> {
@@ -96,6 +100,9 @@ pub fn detect_kind(text: &str) -> Result<FileKind> {
     }
     if has(&table, &["stream"]) {
         return Ok(FileKind::Traffic);
+    }
+    if has(&table, &["host"]) {
+        return Ok(FileKind::Hosts);
     }
     const UDP: &[&str] = &["rate", "app", "queries", "records", "transactions", "udp"];
     const TCP: &[&str] = &["cps", "connections", "closer", "tcp"];
@@ -163,6 +170,7 @@ pub fn check_file(
         FileKind::Tcp => tcp(&TcpProfile::from_toml(&text, dir)?, "", &mut out)?,
         FileKind::Udp => udp(&UdpProfile::from_toml(&text, dir)?, "", &mut out)?,
         FileKind::Bench => bench(&BenchProfile::from_toml(&text)?, &mut out)?,
+        FileKind::Hosts => hosts(&crate::HostProfile::from_toml(&text)?, &mut out)?,
         FileKind::Scenario => scenario(&Scenario::from_path(path, overrides)?, &mut out)?,
     }
     Ok(out)
@@ -196,10 +204,96 @@ fn traffic(p: &Profile, prefix: &str, out: &mut FileCheck) -> Result<()> {
     Ok(())
 }
 
+/// Summary lines for a TCP or UDP profile's emulated hosts.
+fn endpoint_hosts(
+    plan: Option<&crate::EndpointHosts>,
+    client: Option<&crate::TcpHostSpec>,
+    server: Option<&crate::TcpHostSpec>,
+    prefix: &str,
+    out: &mut FileCheck,
+) {
+    if plan.is_none() {
+        return;
+    }
+    for (what, h) in [("client", client), ("server", server)] {
+        let Some(h) = h.filter(|h| h.emulation.is_needed()) else {
+            continue;
+        };
+        let mut line = format!("{prefix}{what}: {} mac {}", h.address_text(), h.mac());
+        if !h.emulation.groups.is_empty() {
+            let g: Vec<String> = h.emulation.groups.iter().map(|g| g.to_string()).collect();
+            line += &format!(", joins {}", g.join(" "));
+        }
+        out.summary.push(line);
+    }
+}
+
+fn hosts(p: &crate::HostProfile, out: &mut FileCheck) -> Result<()> {
+    let ifaces = p.interfaces(Some("check"))?;
+    let configs = p.configs(&ifaces, Some("check"))?;
+    crate::HostEngine::new(configs, p.options.clone())?;
+    out.summary.push(format!(
+        "hosts: {} in {} table(s)",
+        p.host_count(),
+        p.hosts.len()
+    ));
+    for (i, spec) in p.hosts.iter().enumerate() {
+        let h = &spec.host;
+        let mut parts = Vec::new();
+        match &h.ipv4 {
+            Some(crate::Ipv4Mode::Dhcp) => parts.push("ipv4 dhcp".to_string()),
+            Some(crate::Ipv4Mode::Static { ip, prefix, .. }) => {
+                parts.push(format!("ipv4 {ip}/{prefix}"))
+            }
+            None => {}
+        }
+        match &h.ipv6 {
+            Some(crate::Ipv6Mode::Slaac) => parts.push("ipv6 slaac".to_string()),
+            Some(crate::Ipv6Mode::Dhcpv6) => parts.push("ipv6 dhcpv6".to_string()),
+            Some(crate::Ipv6Mode::Static { ip, prefix, .. }) => {
+                parts.push(format!("ipv6 {ip}/{prefix}"))
+            }
+            None => {}
+        }
+        if !h.groups.is_empty() {
+            let g: Vec<String> = h.groups.iter().map(|g| g.to_string()).collect();
+            parts.push(format!("joins {}", g.join(" ")));
+        }
+        if let Some(r) = &h.router {
+            let p: Vec<String> = r.prefixes.iter().map(|(a, l)| format!("{a}/{l}")).collect();
+            parts.push(format!("advertises {} every {:?}", p.join(" "), r.interval));
+        }
+        out.summary.push(format!(
+            "  host {}: {} from {}{}: {}",
+            i + 1,
+            spec.count,
+            h.mac,
+            h.vlan.map(|v| format!(" on vlan {v}")).unwrap_or_default(),
+            parts.join(", ")
+        ));
+    }
+    if p.options.start_rate == 0.0 && p.host_count() > 100 {
+        out.warnings.push(format!(
+            "{} hosts start at once; a DHCP server may drop some requests (set `rate` in [options])",
+            p.host_count()
+        ));
+    }
+    Ok(())
+}
+
 fn tcp(p: &TcpProfile, prefix: &str, out: &mut FileCheck) -> Result<()> {
     let programs: Vec<_> = p.programs()?.into_iter().map(Arc::new).collect();
     let ifaces = p.interfaces(Some("check"))?;
-    TcpEngine::new(p.config(&programs, &ifaces, Some("check"))?)?;
+    let config = p.config(&programs, &ifaces, Some("check"))?;
+    let plan = p.endpoint_hosts(&config)?;
+    match &plan {
+        Some(plan) => {
+            plan.hosted(config, p.host_options.clone(), TcpEngine::new)?;
+        }
+        None => {
+            TcpEngine::new(config)?;
+        }
+    }
     let roles = match (&p.client, &p.server) {
         (Some(_), Some(_)) => "client and server",
         (Some(_), None) => "client only",
@@ -215,6 +309,14 @@ fn tcp(p: &TcpProfile, prefix: &str, out: &mut FileCheck) -> Result<()> {
         n => format!(", {n} connections"),
     };
     out.summary.push(line);
+    let hp = format!("{prefix}  ");
+    endpoint_hosts(
+        plan.as_ref(),
+        p.client.as_ref(),
+        p.server.as_ref(),
+        &hp,
+        out,
+    );
     for (i, (t, prog)) in p.templates.iter().zip(&programs).enumerate() {
         let mut line = format!(
             "{prefix}  template '{}': port {}, {} messages, weight {}",
@@ -243,7 +345,16 @@ fn tcp(p: &TcpProfile, prefix: &str, out: &mut FileCheck) -> Result<()> {
 fn udp(p: &UdpProfile, prefix: &str, out: &mut FileCheck) -> Result<()> {
     let apps = p.apps()?;
     let ifaces = p.interfaces(Some("check"))?;
-    UdpEngine::new(p.config(&apps, &ifaces, Some("check"))?)?;
+    let config = p.config(&apps, &ifaces, Some("check"))?;
+    let plan = p.endpoint_hosts(&config)?;
+    match &plan {
+        Some(plan) => {
+            plan.hosted(config, p.host_options.clone(), UdpEngine::new)?;
+        }
+        None => {
+            UdpEngine::new(config)?;
+        }
+    }
     let roles = match (&p.client, &p.server) {
         (Some(_), Some(_)) => "client and server",
         (Some(_), None) => "client only",
@@ -259,6 +370,14 @@ fn udp(p: &UdpProfile, prefix: &str, out: &mut FileCheck) -> Result<()> {
         n => format!(", {n} transactions"),
     };
     out.summary.push(line);
+    let hp = format!("{prefix}  ");
+    endpoint_hosts(
+        plan.as_ref(),
+        p.client.as_ref(),
+        p.server.as_ref(),
+        &hp,
+        out,
+    );
     for (i, (t, app)) in p.templates.iter().zip(&apps).enumerate() {
         let mut line = format!(
             "{prefix}  template '{}': {}, weight {}",
@@ -345,6 +464,7 @@ mod tests {
     fn detects_kinds() {
         let cases = [
             ("[[stream]]\npacket = \"eth()\"", FileKind::Traffic),
+            ("[[host]]\nipv4 = \"dhcp\"", FileKind::Hosts),
             ("[benchmark]\npacket = \"eth()\"", FileKind::Bench),
             ("[[check]]\ntcp = \"${x}.toml\"", FileKind::Scenario),
             ("cps = 5\npcap = \"a.pcap\"", FileKind::Tcp),

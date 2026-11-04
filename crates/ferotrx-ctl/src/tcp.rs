@@ -51,7 +51,17 @@ pub fn start_tcp_with(
 ) -> Result<TcpStarted, StartError> {
     let programs: Vec<Arc<TcpProgram>> = profile.programs()?.into_iter().map(Arc::new).collect();
     let interfaces = profile.interfaces(iface)?;
-    let engine = TcpEngine::new(profile.config(&programs, &interfaces, iface)?)?;
+    let engine_config = profile.config(&programs, &interfaces, iface)?;
+    // With DHCP, SLAAC or DHCPv6 the hosts get their addresses first, and
+    // the engine is built with them; checked now with example addresses.
+    let (engine, hosted) = match profile.endpoint_hosts(&engine_config)? {
+        Some(plan) => {
+            let (checked, hosted) =
+                plan.hosted(engine_config, profile.host_options.clone(), TcpEngine::new)?;
+            (checked, Some(hosted))
+        }
+        None => (TcpEngine::new(engine_config)?, None),
+    };
     let program = match engine.templates() {
         [one] => one.program.to_string(),
         many => many
@@ -77,8 +87,12 @@ pub fn start_tcp_with(
     if config.duration.is_none() {
         config.duration = profile.duration;
     }
+    let job = match hosted {
+        Some(h) => TcpJob::spawn(h, ports, config)?,
+        None => TcpJob::spawn(engine, ports, config)?,
+    };
     Ok(TcpStarted {
-        job: TcpJob::spawn(engine, ports, config)?,
+        job,
         program,
         interfaces,
         port_details,
@@ -122,6 +136,7 @@ impl TcpRun {
             rx_bytes: 0,
             elapsed_s: 0.0,
             cps: 0.0,
+            hosts: Vec::new(),
         };
         info.fill(&stats);
         info

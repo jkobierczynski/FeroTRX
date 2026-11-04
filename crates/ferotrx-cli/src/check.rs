@@ -13,7 +13,7 @@ pub struct CheckArgs {
     files: Vec<PathBuf>,
 
     /// The kind of the files, when guessing from their keys is not enough:
-    /// traffic, tcp, udp, bench or scenario.
+    /// traffic, tcp, udp, hosts, bench or scenario.
     #[arg(long, value_name = "KIND")]
     kind: Option<FileKind>,
 

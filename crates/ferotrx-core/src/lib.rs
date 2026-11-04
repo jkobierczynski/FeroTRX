@@ -31,6 +31,12 @@
 //!   emulated clients and servers, with matching, timeouts and retries:
 //!   sessions from captures ([`UdpProgram`]), DNS lookups ([`DnsWorkload`])
 //!   and NTP. [`UdpJob`] runs it on ports.
+//! * Host emulation: [`HostEngine`] runs emulated hosts that get their
+//!   addresses by DHCP, SLAAC or DHCPv6, announce them (gratuitous ARP,
+//!   unsolicited neighbor advertisements), join multicast groups (IGMP, MLD)
+//!   and can advertise IPv6 prefixes as routers; [`Hosted`] puts them in
+//!   front of the TCP or UDP engine, so its client and server get their
+//!   addresses that way.
 //! * Loss and latency: a stream made with [`Stream::with_latency`] carries a
 //!   [`Signature`] (flow, sequence number, send time) in every packet; a
 //!   [`PacketReceiver`] on the far side counts arrivals into [`RxStats`]:
@@ -93,6 +99,7 @@ mod capture;
 pub mod check;
 mod error;
 mod field_engine;
+mod host;
 mod job;
 mod latency;
 mod net;
@@ -122,6 +129,13 @@ pub use bench::{
 pub use capture::{Capture, Packet, LINKTYPE_ETHERNET};
 pub use error::{Error, Result};
 pub use field_engine::{FieldEngine, FieldVar, Side, VarField, VarOp};
+#[cfg(feature = "profile")]
+pub use host::{parse_ipv4_mode, parse_ipv6_mode, parse_prefix6, HostProfile, HostSpec};
+pub use host::{
+    AddressSource, Addressing, Emulation, EndpointConfig, EndpointHosts, GroupStatus, HostAddress,
+    HostConfig, HostCounters, HostEngine, HostOptions, HostState, HostStats, HostStatus, Hosted,
+    HostedStats, Ipv4Mode, Ipv6Mode, RouterConfig,
+};
 pub use job::{Job, JobState, RxSettings, JOB_STATS_INTERVAL};
 pub use latency::{
     signed_len, wall_clock, FlowReport, FlowStats, LatencyStats, PacketReceiver, PortReceiver,
@@ -147,8 +161,8 @@ pub use tcp::{
 };
 #[cfg(feature = "profile")]
 pub use tcp::{
-    parse_connect_addr, parse_ip_prefix, parse_port_range, parse_size, TcpHostSpec, TcpProfile,
-    TcpSource, TcpTemplateSpec,
+    parse_connect_addr, parse_groups, parse_ip_prefix, parse_port_range, parse_size, TcpHostSpec,
+    TcpProfile, TcpSource, TcpTemplateSpec,
 };
 pub use traffic::{parse_shape_point, Arrivals, Schedule, ShapePoint, TrafficModel};
 pub use transform::{
