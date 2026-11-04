@@ -108,7 +108,7 @@
 //!   as JSON lines.
 //!
 //! [`LabPki`] makes the certificates for a lab (`ferotrx certs`). The
-//! README has the threat model and deployment notes.
+//! threat model and deployment notes are in `docs/remote-control.md`.
 
 mod audit;
 mod auth;

@@ -51,4 +51,5 @@ assets = [
     ["target/release/ferotrx", "usr/bin/", "755"],
     ["../../README.md", "usr/share/doc/ferotrx/README.md", "644"],
     ["../../examples/*", "usr/share/doc/ferotrx/examples/", "644"],
+    ["../../docs/*", "usr/share/doc/ferotrx/docs/", "644"],
 ]

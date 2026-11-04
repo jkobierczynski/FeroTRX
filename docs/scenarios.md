@@ -25,6 +25,38 @@ ferotrx scenario history runs/                           # every kept run
 ferotrx scenario metrics                                 # what conditions can test
 ```
 
+## An example run
+
+With [`examples/scenario-nat.toml`](../examples/scenario-nat.toml) through the namespace
+router of `scripts/scenario-netns.sh`:
+
+```text
+PASS   web through NAT (tcp, 1.1 s): 50 connections: 50 established, 50 completed; 0 retransmits; 51.0 cps
+PASS   port 8080 blocked (tcp, 3.1 s) expect blocked: 3 connections: 0 established, 0 completed, 3 still open; 8 retransmits; 0.0 cps
+PASS   DNS through NAT (udp, 1.1 s): 100 transactions: 100 answered, 25 with error codes; answers in 0.35ms on average; 101.0 per second
+PASS   NTP blocked (udp, 3.1 s) expect blocked: 3 transactions: 0 answered, 2 timed out, 3 retries; 0.0 per second
+PASS   voice stream (traffic, 3.6 s): 3001 packets sent at 1.841 Mbit/s, 3001 received, 0 lost (0.00%); latency avg 0.02ms, p99 0.08ms
+PASSED: 5 passed, 0 failed, 0 errors, 0 skipped in 12.0 s
+```
+
+and after the router starts resetting TCP to port 80:
+
+```text
+FAIL   web through NAT (tcp, 11.1 s, 2 attempts): 50 connections: 0 established, 0 completed, 50 timed out; 100 retransmits; 0.0 cps
+        not met: completed_pct == 100 (was 0%)
+        not met: cps > 10 (was 0/s)
+        not met: timed_out == 0 (was 50)
+...
+REGRESSED  web through NAT (tcp): pass -> fail
+same       port 8080 blocked (tcp): pass -> pass
+...
+1 regressed, 0 fixed, 0 worse, 0 added, 0 removed, 4 the same (metrics moved by more than 20% shown)
+error: 1 of 5 checks failed
+```
+
+`sudo scripts/scenario-netns.sh` runs exactly this: it breaks the router
+and checks that the second run catches it. CI runs it and keeps the reports.
+
 ## The file
 
 ```toml
@@ -158,7 +190,7 @@ receiver saw, over the sending time), `lost`, `loss_pct`, `duplicates`,
 streams), `latency_p50`, `latency_p99`, `latency_max`, `jitter` (ms; the
 percentiles, maximum and jitter are of the worst stream). Every stream
 carries a latency signature unless the profile marks some with `latency`;
-see the README on loss and latency for what the signature does to the
+see [loss-latency.md](loss-latency.md) for what the signature does to the
 packets. A traffic check needs a `duration` when a stream loops for ever.
 
 ## Jittery machines

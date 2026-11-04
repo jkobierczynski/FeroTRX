@@ -6,7 +6,7 @@
 #
 # Replace 02:00:00:00:00:01 with the router's MAC on VLAN 10 and 192.168.20.50
 # with a host on VLAN 20. Remove the vlan(id=10) layers if the sender is on an
-# access port. Packet syntax: `ferotrx build --help` or the README.
+# access port. Packet syntax: `ferotrx build --help` or docs/packets.md.
 
 # A ping every second, until the run ends.
 [[stream]]

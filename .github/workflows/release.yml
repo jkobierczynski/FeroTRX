@@ -86,7 +86,7 @@ jobs:
         run: |
           mkdir -p "$NAME"
           cp target/release/ferotrx README.md LICENSE "$NAME/"
-          cp -r examples "$NAME/"
+          cp -r examples docs "$NAME/"
           tar czf "dist/$NAME.tar.gz" "$NAME"
       - uses: actions/upload-artifact@v4
         with:
@@ -129,7 +129,7 @@ jobs:
         run: |
           mkdir -p dist "$NAME"
           cp target/${{ matrix.target }}/release/ferotrx README.md LICENSE "$NAME/"
-          cp -r examples "$NAME/"
+          cp -r examples docs "$NAME/"
           tar czf "dist/$NAME.tar.gz" "$NAME"
       - uses: actions/upload-artifact@v4
         with:
@@ -161,7 +161,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist, $env:NAME | Out-Null
           Copy-Item target\release\ferotrx.exe, README.md, LICENSE $env:NAME
-          Copy-Item -Recurse examples $env:NAME
+          Copy-Item -Recurse examples, docs $env:NAME
           Compress-Archive -Path $env:NAME -DestinationPath "dist\$env:NAME.zip"
       - uses: actions/upload-artifact@v4
         with:

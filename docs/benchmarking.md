@@ -19,6 +19,43 @@ sudo ferotrx bench examples/bench-rfc2544.toml -i eth1 --rx eth2 \
 namespace whose output is limited to 20 Mbit/s by a token bucket, and checks
 that the benchmark finds that limit; CI runs it on every change.
 
+## A benchmark profile
+
+```toml
+[benchmark]
+packet = "eth(src=02:00:00:00:01:02,dst=02:00:00:00:01:01)/ipv4(src=10.9.1.2,dst=10.9.2.2)/udp(sport=4000,dport=9000)"
+vary = ["port_src=4000..4255"]
+tests = ["throughput", "latency", "frame_loss", "back_to_back"]
+sizes = ["rfc2544", "imix"]    # sizes without FCS: 60, 124, ... 1514, and a mix
+line_rate = "1gbps"
+trial_duration = "10s"
+warmup = "2s"
+repetitions = 1
+loss_threshold = 0.0           # percent
+```
+
+## An example report
+
+Through the namespace router of `scripts/bench-netns.sh`, which forwards
+20 Mbit/s (a token bucket) with a 25 ms queue, on a 100 Mbit/s line rate:
+
+```text
+Throughput (highest load losing at most 0%, searched to 1%):
+  size   frame   load %     frames/s     Mbit/s  L1 Mbit/s  note
+  1020    1020    20.39         2442      19.93      20.40
+  imix   363.7    21.17         6828      19.87      21.18
+
+Frame loss:
+  size   load %    offered/s         sent     received   loss %
+  1020   100.00        11973        11974         2480   79.288
+  1020    80.00         9579         9579         2506   73.839
+  ...
+Back-to-back (longest burst without loss):
+  size   load %     frames      burst  note
+  1020   100.00         78     6.51ms
+  imix   100.00        312     9.68ms
+```
+
 ## The setup
 
 ```

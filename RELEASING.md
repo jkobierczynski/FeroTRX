@@ -13,7 +13,7 @@ when a version tag `vX.Y.Z` is pushed. The release gets:
 | `ferotrx-X.Y.Z-py3-none-any.whl`, `ferotrx-X.Y.Z.tar.gz` | The Python client (`pip install ferotrx-X.Y.Z-py3-none-any.whl`), any OS |
 | `SHA256SUMS` | Checksums of all of the above |
 
-Each archive holds the `ferotrx` binary, `README.md`, `LICENSE` and `examples/`.
+Each archive holds the `ferotrx` binary, `README.md`, `LICENSE`, `examples/` and the manual in `docs/`.
 The packages are built with the default features (libpcap, AF_XDP on Linux).
 DPDK stays opt-in and is not packaged: build it from source with `--features dpdk`.
 
