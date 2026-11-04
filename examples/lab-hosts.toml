@@ -1,0 +1,63 @@
+# FeroTRX host emulation profile: emulated hosts that get their addresses
+# from the lab's DHCP server and router, join multicast groups and stay on
+# the link (renewing leases, answering ARP, pings and IGMP/MLD queries)
+# until Ctrl-C or the duration.
+#
+# Run it with:
+#   sudo ferotrx host examples/lab-hosts.toml -i <interface>
+#
+# Uses: does the DHCP server hand out (and take back) leases to 50 clients?
+# Does the switch's IGMP/MLD snooping deliver a group's traffic to the
+# members only? Do devices under test take an address from FeroTRX's router
+# advertisements? `ferotrx host` prints each host when it is ready, with
+# its addresses, lease and the frames each group received.
+#
+# The hosts use their own MAC addresses (counting up from `mac`), so the
+# interface is put in promiscuous mode. VirtualBox: set the adapter's
+# "Promiscuous Mode" to "Allow All". Use a VLAN the switch keeps tagged
+# (VLAN 1 is often sent untagged), or leave `vlan` out on an access port.
+
+format = 1
+# duration = "5m"          # default: until Ctrl-C
+
+[options]
+setup_timeout = "30s"      # a host without its addresses by then fails
+rate = 20                  # hosts started per second, not all at once
+igmp_version = 3           # an older querier makes the hosts answer in its version
+mld_version = 2
+# dad = true               # duplicate address detection for IPv6
+# release = true           # release leases and leave groups at the end
+
+# 50 DHCP clients that also autoconfigure IPv6 from router advertisements,
+# all members of one IPv4 and one IPv6 group.
+[[host]]
+# iface = "enp0s3"         # default: the -i interface
+count = 50
+mac = "02:dc:00:00:01:01"  # then 02:dc:00:00:01:02 ...
+vlan = 10
+ipv4 = "dhcp"
+ipv6 = "slaac"             # or "dhcpv6"
+hostname = "lab-{n}"       # lab-1 ... lab-50 (DHCP option 12)
+groups = ["239.1.2.3", "ff15::1234"]
+
+# A static host that announces itself with gratuitous ARPs, and joins a
+# group of its own.
+[[host]]
+mac = "02:dc:00:00:02:01"
+vlan = 10
+ipv4 = "192.168.10.50/24"
+gateway = "192.168.10.1"
+announce = true
+groups = ["239.9.9.9"]
+
+# An IPv6 router for VLAN 20: hosts there (real ones) autoconfigure
+# fd00:20::/64 addresses and take this host as their default router.
+[[host]]
+mac = "02:dc:00:00:03:01"
+vlan = 20
+[host.router]
+prefixes = ["fd00:20::/64"]
+interval = "10s"           # unsolicited advertisements; solicitations are answered at once
+lifetime = "30m"           # 0 advertises the prefix without being a default router
+managed = false            # M flag: addresses by DHCPv6
+other = false              # O flag: other settings by DHCPv6

@@ -9,8 +9,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use ferotrx_core::{
-    parse_connect_addr, parse_duration, parse_port_range, parse_size, Capture, MacAddr,
-    TcpHostSpec, TcpProfile, TcpProgram, TcpRole, TcpRunConfig, TcpSource, TcpStats,
+    parse_connect_addr, parse_duration, parse_port_range, parse_size, Capture, HostOptions,
+    MacAddr, TcpHostSpec, TcpProfile, TcpProgram, TcpRole, TcpRunConfig, TcpSource, TcpStats,
     TcpTemplateSpec,
 };
 use ferotrx_ctl::protocol::{RunState, TcpCounters, TcpRunInfo, TcpTemplateCounters};
@@ -159,7 +159,9 @@ pub struct TcpArgs {
 pub(crate) struct HostArgs {
     /// Run an emulated client at this address, IP[/PREFIX], IPv4 (default
     /// /24) or IPv6 (default /64). It must not be an address of this machine.
-    #[arg(long, value_name = "IP[/PREFIX]")]
+    /// Or dhcp, slaac or dhcpv6: the client gets its address (and gateway)
+    /// that way before the run starts (MAC 02:dc:00:00:00:01 unless --client-mac).
+    #[arg(long, value_name = "IP[/PREFIX]|dhcp|slaac|dhcpv6")]
     client_ip: Option<String>,
     /// Use this many consecutive client addresses in turn.
     #[arg(long, value_name = "N")]
@@ -177,8 +179,10 @@ pub(crate) struct HostArgs {
     #[arg(long, value_name = "IFACE")]
     client_iface: Option<String>,
 
-    /// Run an emulated server at this address, IP[/PREFIX] (default /24 or /64).
-    #[arg(long, value_name = "IP[/PREFIX]")]
+    /// Run an emulated server at this address, IP[/PREFIX] (default /24 or
+    /// /64), or dhcp, slaac or dhcpv6 (MAC 02:dc:00:00:00:02 unless
+    /// --server-mac); clients then connect to the address it gets.
+    #[arg(long, value_name = "IP[/PREFIX]|dhcp|slaac|dhcpv6")]
     server_ip: Option<String>,
     /// The server's gateway. The server answers whoever sent the SYN, so this
     /// only matters for ARP and neighbor discovery.
@@ -201,6 +205,21 @@ pub(crate) struct HostArgs {
     /// clients connect to each in turn.
     #[arg(long, value_name = "N")]
     server_ips: Option<u32>,
+
+    /// The client joins this multicast group (IGMP or MLD); repeat for more.
+    #[arg(long, value_name = "GROUP")]
+    client_join: Vec<IpAddr>,
+    /// The server joins this multicast group (IGMP or MLD); repeat for more.
+    #[arg(long, value_name = "GROUP")]
+    server_join: Vec<IpAddr>,
+    /// Announce the client's and server's addresses (gratuitous ARP,
+    /// unsolicited neighbor advertisements) before the run; on by default
+    /// for dhcp, slaac and dhcpv6.
+    #[arg(long)]
+    announce: bool,
+    /// How long the hosts may take to get their addresses (default 30s).
+    #[arg(long, value_parser = parse_duration, value_name = "TIME")]
+    setup_timeout: Option<Duration>,
 }
 
 fn parse_window(s: &str) -> std::result::Result<u32, String> {
@@ -214,7 +233,8 @@ pub(crate) fn parse_connect(s: &str) -> std::result::Result<SocketAddr, String> 
 
 impl HostArgs {
     fn any_client(&self) -> bool {
-        self.client_ips.is_some()
+        !self.client_join.is_empty()
+            || self.client_ips.is_some()
             || self.client_gw.is_some()
             || self.client_vlan.is_some()
             || self.client_mac.is_some()
@@ -222,7 +242,8 @@ impl HostArgs {
     }
 
     fn any_server(&self) -> bool {
-        self.server_gw.is_some()
+        !self.server_join.is_empty()
+            || self.server_gw.is_some()
             || self.server_vlan.is_some()
             || self.server_mac.is_some()
             || self.server_iface.is_some()
@@ -236,7 +257,9 @@ impl HostArgs {
         &self,
         client: &mut Option<TcpHostSpec>,
         server: &mut Option<TcpHostSpec>,
+        host_options: &mut HostOptions,
     ) -> Result<()> {
+        set(&mut host_options.setup_timeout, self.setup_timeout);
         if let Some(ip) = &self.client_ip {
             let h = TcpHostSpec::new(ip)?;
             let old = client.take();
@@ -248,6 +271,7 @@ impl HostArgs {
             opt(&mut c.vlan, self.client_vlan);
             opt(&mut c.mac, self.client_mac);
             opt(&mut c.iface, self.client_iface.clone());
+            emulation(c, &self.client_join, self.announce, 1);
         } else if self.any_client() {
             bail!("client options need --client-ip (or a [client] table in the profile)");
         }
@@ -263,6 +287,7 @@ impl HostArgs {
             opt(&mut s.iface, self.server_iface.clone());
             opt(&mut s.port, self.server_port);
             set(&mut s.ips, self.server_ips);
+            emulation(s, &self.server_join, self.announce, 2);
         } else if self.any_server() {
             bail!("server options need --server-ip (or a [server] table in the profile)");
         }
@@ -273,12 +298,25 @@ impl HostArgs {
 /// A host from the command line keeps the profile's other settings.
 fn merge(old: Option<TcpHostSpec>, new: TcpHostSpec) -> TcpHostSpec {
     match old {
-        Some(o) => TcpHostSpec {
-            ip: new.ip,
-            prefix: new.prefix,
-            ..o
-        },
+        Some(mut o) => {
+            o.ip = new.ip;
+            o.prefix = new.prefix;
+            o.emulation.addressing = new.emulation.addressing;
+            o
+        }
         None => new,
+    }
+}
+
+/// Groups to join, announcements, and the MAC of a host without an address
+/// to take it from (`n`: 1 for the client, 2 for the server).
+fn emulation(h: &mut TcpHostSpec, join: &[IpAddr], announce: bool, n: u8) {
+    h.emulation.groups.extend(join.iter().copied());
+    if announce {
+        h.emulation.announce = Some(true);
+    }
+    if h.is_dynamic() && h.mac.is_none() {
+        h.mac = Some(MacAddr([0x02, 0xdc, 0, 0, 0, n]));
     }
 }
 
@@ -363,7 +401,11 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
             TcpSource::Program(_) => bail!("--flow needs a capture, not [[message]] tables"),
         }
     }
-    args.hosts.apply(&mut profile.client, &mut profile.server)?;
+    args.hosts.apply(
+        &mut profile.client,
+        &mut profile.server,
+        &mut profile.host_options,
+    )?;
     set(&mut profile.cps, args.cps);
     if let Some(m) = args.model.clone() {
         profile.model = m;
@@ -450,9 +492,8 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
         for (what, h) in [("client", &profile.client), ("server", &profile.server)] {
             if let Some(h) = h {
                 let mut line = format!(
-                    "{what}: {}/{} mac {} on {}",
-                    h.ip,
-                    h.prefix,
+                    "{what}: {} mac {} on {}",
+                    h.address_text(),
                     h.mac(),
                     h.iface.as_deref().or(args.iface.as_deref()).unwrap_or("?")
                 );
@@ -493,6 +534,7 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
     }
     let stats = job.join()?;
     print_summary(&stats);
+    crate::host::print_hosts(&stats.hosts, "  ");
     let failed = stats.client.failed() + stats.server.failed();
     let mismatched = stats.client.mismatched + stats.server.mismatched;
     if failed + mismatched > 0 {
@@ -647,4 +689,5 @@ pub fn print_tcp_run(r: &TcpRunInfo) {
         "  frames: {} sent ({} bytes), {} received ({} bytes)",
         r.tx_packets, r.tx_bytes, r.rx_packets, r.rx_bytes
     );
+    crate::host::print_host_infos(&r.hosts, "  ");
 }

@@ -17,7 +17,7 @@ pip install ./python
 import ferotrx
 
 with ferotrx.Client("192.168.56.10", token="s3cret") as c:
-    c.load_profile("lab-two-vlans.toml", upload=True)    # this machine's file
+    c.load_profile("lab-two-vlans.toml", upload=True)  # this machine's file
     run = c.start("lab-two-vlans", iface="enp0s3", duration="30s")
     for update in c.watch(run.id):
         print(f"{update.run.total.pps:.0f} pps")

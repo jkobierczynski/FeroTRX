@@ -86,6 +86,10 @@ pub struct UdpProfile {
     /// How the interfaces send and receive (the `[output]` table): libpcap,
     /// AF_XDP or DPDK. The command line's settings win over these.
     pub output: SendSettings,
+    /// Settings of the emulated hosts (the `[hosts]` table), for a client
+    /// or server that gets its address by DHCP, SLAAC or DHCPv6, announces
+    /// it or joins groups.
+    pub host_options: crate::HostOptions,
 }
 
 /// One template of a [`UdpProfile`].
@@ -227,6 +231,7 @@ impl Default for UdpProfile {
             duration: None,
             options: UdpOptions::default(),
             output: SendSettings::default(),
+            host_options: crate::HostOptions::for_endpoints(),
         }
     }
 }
@@ -272,6 +277,7 @@ struct RawProfile {
     server: Option<RawHost>,
     udp: Option<RawOptions>,
     output: Option<OutputFile>,
+    hosts: Option<crate::host::RawHostOptions>,
 }
 
 #[derive(Deserialize)]
@@ -520,6 +526,8 @@ impl UdpProfile {
         p.output = raw
             .output
             .map_or(Ok(SendSettings::default()), OutputFile::settings)?;
+        p.host_options = crate::host::host_options(raw.hosts, crate::HostOptions::for_endpoints())
+            .map_err(|e| Error::Profile(format!("[hosts]: {e}")))?;
         if let Some(o) = raw.udp {
             let d = |v: Option<String>, dflt: Duration| -> Result<Duration> {
                 v.map_or(Ok(dflt), |s| parse_duration(&s))
@@ -573,6 +581,17 @@ impl UdpProfile {
             }
         }
         Ok(out)
+    }
+
+    /// The emulated hosts `config`'s client and server need (DHCP, SLAAC,
+    /// DHCPv6, announcements, groups), if any; `config` as
+    /// [`config`](Self::config) makes it.
+    pub fn endpoint_hosts(&self, config: &UdpConfig) -> Result<Option<crate::EndpointHosts>> {
+        crate::EndpointHosts::new(
+            config,
+            self.client.as_ref().map(|h| &h.emulation),
+            self.server.as_ref().map(|h| &h.emulation),
+        )
     }
 
     /// The engine configuration, ports numbered as in `interfaces`; `apps`

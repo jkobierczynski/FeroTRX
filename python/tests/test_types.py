@@ -145,3 +145,26 @@ def test_versions_agree() -> None:
     )
     assert workspace and pyproject
     assert ferotrx.__version__ == pyproject.group(1) == workspace.group(1)
+
+
+def test_tcp_run_hosts() -> None:
+    info = TcpRunInfo.from_dict(
+        {
+            "id": 2,
+            "state": "finished",
+            "hosts": [
+                {
+                    "mac": "02:00:0a:09:00:01",
+                    "state": "ready",
+                    "ready_after_s": 1,
+                    "ipv4": {"address": "10.9.0.50/24", "source": "dhcp", "lease_s": 3600},
+                    "groups": [
+                        {"group": "239.1.1.1", "reports": 2, "rx_packets": 5, "rx_bytes": 0}
+                    ],
+                }
+            ],
+        }
+    )
+    (h,) = info.hosts
+    assert h.ipv4 is not None and h.ipv4.source == "dhcp" and h.ipv4.lease_s == 3600.0
+    assert h.groups[0].rx_packets == 5 and h.ipv6 is None

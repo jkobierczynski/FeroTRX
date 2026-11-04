@@ -34,6 +34,9 @@ __all__ = [
     "RxCounters",
     "RunInfo",
     "RxRunInfo",
+    "HostAddressInfo",
+    "HostGroupInfo",
+    "HostInfo",
     "TcpCounters",
     "TcpTemplateCounters",
     "TcpRunInfo",
@@ -344,6 +347,51 @@ class RxRunInfo(RxCounters):
         return self.state == RunState.RUNNING
 
 
+# ----- emulated hosts -----
+
+
+@dataclass(kw_only=True)
+class HostAddressInfo(Record):
+    """An address of an emulated host."""
+
+    #: ``ADDRESS/PREFIX``.
+    address: str = ""
+    gateway: str | None = None
+    #: ``static``, ``dhcp``, ``slaac`` or ``dhcpv6``.
+    source: str = ""
+    server: str | None = None
+    dns: list[str] = field(default_factory=list)
+    lease_s: float | None = None
+    renewals: int = 0
+
+
+@dataclass(kw_only=True)
+class HostGroupInfo(Record):
+    """A multicast group an emulated host joined."""
+
+    group: str = ""
+    reports: int = 0
+    rx_packets: int = 0
+    rx_bytes: int = 0
+
+
+@dataclass(kw_only=True)
+class HostInfo(Record):
+    """An emulated host of a TCP or UDP run: state, addresses and groups."""
+
+    mac: str = ""
+    vlan: int | None = None
+    #: ``starting``, ``ready`` or ``failed``.
+    state: str = ""
+    error: str | None = None
+    #: Seconds the host took to get its addresses.
+    ready_after_s: float | None = None
+    ipv4: HostAddressInfo | None = None
+    ipv6: HostAddressInfo | None = None
+    link_local: str | None = None
+    groups: list[HostGroupInfo] = field(default_factory=list)
+
+
 # ----- tcp.* -----
 
 
@@ -401,6 +449,9 @@ class TcpRunInfo(Record):
     elapsed_s: float = 0.0
     #: Completed client connections per second.
     cps: float = 0.0
+    #: The emulated hosts, when they get addresses by DHCP, SLAAC or DHCPv6,
+    #: announce them or join groups.
+    hosts: list[HostInfo] = field(default_factory=list)
 
     @property
     def running(self) -> bool:
@@ -468,6 +519,8 @@ class UdpRunInfo(Record):
     elapsed_s: float = 0.0
     #: Answered client transactions per second.
     tps: float = 0.0
+    #: The emulated hosts, as for TCP runs.
+    hosts: list[HostInfo] = field(default_factory=list)
 
     @property
     def running(self) -> bool:

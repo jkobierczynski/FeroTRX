@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::profile::OutputFile;
-use crate::SendSettings;
+use crate::{Addressing, Emulation, SendSettings};
 
 use super::engine::{
     TcpClientConfig, TcpConfig, TcpEndpoint, TcpOptions, TcpServerConfig, TcpTemplate,
@@ -149,6 +149,10 @@ pub struct TcpProfile {
     /// How the interfaces send and receive (the `[output]` table): libpcap,
     /// AF_XDP or DPDK. The command line's settings win over these.
     pub output: SendSettings,
+    /// Settings of the emulated hosts (the `[hosts]` table), for a client
+    /// or server that gets its address by DHCP, SLAAC or DHCPv6, announces
+    /// it or joins groups.
+    pub host_options: crate::HostOptions,
 }
 
 /// One template of a [`TcpProfile`]: a kind of connection.
@@ -265,12 +269,23 @@ pub struct TcpHostSpec {
     pub next_hop_mac: Option<MacAddr>,
     /// The server's listening port.
     pub port: Option<u16>,
+    /// How the host gets its address (`ip = "dhcp"`, `"slaac"`,
+    /// `"dhcpv6"`), whether it announces it, and the groups it joins.
+    pub emulation: Emulation,
 }
 
 impl TcpHostSpec {
     /// A host at `ip`, written `a.b.c.d` or `a.b.c.d/prefix` (default /24),
-    /// or an IPv6 address with an optional prefix (default /64).
+    /// or an IPv6 address with an optional prefix (default /64); or `dhcp`,
+    /// `slaac` or `dhcpv6` for a host that gets its address that way (its
+    /// `ip` is then 0.0.0.0 or :: until it has one).
     pub fn new(ip: &str) -> Result<Self> {
+        if let Some(a) = Addressing::parse(ip) {
+            let mut h = Self::new(&a.placeholder().to_string())?;
+            h.prefix = 0;
+            h.emulation.addressing = a;
+            return Ok(h);
+        }
         let (ip, prefix) = parse_ip_prefix(ip)?;
         Ok(Self {
             iface: None,
@@ -282,12 +297,33 @@ impl TcpHostSpec {
             mac: None,
             next_hop_mac: None,
             port: None,
+            emulation: Emulation::default(),
         })
     }
 
+    /// True when the host gets its address by DHCP, SLAAC or DHCPv6.
+    pub fn is_dynamic(&self) -> bool {
+        self.emulation.addressing.is_dynamic()
+    }
+
+    /// The address as written: `ip/prefix`, or `dhcp`, `slaac`, `dhcpv6`.
+    pub fn address_text(&self) -> String {
+        if self.is_dynamic() {
+            self.emulation.addressing.to_string()
+        } else {
+            format!("{}/{}", self.ip, self.prefix)
+        }
+    }
+
     /// The host's MAC address: the one given, or 02:00 followed by its IPv4
-    /// address, or by the last four bytes of its IPv6 address.
+    /// address, or by the last four bytes of its IPv6 address. A host that
+    /// gets its address by DHCP, SLAAC or DHCPv6 has no address to take it
+    /// from: profiles give it 02:dc:00:00:00:01 (client) or 02 (server)
+    /// unless it has a `mac`.
     pub fn mac(&self) -> MacAddr {
+        if self.is_dynamic() && self.mac.is_none() {
+            return MacAddr([0x02, 0xdc, 0, 0, 0, 1]);
+        }
         self.mac.unwrap_or_else(|| {
             let o = match self.ip {
                 IpAddr::V4(a) => a.octets(),
@@ -375,6 +411,7 @@ impl Default for TcpProfile {
             duration: None,
             options: TcpOptions::default(),
             output: SendSettings::default(),
+            host_options: crate::HostOptions::for_endpoints(),
         }
     }
 }
@@ -405,6 +442,7 @@ struct RawProfile {
     server: Option<RawHost>,
     tcp: Option<RawOptions>,
     output: Option<OutputFile>,
+    hosts: Option<crate::host::RawHostOptions>,
 }
 
 #[derive(Deserialize)]
@@ -465,6 +503,9 @@ pub(crate) struct RawHost {
     mac: Option<String>,
     next_hop_mac: Option<String>,
     port: Option<u16>,
+    announce: Option<bool>,
+    groups: Option<Vec<String>>,
+    hostname: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -658,8 +699,33 @@ impl RawHost {
             .transpose()
             .map_err(ctx)?;
         h.port = self.port;
+        h.emulation.announce = self.announce;
+        h.emulation.hostname = self.hostname;
+        h.emulation.groups =
+            parse_groups(self.groups.as_deref().unwrap_or_default()).map_err(ctx)?;
+        if h.is_dynamic() && h.mac.is_none() {
+            let n = if what == "server" { 2 } else { 1 };
+            h.mac = Some(MacAddr([0x02, 0xdc, 0, 0, 0, n]));
+        }
         Ok(h)
     }
+}
+
+/// Parses multicast group addresses, IPv4 or IPv6.
+pub fn parse_groups(groups: &[String]) -> Result<Vec<IpAddr>> {
+    groups
+        .iter()
+        .map(|g| {
+            let ip: IpAddr = g
+                .trim()
+                .parse()
+                .map_err(|_| Error::InvalidSpec(format!("invalid group address '{g}'")))?;
+            if !ip.is_multicast() {
+                return Err(Error::InvalidSpec(format!("{ip} is not a multicast group")));
+            }
+            Ok(ip)
+        })
+        .collect()
 }
 
 impl TcpProfile {
@@ -756,6 +822,8 @@ impl TcpProfile {
         p.output = raw
             .output
             .map_or(Ok(SendSettings::default()), OutputFile::settings)?;
+        p.host_options = crate::host::host_options(raw.hosts, crate::HostOptions::for_endpoints())
+            .map_err(|e| Error::Profile(format!("[hosts]: {e}")))?;
         if let Some(o) = raw.tcp {
             let d = |v: Option<String>, dflt: Duration| -> Result<Duration> {
                 v.map_or(Ok(dflt), |s| parse_duration(&s))
@@ -821,6 +889,17 @@ impl TcpProfile {
             }
         }
         Ok(out)
+    }
+
+    /// The emulated hosts `config`'s client and server need (DHCP, SLAAC,
+    /// DHCPv6, announcements, groups), if any; `config` as
+    /// [`config`](Self::config) makes it.
+    pub fn endpoint_hosts(&self, config: &TcpConfig) -> Result<Option<crate::EndpointHosts>> {
+        crate::EndpointHosts::new(
+            config,
+            self.client.as_ref().map(|h| &h.emulation),
+            self.server.as_ref().map(|h| &h.emulation),
+        )
     }
 
     /// The engine configuration, with ports numbered as in `interfaces`.

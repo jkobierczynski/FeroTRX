@@ -117,6 +117,9 @@ pub trait PortEngine: Send {
     fn is_done(&self) -> bool;
     /// Sets the elapsed time and stop flag in the counters.
     fn set_elapsed(&mut self, elapsed: Duration, stopped: bool);
+    /// Queues what goes out when the run ends (lease releases, group
+    /// leaves); [`run_engine`] sends it. Nothing by default.
+    fn finish(&mut self) {}
     fn stats(&self) -> &Self::Stats;
     /// Wraps an error message in the engine's kind of [`Error`].
     fn wrap_error(message: String) -> Error;
@@ -238,6 +241,16 @@ where
             .is_some_and(|s| s.load(Ordering::Relaxed))
             || config.duration.is_some_and(|d| now >= d);
         if stopped || engine.is_done() {
+            engine.finish();
+            for (p, frame) in engine.take_output() {
+                if let Some(port) = ports.get_mut(p) {
+                    // Best effort: the run is over either way.
+                    let _ = port.send(&frame);
+                }
+            }
+            for port in ports.iter_mut() {
+                let _ = port.flush();
+            }
             engine.set_elapsed(start.elapsed(), stopped && !engine.is_done());
             let stats = engine.stats().clone();
             progress(&stats);

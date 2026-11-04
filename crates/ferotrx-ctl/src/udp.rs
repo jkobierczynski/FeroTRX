@@ -46,7 +46,16 @@ pub fn start_udp_with(
     let interfaces = profile.interfaces(iface)?;
     let mut engine_config = profile.config(&apps, &interfaces, iface)?;
     engine_config.options.clock = wall_clock();
-    let engine = UdpEngine::new(engine_config)?;
+    // With DHCP, SLAAC or DHCPv6 the hosts get their addresses first, and
+    // the engine is built with them; checked now with example addresses.
+    let (engine, hosted) = match profile.endpoint_hosts(&engine_config)? {
+        Some(plan) => {
+            let (checked, hosted) =
+                plan.hosted(engine_config, profile.host_options.clone(), UdpEngine::new)?;
+            (checked, Some(hosted))
+        }
+        None => (UdpEngine::new(engine_config)?, None),
+    };
     let program = match engine.templates() {
         [one] => one.app.to_string(),
         many => many
@@ -72,8 +81,12 @@ pub fn start_udp_with(
     if config.duration.is_none() {
         config.duration = profile.duration;
     }
+    let job = match hosted {
+        Some(h) => UdpJob::spawn(h, ports, config)?,
+        None => UdpJob::spawn(engine, ports, config)?,
+    };
     Ok(UdpStarted {
-        job: UdpJob::spawn(engine, ports, config)?,
+        job,
         program,
         interfaces,
         port_details,
@@ -117,6 +130,7 @@ impl UdpRun {
             rx_bytes: 0,
             elapsed_s: 0.0,
             tps: 0.0,
+            hosts: Vec::new(),
         };
         info.fill(&stats);
         info
