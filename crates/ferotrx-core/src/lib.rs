@@ -97,6 +97,7 @@
 //! assert_eq!(stats.streams[0].bytes, 5 * 64);
 //! ```
 
+pub mod app;
 mod bench;
 mod capture;
 #[cfg(feature = "profile")]
@@ -125,6 +126,7 @@ mod transform;
 mod udp;
 mod workers;
 
+pub use app::{App, AppProtocol, AppSession, AppStats, Transport};
 #[cfg(feature = "profile")]
 pub use bench::BenchProfile;
 pub use bench::{

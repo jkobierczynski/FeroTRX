@@ -106,18 +106,32 @@ pub fn detect_kind(text: &str) -> Result<FileKind> {
     }
     const UDP: &[&str] = &["rate", "app", "queries", "records", "transactions", "udp"];
     const TCP: &[&str] = &["cps", "connections", "closer", "tcp"];
+    // An application protocol that only runs over TCP (`app = "http"`), or
+    // one with TCP settings, makes a TCP profile.
+    let tcp_app = |t: &toml::Table| {
+        let Some(name) = t.get("app").and_then(|a| a.as_str()) else {
+            return false;
+        };
+        let stream_only = crate::app::AppRegistry::builtin()
+            .parse(name, &toml::Table::new(), std::path::Path::new("."))
+            .is_ok_and(|a| !a.supports(crate::Transport::Datagram));
+        stream_only || has(t, TCP)
+    };
+    let tables = table
+        .get("template")
+        .and_then(|t| t.as_array())
+        .map(|a| a.iter().filter_map(|t| t.as_table()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if tcp_app(&table) || tables.iter().any(|t| tcp_app(t)) {
+        return Ok(FileKind::Tcp);
+    }
     if has(&table, UDP) {
         return Ok(FileKind::Udp);
     }
     if has(&table, TCP) {
         return Ok(FileKind::Tcp);
     }
-    let templates = table
-        .get("template")
-        .and_then(|t| t.as_array())
-        .map(|a| a.iter().filter_map(|t| t.as_table()).collect::<Vec<_>>())
-        .unwrap_or_default();
-    if templates.iter().any(|t| has(t, UDP)) {
+    if tables.iter().any(|t| has(t, UDP)) {
         return Ok(FileKind::Udp);
     }
     if !table.keys().any(|k| k != "format") {
@@ -318,11 +332,14 @@ fn tcp(p: &TcpProfile, prefix: &str, out: &mut FileCheck) -> Result<()> {
         out,
     );
     for (i, (t, prog)) in p.templates.iter().zip(&programs).enumerate() {
+        let plays = match t.app() {
+            Some(a) => a.describe(),
+            None => format!("{} messages", prog.messages.len()),
+        };
         let mut line = format!(
-            "{prefix}  template '{}': port {}, {} messages, weight {}",
+            "{prefix}  template '{}': port {}, {plays}, weight {}",
             t.name(i),
             t.port.unwrap_or(prog.server_port),
-            prog.messages.len(),
             t.weight
         );
         if let Some(cps) = t.cps {
@@ -472,6 +489,12 @@ mod tests {
             ("app = \"dns\"", FileKind::Udp),
             ("[[template]]\napp = \"ntp\"\nrate = 2", FileKind::Udp),
             ("[[template]]\npcap = \"x.pcap\"", FileKind::Tcp),
+            ("app = \"http\"", FileKind::Tcp),
+            ("app = \"dns\"\nconnections = 5", FileKind::Tcp),
+            (
+                "[[template]]\napp = \"http\"\n[[template]]\napp = \"dns\"",
+                FileKind::Tcp,
+            ),
         ];
         for (text, kind) in cases {
             assert_eq!(detect_kind(text).unwrap(), kind, "{text}");

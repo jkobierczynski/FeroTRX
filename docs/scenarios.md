@@ -174,7 +174,11 @@ arrived) fails. A misspelt metric is an error that lists the right names.
 (other bytes than the capture), `open` (still open when the run ended),
 `retransmits`, `timeouts`, `cps` (completed per second),
 `server_connections`, `server_completed`, `server_failed`,
-`server_mismatched`.
+`server_mismatched`; with an [application protocol](app-protocols.md),
+also `app_transactions`, `app_failed`, `app_failed_pct`, `app_errors`
+(HTTP 4xx/5xx, DNS error codes), `protocol_errors` and `response_min`,
+`response_avg`, `response_p99`, `response_max` (ms, from a request to its
+whole answer).
 
 **UDP**: `transactions`, `answered`, `answered_pct`, `timed_out`,
 `timed_out_pct`, `mismatched` (another answer than expected), `unmatched`

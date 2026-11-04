@@ -12,9 +12,9 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::dns::{self, DnsCheck, DnsWorkload, Rcode};
-use super::ntp::{self, NtpCheck};
+use super::dns::DnsWorkload;
 use super::program::{UdpProgram, UdpRole};
+use crate::app::{App, AppCx, AppRole, AppSession, Receive, SessionInit, Transport};
 use crate::net::{ETHERTYPE_IPV4, ETHERTYPE_IPV6, IPPROTO_ICMPV6};
 use crate::tcp::engine::{ip_add, ip_max, ip_num, ip_version, TcpEndpoint};
 use crate::tcp::hosts::{self, Host, MAX_HOPS};
@@ -31,31 +31,50 @@ pub enum UdpApp {
     /// Datagrams as in the program (from a capture or written out), checked
     /// byte for byte.
     Replay(Arc<UdpProgram>),
-    /// DNS lookups: the client sends the workload's queries in turn, each
-    /// with its own transaction id, and the server answers from its records.
-    /// Answers are matched by id and question.
-    Dns(Arc<DnsWorkload>),
-    /// NTP: client requests and server replies, matched by the client's
-    /// transmit timestamp.
-    Ntp,
+    /// An application protocol (see [`crate::app`]): DNS, NTP or one of
+    /// your own. Each transaction is one request and its answer; the
+    /// protocol makes the request, matches the answer (by DNS id and
+    /// question, NTP timestamp) and, on the server, makes the answer.
+    App(App),
 }
 
 impl UdpApp {
-    /// The usual server port: the program's, 53 or 123.
+    /// DNS lookups: the client sends the workload's queries in turn, each
+    /// with its own transaction id, and the server answers from its records.
+    /// Answers are matched by id and question.
+    pub fn dns(workload: Arc<DnsWorkload>) -> Self {
+        UdpApp::App(App::new(crate::app::dns::Dns::new(workload)))
+    }
+
+    /// NTP: client requests and server replies, matched by the client's
+    /// transmit timestamp.
+    pub fn ntp() -> Self {
+        UdpApp::App(App::new(crate::app::ntp::Ntp))
+    }
+
+    /// The usual server port: the program's, or the protocol's (53, 123).
     pub fn default_port(&self) -> u16 {
         match self {
             UdpApp::Replay(p) => p.server_port,
-            UdpApp::Dns(_) => 53,
-            UdpApp::Ntp => 123,
+            UdpApp::App(a) => a.default_port(),
         }
     }
 
-    /// `replay`, `dns` or `ntp`.
-    pub fn kind(&self) -> &'static str {
+    /// `replay`, or the protocol's name: `dns`, `ntp`.
+    pub fn kind(&self) -> &str {
         match self {
             UdpApp::Replay(_) => "replay",
-            UdpApp::Dns(_) => "dns",
-            UdpApp::Ntp => "ntp",
+            UdpApp::App(a) => a.name(),
+        }
+    }
+
+    /// The DNS workload, if the template plays DNS.
+    pub fn dns_workload(&self) -> Option<&Arc<DnsWorkload>> {
+        match self {
+            UdpApp::App(a) => a
+                .downcast_ref::<crate::app::dns::Dns>()
+                .map(|d| &d.workload),
+            UdpApp::Replay(_) => None,
         }
     }
 }
@@ -64,8 +83,7 @@ impl fmt::Display for UdpApp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             UdpApp::Replay(p) => write!(f, "{p}"),
-            UdpApp::Dns(d) => write!(f, "{d}"),
-            UdpApp::Ntp => f.write_str("NTP requests"),
+            UdpApp::App(a) => write!(f, "{}", a.describe()),
         }
     }
 }
@@ -310,6 +328,10 @@ pub struct UdpSideStats {
     pub payload_rx: u64,
     /// Client: from each request (its first try) to its answer.
     pub response_time: LatencyStats,
+    /// What the application protocol counted: transactions by response
+    /// code (`NOERROR`, `NXDOMAIN`), failures, protocol errors. Empty for
+    /// replays.
+    pub app: crate::AppStats,
 }
 
 /// Counters of one template in a UDP run.
@@ -395,7 +417,7 @@ fn plan(t: &UdpTemplate, o: &UdpOptions) -> Vec<Step> {
                 })
                 .collect()
         }
-        UdpApp::Dns(_) | UdpApp::Ntp => vec![
+        UdpApp::App(_) => vec![
             Step {
                 from: UdpRole::Client,
                 wait: Duration::ZERO,
@@ -437,10 +459,15 @@ struct Session {
     /// The last datagram from the other end that the program took: the
     /// server's last request, the client's last answer.
     last_req: Vec<u8>,
-    /// The transaction's number, which picks the DNS query.
-    txn: u64,
-    dns_id: u16,
-    ntp_xmt: u64,
+    /// The application protocol's session, for templates that play one.
+    app: Option<Box<dyn AppSession>>,
+    /// Datagrams the session made that wait to go: the client's request,
+    /// the server's answer.
+    app_out: Vec<Vec<u8>>,
+    /// Whether `start` was called (client).
+    app_started: bool,
+    /// The fit of a datagram the server's new session already took.
+    app_fit: Option<(bool, bool)>,
     mismatched: bool,
     error: bool,
     /// Server: everything played; the session stays to answer repeats.
@@ -512,24 +539,31 @@ impl Session {
     }
 
     /// What this end sends at the current step.
-    fn payload(&self, cx: &Ctx, now: Duration) -> Option<Vec<u8>> {
+    fn payload(&mut self, cx: &mut Ctx, now: Duration) -> Option<Vec<u8>> {
         match &cx.templates[self.tpl].app {
             UdpApp::Replay(p) => p.messages.get(self.step).map(|m| m.data.clone()),
-            UdpApp::Dns(w) => match self.role {
-                UdpRole::Client => w.query(self.txn).map(|q| w.query_message(self.dns_id, q)),
-                UdpRole::Server => w.answer(&self.last_req),
-            },
-            UdpApp::Ntp => match self.role {
-                UdpRole::Client => Some(ntp::request(self.ntp_xmt)),
-                UdpRole::Server => {
-                    ntp::reply(&self.last_req, ntp::timestamp(cx.options.clock + now))
+            UdpApp::App(_) => {
+                if self.role == UdpRole::Client && !self.app_started {
+                    self.app_started = true;
+                    let mut ax = AppCx::new(now, cx.options.clock + now);
+                    if let Some(a) = self.app.as_mut() {
+                        a.start(&mut ax);
+                    }
+                    self.app_out.extend(ax.take_sends());
+                    cx.stats
+                        .add(self.role, self.tpl, |s| ax.count_into(&mut s.app));
                 }
-            },
+                if self.app_out.is_empty() {
+                    None
+                } else {
+                    Some(self.app_out.remove(0))
+                }
+            }
         }
     }
 
     /// Whether `data` is the datagram the current step waits for.
-    fn fits(&self, cx: &Ctx, data: &[u8]) -> Fit {
+    fn fits(&mut self, cx: &mut Ctx, data: &[u8], now: Duration) -> Fit {
         match &cx.templates[self.tpl].app {
             UdpApp::Replay(p) => {
                 let expected = p.messages.get(self.step).map(|m| m.data.as_slice());
@@ -538,43 +572,33 @@ impl Session {
                     error: false,
                 }
             }
-            UdpApp::Dns(w) => match self.role {
-                UdpRole::Client => {
-                    let Some(q) = w.query(self.txn) else {
-                        return Fit::No;
-                    };
-                    match dns::check_answer(data, self.dns_id, q) {
-                        DnsCheck::NotOurs => Fit::No,
-                        DnsCheck::Answer { rcode, ok } => Fit::Yes {
-                            ok,
-                            error: rcode != Rcode::NOERROR,
-                        },
-                    }
+            UdpApp::App(_) => {
+                if let Some((ok, error)) = self.app_fit.take() {
+                    return Fit::Yes { ok, error };
                 }
-                UdpRole::Server => match dns::Message::parse(data) {
-                    Some(m) if !m.response && m.question.is_some() => Fit::Yes {
-                        ok: true,
-                        error: false,
-                    },
-                    _ => Fit::No,
-                },
-            },
-            UdpApp::Ntp => match self.role {
-                UdpRole::Client => match ntp::check(data, self.ntp_xmt) {
-                    NtpCheck::NotOurs => Fit::No,
-                    NtpCheck::Reply { kiss } => Fit::Yes {
-                        ok: true,
-                        error: kiss,
-                    },
-                },
-                UdpRole::Server => match data.first() {
-                    Some(b) if data.len() >= 48 && b & 0x07 == 3 => Fit::Yes {
-                        ok: true,
-                        error: false,
-                    },
-                    _ => Fit::No,
-                },
-            },
+                let Some(a) = self.app.as_mut() else {
+                    return Fit::No;
+                };
+                let mut ax = AppCx::new(now, cx.options.clock + now);
+                if a.receive(data, &mut ax) == Receive::NotMine {
+                    return Fit::No;
+                }
+                self.app_out.extend(ax.take_sends());
+                let (ok, error) = (ax.all_ok(), ax.any_error());
+                let rt = self.asked_at.map(|at| now.saturating_sub(at));
+                let (role, tpl) = (self.role, self.tpl);
+                cx.stats.add(role, tpl, |s| {
+                    for t in ax.transactions() {
+                        let mut t = t.clone();
+                        if role == UdpRole::Client && t.response_time.is_none() {
+                            t.response_time = rt;
+                        }
+                        s.app.record(&t);
+                    }
+                    s.app.protocol_errors += ax.protocol_errors().len() as u64;
+                });
+                Fit::Yes { ok, error }
+            }
         }
     }
 
@@ -597,7 +621,7 @@ impl Session {
                     Some(_) => self.hold = None,
                 }
             }
-            let Some(data) = self.payload(cx, now) else {
+            let Some(data) = self.payload(&mut *cx, now) else {
                 // Nothing to send (a request the server cannot answer).
                 self.step = self.steps(cx).len();
                 continue;
@@ -663,7 +687,7 @@ impl Session {
             }
             return Fate::Keep;
         }
-        match self.fits(cx, data) {
+        match self.fits(cx, data, now) {
             Fit::No => {
                 cx.add(self.role, self.tpl, |s| s.unmatched += 1);
                 Fate::Keep
@@ -775,7 +799,7 @@ impl Session {
 /// client.transactions = 20;
 /// client.rate = 1000.0;
 /// let engine = UdpEngine::new(UdpConfig {
-///     templates: vec![UdpTemplate::new(UdpApp::Dns(Arc::new(dns)), "10.0.0.2:53".parse().unwrap())],
+///     templates: vec![UdpTemplate::new(UdpApp::dns(Arc::new(dns)), "10.0.0.2:53".parse().unwrap())],
 ///     client: Some(client),
 ///     server: Some(UdpServerConfig::new(ep(1, 2))),
 ///     options: UdpOptions::default(),
@@ -854,12 +878,22 @@ impl UdpEngine {
                         e.to_string().trim_start_matches("udp: ")
                     ))
                 })?,
-                UdpApp::Dns(w) if client.is_some() && t.weight > 0 && w.queries.is_empty() => {
-                    return Err(Error::Udp(format!(
-                        "{what}: the DNS workload has no queries"
-                    )));
+                UdpApp::App(a) => {
+                    let check = |role| {
+                        a.validate(role, Transport::Datagram).map_err(|e| {
+                            Error::Udp(format!(
+                                "{what}: {}",
+                                e.to_string().trim_start_matches("profile: ")
+                            ))
+                        })
+                    };
+                    if server.is_some() {
+                        check(AppRole::Server)?;
+                    }
+                    if client.is_some() && t.weight > 0 {
+                        check(AppRole::Client)?;
+                    }
                 }
-                _ => {}
             }
             if t.connect_ips == 0 {
                 return Err(Error::Udp(format!(
@@ -1206,23 +1240,40 @@ impl UdpEngine {
             asked_at: None,
             last_rx: now,
             last_req: Vec::new(),
-            txn: 0,
-            dns_id: 0,
-            ntp_xmt: 0,
+            app: match &cx.templates[tpl].app {
+                UdpApp::App(a) => Some(a.session(&SessionInit {
+                    role: AppRole::Server,
+                    transport: Transport::Datagram,
+                    index: 0,
+                    seed: (now.as_nanos() as u64) ^ (u64::from(d.sport) << 32),
+                    local: key.0,
+                    remote: key.1,
+                })),
+                UdpApp::Replay(_) => None,
+            },
+            app_out: Vec::new(),
+            app_started: true,
+            app_fit: None,
             mismatched: false,
             error: false,
             done: false,
             scheduled: Duration::MAX,
         };
         // Only a datagram that can start the transaction opens a session.
-        if let Fit::No = s.fits(&cx, d.data) {
-            let n = d.data.len() as u64;
-            cx.add(role, tpl, |c| {
-                c.datagrams_rx += 1;
-                c.payload_rx += n;
-                c.unmatched += 1;
-            });
-            return;
+        match s.fits(&mut cx, d.data, now) {
+            Fit::No => {
+                let n = d.data.len() as u64;
+                cx.add(role, tpl, |c| {
+                    c.datagrams_rx += 1;
+                    c.payload_rx += n;
+                    c.unmatched += 1;
+                });
+                return;
+            }
+            // The protocol's session took it already: the step after
+            // reads this instead of handing the datagram over again.
+            Fit::Yes { ok, error } if s.app.is_some() => s.app_fit = Some((ok, error)),
+            Fit::Yes { .. } => {}
         }
         cx.add(role, tpl, |c| {
             c.sent += 1;
@@ -1424,10 +1475,22 @@ impl UdpEngine {
         let Some(key) = found else {
             return false;
         };
+        let index = self.opened[tpl];
         self.opened[tpl] += 1;
         let txn = self.txn_count;
         self.txn_count += 1;
         let r = self.rng.next();
+        let app = match &self.templates[tpl].app {
+            UdpApp::App(a) => Some(a.session(&SessionInit {
+                role: AppRole::Client,
+                transport: Transport::Datagram,
+                index,
+                seed: r ^ txn,
+                local: key.0,
+                remote: to,
+            })),
+            UdpApp::Replay(_) => None,
+        };
         let mut s = Session {
             role: UdpRole::Client,
             tpl,
@@ -1449,12 +1512,10 @@ impl UdpEngine {
             asked_at: None,
             last_rx: now,
             last_req: Vec::new(),
-            txn: self.opened[tpl] - 1,
-            dns_id: (r >> 16) as u16,
-            // Unique per transaction: the run's clock plus the transaction
-            // number in the low bits.
-            ntp_xmt: (ntp::timestamp(self.options.clock + now) & !0xffff_ffff)
-                | ((r as u32 as u64) ^ txn) & 0xffff_ffff,
+            app,
+            app_out: Vec::new(),
+            app_started: false,
+            app_fit: None,
             mismatched: false,
             error: false,
             done: false,

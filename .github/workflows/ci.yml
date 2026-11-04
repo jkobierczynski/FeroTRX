@@ -202,6 +202,22 @@ jobs:
           sudo IPV6=1 scripts/udp-netns.sh ./target/debug/ferotrx
           sudo IPV6=1 MIX=1 NO_VLAN=1 LOSS=0.03 scripts/udp-netns.sh ./target/debug/ferotrx
 
+      # Application protocols over stateful TCP through the NAT router: HTTP
+      # (keep-alive, chunked, POST, 404) and DNS over TCP between emulated
+      # ends, curl against the emulated web server, and the emulated client
+      # against a real one (python3 -m http.server); with 3% loss, over IPv6,
+      # and over AF_XDP with two workers.
+      - name: Application protocols through a NAT router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y ethtool curl
+          cargo build -p ferotrx-cli
+          sudo modprobe 8021q || true
+          sudo scripts/app-netns.sh ./target/debug/ferotrx
+          sudo NO_VLAN=1 LOSS=0.03 scripts/app-netns.sh ./target/debug/ferotrx
+          sudo IPV6=1 scripts/app-netns.sh ./target/debug/ferotrx
+          sudo NO_VLAN=1 scripts/app-netns.sh ./target/debug/ferotrx -B af_xdp --workers 2
+
       # Host emulation on a bridged LAN with IGMP/MLD snooping: DHCP clients
       # (dnsmasq) that join a group and answer the bridge's queries, a
       # gratuitous ARP, a TCP client with a DHCP address; over IPv6, SLAAC and

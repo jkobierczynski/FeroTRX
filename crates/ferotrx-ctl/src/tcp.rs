@@ -84,12 +84,12 @@ pub fn start_tcp_with(
         None => (TcpEngine::new(engine_config)?, None),
     };
     let program = match engine.templates() {
-        [one] => one.program.to_string(),
+        [one] => one.describe(),
         many => many
             .iter()
             .map(|t| match t.cps {
-                Some(cps) => format!("{} ({cps} cps): {}", t.name, t.program),
-                None => format!("{} (weight {}): {}", t.name, t.weight, t.program),
+                Some(cps) => format!("{} ({cps} cps): {}", t.name, t.describe()),
+                None => format!("{} (weight {}): {}", t.name, t.weight, t.describe()),
             })
             .collect::<Vec<_>>()
             .join("; "),

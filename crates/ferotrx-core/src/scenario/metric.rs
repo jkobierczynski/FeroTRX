@@ -254,6 +254,50 @@ pub const TCP_METRICS: &[MetricDef] = &[
         Lower,
         "server connections that received other bytes",
     ),
+    m(
+        "app_transactions",
+        Count,
+        Higher,
+        "application transactions the client finished (HTTP requests answered, DNS queries)",
+    ),
+    m(
+        "app_failed",
+        Count,
+        Lower,
+        "application transactions that did not go as expected (status, response code)",
+    ),
+    m(
+        "app_failed_pct",
+        Percent,
+        Lower,
+        "failed, of the application transactions",
+    ),
+    m(
+        "app_errors",
+        Count,
+        Neither,
+        "answers with an error status or code (HTTP 4xx/5xx, DNS NXDOMAIN...)",
+    ),
+    m(
+        "protocol_errors",
+        Count,
+        Lower,
+        "things the server sent that the application protocol could not take",
+    ),
+    m("response_min", Millis, Lower, "fastest application answer"),
+    m(
+        "response_avg",
+        Millis,
+        Lower,
+        "average time from a request to its whole answer",
+    ),
+    m(
+        "response_p99",
+        Millis,
+        Lower,
+        "99th percentile of the time to an answer",
+    ),
+    m("response_max", Millis, Lower, "slowest application answer"),
 ];
 
 /// Metrics of a UDP check: the client side, and the server's with `server_`.

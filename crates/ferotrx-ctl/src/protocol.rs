@@ -749,7 +749,7 @@ pub struct TcpRunInfo {
 }
 
 /// The counters of one template of a [`TcpRunInfo`].
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TcpTemplateCounters {
     pub name: String,
     pub client: TcpCounters,
@@ -757,7 +757,7 @@ pub struct TcpTemplateCounters {
 }
 
 /// Connection counters of one side of a [`TcpRunInfo`].
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TcpCounters {
     pub started: u64,
     pub established: u64,
@@ -778,6 +778,50 @@ pub struct TcpCounters {
     /// Most bytes one connection had in flight at once.
     #[serde(default)]
     pub max_in_flight: u64,
+    /// What the application protocol counted, for templates that play one
+    /// (`app = "http"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<AppCounters>,
+}
+
+/// Application protocol counters of one side; see `ferotrx_core::AppStats`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AppCounters {
+    /// Requests answered (client), answers sent (server).
+    pub transactions: u64,
+    /// Transactions that did not go as expected (status, response code).
+    pub failed: u64,
+    /// Transactions answered with an error status or code.
+    pub errors: u64,
+    /// Things the other end sent that the protocol could not take.
+    #[serde(default)]
+    pub protocol_errors: u64,
+    /// Transactions by status or response code, e.g. `{"200": 98, "404": 2}`.
+    #[serde(default)]
+    pub codes: std::collections::BTreeMap<String, u64>,
+    /// Client: from each request to its whole answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_time: Option<LatencyCounters>,
+}
+
+impl From<&ferotrx_core::AppStats> for AppCounters {
+    fn from(s: &ferotrx_core::AppStats) -> Self {
+        Self {
+            transactions: s.transactions,
+            failed: s.failed,
+            errors: s.errors,
+            protocol_errors: s.protocol_errors,
+            codes: s.codes.clone(),
+            response_time: (s.response_time.count() > 0).then(|| (&s.response_time).into()),
+        }
+    }
+}
+
+impl AppCounters {
+    /// From `s`, unless it counted nothing.
+    pub fn of(s: &ferotrx_core::AppStats) -> Option<Self> {
+        (!s.is_empty()).then(|| s.into())
+    }
 }
 
 impl From<&TcpSideStats> for TcpCounters {
@@ -796,6 +840,7 @@ impl From<&TcpSideStats> for TcpCounters {
             timeouts: s.timeouts,
             paws_dropped: s.paws_dropped,
             max_in_flight: s.max_in_flight,
+            app: AppCounters::of(&s.app),
         }
     }
 }
@@ -938,6 +983,10 @@ pub struct UdpCounters {
     /// Client: from each request to its answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_time: Option<LatencyCounters>,
+    /// What the application protocol counted (DNS, NTP): transactions by
+    /// response code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<AppCounters>,
 }
 
 impl From<&UdpSideStats> for UdpCounters {
@@ -957,6 +1006,7 @@ impl From<&UdpSideStats> for UdpCounters {
             payload_tx: s.payload_tx,
             payload_rx: s.payload_rx,
             response_time: (s.response_time.count() > 0).then(|| (&s.response_time).into()),
+            app: AppCounters::of(&s.app),
         }
     }
 }

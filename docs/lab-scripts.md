@@ -6,8 +6,9 @@ the kernel as the router, runs FeroTRX through it, checks the results and
 removes the lab again. CI runs all of them on every change.
 
 They need Linux, root and a few tools: `ip` (iproute2) everywhere, plus
-`iptables` (or iptables-nft), `tc`, `jq` or `dnsmasq` depending on the
-script. On Debian and Ubuntu: `sudo apt install iproute2 iptables jq dnsmasq-base`.
+`iptables` (or iptables-nft), `tc`, `jq`, `dnsmasq`, `ethtool`, `curl` or
+`dig` depending on the script. On Debian and Ubuntu: `sudo apt install
+iproute2 iptables jq dnsmasq-base ethtool curl dnsutils`.
 Each takes the `ferotrx` binary as its first argument (default: a build in
 this checkout, else the installed one); arguments after it go to the
 `ferotrx` command the script runs.
@@ -16,6 +17,7 @@ this checkout, else the installed one); arguments after it go to the
 | --- | --- | --- |
 | `tcp-nat-netns.sh` | `ferotrx tcp` with `examples/http.pcap` through a NAT router between VLANs 10 and 20 on a trunk | `LOSS=0.03`, `MIX=1` (three templates to four servers), `NETEM="..."`, `BDP=1` (long fat pipe), `IPV6=1`, `NO_VLAN=1`, `LOG_INVALID=1`, `QUEUES=4` (multi-queue veths, for `--workers`) |
 | `udp-netns.sh` | `ferotrx udp` DNS lookups through the same kind of router, then `dig` against the DNS server | `LOSS=0.03`, `MIX=1` (DNS, NTP, echo), `IPV6=1`, `NO_VLAN=1`, `QUEUES=4` |
+| `app-netns.sh` | `ferotrx tcp` with HTTP and DNS over TCP (`examples/lab-http.toml`) through the router, then `curl` against the emulated web server and the emulated client against `python3 -m http.server` | `LOSS=0.03`, `IPV6=1`, `NO_VLAN=1` |
 | `latency-netns.sh` | a profile with two latency streams and a plain one, through a router with delay and loss | `DELAY=5ms`, `LOSS=0.02`, `DURATION=4s`, `IPV6=1` |
 | `bench-netns.sh` | `ferotrx bench` against a router that forwards 20 Mbit/s through a token bucket | `RATE=20`, `LINE=100`, `DELAY=2ms`, `SIZES="1020 imix"`, `TRIAL=1s` |
 | `hosts-netns.sh` | `ferotrx host` and `ferotrx tcp --client-ip dhcp` against dnsmasq and a bridge with IGMP/MLD snooping | `IPV6=1` (SLAAC, DHCPv6, MLD, router advertisements) |
@@ -34,6 +36,7 @@ Options after the script name (and the optional path to the binary) go to
 results look like, and what each script checks, is in the guide for the
 feature: [stateful TCP](stateful-tcp.md#lab-script),
 [stateful UDP](stateful-udp.md#lab-script),
+[application protocols](app-protocols.md#lab-script),
 [loss and latency](loss-latency.md#lab-script),
 [benchmarking](benchmarking.md), [host emulation](host-emulation.md#lab-script)
 and [scenarios](scenarios.md#an-example-run).

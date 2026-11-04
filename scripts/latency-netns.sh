@@ -33,9 +33,11 @@ if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
     shift
 else
     BIN=
-    for b in ./target/debug/ferotrx ./target/release/ferotrx "$(command -v ferotrx || true)"; do
-        if [ -n "$b" ] && [ -x "$b" ]; then BIN=$b; break; fi
+    # The newest of the debug and release builds, else the one on the PATH.
+    for b in ./target/debug/ferotrx ./target/release/ferotrx; do
+        if [ -x "$b" ] && { [ -z "$BIN" ] || [ "$b" -nt "$BIN" ]; }; then BIN=$b; fi
     done
+    [ -n "$BIN" ] || BIN=$(command -v ferotrx || true)
 fi
 if [ -z "$BIN" ] || ! [ -x "$BIN" ]; then
     echo "ferotrx not found${BIN:+ at $BIN}: build it first (cargo build -p ferotrx-cli)," >&2

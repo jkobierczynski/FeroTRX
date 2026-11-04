@@ -22,7 +22,7 @@
 
 pub(crate) mod dns;
 mod engine;
-mod ntp;
+pub(crate) mod ntp;
 #[cfg(feature = "profile")]
 mod profile;
 mod program;

@@ -1,0 +1,86 @@
+# FeroTRX stateful TCP profile: HTTP/1.1 and DNS over TCP, played by
+# application protocols, through a NAT router between two VLANs.
+#
+#   FeroTRX host --- switch (trunk) --- router --- VLAN 10: 192.168.10.0/24 (clients)
+#                                              \-- VLAN 20: 192.168.20.0/24 (server)
+#
+# Run it with:
+#   sudo ferotrx tcp -p examples/lab-http.toml -i <interface>
+#
+# Unlike a replay of a capture, both ends speak the protocol: the emulated
+# web server parses each request and answers with the route that matches,
+# the client checks every status code; the DNS server looks each question
+# up. So either end also works against real software:
+#
+#   only the server (leave out [client]):  curl http://192.168.20.80/big
+#   only the client (leave out [server]), against a real server:
+#     sudo ferotrx tcp -p examples/lab-http.toml -i eth0 --connect 192.168.20.10
+#
+# As in examples/lab-tcp.toml, the `ip`s must be free addresses in each VLAN,
+# not addresses of the FeroTRX machine, and `gateway` the router's address.
+format = 1
+cps = 50
+connections = 500
+concurrency = 100
+
+[[template]]
+name = "web"
+app = "http"                # port 80 unless `port` says otherwise
+weight = 3
+
+[template.http]
+per_connection = 3          # requests per connection (keep-alive), then the client closes
+host = "www.lab.local"      # the Host header (default: the address connected to)
+# pipeline = true           # send a connection's requests at once
+# think_time = "50ms"       # pause between an answer and the next request
+requests = [
+  "GET /",
+  "GET /big",
+  "GET /missing 404",       # the expected status: a code, 2xx, any (default: below 400)
+]
+
+[[template.http.request]]   # a request with a body and headers
+method = "POST"
+path = "/upload"
+body_size = "16K"           # or body = "...", body_file = "..."
+content_type = "application/octet-stream"
+headers = { "X-Test" = "ferotrx" }
+expect = 201
+
+[[template.http.route]]     # the server's answers: the first route that matches
+path = "/"
+body = "<html><body>FeroTRX lab</body></html>\n"
+content_type = "text/html"
+
+[[template.http.route]]
+path = "/big"
+body_size = "200K"
+chunked = true              # Transfer-Encoding: chunked instead of Content-Length
+
+[[template.http.route]]
+method = "POST"
+path = "/upload"
+status = 201
+delay = "5ms"               # wait before answering
+# Anything else gets 404 Not Found. With no routes at all, every request gets 200.
+
+[[template]]
+name = "dns"
+app = "dns"                 # DNS over TCP (RFC 7766), port 53
+weight = 1
+
+[template.dns]
+per_connection = 2          # queries per connection, one after the other
+queries = ["www.lab.local A", "missing.lab.local A NXDOMAIN", "lab.local MX"]
+records = ["www.lab.local A 192.168.20.80", "lab.local MX 10 mail.lab.local"]
+
+[client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20

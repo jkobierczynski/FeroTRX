@@ -167,6 +167,16 @@ whose table names none, `base_dir` for relative pcap paths in uploaded or
 `toml` profiles, and the backend settings. Then `tcp_stats`, `tcp_stop`,
 `tcp_runs`, `tcp_remove`, `tcp_wait`, and the same for `udp_` and `rx_`.
 
+With an [application protocol](app-protocols.md) (HTTP, DNS, NTP), each
+side also has `app`, an `AppCounters` (`transactions`, `failed`, `errors`,
+`protocol_errors`, `codes` by status or response code, `response_time`), or
+`None` when it counted nothing:
+
+```python
+web = done.template("web").client.app
+assert web.failed == 0 and web.codes.get("404", 0) > 0
+```
+
 ## Errors
 
 | Exception | Code | When |

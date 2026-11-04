@@ -267,12 +267,12 @@ fn dns_through_a_lossy_nat_router() {
         ..Default::default()
     };
     let mut c = engine(
-        vec![tpl(UdpApp::Dns(lab_dns()), 53)],
+        vec![tpl(UdpApp::dns(lab_dns()), 53)],
         Some(client(100, 500.0)),
         false,
         options.clone(),
     );
-    let mut s = engine(vec![tpl(UdpApp::Dns(lab_dns()), 53)], None, true, options);
+    let mut s = engine(vec![tpl(UdpApp::dns(lab_dns()), 53)], None, true, options);
     let mut router = UdpNat::new(7);
     let took = simulate(&mut [&mut c, &mut s], &mut router, Duration::from_secs(60));
     let (cs, ss) = (&c.stats().client, &s.stats().server);
@@ -306,8 +306,8 @@ fn one_engine_plays_dns_ntp_and_a_replay_by_weight() {
         ],
     );
     let templates = vec![
-        tpl(UdpApp::Dns(lab_dns()), 53).with_weight(3),
-        tpl(UdpApp::Ntp, 123),
+        tpl(UdpApp::dns(lab_dns()), 53).with_weight(3),
+        tpl(UdpApp::ntp(), 123),
         tpl(UdpApp::Replay(Arc::new(echo)), 7).with_name("echo"),
     ];
     let options = UdpOptions {
@@ -342,12 +342,12 @@ fn late_answers_time_out_and_count_as_unmatched() {
         ..Default::default()
     };
     let mut c = engine(
-        vec![tpl(UdpApp::Ntp, 123)],
+        vec![tpl(UdpApp::ntp(), 123)],
         Some(client(10, 100.0)),
         false,
         options.clone(),
     );
-    let mut s = engine(vec![tpl(UdpApp::Ntp, 123)], None, true, options);
+    let mut s = engine(vec![tpl(UdpApp::ntp(), 123)], None, true, options);
     let mut router = UdpNat::new(0);
     router.delay = Duration::from_millis(300);
     simulate(&mut [&mut c, &mut s], &mut router, Duration::from_secs(10));
@@ -369,7 +369,7 @@ fn nobody_answering_times_out() {
         ..Default::default()
     };
     let mut c = engine(
-        vec![tpl(UdpApp::Dns(lab_dns()), 53)],
+        vec![tpl(UdpApp::dns(lab_dns()), 53)],
         Some(client(3, 100.0)),
         false,
         options,
@@ -394,13 +394,13 @@ fn notices_answers_that_differ() {
     let client_dns =
         Arc::new(DnsWorkload::parse(&["www.lab.local A NXDOMAIN"], &[] as &[&str]).unwrap());
     let mut c = engine(
-        vec![tpl(UdpApp::Dns(client_dns), 53)],
+        vec![tpl(UdpApp::dns(client_dns), 53)],
         Some(client(4, 100.0)),
         false,
         UdpOptions::default(),
     );
     let mut s = engine(
-        vec![tpl(UdpApp::Dns(lab_dns()), 53)],
+        vec![tpl(UdpApp::dns(lab_dns()), 53)],
         None,
         true,
         UdpOptions::default(),
@@ -446,15 +446,15 @@ fn notices_answers_that_differ() {
 #[test]
 fn server_counts_strays_and_bad_requests() {
     let mut s = engine(
-        vec![tpl(UdpApp::Dns(lab_dns()), 53)],
+        vec![tpl(UdpApp::dns(lab_dns()), 53)],
         None,
         true,
         UdpOptions::default(),
     );
     let mut c = engine(
         vec![
-            tpl(UdpApp::Ntp, 53).with_name("not-dns"),
-            tpl(UdpApp::Ntp, 4444),
+            tpl(UdpApp::ntp(), 53).with_name("not-dns"),
+            tpl(UdpApp::ntp(), 4444),
         ],
         Some(client(4, 100.0)),
         false,
@@ -477,13 +477,13 @@ fn server_counts_strays_and_bad_requests() {
 
 #[test]
 fn rates_concurrency_and_think_time() {
-    let dns = UdpApp::Dns(lab_dns());
+    let dns = UdpApp::dns(lab_dns());
     let templates = vec![
         tpl(dns.clone(), 53)
             .with_rate(100.0)
             .with_transactions(20)
             .with_think_time(Duration::from_millis(30)),
-        tpl(UdpApp::Ntp, 123)
+        tpl(UdpApp::ntp(), 123)
             .with_concurrency(1)
             .with_transactions(5),
     ];
@@ -612,15 +612,15 @@ fn rejects_what_cannot_work() {
         .unwrap_err()
         .to_string()
     };
-    let e = bad(vec![tpl(UdpApp::Ntp, 123), tpl(UdpApp::Ntp, 123)], None);
+    let e = bad(vec![tpl(UdpApp::ntp(), 123), tpl(UdpApp::ntp(), 123)], None);
     assert!(e.contains("both listen on port 123"), "{e}");
     let server_first = UdpProgram::new(5, vec![UdpMessage::new(UdpRole::Server, "x")]);
     let e = bad(vec![tpl(UdpApp::Replay(Arc::new(server_first)), 5)], None);
     assert!(e.contains("client must send first"), "{e}");
     let empty = Arc::new(DnsWorkload::default());
-    let e = bad(vec![tpl(UdpApp::Dns(empty), 53)], Some(client(1, 1.0)));
+    let e = bad(vec![tpl(UdpApp::dns(empty), 53)], Some(client(1, 1.0)));
     assert!(e.contains("no queries"), "{e}");
-    let v6 = UdpTemplate::new(UdpApp::Ntp, "[fd00::1]:123".parse().unwrap());
+    let v6 = UdpTemplate::new(UdpApp::ntp(), "[fd00::1]:123".parse().unwrap());
     let e = bad(vec![v6], Some(client(1, 1.0)));
     assert!(e.contains("IPv6"), "{e}");
 }
@@ -631,11 +631,11 @@ fn traffic_models_start_transactions() {
     // the client finishes by itself with no transaction limit.
     let mut c = client(0, 100.0);
     c.model = "ramp_up=0s,hold=300ms,ramp_down=0s".parse().unwrap();
-    let ntp = tpl(UdpApp::Ntp, 123)
+    let ntp = tpl(UdpApp::ntp(), 123)
         .with_rate(200.0)
         .with_transactions(30)
         .with_model("poisson,seed=5".parse().unwrap());
-    let dns = tpl(UdpApp::Dns(lab_dns()), 53);
+    let dns = tpl(UdpApp::dns(lab_dns()), 53);
     let mut client = engine(
         vec![dns.clone(), ntp.clone()],
         Some(c),
