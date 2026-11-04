@@ -26,6 +26,10 @@
 //!   emulated client and server with handshakes, sequence and acknowledgement
 //!   tracking and retransmits, so it passes NAT routers and stateful firewalls.
 //!   [`TcpJob`] runs it on [`PacketPort`]s, ports that send and receive.
+//! * Stateful UDP: [`UdpEngine`] plays request/response transactions between
+//!   emulated clients and servers, with matching, timeouts and retries:
+//!   sessions from captures ([`UdpProgram`]), DNS lookups ([`DnsWorkload`])
+//!   and NTP. [`UdpJob`] runs it on ports.
 //! * Loss and latency: a stream made with [`Stream::with_latency`] carries a
 //!   [`Signature`] (flow, sequence number, send time) in every packet; a
 //!   [`PacketReceiver`] on the far side counts arrivals into [`RxStats`]:
@@ -96,6 +100,7 @@ mod source;
 mod stream;
 mod tcp;
 mod transform;
+mod udp;
 
 #[cfg(feature = "profile")]
 pub use bench::BenchProfile;
@@ -123,9 +128,10 @@ pub use size_mix::{SizeMix, FCS_LEN, L1_OVERHEAD, RFC2544_SIZES};
 pub use source::{CaptureSource, PacketSource};
 pub use stream::{run, run_with_progress, RunConfig, RunStats, Stream};
 pub use tcp::{
-    memory_ports, run_tcp, MemoryPort, PacketPort, TcpClientConfig, TcpConfig, TcpEndpoint,
-    TcpEngine, TcpFlow, TcpJob, TcpMessage, TcpOptions, TcpProgram, TcpRole, TcpRunConfig,
-    TcpServerConfig, TcpSideStats, TcpStats, TcpTemplate, TcpTemplateStats,
+    memory_ports, run_engine, run_tcp, MemoryPort, PacketPort, PortEngine, PortJob,
+    TcpClientConfig, TcpConfig, TcpEndpoint, TcpEngine, TcpFlow, TcpJob, TcpMessage, TcpOptions,
+    TcpProgram, TcpRole, TcpRunConfig, TcpServerConfig, TcpSideStats, TcpStats, TcpTemplate,
+    TcpTemplateStats,
 };
 #[cfg(feature = "profile")]
 pub use tcp::{
@@ -136,3 +142,10 @@ pub use transform::{
     Field, FixChecksums, IpRewrite, MacRewrite, PortRewrite, Rewrite, Transform, VlanPop, VlanPush,
     VlanSet,
 };
+pub use udp::{
+    DnsData, DnsQuery, DnsRecord, DnsType, DnsWorkload, Rcode, UdpApp, UdpClientConfig, UdpConfig,
+    UdpEndpoint, UdpEngine, UdpFlow, UdpJob, UdpMessage, UdpOptions, UdpProgram, UdpRole,
+    UdpServerConfig, UdpSideStats, UdpStats, UdpTemplate, UdpTemplateStats,
+};
+#[cfg(feature = "profile")]
+pub use udp::{UdpProfile, UdpSource, UdpTemplateSpec};

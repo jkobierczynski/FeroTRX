@@ -281,6 +281,27 @@ impl Client {
         self.call("tcp.remove", &RunId { id })
     }
 
+    pub fn udp_start(&mut self, params: &UdpStartParams) -> Result<UdpRunInfo, ClientError> {
+        self.call("udp.start", params)
+    }
+
+    /// Stops a UDP run and waits for it to end.
+    pub fn udp_stop(&mut self, id: u64) -> Result<UdpRunInfo, ClientError> {
+        self.call("udp.stop", &StopParams { id, wait: true })
+    }
+
+    pub fn udp_stats(&mut self, id: u64) -> Result<UdpRunInfo, ClientError> {
+        self.call("udp.stats", &RunId { id })
+    }
+
+    pub fn udp_runs(&mut self) -> Result<Vec<UdpRunInfo>, ClientError> {
+        self.call("udp.list", &Value::Null)
+    }
+
+    pub fn udp_remove(&mut self, id: u64) -> Result<UdpRunInfo, ClientError> {
+        self.call("udp.remove", &RunId { id })
+    }
+
     /// Starts a receiver on an interface of the server (see `rx.start`).
     pub fn rx_start(&mut self, params: &RxStartParams) -> Result<RxRunInfo, ClientError> {
         self.call("rx.start", params)

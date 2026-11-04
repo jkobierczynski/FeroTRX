@@ -8,7 +8,7 @@ use clap::{Args, Subcommand};
 use ferotrx_core::{parse_duration, parse_size, Profile};
 use ferotrx_ctl::protocol::{
     Counters, LoadProfileParams, OutputSpec, ProfileInfo, RunInfo, RunState, RxRunInfo, RxSpec,
-    RxStartParams, StartParams, TcpStartParams, DEFAULT_PORT,
+    RxStartParams, StartParams, TcpStartParams, UdpStartParams, DEFAULT_PORT,
 };
 use ferotrx_ctl::{
     AuditLog, Client, ClientTls, Controller, FilePolicy, LabPki, Role, Server, ServerConfig,
@@ -325,6 +325,33 @@ enum CtlCommand {
     TcpStats { id: Option<u64> },
     /// Stop a TCP run and show its final counters.
     TcpStop { id: u64 },
+    /// Start a stateful UDP run from a UDP profile (see `ferotrx udp --help`).
+    /// PATH is on the server, unless --upload sends the local file.
+    UdpStart {
+        path: PathBuf,
+        /// Send this machine's file to the server.
+        #[arg(short, long)]
+        upload: bool,
+        /// With --upload: folder on the server that a relative `pcap` path is in.
+        #[arg(long, requires = "upload")]
+        base_dir: Option<PathBuf>,
+        /// Interface of the server for hosts whose table names none.
+        #[arg(short, long)]
+        iface: Option<String>,
+        /// Transactions per second instead of the profile's.
+        #[arg(long)]
+        rate: Option<f64>,
+        /// Transactions in all instead of the profile's; 0 = until stopped.
+        #[arg(short = 'n', long)]
+        transactions: Option<u64>,
+        /// Stop after this long, e.g. 30s.
+        #[arg(short, long)]
+        duration: Option<String>,
+    },
+    /// Show the counters of one UDP run, or of every UDP run.
+    UdpStats { id: Option<u64> },
+    /// Stop a UDP run and show its final counters.
+    UdpStop { id: u64 },
     /// Start a receiver on an interface of the server, counting the loss and
     /// latency of flows with signatures sent from elsewhere (`--latency`).
     RxStart {
@@ -656,6 +683,63 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                 return print_json(&run);
             }
             crate::tcp::print_tcp_run(&run);
+        }
+        CtlCommand::UdpStart {
+            path,
+            upload,
+            base_dir,
+            iface,
+            rate,
+            transactions,
+            duration,
+        } => {
+            let mut params = UdpStartParams {
+                iface,
+                rate,
+                transactions,
+                duration,
+                ..Default::default()
+            };
+            if upload {
+                params.toml = Some(
+                    std::fs::read_to_string(&path)
+                        .with_context(|| format!("cannot read {}", path.display()))?,
+                );
+                params.base_dir = base_dir;
+            } else {
+                params.path = Some(path);
+            }
+            let run = c.udp_start(&params)?;
+            if json {
+                return print_json(&run);
+            }
+            crate::udp::print_udp_run(&run);
+        }
+        CtlCommand::UdpStats { id: Some(id) } => {
+            let run = c.udp_stats(id)?;
+            if json {
+                return print_json(&run);
+            }
+            crate::udp::print_udp_run(&run);
+        }
+        CtlCommand::UdpStats { id: None } => {
+            let runs = c.udp_runs()?;
+            if json {
+                return print_json(&runs);
+            }
+            if runs.is_empty() {
+                println!("no UDP runs");
+            }
+            for r in &runs {
+                crate::udp::print_udp_run(r);
+            }
+        }
+        CtlCommand::UdpStop { id } => {
+            let run = c.udp_stop(id)?;
+            if json {
+                return print_json(&run);
+            }
+            crate::udp::print_udp_run(&run);
         }
         CtlCommand::RxStart { iface, duration } => {
             let r = c.rx_start(&RxStartParams { iface, duration })?;

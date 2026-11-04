@@ -2,6 +2,7 @@ mod bench;
 mod latency;
 mod remote;
 mod tcp;
+mod udp;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -39,6 +40,10 @@ enum Command {
     /// playing the client, the server or both (handshakes, sequence and
     /// acknowledgement tracking, retransmits), e.g. through a NAT router.
     Tcp(tcp::TcpArgs),
+    /// Stateful UDP: request/response transactions between emulated clients
+    /// and servers, with matching, timeouts and retries: DNS lookups, NTP,
+    /// or UDP sessions replayed from a capture.
+    Udp(udp::UdpArgs),
     /// Receive on an interface (or read a capture) and report loss and
     /// latency of the flows with FeroTRX signatures, sent by `--latency` or
     /// `--rx` on another machine.
@@ -405,6 +410,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Inspect(args) => cmd_inspect(args),
         Command::Build(args) => cmd_build(args),
         Command::Tcp(args) => tcp::cmd_tcp(args),
+        Command::Udp(args) => udp::cmd_udp(args),
         Command::Rx(args) => latency::cmd_rx(args),
         Command::Bench(args) => bench::cmd_bench(args),
         #[cfg(feature = "pcap")]

@@ -1,0 +1,521 @@
+//! `ferotrx udp`: stateful UDP transactions (DNS, NTP, replayed sessions).
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{bail, Context, Result};
+use clap::{Args, ValueEnum};
+use ferotrx_core::{
+    parse_duration, parse_port_range, Capture, DnsWorkload, TcpRunConfig, UdpApp, UdpProfile,
+    UdpProgram, UdpRole, UdpSource, UdpStats, UdpTemplateSpec,
+};
+use ferotrx_ctl::protocol::{
+    LatencyCounters, RunState, UdpCounters, UdpRunInfo, UdpTemplateCounters,
+};
+
+use crate::tcp::{opt, parse_connect, set, HostArgs};
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum App {
+    /// Replay a UDP session from the capture, datagram for datagram.
+    Replay,
+    /// DNS: the capture's lookups (queries, and records from its answers),
+    /// plus --query and --record.
+    Dns,
+    /// NTP client requests and server replies.
+    Ntp,
+}
+
+#[derive(Args)]
+#[command(args_override_self = true)]
+pub struct UdpArgs {
+    /// A capture with the UDP session to replay, or with DNS lookups (--app dns).
+    /// Not needed with --profile, --app ntp, or DNS from --query/--record.
+    file: Option<PathBuf>,
+
+    /// A UDP profile (TOML) with what to play (or several `[[template]]`s),
+    /// the hosts and the rates; the options below replace its values. See
+    /// examples/lab-dns.toml.
+    #[arg(short, long, conflicts_with = "file")]
+    profile: Option<PathBuf>,
+
+    /// What the transactions carry (default: replay with a capture, dns with --query).
+    #[arg(long, value_enum)]
+    app: Option<App>,
+
+    /// Which UDP session of the capture to replay, numbered from 1 (see --list).
+    #[arg(long, value_name = "N")]
+    flow: Option<usize>,
+
+    /// A DNS query the client sends, NAME [TYPE] [RCODE], e.g.
+    /// "www.lab.local AAAA" or "nope.lab.local A NXDOMAIN"; repeat for more.
+    #[arg(long, value_name = "QUERY")]
+    query: Vec<String>,
+
+    /// A record the DNS server answers with, NAME [TTL] TYPE DATA, e.g.
+    /// "www.lab.local 300 A 192.168.20.80", or NAME RCODE for an error;
+    /// repeat for more.
+    #[arg(long, value_name = "RECORD")]
+    record: Vec<String>,
+
+    /// List the UDP sessions in the capture and exit.
+    #[arg(long)]
+    list: bool,
+
+    /// Show what the transactions carry, and exit.
+    #[arg(long)]
+    show: bool,
+
+    /// Interface for the client and the server, unless --client-iface or
+    /// --server-iface say otherwise.
+    #[arg(short, long)]
+    iface: Option<String>,
+
+    #[command(flatten)]
+    hosts: HostArgs,
+
+    /// Where the client sends, IP:PORT ([IPv6]:PORT), or IP for each
+    /// template's port. Default: the server. Needed when this machine runs
+    /// only the client.
+    #[arg(long, value_name = "IP[:PORT]", value_parser = parse_connect)]
+    connect: Option<SocketAddr>,
+
+    /// Send to this many consecutive server addresses, in turn.
+    #[arg(long, value_name = "N")]
+    connect_ips: Option<u32>,
+
+    /// Transactions per second, all templates together (default 1, or the profile's).
+    #[arg(long)]
+    rate: Option<f64>,
+
+    /// Transactions in all; 0 keeps going until Ctrl-C or --duration
+    /// (default 1, or the profile's).
+    #[arg(short = 'n', long)]
+    transactions: Option<u64>,
+
+    /// Most transactions open at once; 0 is no limit.
+    #[arg(long)]
+    concurrency: Option<usize>,
+
+    /// Client source ports, LOW-HIGH (default 1024-65534); each transaction
+    /// gets its own.
+    #[arg(long, value_name = "LOW-HIGH")]
+    source_ports: Option<String>,
+
+    /// Wait this long for an answer before asking again (default 1s).
+    #[arg(long, value_parser = parse_duration)]
+    timeout: Option<Duration>,
+
+    /// Ask again this often before a transaction times out (default 2).
+    #[arg(long, value_name = "N")]
+    retries: Option<u32>,
+
+    /// The server forgets a quiet session after this long (default 5s).
+    #[arg(long, value_parser = parse_duration)]
+    session_timeout: Option<Duration>,
+
+    /// Keep the capture's timing: wait as long between datagrams as it shows.
+    #[arg(long)]
+    keep_timing: bool,
+
+    /// Pause this long before answering the other end, e.g. 20ms.
+    #[arg(long, value_parser = parse_duration)]
+    think_time: Option<Duration>,
+
+    /// Do not check replayed datagrams against the capture.
+    #[arg(long)]
+    no_verify: bool,
+
+    /// Stop after this long, e.g. 30s or 5m.
+    #[arg(short, long, value_parser = parse_duration)]
+    duration: Option<Duration>,
+
+    /// Print no progress lines, only the final summary.
+    #[arg(short, long)]
+    quiet: bool,
+}
+
+fn sessions(file: &PathBuf) -> Result<()> {
+    let cap =
+        Capture::from_path(file).with_context(|| format!("cannot read {}", file.display()))?;
+    let flows = UdpProgram::flows(&cap);
+    if flows.is_empty() {
+        println!("no UDP datagrams in {}", file.display());
+    }
+    for (i, f) in flows.iter().enumerate() {
+        println!("{:>4}  {f}", i + 1);
+    }
+    Ok(())
+}
+
+fn show(app: &UdpApp) {
+    println!("{app}");
+    match app {
+        UdpApp::Replay(p) => {
+            for (i, m) in p.messages.iter().enumerate() {
+                let arrow = match m.from {
+                    UdpRole::Client => "client ->",
+                    UdpRole::Server => "<- server",
+                };
+                let text: String = String::from_utf8_lossy(&m.data[..m.data.len().min(60)])
+                    .chars()
+                    .map(|c| if c.is_control() { '.' } else { c })
+                    .collect();
+                let gap = if m.delay.is_zero() {
+                    String::new()
+                } else {
+                    format!(" (after {:?})", m.delay)
+                };
+                println!(
+                    "{:>4}  {arrow} {:>6} bytes  {text}{gap}",
+                    i + 1,
+                    m.data.len()
+                );
+            }
+        }
+        UdpApp::Dns(w) => {
+            for q in &w.queries {
+                println!("  query  {q}");
+            }
+            for r in &w.records {
+                println!("  record {r}");
+            }
+            for (n, r) in &w.errors {
+                println!("  error  {n} {r}");
+            }
+        }
+        UdpApp::Ntp => {}
+    }
+}
+
+/// The template the command line describes, without a profile.
+fn template(args: &UdpArgs) -> Result<UdpTemplateSpec> {
+    let dns_given = !args.query.is_empty() || !args.record.is_empty();
+    let app = args
+        .app
+        .unwrap_or(if dns_given { App::Dns } else { App::Replay });
+    let source = match app {
+        App::Replay => {
+            if dns_given {
+                bail!("--query and --record go with --app dns");
+            }
+            let Some(file) = &args.file else {
+                bail!("give a capture file, --profile, --app ntp, or DNS --query");
+            };
+            UdpSource::Pcap {
+                path: file.clone(),
+                flow: match args.flow {
+                    Some(0) => bail!("sessions are numbered from 1"),
+                    f => f.map(|f| f - 1),
+                },
+            }
+        }
+        App::Dns => {
+            if args.flow.is_some() {
+                bail!("--flow goes with a replay; --app dns takes every lookup in the capture");
+            }
+            UdpSource::Dns {
+                pcap: args.file.clone(),
+                extra: DnsWorkload::parse(&args.query, &args.record)?,
+            }
+        }
+        App::Ntp => {
+            if dns_given || args.file.is_some() {
+                bail!("--app ntp takes no capture, --query or --record");
+            }
+            UdpSource::Ntp
+        }
+    };
+    Ok(UdpTemplateSpec::new(source))
+}
+
+pub fn cmd_udp(args: UdpArgs) -> Result<()> {
+    if args.list {
+        let Some(file) = &args.file else {
+            bail!("--list needs a capture file");
+        };
+        return sessions(file);
+    }
+    let mut profile = match &args.profile {
+        Some(path) => {
+            if args.app.is_some()
+                || args.flow.is_some()
+                || !args.query.is_empty()
+                || !args.record.is_empty()
+            {
+                bail!("--app, --flow, --query and --record describe a template; with --profile, set them in the profile");
+            }
+            UdpProfile::from_path(path)
+                .with_context(|| format!("cannot read {}", path.display()))?
+        }
+        None => UdpProfile {
+            templates: vec![template(&args)?],
+            ..Default::default()
+        },
+    };
+    args.hosts.apply(&mut profile.client, &mut profile.server)?;
+    set(&mut profile.rate, args.rate);
+    set(&mut profile.transactions, args.transactions);
+    set(&mut profile.concurrency, args.concurrency);
+    opt(&mut profile.connect, args.connect);
+    opt(&mut profile.connect_ips, args.connect_ips);
+    if profile.templates.len() > 1 && args.hosts.server_port.is_some() {
+        bail!("--server-port needs a single template; set `port` in each [[template]] instead");
+    }
+    if let Some(r) = &args.source_ports {
+        profile.source_ports = parse_port_range(r)?;
+    }
+    let o = &mut profile.options;
+    set(&mut o.timeout, args.timeout);
+    set(&mut o.retries, args.retries);
+    set(&mut o.session_timeout, args.session_timeout);
+    set(&mut o.think_time, args.think_time);
+    if args.keep_timing {
+        o.keep_timing = true;
+    }
+    if args.no_verify {
+        o.verify = false;
+    }
+    if args.duration.is_some() {
+        profile.duration = args.duration;
+    }
+
+    if args.show {
+        let apps = profile.apps()?;
+        let many = apps.len() > 1;
+        for (i, (t, app)) in profile.templates.iter().zip(&apps).enumerate() {
+            if many {
+                println!("{}:", template_line(t, i));
+            }
+            show(app);
+        }
+        return Ok(());
+    }
+    if profile.client.is_none() && profile.server.is_none() {
+        bail!("give --client-ip, --server-ip or both (or a profile with [client] and [server])");
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = stop.clone();
+        ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed))
+            .context("cannot install Ctrl-C handler")?;
+    }
+    let started = ferotrx_ctl::start_udp(
+        &profile,
+        args.iface.as_deref(),
+        TcpRunConfig {
+            duration: profile.duration,
+            stop: Some(stop),
+        },
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    if !args.quiet {
+        if profile.templates.len() > 1 {
+            for (i, t) in profile.templates.iter().enumerate() {
+                eprintln!("{}", template_line(t, i));
+            }
+        }
+        eprintln!("transactions: {}", started.program);
+        for (what, h) in [("client", &profile.client), ("server", &profile.server)] {
+            if let Some(h) = h {
+                let mut line = format!(
+                    "{what}: {}/{} mac {} on {}",
+                    h.ip,
+                    h.prefix,
+                    h.mac(),
+                    h.iface.as_deref().or(args.iface.as_deref()).unwrap_or("?")
+                );
+                if h.ips > 1 {
+                    line.push_str(&format!(" ({} addresses, to {})", h.ips, h.last_ip()));
+                }
+                if let Some(v) = h.vlan {
+                    line.push_str(&format!(", vlan {v}"));
+                }
+                if let Some(g) = h.gateway {
+                    line.push_str(&format!(", gateway {g}"));
+                }
+                eprintln!("{line}");
+            }
+        }
+        if profile.client.is_some() {
+            let n = if profile.transactions == 0 {
+                "until stopped".to_string()
+            } else {
+                format!("{} transactions", profile.transactions)
+            };
+            eprintln!("sending {n} at {} per second", profile.rate);
+        } else {
+            eprintln!("server only: answering until Ctrl-C or --duration");
+        }
+    }
+    let job = started.job;
+    while !job.wait(Some(Duration::from_secs(1))) {
+        if !args.quiet {
+            eprintln!("{}", progress_line(&job.stats()));
+        }
+    }
+    let stats = job.join()?;
+    print_summary(&stats);
+    let c = &stats.client;
+    let failed = c.timed_out + stats.server.timed_out;
+    let mismatched = c.mismatched + stats.server.mismatched;
+    if failed + mismatched > 0 {
+        bail!("{failed} transactions timed out, {mismatched} got other answers than expected");
+    }
+    Ok(())
+}
+
+fn template_line(t: &UdpTemplateSpec, i: usize) -> String {
+    let mut line = match t.rate {
+        Some(r) => format!("template {} ({r} per second of its own)", t.name(i)),
+        None => format!("template {} (weight {})", t.name(i), t.weight),
+    };
+    if let Some(n) = t.transactions {
+        line.push_str(&format!(", {n} transactions"));
+    }
+    if let Some(n) = t.concurrency {
+        line.push_str(&format!(", at most {n} open"));
+    }
+    if let Some(d) = t.think_time {
+        line.push_str(&format!(", think time {d:?}"));
+    }
+    line
+}
+
+fn progress_line(s: &UdpStats) -> String {
+    format!(
+        "progress: client {} sent, {} answered, {} open, {} timed out; server {} answered; {:.1} per second, {} frames out, {} in",
+        s.client.sent,
+        s.client.answered,
+        s.client.active,
+        s.client.timed_out,
+        s.server.answered,
+        s.tps(),
+        s.tx_packets,
+        s.rx_packets
+    )
+}
+
+fn print_summary(s: &UdpStats) {
+    eprintln!(
+        "{} in {:.3} s: {} frames ({} bytes) sent, {} ({} bytes) received",
+        if s.stopped { "stopped" } else { "done" },
+        s.elapsed.as_secs_f64(),
+        s.tx_packets,
+        s.tx_bytes,
+        s.rx_packets,
+        s.rx_bytes
+    );
+    for (what, side) in [("client", &s.client), ("server", &s.server)] {
+        if side.sent == 0 && side.datagrams_rx == 0 {
+            continue;
+        }
+        eprintln!("  {what}: {}", side_line(&side.into()));
+    }
+    if s.templates.len() > 1 {
+        for t in &s.templates {
+            let t = UdpTemplateCounters {
+                name: t.name.clone(),
+                client: (&t.client).into(),
+                server: (&t.server).into(),
+            };
+            for line in template_lines(&t) {
+                eprintln!("{line}");
+            }
+        }
+    }
+    if s.client.answered > 0 {
+        eprintln!("  {:.1} transactions per second", s.tps());
+    }
+}
+
+fn template_lines(t: &UdpTemplateCounters) -> Vec<String> {
+    [("client", &t.client), ("server", &t.server)]
+        .into_iter()
+        .filter(|(_, c)| c.sent > 0 || c.datagrams_rx > 0)
+        .map(|(what, c)| format!("    {} {what}: {}", t.name, side_line(c)))
+        .collect()
+}
+
+fn ms(us: Option<f64>) -> String {
+    us.map_or("-".into(), |u| format!("{:.2}", u / 1000.0))
+}
+
+fn response_line(r: &LatencyCounters) -> String {
+    format!(
+        "response time ms min {} avg {} p50 {} p99 {} max {}",
+        ms(r.min_us),
+        ms(r.avg_us),
+        ms(r.p50_us),
+        ms(r.p99_us),
+        ms(r.max_us)
+    )
+}
+
+fn side_line(c: &UdpCounters) -> String {
+    let mut line = format!("{} transactions, {} answered", c.sent, c.answered);
+    if c.active > 0 {
+        line.push_str(&format!(", {} open", c.active));
+    }
+    for (n, what) in [
+        (c.timed_out, "timed out"),
+        (c.errors, "with error answers"),
+        (c.mismatched, "with other answers than expected"),
+        (c.unmatched, "datagrams unmatched"),
+        (c.retries, "sent again"),
+        (c.duplicates, "duplicates"),
+    ] {
+        if n > 0 {
+            line.push_str(&format!(", {n} {what}"));
+        }
+    }
+    line.push_str(&format!(
+        "; {} datagrams ({} bytes) sent, {} ({} bytes) received",
+        c.datagrams_tx, c.payload_tx, c.datagrams_rx, c.payload_rx
+    ));
+    if let Some(r) = &c.response_time {
+        line.push_str(&format!("; {}", response_line(r)));
+    }
+    line
+}
+
+/// Prints a UDP run as the control server reports it.
+pub fn print_udp_run(r: &UdpRunInfo) {
+    let state = match r.state {
+        RunState::Running => "running",
+        RunState::Finished => "finished",
+        RunState::Stopped => "stopped",
+        RunState::Failed => "failed",
+    };
+    println!(
+        "udp run {} on {}: {state}, {:.3} s, {:.1} per second",
+        r.id,
+        r.interfaces.join(", "),
+        r.elapsed_s,
+        r.tps
+    );
+    println!("  transactions: {}", r.program);
+    if let Some(e) = &r.error {
+        println!("  error: {e}");
+    }
+    for (what, c) in [("client", &r.client), ("server", &r.server)] {
+        if c.sent > 0 || c.datagrams_rx > 0 {
+            println!("  {what}: {}", side_line(c));
+        }
+    }
+    if r.templates.len() > 1 {
+        for t in &r.templates {
+            for line in template_lines(t) {
+                println!("{line}");
+            }
+        }
+    }
+    println!(
+        "  frames: {} sent ({} bytes), {} received ({} bytes)",
+        r.tx_packets, r.tx_bytes, r.rx_packets, r.rx_bytes
+    );
+}

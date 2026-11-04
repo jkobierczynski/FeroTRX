@@ -112,7 +112,10 @@ fi
 if [ "${IPV6:-}" = 1 ]; then
     ip="ipv6(src=$(a 1 2),dst=$(a 2 2))"
     voice_ip="ipv6(src=$(a 1 2),dst=$(a 2 2),tc=184)" # DSCP 46
-    vary_ip=", \"ip_src=$(a 1 100)..$(a 1 1ff)\""
+    # 100 source addresses, stepping with the 100 source ports: 100 flows for
+    # the router's connection tracking, as over IPv4. (256 addresses would
+    # make lcm(256, 100) = 6400 flows, each a new NAT mapping.)
+    vary_ip=", \"ip_src=$(a 1 100)..$(a 1 163)\""
 else
     ip="ipv4(src=$(a 1 2),dst=$(a 2 2))"
     voice_ip="ipv4(src=$(a 1 2),dst=$(a 2 2),dscp=46)"
@@ -153,6 +156,19 @@ set -e
 echo "router: connections masqueraded, and packets dropped:"
 [ $nat = no ] || ipt -t nat -L POSTROUTING -v -n | sed -n '3p'
 ipt -L FORWARD -v -n | sed -n '3,$p'
+# Where packets went missing, other than the LOSS rule: the router's IP
+# counters and delay queue, and the links' drop counters.
+echo "drops along the way (non-zero counters only):"
+r nstat -az 2>/dev/null | awk '$1 ~ /Discard|NoRoute|TooBig|Drop|Fail/ && $2 > 0 {print "  router " $1 " " $2}' || true
+r tc -s qdisc show dev rs 2>/dev/null | awk '/dropped/ {gsub("[(),]", ""); for (i = 1; i <= NF; i++) if ($i == "dropped" && $(i + 1) > 0) print "  router delay queue on rs: " $(i + 1) " dropped"}' || true
+for l in c0 s0; do
+    d=$(cat /sys/class/net/$l/statistics/rx_dropped /sys/class/net/$l/statistics/tx_dropped 2>/dev/null | paste -sd' ')
+    [ "$d" = "0 0" ] || echo "  $l rx/tx dropped: $d"
+done
+for l in rc rs; do
+    d=$(r cat /sys/class/net/$l/statistics/rx_dropped /sys/class/net/$l/statistics/tx_dropped 2>/dev/null | paste -sd' ')
+    [ "$d" = "0 0" ] || echo "  router $l rx/tx dropped: $d"
+done
 [ $status -eq 0 ] || exit $status
 
 fail=0

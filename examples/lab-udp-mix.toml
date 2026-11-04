@@ -1,0 +1,61 @@
+# FeroTRX stateful UDP profile with a mix of transactions, like
+# examples/lab-tcp-mix.toml for TCP: DNS lookups from a capture, NTP, and an
+# echo written out below, through the lab router of examples/lab-dns.toml.
+#
+#   sudo ferotrx udp -p examples/lab-udp-mix.toml -i <interface>
+#
+# `rate`, `transactions` and `concurrency` are for all templates together;
+# each new transaction gets a template by `weight`, unless the template has
+# its own `rate`. The server tells templates apart by port.
+
+rate = 200
+transactions = 0      # until Ctrl-C or --duration
+duration = "30s"
+
+[[template]]
+name = "dns"
+app = "dns"
+pcap = "dns-lookups.pcap"   # its queries, and the records of its answers
+weight = 4
+
+[[template]]
+name = "ntp"
+app = "ntp"
+rate = 10                   # its own rate, besides the 200 per second above
+think_time = "2ms"          # the server takes 2 ms to answer
+
+[[template]]
+name = "echo"
+port = 7
+weight = 1
+concurrency = 20
+[[template.message]]
+from = "client"
+text = "ping 1"
+[[template.message]]
+from = "server"
+text = "pong 1"
+[[template.message]]
+from = "client"
+text = "ping 2"
+delay = "20ms"              # with [udp] keep_timing
+[[template.message]]
+from = "server"
+text = "pong 2"
+
+[client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.53/24"
+ips = 2                     # servers .53 and .54, in turn
+gateway = "192.168.20.1"
+vlan = 20
+
+[udp]
+timeout = "500ms"
+retries = 3
+keep_timing = true

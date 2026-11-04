@@ -4,6 +4,10 @@
     python3 examples/make-sample-pcaps.py
 
 dns.pcap  20 DNS queries from 10.1.2.10-14 to 10.1.2.1, 50 ms apart.
+dns-lookups.pcap
+          Both directions of 8 DNS lookups from 10.1.2.40 to the resolver
+          10.1.2.53: A and AAAA through a CNAME, MX, TXT, SRV, PTR, and a
+          name that does not exist (NXDOMAIN). For `ferotrx udp`.
 web.pcap  The client side of 3 HTTP requests from 10.1.2.20-22 to 10.1.2.80:
           SYN, ACK, GET, ACKs and FIN, as a browser would send them.
 http.pcap Both directions of one HTTP/1.1 connection from 10.1.2.30 to
@@ -50,10 +54,12 @@ def ether(payload, dst=ROUTER_MAC, src=CLIENT_MAC):
     return dst + src + b"\x08\x00" + payload
 
 
-def udp(src, dst, sport, dport, data, ident):
+def udp(src, dst, sport, dport, data, ident, reverse=False):
     seg = struct.pack("!HHHH", sport, dport, 8 + len(data), 0) + data
     c = l4_checksum(src, dst, 17, seg) or 0xFFFF
     seg = seg[:6] + struct.pack("!H", c) + seg[8:]
+    if reverse:
+        return ether(ipv4(src, dst, 17, seg, ident), dst=CLIENT_MAC, src=ROUTER_MAC)
     return ether(ipv4(src, dst, 17, seg, ident))
 
 
@@ -69,6 +75,66 @@ def tcp(src, dst, sport, dport, seq, ack, flags, data, ident, reverse=False):
 def dns_query(txid, name):
     q = b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0"
     return struct.pack("!HHHHHH", txid, 0x0100, 1, 0, 0, 0) + q + struct.pack("!HH", 1, 1)
+
+
+def dns_name(name):
+    return b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0"
+
+
+def dns_rdata(rtype, value):
+    if rtype == 1:
+        return bytes(int(x) for x in value.split("."))
+    if rtype == 28:
+        import ipaddress
+        return ipaddress.IPv6Address(value).packed
+    if rtype in (5, 12):
+        return dns_name(value)
+    if rtype == 15:
+        pref, host = value.split()
+        return struct.pack("!H", int(pref)) + dns_name(host)
+    if rtype == 16:
+        return bytes([len(value)]) + value.encode()
+    if rtype == 33:
+        prio, weight, port, target = value.split()
+        return struct.pack("!HHH", int(prio), int(weight), int(port)) + dns_name(target)
+    raise ValueError(rtype)
+
+
+def dns_response(txid, name, qtype, answers, rcode=0):
+    """answers: (owner, type, ttl, value); an owner equal to `name` is
+    written as a pointer to the question, as servers do."""
+    flags = 0x8180 | rcode
+    msg = struct.pack("!HHHHHH", txid, flags, 1, len(answers), 0, 0)
+    msg += dns_name(name) + struct.pack("!HH", qtype, 1)
+    for owner, rtype, ttl, value in answers:
+        rdata = dns_rdata(rtype, value)
+        msg += (b"\xc0\x0c" if owner == name else dns_name(owner))
+        msg += struct.pack("!HHIH", rtype, 1, ttl, len(rdata)) + rdata
+    return msg
+
+
+def dns_lookups():
+    client, server = [10, 1, 2, 40], [10, 1, 2, 53]
+    lookups = [
+        ("www.lab.local", 1, [("www.lab.local", 5, 300, "web.lab.local"),
+                              ("web.lab.local", 1, 300, "10.1.2.80")], 0),
+        ("lab.local", 15, [("lab.local", 15, 3600, "10 mail.lab.local")], 0),
+        ("mail.lab.local", 1, [("mail.lab.local", 1, 300, "10.1.2.25")], 0),
+        ("www.lab.local", 28, [("www.lab.local", 5, 300, "web.lab.local"),
+                               ("web.lab.local", 28, 300, "fd00:1::80")], 0),
+        ("lab.local", 16, [("lab.local", 16, 3600, "v=spf1 mx -all")], 0),
+        ("missing.lab.local", 1, [], 3),
+        ("_ldap._tcp.lab.local", 33, [("_ldap._tcp.lab.local", 33, 600, "0 100 389 dc.lab.local")], 0),
+        ("80.2.1.10.in-addr.arpa", 12, [("80.2.1.10.in-addr.arpa", 12, 300, "web.lab.local")], 0),
+    ]
+    pkts = []
+    for i, (name, qtype, answers, rcode) in enumerate(lookups):
+        txid, sport, t = 0x2000 + i, 41000 + i, i * 0.1
+        query = struct.pack("!HHHHHH", txid, 0x0100, 1, 0, 0, 0) + dns_name(name) + struct.pack("!HH", qtype, 1)
+        pkts.append((t, udp(client, server, sport, 53, query, 2 * i + 1)))
+        reply = dns_response(txid, name, qtype, answers, rcode)
+        pkts.append((t + 0.002, udp(server, client, 53, sport, reply, 2 * i + 2, reverse=True)))
+    return pkts
 
 
 def write_pcap(path, packets):
@@ -163,3 +229,4 @@ if __name__ == "__main__":
     write_pcap(HERE / "dns.pcap", dns())
     write_pcap(HERE / "web.pcap", web())
     write_pcap(HERE / "http.pcap", http())
+    write_pcap(HERE / "dns-lookups.pcap", dns_lookups())

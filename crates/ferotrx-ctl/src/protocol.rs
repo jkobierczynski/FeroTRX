@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use ferotrx_core::{
     FlowReport, FlowStats, LatencyStats, ReplayStats, RunStats, RxStats, TcpSideStats, TcpStats,
+    UdpSideStats, UdpStats,
 };
 
 /// Version of the method set below. Bumped when a method changes incompatibly.
@@ -195,8 +196,8 @@ impl Role {
         match method {
             "server.info" | "auth" => None,
             "interfaces.list" | "profile.get" | "profile.list" | "run.stats" | "run.list"
-            | "tcp.stats" | "tcp.list" | "rx.stats" | "rx.list" | "stats.subscribe"
-            | "stats.unsubscribe" => Some(Role::Read),
+            | "tcp.stats" | "tcp.list" | "udp.stats" | "udp.list" | "rx.stats" | "rx.list"
+            | "stats.subscribe" | "stats.unsubscribe" => Some(Role::Read),
             _ => Some(Role::Operator),
         }
     }
@@ -770,6 +771,136 @@ impl TcpRunInfo {
         self.rx_bytes = s.rx_bytes;
         self.elapsed_s = s.elapsed.as_secs_f64();
         self.cps = s.cps();
+    }
+}
+
+// ----- udp.* -----
+
+/// Parameters of `udp.start`: a UDP profile (see `ferotrx_core::UdpProfile`)
+/// as a file or as TOML text, and values that replace the profile's.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UdpStartParams {
+    /// A UDP profile file on the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// The profile's text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toml: Option<String>,
+    /// Folder that `pcap` paths in `toml` are relative to (default: the server's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_dir: Option<PathBuf>,
+    /// Interface for hosts whose table names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iface: Option<String>,
+    /// Transactions per second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transactions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<usize>,
+    /// Stop after this long, e.g. `30s`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+}
+
+/// A stateful UDP run, as `udp.start`, `udp.stats`, `udp.stop` and `udp.list` report it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UdpRunInfo {
+    /// Run id; shared with the other runs, so they never clash.
+    pub id: u64,
+    /// What the transactions carry, e.g. `DNS: 8 queries, 8 records`.
+    pub program: String,
+    pub interfaces: Vec<String>,
+    pub state: RunState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// All templates together.
+    pub client: UdpCounters,
+    pub server: UdpCounters,
+    /// Each template's counters, in the profile's order.
+    #[serde(default)]
+    pub templates: Vec<UdpTemplateCounters>,
+    pub tx_packets: u64,
+    pub tx_bytes: u64,
+    pub rx_packets: u64,
+    pub rx_bytes: u64,
+    pub elapsed_s: f64,
+    /// Answered client transactions per second.
+    pub tps: f64,
+}
+
+/// The counters of one template of a [`UdpRunInfo`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct UdpTemplateCounters {
+    pub name: String,
+    pub client: UdpCounters,
+    pub server: UdpCounters,
+}
+
+/// Transaction counters of one side of a [`UdpRunInfo`]; see
+/// `ferotrx_core::UdpSideStats`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct UdpCounters {
+    pub sent: u64,
+    pub answered: u64,
+    pub timed_out: u64,
+    pub unmatched: u64,
+    pub mismatched: u64,
+    pub errors: u64,
+    pub retries: u64,
+    pub duplicates: u64,
+    pub active: u64,
+    pub datagrams_tx: u64,
+    pub datagrams_rx: u64,
+    pub payload_tx: u64,
+    pub payload_rx: u64,
+    /// Client: from each request to its answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_time: Option<LatencyCounters>,
+}
+
+impl From<&UdpSideStats> for UdpCounters {
+    fn from(s: &UdpSideStats) -> Self {
+        Self {
+            sent: s.sent,
+            answered: s.answered,
+            timed_out: s.timed_out,
+            unmatched: s.unmatched,
+            mismatched: s.mismatched,
+            errors: s.errors,
+            retries: s.retries,
+            duplicates: s.duplicates,
+            active: s.active,
+            datagrams_tx: s.datagrams_tx,
+            datagrams_rx: s.datagrams_rx,
+            payload_tx: s.payload_tx,
+            payload_rx: s.payload_rx,
+            response_time: (s.response_time.count() > 0).then(|| (&s.response_time).into()),
+        }
+    }
+}
+
+impl UdpRunInfo {
+    pub(crate) fn fill(&mut self, s: &UdpStats) {
+        self.client = (&s.client).into();
+        self.server = (&s.server).into();
+        self.templates = s
+            .templates
+            .iter()
+            .map(|t| UdpTemplateCounters {
+                name: t.name.clone(),
+                client: (&t.client).into(),
+                server: (&t.server).into(),
+            })
+            .collect();
+        self.tx_packets = s.tx_packets;
+        self.tx_bytes = s.tx_bytes;
+        self.rx_packets = s.rx_packets;
+        self.rx_bytes = s.rx_bytes;
+        self.elapsed_s = s.elapsed.as_secs_f64();
+        self.tps = s.tps();
     }
 }
 

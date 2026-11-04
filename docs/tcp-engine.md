@@ -127,3 +127,13 @@ scaling is filling a long path.
   way) checks more than 64 KB in flight through a real Linux router, and
   `NETEM="delay 5ms reorder 10% 50% duplicate 2% loss 2%"` runs the
   template mix through reordering, duplicates and loss, over IPv4 and IPv6.
+
+## Message timing
+
+By default each end sends its next message as soon as the other end's has
+arrived. `keep_timing` (`--keep-timing`) makes it wait the gap the capture
+shows between the previous message (its last byte, from either end) and this
+one (`TcpMessage::delay`; `delay` in a `[[message]]`), and `think_time`
+(`--think-time`) adds a pause before every answer to the other end. Gaps are
+measured where the capture was taken, so they include the path's delay there.
+A gap longer than `idle_timeout` makes the waiting end reset the connection.

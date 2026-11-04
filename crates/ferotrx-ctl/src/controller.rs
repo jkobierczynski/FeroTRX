@@ -10,14 +10,15 @@ use serde_json::Value;
 
 use ferotrx_core::{
     parse_duration, FlowReport, Job, JobState, PacketReceiver, Profile, Rate, RunConfig, RxConfig,
-    RxJob, RxSettings, SendSettings, SinkError, StreamSource, TcpProfile, TcpRunConfig,
-    LINKTYPE_ETHERNET,
+    RxJob, RxSettings, SendSettings, SinkError, StreamSource, TcpProfile, TcpRunConfig, UdpProfile,
+    UdpSource, LINKTYPE_ETHERNET,
 };
 use ferotrx_io::Output;
 
 use crate::files::FilePolicy;
 use crate::protocol::*;
 use crate::tcp::{start_tcp_with, PortOpener, TcpRun};
+use crate::udp::{start_udp_with, UdpRun};
 
 /// Error from [`start_run`].
 pub type StartError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -106,6 +107,7 @@ pub struct Controller {
     profiles: Mutex<BTreeMap<String, Profile>>,
     runs: Mutex<BTreeMap<u64, Arc<Run>>>,
     tcp_runs: Mutex<BTreeMap<u64, Arc<TcpRun>>>,
+    udp_runs: Mutex<BTreeMap<u64, Arc<UdpRun>>>,
     rx_runs: Mutex<BTreeMap<u64, Arc<RxRun>>>,
     next_run: AtomicU64,
     auth_required: bool,
@@ -144,6 +146,7 @@ impl Controller {
             profiles: Mutex::default(),
             runs: Mutex::default(),
             tcp_runs: Mutex::default(),
+            udp_runs: Mutex::default(),
             rx_runs: Mutex::default(),
             next_run: AtomicU64::new(1),
             auth_required: false,
@@ -238,6 +241,22 @@ impl Controller {
                 let p: RunId = parse(params)?;
                 let info = self.tcp_stop(p.id, true)?;
                 lock(&self.tcp_runs).remove(&p.id);
+                to_value(info)
+            }
+            "udp.start" => to_value(self.udp_start(parse(params)?)?),
+            "udp.stop" => {
+                let p: StopParams = parse(params)?;
+                to_value(self.udp_stop(p.id, p.wait)?)
+            }
+            "udp.stats" => {
+                let p: RunId = parse(params)?;
+                to_value(self.udp_run(p.id)?.info())
+            }
+            "udp.list" => to_value(self.udp_runs()),
+            "udp.remove" => {
+                let p: RunId = parse(params)?;
+                let info = self.udp_stop(p.id, true)?;
+                lock(&self.udp_runs).remove(&p.id);
                 to_value(info)
             }
             "rx.start" => to_value(self.rx_start(parse(params)?)?),
@@ -494,6 +513,7 @@ impl Controller {
     pub fn stop_all(&self) {
         let runs: Vec<Arc<Run>> = lock(&self.runs).values().cloned().collect();
         let tcp: Vec<Arc<TcpRun>> = lock(&self.tcp_runs).values().cloned().collect();
+        let udp: Vec<Arc<UdpRun>> = lock(&self.udp_runs).values().cloned().collect();
         let rx: Vec<Arc<RxRun>> = lock(&self.rx_runs).values().cloned().collect();
         for r in &rx {
             r.job.stop();
@@ -504,10 +524,16 @@ impl Controller {
         for r in &tcp {
             r.job.stop();
         }
+        for r in &udp {
+            r.job.stop();
+        }
         for r in &runs {
             r.job.wait(Some(STOP_TIMEOUT));
         }
         for r in &tcp {
+            r.job.wait(Some(STOP_TIMEOUT));
+        }
+        for r in &udp {
             r.job.wait(Some(STOP_TIMEOUT));
         }
     }
@@ -581,6 +607,83 @@ impl Controller {
             .get(&id)
             .cloned()
             .ok_or_else(|| RpcError::not_found(format!("no TCP run {id}")))
+    }
+
+    /// Starts a stateful UDP run from a UDP profile.
+    pub fn udp_start(&self, p: UdpStartParams) -> Result<UdpRunInfo, RpcError> {
+        let failed = |e: ferotrx_core::Error| RpcError::failed(e);
+        let mut profile = match (p.path, p.toml) {
+            (Some(path), None) => UdpProfile::from_path(self.files.readable(&path)?)
+                .map_err(|e| RpcError::failed(format!("{}: {e}", path.display())))?,
+            (None, Some(text)) => {
+                self.files.upload(&text)?;
+                let base = self.files.base_dir(p.base_dir.as_deref())?;
+                UdpProfile::from_toml(&text, &base).map_err(failed)?
+            }
+            _ => return Err(RpcError::invalid_params("give either path or toml")),
+        };
+        for t in &profile.templates {
+            match &t.source {
+                UdpSource::Pcap { path, .. }
+                | UdpSource::Dns {
+                    pcap: Some(path), ..
+                } => {
+                    self.files.readable(path)?;
+                }
+                _ => {}
+            }
+        }
+        if let Some(v) = p.rate {
+            profile.rate = v;
+        }
+        if let Some(v) = p.transactions {
+            profile.transactions = v;
+        }
+        if let Some(v) = p.concurrency {
+            profile.concurrency = v;
+        }
+        let duration = p
+            .duration
+            .as_deref()
+            .map(parse_duration)
+            .transpose()
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let config = TcpRunConfig {
+            duration,
+            stop: None,
+        };
+        let started = start_udp_with(&profile, p.iface.as_deref(), config, &*self.open_port)
+            .map_err(RpcError::failed)?;
+        let id = self.next_run.fetch_add(1, Ordering::Relaxed);
+        let run = Arc::new(UdpRun {
+            id,
+            program: started.program,
+            interfaces: started.interfaces,
+            job: started.job,
+            stopped_by_request: Default::default(),
+        });
+        let info = run.info();
+        lock(&self.udp_runs).insert(id, run);
+        Ok(info)
+    }
+
+    /// Stops a UDP run. With `wait`, answers once it has ended (or after 10 s).
+    pub fn udp_stop(&self, id: u64, wait: bool) -> Result<UdpRunInfo, RpcError> {
+        let run = self.udp_run(id)?;
+        run.stop(wait.then_some(STOP_TIMEOUT));
+        Ok(run.info())
+    }
+
+    pub fn udp_runs(&self) -> Vec<UdpRunInfo> {
+        let runs: Vec<Arc<UdpRun>> = lock(&self.udp_runs).values().cloned().collect();
+        runs.iter().map(|r| r.info()).collect()
+    }
+
+    fn udp_run(&self, id: u64) -> Result<Arc<UdpRun>, RpcError> {
+        lock(&self.udp_runs)
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| RpcError::not_found(format!("no UDP run {id}")))
     }
 
     /// Starts a receiver that counts the latency flows arriving on an interface.
