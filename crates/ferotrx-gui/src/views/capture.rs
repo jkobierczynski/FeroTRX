@@ -94,6 +94,7 @@ impl CaptureState {
 impl FeroApp {
     pub fn capture_tab(&mut self, ui: &mut egui::Ui) {
         let mut to_stream = false;
+        let mut browse = false;
         let has_port = self.sel_port.is_some();
         let cs = &mut self.capture;
         ui.horizontal(|ui| {
@@ -103,6 +104,9 @@ impl FeroApp {
                     .hint_text("examples/web.pcap")
                     .desired_width(360.0),
             );
+            if ui.button("Browse…").clicked() {
+                browse = true;
+            }
             if ui.button("Open").clicked()
                 || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
             {
@@ -117,6 +121,16 @@ impl FeroApp {
                 ));
             }
         });
+        if browse {
+            let current = cs.path.clone();
+            self.files.pick(
+                crate::files::Target::Capture,
+                "Open a capture",
+                crate::files::Kind::Capture,
+                &current,
+            );
+        }
+        let cs = &mut self.capture;
         if let Some(e) = &cs.error {
             ui.colored_label(ui.visuals().error_fg_color, e);
         }
@@ -154,20 +168,25 @@ impl FeroApp {
         ui.separator();
 
         let row_h = 18.0;
-        let list_h = (ui.available_height() * 0.45).max(120.0);
         let mut clicked = None;
-        let width = ui.available_width();
-        ui.allocate_ui_with_layout(
-            egui::vec2(width, list_h + row_h + 8.0),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
+        // The packet list above the packet; the line between them drags.
+        let h = ui.available_height();
+        egui::TopBottomPanel::top("capture-list")
+            .resizable(true)
+            .frame(egui::Frame::NONE)
+            .default_height((h * 0.45).max(120.0))
+            .height_range(80.0..=(h - 80.0).max(90.0))
+            .show_inside(ui, |ui| {
+                // Keep the panel's height: the table alone would shrink it.
+                ui.set_min_height(ui.available_height());
                 // Clicks on a row select it, rather than starting a text selection.
                 ui.style_mut().interaction.selectable_labels = false;
-                ui.set_min_height(list_h + row_h + 8.0);
+                let list_h = (ui.available_height() - row_h - 4.0).max(row_h);
                 TableBuilder::new(ui)
                     .id_salt("capture-table")
                     .striped(true)
                     .sense(egui::Sense::click())
+                    .auto_shrink([false, false])
                     .max_scroll_height(list_h)
                     .min_scrolled_height(list_h)
                     .column(Column::exact(22.0))
@@ -232,13 +251,12 @@ impl FeroApp {
                             }
                         });
                     });
-            },
-        );
+            });
         if let Some(n) = clicked {
             cs.selected = Some(n);
             cs.sel = Selection::default();
         }
-        ui.separator();
+        ui.add_space(4.0);
         if let Some(n) = cs.selected.filter(|&n| n < count) {
             let d = cs.decoded(n).cloned().unwrap_or_default();
             let data = cs
@@ -246,19 +264,20 @@ impl FeroApp {
                 .as_ref()
                 .map(|c| c.packets[n].data.clone())
                 .unwrap_or_default();
-            egui_extras::StripBuilder::new(ui)
-                .size(egui_extras::Size::relative(0.45))
-                .size(egui_extras::Size::remainder())
-                .horizontal(|mut strip| {
-                    strip.cell(|ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt("cap-tree")
-                            .show(ui, |ui| {
-                                packet_view::tree(ui, &d, &mut cs.sel);
-                            });
-                    });
-                    strip.cell(|ui| packet_view::hex(ui, &d, &data, &mut cs.sel));
+            let w = ui.available_width();
+            egui::SidePanel::left("capture-tree")
+                .resizable(true)
+                .frame(egui::Frame::NONE)
+                .default_width(w * 0.45)
+                .width_range(200.0..=(w - 200.0).max(220.0))
+                .show_inside(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("cap-tree")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| packet_view::tree(ui, &d, &mut cs.sel));
                 });
+            ui.add_space(2.0);
+            packet_view::hex(ui, &d, &data, &mut cs.sel);
         }
 
         if to_stream {

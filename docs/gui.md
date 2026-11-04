@@ -36,12 +36,34 @@ between sessions.
 | Part | What it does |
 | --- | --- |
 | **Servers and ports** (left) | Each server with its state, version and backends, and its ports: the interfaces it can send on, plus `file` (a pcap written on the server) and `null` (count and drop), which need no root and are good for trying a profile. ▶ marks a port that is sending. Right-click a server to connect, disconnect, edit or remove it; **Add server…** adds one. |
-| **Streams** tab | The selected port: Start, Stop and Check (load on the server without sending), Open/Save of profile files on this computer, the port settings, the stream table and the stream editor. |
+| **Streams** tab | The selected port: Start, Stop and Check (load on the server without sending), Open…/Save… of profile files on this computer, the port settings, the stream table and the stream editor. |
 | **Stateful** tab | Start a TCP or UDP run from a profile, on the server or uploaded from here, with the usual overrides (rate, count, concurrency, duration, workers, backend). **Check** runs `ferotrx check` on a local file. |
 | **Capture** tab | Open a pcap or pcapng file on this computer: packet list, decode tree and hex. Tick packets (or select one) and **Make a stream** to edit them in the Streams tab. |
 | **Charts** tab | Packets/s or Mbit/s of every run of the selected server over time. |
 | **Statistics** (bottom) | A column per run, a row per counter: stream runs (totals, per stream, loss and latency with a receiver), TCP runs (connections started, established, completed, reset, timed out, retransmits, per template), UDP runs (sent, answered, timed out, retries, response times) and receivers. Stop and remove runs from their column. |
 | **Log** (bottom) | What the servers answered, errors in red. |
+
+## Files and paths
+
+Every file field has a **Browse…** button with a file dialog. Files on this
+computer (profiles you open and save, captures, certificates) are always
+picked this way. Files on the server (the capture a stream replays, the pcap
+the `file` port writes, a profile the server reads) can be picked the same
+way when the server runs on this computer (`127.0.0.1`, `::1`,
+`localhost`); for a server elsewhere, type the path, relative to the
+server's data directory (where `ferotrx serve` was started, or
+`--data-dir`).
+
+Relative paths inside a profile start at the profile's own folder, as with
+`ferotrx run`: open `examples/lab-two-vlans.toml` and its `pcap = "dns.pcap"`
+means `examples/dns.pcap`. The GUI remembers that folder for each port and
+sends it with the streams when the server is on this computer (the folder
+must be inside the server's data directory). A capture picked with
+**Browse…** is written relative to that folder when it is inside it.
+
+The lines between the stream table and the editor, the layers and the
+packet view, the decode tree and the bytes, and the capture list and the
+packet can all be dragged.
 
 ## Ports and their settings
 

@@ -17,6 +17,7 @@
 
 pub mod app;
 pub mod conn;
+pub mod files;
 pub mod fonts;
 pub mod model;
 pub mod packet_view;

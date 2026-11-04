@@ -72,6 +72,18 @@ impl ConnSettings {
         }
     }
 
+    /// True when the server runs on this computer (a loopback address), so
+    /// paths on it can be picked with this computer's file dialog.
+    pub fn is_local(&self) -> bool {
+        let a = self.address();
+        let host = a.rsplit_once(':').map(|(h, _)| h).unwrap_or(&a);
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    }
+
     /// Settings from the same environment variables `ferotrx ctl` reads.
     pub fn from_env() -> Option<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
@@ -325,5 +337,22 @@ mod tests {
         assert_eq!(a("::1"), "[::1]:4510");
         assert_eq!(a("[::1]:4600"), "[::1]:4600");
         assert_eq!(a(" 10.0.0.1 "), "10.0.0.1:4510");
+    }
+
+    #[test]
+    fn loopback_servers_are_local() {
+        let l = |s: &str| {
+            ConnSettings {
+                addr: s.into(),
+                ..Default::default()
+            }
+            .is_local()
+        };
+        assert!(l("127.0.0.1:4510"));
+        assert!(l("localhost"));
+        assert!(l("::1"));
+        assert!(l("[::1]:4600"));
+        assert!(!l("192.168.56.10"));
+        assert!(!l("lab-vm:4510"));
     }
 }
