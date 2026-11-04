@@ -10,8 +10,8 @@ sudo ferotrx udp -p examples/lab-dns.toml -i enp0s3 -B af_xdp --rate 20000 -n 0 
 sudo ferotrx tcp -p examples/lab-tcp.toml -B dpdk -i 0000:03:00.0 --dpdk-args '-l 0-1'
 ```
 
-The options are those of the stateless backends (see the README's "Fast send
-backends"): `-B/--backend`, `--xdp-mode`, `--queue`, `--batch` and
+The options are those of the stateless backends (see
+[backends.md](backends.md)): `-B/--backend`, `--xdp-mode`, `--queue`, `--batch` and
 `--dpdk-args`. A TCP or UDP profile can set them in an `[output]` table, and
 `tcp.start` and `udp.start` on the control server take the same fields
 (`backend`, `queue`, `xdp_mode`, `batch`, `dpdk_args`). The line printed at
