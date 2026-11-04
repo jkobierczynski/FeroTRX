@@ -34,9 +34,11 @@ pub use afxdp::{AfXdpConfig, AfXdpSink};
 #[cfg(feature = "dpdk")]
 mod dpdk;
 
+mod host;
 mod port;
 #[cfg(feature = "dpdk")]
 pub use dpdk::{DpdkConfig, DpdkSink};
+pub use host::{describe_host, describe_interface};
 pub use port::{interface_mac, open_port, open_receiver};
 #[cfg(feature = "pcap")]
 pub use port::{PcapPort, PcapReceiver};

@@ -35,13 +35,16 @@ the same library.
 | M12, TCP maturity | Window scaling, timestamps and PAWS, SACK with out-of-order receive and hole-only retransmits, RTT-based timeouts (RFC 6298), NewReno/SACK recovery; windows, timeouts and SYN retries in profiles and on the command line; per-template `cps`, `connections`, `concurrency`; [docs/tcp-engine.md](docs/tcp-engine.md); simulated long-fat-pipe and impairment tests, `BDP=1` and `NETEM=` in the lab script | #22 | 0.5.0 |
 | M13, secure remote control | TLS (rustls) and mutual TLS for `serve`/`ctl`, read-only and operator roles by token, tokens file or client CA, data directories for profiles, pcaps and outputs, upload/request/connection limits, idle and login timeouts, JSON-lines audit log, no open listener on the network without a login (`--insecure`), `ferotrx certs` lab CA; threat model and deployment notes in the README | #24 | 0.6.0 |
 | M15, stateful UDP and transactions | Sans-IO UDP engine with both ends emulated: sessions from captures or `[[message]]`, response matching, timeouts, retries, server sessions that answer repeats; DNS (queries, A/AAAA/CNAME/MX/TXT/NS/PTR/SRV/SOA, NXDOMAIN and error responses), NTP; per-template `rate`, `transactions`, `concurrency`, `think_time`; counters sent/answered/timed out/unmatched with response times; `ferotrx udp`, UDP profiles, `udp.*` control methods; TCP `--keep-timing` and `--think-time`; [docs/udp-engine.md](docs/udp-engine.md); `scripts/udp-netns.sh` with a `dig` check | #26 | 0.8.0 |
+| M14, benchmarking | `ferotrx bench`: RFC 2544 throughput (binary search on the rate with a loss threshold), latency, frame loss and back-to-back; frame sizes and size mixes (IMIX, weighted, random) also in profiles and on `replay`/`build`; signatures that keep the frame size; warm-up, repetitions, stop conditions in a benchmark profile; offered against achieved rates and run metadata (version, kernel, CPU, sender, drivers, NICs, profile) in JSON and text reports; [docs/benchmarking.md](docs/benchmarking.md); `scripts/bench-netns.sh` | #25 | 0.8.0 |
 | M16, scenario and regression tests | Scenario files: checks that each run TCP, UDP or streams with a receiver, from profile files or inline, with an expected outcome (`complete`, `blocked`) and conditions on metrics with units (`loss_pct < 1%`, `latency_p99 < 20ms`, `rx_mbps > 50Mbit/s`); variables (`--set`); attempts for jittery labs; pass/fail/error per check and the exit code; JSON and JUnit XML reports; run history and comparisons (regressed, fixed, metrics that moved, `--strict`, `--baseline`); `ferotrx scenario run/show/compare/history/metrics`; `ferotrx_ctl::LabRunner`; [docs/scenarios.md](docs/scenarios.md); `scripts/scenario-netns.sh` (a firewall change caught) | #28 | 0.9.0 |
 
 The lab scripts (`scripts/*.sh`) build a NAT router in network namespaces
 and run in CI, over IPv4 and IPv6, with and without loss, for UDP and DNS also
 with `dig` against the emulated server, and for TCP also
-on a long fat pipe and with reordering and duplicates (netem). A regression
-scenario runs against the same router before and after a firewall change.
+on a long fat pipe and with reordering and duplicates (netem); the benchmark
+script puts a rate limit (token bucket) on the router and checks that
+`ferotrx bench` finds it. A regression scenario runs against the same router
+before and after a firewall change.
 
 ## Still to do
 
@@ -60,9 +63,10 @@ checked against 0.4.0. Each issue has the full checklist.
 
 **P1: measurements and more session types**
 
-- [ ] **M14, benchmarking (0.7.0)**, [#17](https://github.com/jkobierczynski/FeroTRX/issues/17):
+- [x] **M14, benchmarking (0.8.0, after M15)**, [#17](https://github.com/jkobierczynski/FeroTRX/issues/17):
       IMIX and size distributions, RFC 2544-style throughput/loss/latency/
-      back-to-back, run metadata in reports, documented method
+      back-to-back, run metadata in reports, documented method (the
+      optional receive path through AF_XDP is not done yet; libpcap receives)
 - [x] **M15, stateful UDP and transactions (0.8.0)**, [#18](https://github.com/jkobierczynski/FeroTRX/issues/18):
       UDP sessions with matching/timeouts/retries, DNS first, per-template
       transaction rates, message timing for TCP replay

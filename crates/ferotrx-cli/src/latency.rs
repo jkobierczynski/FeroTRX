@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
-use ferotrx_core::{parse_duration, Capture, Job, RxConfig, RxJob, RxSettings, RxStats};
+use ferotrx_core::{
+    parse_duration, Capture, Job, Rate, ReplayStats, RunInfo, RxConfig, RxJob, RxSettings, RxStats,
+};
 use ferotrx_ctl::protocol::FlowCounters;
 
 /// Loss and latency options of `replay`, `run` and `build`.
@@ -86,13 +88,55 @@ fn pct(n: u64, of: u64) -> f64 {
 /// The final loss and latency table of a job with a receiver.
 pub struct Report {
     rows: Vec<(String, FlowCounters)>,
+    /// Offered and achieved send rates, per row.
+    rates: Vec<Option<SendRate>>,
     packets: u64,
     untagged: u64,
+    /// Run metadata for the JSON report.
+    pub info: Option<RunInfo>,
+}
+
+/// What a stream was asked to send and what it sent.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SendRate {
+    /// The rate asked for, e.g. `1000pps`, `100mbps` or `topspeed`.
+    offered: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offered_pps: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offered_mbps: Option<f64>,
+    /// Measured over the time the stream sent.
+    achieved_pps: f64,
+    achieved_mbps: f64,
+    sent: u64,
+    duration_s: f64,
+}
+
+impl SendRate {
+    fn new(rate: Rate, st: &ReplayStats) -> Self {
+        Self {
+            offered: rate.to_string(),
+            offered_pps: match rate {
+                Rate::Pps(p) => Some(p),
+                _ => None,
+            },
+            offered_mbps: match rate {
+                Rate::Mbps(m) => Some(m),
+                _ => None,
+            },
+            achieved_pps: st.pps(),
+            achieved_mbps: st.mbps(),
+            sent: st.packets,
+            duration_s: st.elapsed.as_secs_f64(),
+        }
+    }
 }
 
 /// The JSON form of a report (`--report`).
 #[derive(serde::Serialize)]
 struct JsonReport<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    info: Option<&'a RunInfo>,
     /// Frames received, and those without a signature.
     packets: u64,
     untagged: u64,
@@ -104,44 +148,82 @@ struct JsonFlow<'a> {
     name: &'a str,
     #[serde(flatten)]
     counters: &'a FlowCounters,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    send: Option<&'a SendRate>,
 }
 
 fn write_report(
     path: &Path,
+    info: Option<&RunInfo>,
     packets: u64,
     untagged: u64,
     rows: &[(String, FlowCounters)],
+    rates: &[Option<SendRate>],
 ) -> Result<()> {
     let report = JsonReport {
+        info,
         packets,
         untagged,
         flows: rows
             .iter()
-            .map(|(name, counters)| JsonFlow { name, counters })
+            .enumerate()
+            .map(|(i, (name, counters))| JsonFlow {
+                name,
+                counters,
+                send: rates.get(i).and_then(Option::as_ref),
+            })
             .collect(),
     };
     let text = serde_json::to_string_pretty(&report)?;
     std::fs::write(path, text + "\n").with_context(|| format!("cannot write {}", path.display()))
 }
 
+/// Run metadata for a report: this machine, and the interfaces sent and received on.
+pub fn run_info(tx: Option<&str>, rx: Option<&str>, backend: Option<String>) -> RunInfo {
+    let mut info = RunInfo::new();
+    ferotrx_io::describe_host(&mut info);
+    info.command = Some(std::env::args().collect::<Vec<_>>().join(" "));
+    info.backend = backend;
+    info.tx_interface = tx.map(ferotrx_io::describe_interface);
+    info.rx_interface = rx.map(ferotrx_io::describe_interface);
+    info
+}
+
 impl Report {
     /// The report of a job that has ended, if it has a receiver.
     pub fn of(job: &Job) -> Option<Report> {
         let rx = job.rx_stats()?;
+        let stats = job.stats();
+        let reports = job.flow_reports();
+        let rates = reports
+            .iter()
+            .map(|r| {
+                let i = job.stream_names().iter().position(|n| *n == r.stream)?;
+                Some(SendRate::new(*job.rates().get(i)?, stats.streams.get(i)?))
+            })
+            .collect();
         Some(Report {
-            rows: job
-                .flow_reports()
+            rows: reports
                 .iter()
                 .map(|r| (r.stream.clone(), r.into()))
                 .collect(),
+            rates,
             packets: rx.packets,
             untagged: rx.untagged,
+            info: None,
         })
     }
 
     /// Writes the report as JSON.
     pub fn save(&self, path: &Path) -> Result<()> {
-        write_report(path, self.packets, self.untagged, &self.rows)
+        write_report(
+            path,
+            self.info.as_ref(),
+            self.packets,
+            self.untagged,
+            &self.rows,
+            &self.rates,
+        )
     }
 
     pub fn print(&self) {
@@ -247,7 +329,9 @@ pub fn cmd_rx(args: RxCmdArgs) -> Result<()> {
         let cap =
             Capture::from_path(path).with_context(|| format!("cannot read {}", path.display()))?;
         let stats = RxStats::from_capture(&cap);
-        return print_rx(&stats, args.report.as_deref());
+        let mut info = run_info(None, None, None);
+        info.profile = Some(format!("capture {}", path.display()));
+        return print_rx(&stats, args.report.as_deref(), Some(&info));
     }
     let Some(iface) = &args.iface else {
         bail!("give an interface (-i) or a capture (--file)");
@@ -287,10 +371,11 @@ pub fn cmd_rx(args: RxCmdArgs) -> Result<()> {
         }
     }
     let stats = job.join()?;
-    print_rx(&stats, args.report.as_deref())
+    let info = run_info(None, Some(iface), None);
+    print_rx(&stats, args.report.as_deref(), Some(&info))
 }
 
-fn print_rx(stats: &RxStats, report: Option<&Path>) -> Result<()> {
+fn print_rx(stats: &RxStats, report: Option<&Path>, info: Option<&RunInfo>) -> Result<()> {
     eprintln!(
         "received {} frames ({} bytes) in {:.3} s, {} without a signature",
         stats.packets,
@@ -312,7 +397,7 @@ fn print_rx(stats: &RxStats, report: Option<&Path>) -> Result<()> {
         );
     }
     match report {
-        Some(path) => write_report(path, stats.packets, stats.untagged, &rows),
+        Some(path) => write_report(path, info, stats.packets, stats.untagged, &rows, &[]),
         None => Ok(()),
     }
 }

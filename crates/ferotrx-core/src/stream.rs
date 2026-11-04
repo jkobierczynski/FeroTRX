@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::latency::{reserve, stamp, wall_clock};
+use crate::latency::{reserve, reserve_inside, stamp, wall_clock};
 use crate::{Error, Pacer, Packet, PacketSink, PacketSource, Rate, ReplayStats, Result, Transform};
 
 /// One flow of traffic: a source, the transforms applied to it, and its own rate.
@@ -18,6 +18,10 @@ pub struct Stream<'a> {
     /// Flow id of the latency [`Signature`](crate::Signature) every packet
     /// carries, or `None` for a stream without one.
     pub latency: Option<u32>,
+    /// Put the latency signature over the last bytes of each packet's payload
+    /// instead of after them, so packets keep the size they were given (see
+    /// [`keep_size`](Stream::keep_size)).
+    pub keep_size: bool,
     source: Box<dyn PacketSource + 'a>,
     transforms: Vec<Box<dyn Transform + 'a>>,
 }
@@ -31,6 +35,7 @@ impl<'a> Stream<'a> {
             limit: None,
             delay: Duration::ZERO,
             latency: None,
+            keep_size: false,
             source: Box::new(source),
             transforms: Vec::new(),
         }
@@ -61,6 +66,16 @@ impl<'a> Stream<'a> {
         self
     }
 
+    /// With a latency signature: write it over the last 28 bytes of each
+    /// packet's IP payload instead of adding 28 bytes, so packets keep the
+    /// size their source and transforms gave them, as benchmarks with set
+    /// frame sizes need. Packets whose payload is shorter than the signature
+    /// still grow, to the headers plus 28 bytes.
+    pub fn keep_size(mut self, keep: bool) -> Self {
+        self.keep_size = keep;
+        self
+    }
+
     /// Appends a transform; transforms run in the order they were added.
     pub fn with_transform(mut self, transform: impl Transform + 'a) -> Self {
         self.push_transform(transform);
@@ -84,6 +99,7 @@ impl std::fmt::Debug for Stream<'_> {
             .field("limit", &self.limit)
             .field("delay", &self.delay)
             .field("latency", &self.latency)
+            .field("keep_size", &self.keep_size)
             .field("transforms", &self.transforms.len())
             .finish_non_exhaustive()
     }
@@ -297,9 +313,13 @@ fn fill(stream: &mut Stream<'_>, lane: &mut Lane, st: &ReplayStats, start: Insta
     for t in &mut stream.transforms {
         t.apply(&mut lane.packet);
     }
-    lane.signature = stream
-        .latency
-        .and_then(|flow| reserve(&mut lane.packet.data, flow));
+    lane.signature = stream.latency.and_then(|flow| {
+        if stream.keep_size {
+            reserve_inside(&mut lane.packet.data, flow)
+        } else {
+            reserve(&mut lane.packet.data, flow)
+        }
+    });
     lane.deadline = match lane
         .pacer
         .next_deadline(lane.packet.timestamp, lane.packet.data.len())

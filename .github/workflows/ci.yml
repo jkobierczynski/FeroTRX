@@ -150,6 +150,16 @@ jobs:
           sudo LOSS=0.03 scripts/latency-netns.sh ./target/debug/ferotrx
           sudo IPV6=1 scripts/latency-netns.sh ./target/debug/ferotrx
 
+      # RFC 2544 benchmark of a router whose output a token bucket limits to
+      # 20 Mbit/s: throughput, latency, frame loss and back-to-back for a
+      # fixed size and IMIX, checked against the limit; JSON and text reports.
+      - name: Benchmark a rate-limited router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo modprobe sch_netem || true
+          sudo scripts/bench-netns.sh ./target/debug/ferotrx -q
+
       # A regression scenario (examples/scenario-nat.toml) against the NAT
       # router: web and DNS pass, TCP 8080 and NTP are blocked, a voice
       # stream arrives. Then the router resets TCP to port 80, and the second

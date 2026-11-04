@@ -146,6 +146,30 @@ pub(crate) fn reserve(data: &mut Vec<u8>, flow: u32) -> Option<usize> {
     }
 }
 
+/// Like [`reserve`], but the signature takes the place of the last
+/// [`SIGNATURE_LEN`] bytes of the IP payload, so the frame keeps its length.
+/// A payload shorter than that grows just enough to hold it.
+pub(crate) fn reserve_inside(data: &mut Vec<u8>, flow: u32) -> Option<usize> {
+    let end = match net::parse(data).and_then(|l| l.ip) {
+        Some(ip) if ip.fragmented => return None,
+        Some(ip) => ip.end?,
+        None => data.len(),
+    };
+    set_len(data, end.saturating_sub(SIGNATURE_LEN));
+    reserve(data, flow)
+}
+
+/// The length a frame of `len` bytes has once [`reserve_inside`] put a
+/// signature in it: `len`, or more when its payload was too short.
+pub fn signed_len(frame: &[u8], len: usize) -> usize {
+    let mut f = frame.to_vec();
+    set_len(&mut f, len);
+    match reserve_inside(&mut f, 0) {
+        Some(_) => f.len(),
+        None => len,
+    }
+}
+
 /// Writes the sequence number and send time into the signature reserved at `at`.
 /// The checksums stay right (see [`Signature`]).
 pub(crate) fn stamp(data: &mut [u8], at: usize, flow: u32, seq: u64, tx_time: Duration) {
@@ -209,6 +233,26 @@ mod tests {
             stamp(&mut frame, at, 1, 5, Duration::ZERO);
             assert_eq!(Signature::find(&frame).unwrap().seq, 5);
         }
+    }
+
+    #[test]
+    fn reserve_inside_keeps_the_length() {
+        let mut f = udp4();
+        set_len(&mut f, 200);
+        let at = reserve_inside(&mut f, 2).unwrap();
+        assert_eq!(f.len(), 200);
+        assert!(checksums_ok(&f));
+        stamp(&mut f, at, 2, 77, Duration::from_secs(5));
+        assert!(checksums_ok(&f));
+        assert_eq!(Signature::find(&f).unwrap().seq, 77);
+        // Too short: grows to the headers and the signature.
+        let mut f = udp4();
+        set_len(&mut f, 60);
+        reserve_inside(&mut f, 2).unwrap();
+        assert_eq!(f.len(), 14 + 20 + 8 + SIGNATURE_LEN);
+        assert_eq!(signed_len(&udp4(), 60), 70);
+        assert_eq!(signed_len(&udp4(), 1000), 1000);
+        assert!(checksums_ok(&f));
     }
 
     #[test]

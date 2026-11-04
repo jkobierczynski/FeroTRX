@@ -10,7 +10,9 @@ rust-version.workspace = true
 [features]
 default = ["profile"]
 # Load multi-stream traffic profiles from TOML files.
-profile = ["dep:serde", "dep:toml", "build"]
+profile = ["serde", "dep:toml", "build"]
+# Serialize benchmark reports and run metadata (serde).
+serde = ["dep:serde"]
 # Build packets from text descriptions (ferotrx-packet), as a capture or stream source.
 build = ["dep:ferotrx-packet"]
 
