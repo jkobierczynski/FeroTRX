@@ -14,7 +14,7 @@ pub type AppParser = Arc<dyn Fn(&toml::Table, &Path) -> Result<App> + Send + Syn
 
 /// Application protocols by the name profiles give them with `app = "..."`.
 ///
-/// [`AppRegistry::builtin`] has `http`, `dns` and `ntp`; add your own with
+/// [`AppRegistry::builtin`] has `http`, `dns`, `mqtt` and `ntp`; add your own with
 /// [`register`](Self::register) and read profiles with
 /// [`TcpProfile::from_toml_with`](crate::TcpProfile::from_toml_with).
 ///
@@ -38,12 +38,13 @@ impl AppRegistry {
         Self::default()
     }
 
-    /// The built-in protocols: `http`, `dns`, `ntp`.
+    /// The built-in protocols: `http`, `dns`, `mqtt`, `ntp`.
     pub fn builtin() -> Self {
         let mut r = Self::new();
         r.register("http", |t, base| super::http::parse(t, base).map(App::new));
         r.register("dns", |t, base| super::dns::parse(t, base).map(App::new));
         r.register("ntp", |t, _| super::ntp::parse(t).map(App::new));
+        r.register("mqtt", |t, _| super::mqtt::parse(t).map(App::new));
         r
     }
 

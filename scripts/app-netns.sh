@@ -10,7 +10,7 @@
 #     server 192.168.20.80 vlan 20        masquerade out of rt.20
 #
 # Usage: sudo scripts/app-netns.sh [path/to/ferotrx] [extra ferotrx tcp options]
-# (the options go to the runs with both ends emulated, 1 and 4)
+# (the options go to the runs with both ends emulated, 1, 4 and 7)
 # Needs root, ip (iproute2) and iptables (or iptables-nft). Removes the lab
 # when done.
 #
@@ -35,6 +35,13 @@
 # 6. If openssl is installed: openssl s_server on the router with an RSA
 #    certificate, and the emulated client loads its page over TLS 1.2 with
 #    an ECDHE_RSA suite and over TLS 1.3.
+# 7. MQTT (examples/lab-mqtt.toml): clients with QoS 0, 1 and 2, a retained
+#    message and their own messages back, MQTT 5 over TLS, and a client with
+#    a wrong password that the broker must refuse.
+# 8. If mosquitto_pub and mosquitto_sub are installed: they publish to and
+#    subscribe at the emulated broker.
+# 9. If mosquitto is installed: a real broker on the router, and the
+#    emulated clients publish to it over MQTT 3.1.1 and 5.
 #
 # LOSS=0.03 makes the router drop 3% of the packets it forwards.
 # IPV6=1 does the same over IPv6 (fd00:10::/64 and fd00:20::/64).
@@ -415,6 +422,110 @@ EOT
     done
 else
     echo "no openssl or ethtool: skipping the emulated HTTPS client against openssl"
+fi
+
+# Per template: every connection completed and nothing failed.
+check_clean() { # name, file
+    line=$(grep -E "^    $1 client: " "$2" || true)
+    conns=$(echo "$line" | sed -n 's/^    [a-z0-9]* client: \([0-9]*\) connections, \([0-9]*\) established, \([0-9]*\) completed.*/\1 \3/p')
+    txns=$(echo "$line" | sed -n 's/.*; \([0-9]*\) transactions (.*), \([0-9]*\) failed.*/\1 \2/p')
+    set -- "$1" "$2" $conns $txns
+    if [ $# -ne 6 ] || [ "$3" -eq 0 ] || [ "$3" -ne "$4" ] || [ "$5" -eq 0 ] || [ "$6" -ne 0 ]; then
+        fail "template $1: not every connection completed as expected ($line)"
+        return
+    fi
+    echo "template $1: $3 connections, $5 transactions, all as expected"
+}
+
+sed '/^\[client\]/,$d' "$examples/lab-mqtt.toml" >"$tmp/mqtt.toml"
+cat >>"$tmp/mqtt.toml" <<EOT
+[client]
+ip = "0.0.0.0"
+[server]
+ip = "0.0.0.0"
+EOT
+echo "== MQTT clients and broker through the router"
+# shellcheck disable=SC2086
+"$BIN" tcp -p "$tmp/mqtt.toml" $links $client $server -n 140 --cps 70 -q "$@" >"$log" 2>&1 || status=$?
+cat "$log"
+check_clean sensors "$log"
+check_clean secure "$log"
+check_clean intruder "$log"
+for want in "PUBACK x" "PUBCOMP x" "received x" "retained x" "published x"; do
+    grep -Eq "^    sensors client: .*$want" "$log" || fail "sensors: no $want"
+done
+grep -Eq "^    secure client: .*TLSv1\.3 " "$log" || fail "secure: not over TLS 1.3"
+grep -Eq "^    intruder client: .*CONNACK bad credentials x" "$log" ||
+    fail "intruder: not refused for bad credentials"
+
+if command -v mosquitto_pub >/dev/null 2>&1 && command -v mosquitto_sub >/dev/null 2>&1 &&
+    [ $have_ethtool = yes ]; then
+    echo "== mosquitto_pub and mosquitto_sub against the emulated broker"
+    sed '/^\[client\]/,$d' "$tmp/mqtt.toml" >"$tmp/broker.toml"
+    printf '[server]\nip = "0.0.0.0"\n' >>"$tmp/broker.toml"
+    # shellcheck disable=SC2086
+    "$BIN" tcp -p "$tmp/broker.toml" $server_links $server -d 8s -q >"$tmp/server" 2>&1 &
+    bg_pid=$!
+    sleep 1
+    host=$(net 20)80
+    mq="-h $host -p 1883 -u sensor -P lab"
+    # shellcheck disable=SC2086
+    r mosquitto_pub $mq -t lab/sensors/state -m online -r -q 1 || fail "mosquitto_pub: retained QoS 1 publish failed"
+    # A subscriber gets the retained message, then its own QoS 2 publish
+    # comes back on the same connection only, so it waits for the retained one.
+    # shellcheck disable=SC2086
+    got=$(r mosquitto_sub $mq -t 'lab/sensors/#' -C 1 -W 5 -v 2>&1 || true)
+    echo "  mosquitto_sub: $got"
+    [ "$got" = "lab/sensors/state online" ] || fail "mosquitto_sub did not get the retained message ($got)"
+    # shellcheck disable=SC2086
+    r mosquitto_pub $mq -V mqttv5 -t lab/sensors/x -m hello -q 2 || fail "mosquitto_pub: MQTT 5 QoS 2 publish failed"
+    # shellcheck disable=SC2086
+    if r mosquitto_pub -h "$host" -p 1883 -u sensor -P guess -t lab/x -m no 2>/dev/null; then
+        fail "mosquitto_pub with a wrong password was let in"
+    fi
+    wait "$bg_pid" || true
+    bg_pid=
+    cat "$tmp/server"
+    grep -Eq "^    sensors server: .*publish QoS 2 x[1-9]" "$tmp/server" ||
+        fail "the emulated broker did not count the QoS 2 publish"
+else
+    echo "no mosquitto clients or ethtool: skipping them against the emulated broker"
+fi
+
+if command -v mosquitto >/dev/null 2>&1 && [ $have_ethtool = yes ]; then
+    echo "== the emulated MQTT clients against mosquitto"
+    if [ "${IPV6:-}" = 1 ]; then bind=::; else bind=0.0.0.0; fi
+    printf 'listener 1883 %s\nallow_anonymous true\n' "$bind" >"$tmp/mosquitto.conf"
+    r mosquitto -c "$tmp/mosquitto.conf" >"$tmp/mosquitto.log" 2>&1 &
+    bg_pid=$!
+    sleep 1
+    for v in 3.1.1 5; do
+        cat >"$tmp/mqtt-client.toml" <<EOT
+app = "mqtt"
+[mqtt]
+version = "$v"
+subscribe = ["ferotrx/# 2"]
+publish = ["ferotrx/a 0", "ferotrx/b 1 1K", "ferotrx/c 2 100"]
+per_connection = 6
+[client]
+ip = "0.0.0.0"
+EOT
+        # shellcheck disable=SC2086
+        "$BIN" tcp -p "$tmp/mqtt-client.toml" $client_links $client --connect "$(net 10)1" \
+            -n 10 --cps 10 -q >"$log" 2>&1 || status=$?
+        cat "$log"
+        line=$(grep -E "^  client: " "$log" || true)
+        echo "$line" | grep -Eq "^  client: 10 connections, 10 established, 10 completed;" ||
+            fail "MQTT $v: the emulated clients did not complete their connections to mosquitto"
+        echo "$line" | grep -Eq "transactions \(.*\), 0 failed" ||
+            fail "MQTT $v: mosquitto's answers were not the expected ones"
+        echo "$line" | grep -q "PUBCOMP x20" || fail "MQTT $v: not every QoS 2 publish completed"
+    done
+    kill "$bg_pid" 2>/dev/null || true
+    wait "$bg_pid" 2>/dev/null || true
+    bg_pid=
+else
+    echo "no mosquitto or ethtool: skipping the emulated MQTT clients against mosquitto"
 fi
 
 echo "router: connections masqueraded, and dropped:"
