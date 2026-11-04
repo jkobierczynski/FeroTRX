@@ -858,7 +858,15 @@ mod tests {
         assert!(!r.passed());
         assert!(!r.stopped);
 
-        // JSON round trip.
+        // JSON round trip. serde_json reads some floats back one bit off
+        // (it does not round-trip exactly without its float_roundtrip
+        // feature), so use start and run times that survive exactly.
+        let mut r = r;
+        r.started_unix = 1_793_754_048.5;
+        r.elapsed_s = 0.25;
+        for c in &mut r.checks {
+            c.elapsed_s = 0.125;
+        }
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"verdict\":\"fail\""), "{json}");
         let back: ScenarioReport = serde_json::from_str(&json).unwrap();
