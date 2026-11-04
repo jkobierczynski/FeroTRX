@@ -1,0 +1,33 @@
+# FeroTRX stateful TCP profile whose client gets its address by DHCP: the
+# lab's DHCP server (or relay) gives it an address, subnet and gateway, then
+# the connections start; the lease is renewed while the run lasts and
+# released at the end.
+#
+#   FeroTRX host --- switch (trunk) --- router (DHCP server) --- VLAN 10: clients
+#                                                           \-- VLAN 20: server
+#
+# Run it with:
+#   sudo ferotrx tcp -p examples/lab-tcp-dhcp.toml -i <interface>
+#
+# The summary at the end shows the lease. `ip = "slaac"` or `"dhcpv6"`
+# does the same over IPv6 (the gateway comes from router advertisements).
+
+format = 1
+pcap = "http.pcap"
+cps = 20
+connections = 200
+
+[hosts]
+setup_timeout = "20s"      # how long the client may take to get its lease
+
+[client]
+ip = "dhcp"
+mac = "02:dc:00:00:00:01"  # a host without an address needs a MAC of its own (this is the default)
+vlan = 10
+hostname = "ferotrx-client"
+groups = ["239.1.2.3"]     # optional: also join a group (IGMP)
+
+[server]
+ip = "192.168.20.50/24"
+gateway = "192.168.20.1"
+vlan = 20

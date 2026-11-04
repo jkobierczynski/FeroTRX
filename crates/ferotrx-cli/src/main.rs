@@ -1,5 +1,6 @@
 mod bench;
 mod check;
+mod host;
 mod latency;
 mod remote;
 mod scenario;
@@ -46,6 +47,10 @@ enum Command {
     /// and servers, with matching, timeouts and retries: DNS lookups, NTP,
     /// or UDP sessions replayed from a capture.
     Udp(udp::UdpArgs),
+    /// Host emulation: emulated hosts that get their addresses by DHCP,
+    /// SLAAC or DHCPv6, announce them, join multicast groups (IGMP, MLD),
+    /// answer ARP and pings, and can advertise IPv6 prefixes as routers.
+    Host(host::HostArgs),
     /// Receive on an interface (or read a capture) and report loss and
     /// latency of the flows with FeroTRX signatures, sent by `--latency` or
     /// `--rx` on another machine.
@@ -438,6 +443,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Build(args) => cmd_build(args),
         Command::Tcp(args) => tcp::cmd_tcp(args),
         Command::Udp(args) => udp::cmd_udp(args),
+        Command::Host(args) => host::cmd_host(args),
         Command::Rx(args) => latency::cmd_rx(args),
         Command::Bench(args) => bench::cmd_bench(args),
         Command::Scenario(args) => scenario::cmd_scenario(args),

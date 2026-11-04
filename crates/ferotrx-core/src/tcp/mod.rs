@@ -38,8 +38,8 @@ pub use engine::{
 };
 #[cfg(feature = "profile")]
 pub use profile::{
-    parse_connect_addr, parse_ip_prefix, parse_port_range, parse_size, TcpHostSpec, TcpProfile,
-    TcpSource, TcpTemplateSpec,
+    parse_connect_addr, parse_groups, parse_ip_prefix, parse_port_range, parse_size, TcpHostSpec,
+    TcpProfile, TcpSource, TcpTemplateSpec,
 };
 pub use program::{TcpFlow, TcpMessage, TcpProgram, TcpRole};
 pub use run::{

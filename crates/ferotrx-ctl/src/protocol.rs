@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use ferotrx_core::{
-    FlowReport, FlowStats, LatencyStats, ReplayStats, RunStats, RxStats, TcpSideStats, TcpStats,
-    UdpSideStats, UdpStats,
+    FlowReport, FlowStats, HostAddress, HostStatus, LatencyStats, ReplayStats, RunStats, RxStats,
+    TcpSideStats, TcpStats, UdpSideStats, UdpStats,
 };
 
 /// Version of the method set below. Bumped when a method changes incompatibly.
@@ -722,6 +722,10 @@ pub struct TcpRunInfo {
     pub elapsed_s: f64,
     /// Completed client connections per second.
     pub cps: f64,
+    /// The emulated hosts of the client and server, when they get their
+    /// addresses by DHCP, SLAAC or DHCPv6, announce them or join groups.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<HostInfo>,
 }
 
 /// The counters of one template of a [`TcpRunInfo`].
@@ -795,6 +799,7 @@ impl TcpRunInfo {
         self.rx_bytes = s.rx_bytes;
         self.elapsed_s = s.elapsed.as_secs_f64();
         self.cps = s.cps();
+        self.hosts = s.hosts.iter().map(HostInfo::from).collect();
     }
 }
 
@@ -873,6 +878,10 @@ pub struct UdpRunInfo {
     pub elapsed_s: f64,
     /// Answered client transactions per second.
     pub tps: f64,
+    /// The emulated hosts of the client and server, when they get their
+    /// addresses by DHCP, SLAAC or DHCPv6, announce them or join groups.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<HostInfo>,
 }
 
 /// The counters of one template of a [`UdpRunInfo`].
@@ -945,6 +954,99 @@ impl UdpRunInfo {
         self.rx_bytes = s.rx_bytes;
         self.elapsed_s = s.elapsed.as_secs_f64();
         self.tps = s.tps();
+        self.hosts = s.hosts.iter().map(HostInfo::from).collect();
+    }
+}
+
+// ----- emulated hosts -----
+
+/// An emulated host's state, addresses and groups (`ferotrx_core::HostStatus`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HostInfo {
+    pub mac: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vlan: Option<u16>,
+    /// `starting`, `ready` or `failed`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Seconds the host took to get its addresses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_after_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv4: Option<HostAddressInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6: Option<HostAddressInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_local: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<HostGroupInfo>,
+}
+
+/// An address of a [`HostInfo`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HostAddressInfo {
+    /// `ADDRESS/PREFIX`.
+    pub address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
+    /// `static`, `dhcp`, `slaac` or `dhcpv6`.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_s: Option<f64>,
+    #[serde(default)]
+    pub renewals: u64,
+}
+
+/// A group a [`HostInfo`] joined.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostGroupInfo {
+    pub group: String,
+    pub reports: u64,
+    pub rx_packets: u64,
+    pub rx_bytes: u64,
+}
+
+impl From<&HostAddress> for HostAddressInfo {
+    fn from(a: &HostAddress) -> Self {
+        Self {
+            address: format!("{}/{}", a.ip, a.prefix),
+            gateway: a.gateway.map(|g| g.to_string()),
+            source: a.source.to_string(),
+            server: a.server.map(|s| s.to_string()),
+            dns: a.dns.iter().map(|d| d.to_string()).collect(),
+            lease_s: a.lease.map(|l| l.as_secs_f64()),
+            renewals: a.renewals,
+        }
+    }
+}
+
+impl From<&HostStatus> for HostInfo {
+    fn from(h: &HostStatus) -> Self {
+        Self {
+            mac: h.mac.to_string(),
+            vlan: h.vlan,
+            state: h.state.to_string(),
+            error: h.error.clone(),
+            ready_after_s: h.ready_after.map(|d| d.as_secs_f64()),
+            ipv4: h.ipv4.as_ref().map(Into::into),
+            ipv6: h.ipv6.as_ref().map(Into::into),
+            link_local: h.link_local.map(|a| a.to_string()),
+            groups: h
+                .groups
+                .iter()
+                .map(|g| HostGroupInfo {
+                    group: g.group.to_string(),
+                    reports: g.reports,
+                    rx_packets: g.rx_packets,
+                    rx_bytes: g.rx_bytes,
+                })
+                .collect(),
+        }
     }
 }
 

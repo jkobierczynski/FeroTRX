@@ -19,6 +19,8 @@ pub enum Error {
     Tcp(String),
     #[error("udp: {0}")]
     Udp(String),
+    #[error("hosts: {0}")]
+    Host(String),
     #[error("benchmark: {0}")]
     Bench(String),
     #[error("profile: {0}")]
