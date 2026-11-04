@@ -130,8 +130,21 @@ A control server started with `--lab` builds that router before the run
 is running; `"lab": false` (GUI: untick "Build the lab it names") runs on the
 lab as it is, for example one broken on purpose. `ferotrx scenario run --lab`
 builds it for the run and removes it after; without `--lab` the checks run
-on what is there. [`examples/lab-scenario.toml`](../examples/lab-scenario.toml)
-is `scenario-nat.toml` for the lab router.
+on what is there.
+
+Scenarios for the lab router, each naming the router it needs:
+
+| File | Router | Checks |
+| --- | --- | --- |
+| [`lab-scenario.toml`](../examples/lab-scenario.toml) | resets TCP 8080, drops UDP 123 | `scenario-nat.toml` in the lab: web and DNS through the NAT, 8080 and NTP blocked, a voice stream, no route to an unknown network |
+| [`lab-scenario-apps.toml`](../examples/lab-scenario-apps.toml) | resets TCP 8080 | HTTP (keep-alive, uploads, chunked answers) and DNS over TCP, HTTPS with verified certificates, the DNS zone of `lab-dns.toml`, HTTP on 8080 refused |
+| [`lab-scenario-impaired.toml`](../examples/lab-scenario-impaired.toml) | 2% loss, 20 ms delay | TCP and DNS recover by retransmitting; the stream shows the loss and the delay |
+| [`lab-scenario-ipv6.toml`](../examples/lab-scenario-ipv6.toml) | IPv6, routed without NAT | web, DNS and a stream over IPv6 |
+
+While a scenario runs on a control server, each check is also a TCP, UDP
+or stream run of the server (`tcp.list`, `udp.list`, `run.list`, named after
+the check), so its counters show in the GUI's statistics and charts as it
+goes.
 
 Other keys of a check: `name`, `description`, `expect`, `require`, `iface`,
 `rx`, `rx_wait`, `duration`, `attempts`. Unknown keys are an error, so a typo

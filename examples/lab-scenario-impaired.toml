@@ -1,0 +1,59 @@
+# A lossy, slow link: the lab router drops 2% of what it forwards and delays
+# each of its links by 20 ms, as a poor WAN would. TCP and DNS must still
+# get there, by retransmitting; the voice stream shows the loss and the
+# delay. Needs tc and the sch_netem module.
+#
+#   sudo ferotrx scenario run examples/lab-scenario-impaired.toml --lab
+
+format = 1
+name = "lab-impaired"
+description = "The lab router at 2% loss and 20 ms: TCP and DNS recover, the stream shows loss and delay"
+iface = "ftrx-lab"
+
+[lab]
+loss = 0.02
+delay = "20ms"
+
+# Every connection of examples/lab-tcp.toml completes, byte for byte, but
+# not without retransmitting.
+[[check]]
+name = "web recovers from loss"
+tcp = "lab-tcp.toml"
+require = ["retransmits > 0", "timed_out == 0"]
+
+# DNS answers take a round trip through both delayed links, and some
+# queries are asked again.
+[[check]]
+name = "DNS with retries"
+require = ["response_min > 35ms", "response_avg < 200ms", "retries > 0"]
+[check.udp]
+transactions = 200
+rate = 50
+queries = ["www.lab.local A", "lab.local MX"]
+records = ["www.lab.local A 192.168.20.80", "lab.local MX 10 mail.lab.local"]
+[check.udp.client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+[check.udp.server]
+ip = "192.168.20.53/24"
+gateway = "192.168.20.1"
+vlan = 20
+[check.udp.udp]
+timeout = "300ms"
+retries = 5
+
+# 1000 packets a second to the lab's stream receiver: about 2% lost, about
+# 20 ms late.
+[[check]]
+name = "voice stream shows loss and delay"
+rx = "ftrx-lab"
+duration = "5s"
+require = ["loss_pct > 0.5%", "loss_pct < 5%", "latency_min > 15ms", "latency_avg < 100ms"]
+[check.traffic]
+[[check.traffic.stream]]
+name = "voice"
+packet = "eth(src=02:00:00:00:10:02,dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.2,dst=192.168.20.2,dscp=46)/udp(sport=4000,dport=5004)/raw(len=160)"
+rate = "1000pps"
+loops = 0

@@ -271,6 +271,12 @@ fn the_server_runs_scenarios_and_reports_each_check() {
         10.0
     );
     assert_eq!(c.scenario_runs().len(), 1);
+    // Each check was a TCP or UDP run of the server too, for its statistics.
+    let tcp = c.tcp_runs();
+    assert_eq!(tcp.len(), 2, "{tcp:#?}");
+    assert_eq!(tcp[0].program, "scenario: echo");
+    assert_eq!(tcp[0].client.completed, 10);
+    assert_eq!(c.udp_runs().len(), 1);
 
     // `set` and `only`, as `ferotrx scenario run --set --check`.
     let v = c

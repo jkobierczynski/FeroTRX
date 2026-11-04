@@ -17,7 +17,7 @@ use ferotrx_io::Output;
 
 use crate::files::FilePolicy;
 use crate::protocol::*;
-use crate::scenario::{scenario_info, LabRunner, ScenarioRun};
+use crate::scenario::{scenario_info, LabRunner, RunLists, ScenarioRun};
 use crate::tcp::{start_tcp_with, PortOpener, TcpRun};
 use crate::udp::{start_udp_with, UdpRun};
 use ferotrx_core::scenario::{Scenario, Workload};
@@ -129,11 +129,11 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// take `&self` and can be called from several threads at once.
 pub struct Controller {
     profiles: Mutex<BTreeMap<String, Profile>>,
-    runs: Mutex<BTreeMap<u64, Arc<Run>>>,
-    tcp_runs: Mutex<BTreeMap<u64, Arc<TcpRun>>>,
-    udp_runs: Mutex<BTreeMap<u64, Arc<UdpRun>>>,
+    runs: Arc<Mutex<BTreeMap<u64, Arc<Run>>>>,
+    tcp_runs: Arc<Mutex<BTreeMap<u64, Arc<TcpRun>>>>,
+    udp_runs: Arc<Mutex<BTreeMap<u64, Arc<UdpRun>>>>,
     rx_runs: Mutex<BTreeMap<u64, Arc<RxRun>>>,
-    next_run: AtomicU64,
+    next_run: Arc<AtomicU64>,
     auth_required: bool,
     files: FilePolicy,
     scenario_runs: Mutex<BTreeMap<u64, Arc<ScenarioRun>>>,
@@ -151,15 +151,15 @@ struct RxRun {
     stopped_by_request: std::sync::atomic::AtomicBool,
 }
 
-struct Run {
-    id: u64,
-    profile: String,
+pub(crate) struct Run {
+    pub id: u64,
+    pub profile: String,
     /// How the output sends, as `start_run_detailed` described it.
-    output: String,
+    pub output: String,
     /// The interface the run receives on, if it measures loss and latency.
-    rx_iface: Option<String>,
-    job: Job,
-    stopped_by_request: std::sync::atomic::AtomicBool,
+    pub rx_iface: Option<String>,
+    pub job: Job,
+    pub stopped_by_request: std::sync::atomic::AtomicBool,
 }
 
 impl Default for Controller {
@@ -172,11 +172,11 @@ impl Controller {
     pub fn new() -> Self {
         Self {
             profiles: Mutex::default(),
-            runs: Mutex::default(),
-            tcp_runs: Mutex::default(),
-            udp_runs: Mutex::default(),
+            runs: Arc::default(),
+            tcp_runs: Arc::default(),
+            udp_runs: Arc::default(),
             rx_runs: Mutex::default(),
-            next_run: AtomicU64::new(1),
+            next_run: Arc::new(AtomicU64::new(1)),
             auth_required: false,
             files: FilePolicy::unrestricted(),
             scenario_runs: Mutex::default(),
@@ -784,7 +784,13 @@ impl Controller {
         let open_receiver = self.open_receiver.clone();
         let runner = LabRunner::new()
             .with_port_opener(move |name, settings| open_port(name, settings))
-            .with_receiver_opener(move |name| open_receiver(name));
+            .with_receiver_opener(move |name| open_receiver(name))
+            .with_runs(RunLists {
+                runs: self.runs.clone(),
+                tcp: self.tcp_runs.clone(),
+                udp: self.udp_runs.clone(),
+                next: self.next_run.clone(),
+            });
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
         let run = ScenarioRun::spawn(id, scenario, p.only, runner)
             .map_err(|e| RpcError::failed(format!("cannot start the scenario: {e}")))?;

@@ -1,0 +1,56 @@
+# IPv6 through the lab router: fd00:10::/64 (clients, VLAN 10) and
+# fd00:20::/64 (servers, VLAN 20), routed without NAT. Neighbor discovery
+# instead of ARP, the IPv6 MSS, DNS over IPv6, and a stream to the lab's
+# IPv6 stream receiver fd00:20::2.
+#
+#   sudo ferotrx scenario run examples/lab-scenario-ipv6.toml --lab
+
+format = 1
+name = "lab-ipv6"
+description = "The lab router over IPv6: web, DNS and a stream are routed"
+iface = "ftrx-lab"
+
+[lab]
+ipv6 = true
+
+# examples/lab-tcp-v6.toml: the HTTP capture between fd00:10::100-109 and
+# fd00:20::50.
+[[check]]
+name = "web over IPv6"
+tcp = "lab-tcp-v6.toml"
+require = ["timed_out == 0"]
+
+[[check]]
+name = "DNS over IPv6"
+require = ["response_avg < 100ms"]
+[check.udp]
+transactions = 100
+rate = 100
+queries = ["www.lab.local AAAA", "www.lab.local A", "missing.lab.local AAAA NXDOMAIN"]
+records = ["www.lab.local AAAA fd00:20::80", "www.lab.local A 192.168.20.80"]
+[check.udp.client]
+ip = "fd00:10::100/64"
+ips = 10
+gateway = "fd00:10::1"
+vlan = 10
+[check.udp.server]
+ip = "fd00:20::53/64"
+gateway = "fd00:20::1"
+vlan = 20
+[check.udp.udp]
+timeout = "300ms"
+retries = 3
+
+# A voice-like stream (traffic class EF) to fd00:20::2, which the router
+# always reaches; it comes back on ftrx-lab on VLAN 20.
+[[check]]
+name = "voice stream over IPv6"
+rx = "ftrx-lab"
+duration = "3s"
+require = ["loss_pct < 2%", "latency_avg < 50ms"]
+[check.traffic]
+[[check.traffic.stream]]
+name = "voice6"
+packet = "eth(src=02:00:00:00:10:02,dst=02:00:00:00:00:01)/vlan(id=10)/ipv6(src=fd00:10::2,dst=fd00:20::2,tc=184)/udp(sport=4000,dport=5004)/raw(len=160)"
+rate = "1000pps"
+loops = 0

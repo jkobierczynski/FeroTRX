@@ -1,0 +1,86 @@
+# Application protocols through the lab router: HTTP with keep-alive and
+# uploads, HTTPS with verified certificates, the full DNS zone of
+# lab-dns.toml, and an HTTP port the firewall refuses.
+#
+#   sudo ferotrx scenario run examples/lab-scenario-apps.toml --lab
+#
+# or the GUI's Scenario tab, on a server started with --lab.
+
+format = 1
+name = "lab-apps"
+description = "The lab router: HTTP, HTTPS and DNS answered as expected; HTTP on 8080 refused"
+attempts = 2
+iface = "ftrx-lab"
+
+[lab]
+block_tcp = [8080]
+
+# examples/lab-http.toml: 500 connections, 3 requests each, a 16 KB upload,
+# chunked 200 KB answers, DNS over TCP; every answer as expected.
+[[check]]
+name = "HTTP and DNS over TCP"
+tcp = "lab-http.toml"
+require = ["app_failed == 0", "timed_out == 0"]
+
+# Real TLS 1.2/1.3 handshakes; the client checks the server's certificate
+# (a CA generated for the run) and the name www.lab.local.
+[[check]]
+name = "HTTPS"
+require = ["tls_handshakes > 0", "tls_failed == 0", "app_failed == 0"]
+[check.tcp]
+cps = 50
+connections = 100
+[[check.tcp.template]]
+name = "https"
+app = "https"
+[check.tcp.template.http]
+per_connection = 2
+host = "www.lab.local"
+requests = ["GET /", "GET /missing 404"]
+[[check.tcp.template.http.route]]
+path = "/"
+body = "<html><body>FeroTRX over TLS</body></html>\n"
+[check.tcp.template.tls]
+server_name = "www.lab.local"
+names = ["www.lab.local"]
+verify = true
+[check.tcp.client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+[check.tcp.server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20
+
+# examples/lab-dns.toml: 1000 lookups of A, AAAA, MX, TXT, SRV and a missing
+# name, from 10 clients.
+[[check]]
+name = "DNS zone"
+udp = "lab-dns.toml"
+require = ["response_avg < 50ms"]
+
+# The firewall resets TCP to 8080: the HTTP client never gets a connection.
+[[check]]
+name = "HTTP on 8080 refused"
+expect = "blocked"
+duration = "3s"
+[check.tcp]
+connections = 3
+[[check.tcp.template]]
+name = "web"
+app = "http"
+port = 8080
+[check.tcp.template.http]
+requests = ["GET /"]
+[check.tcp.client]
+ip = "192.168.10.100/24"
+gateway = "192.168.10.1"
+vlan = 10
+[check.tcp.server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20
+[check.tcp.tcp]
+syn_retries = 1
