@@ -219,7 +219,7 @@ pub(crate) fn parse_dhcp4(p: &[u8]) -> Option<Dhcp4In> {
             (54, 4) => m.server = Some(ip(v)),
             (1, 4) => m.mask = Some(ip(v)),
             (3, l) if l >= 4 => m.router = Some(ip(v)),
-            (6, l) if l >= 4 => m.dns = v.chunks_exact(4).map(ip).collect(),
+            (6, l) if l >= 4 => m.dns = v.as_chunks::<4>().0.iter().map(|c| ip(c)).collect(),
             (51, 4) => m.lease = Some(u32_at(v)),
             (58, 4) => m.t1 = Some(u32_at(v)),
             (59, 4) => m.t2 = Some(u32_at(v)),
@@ -370,7 +370,7 @@ pub(crate) fn parse_dhcp6(p: &[u8]) -> Option<Dhcp6In> {
                 m.status = Some(s);
             }
         }
-        OPT_DNS => m.dns = v.chunks_exact(16).map(addr).collect(),
+        OPT_DNS => m.dns = v.as_chunks::<16>().0.iter().map(|c| addr(c)).collect(),
         OPT_IA_NA if v.len() >= 12 => {
             m.t1 = u32_at(v, 4);
             m.t2 = u32_at(v, 8);
