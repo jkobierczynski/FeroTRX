@@ -563,34 +563,7 @@ impl RawSize {
     }
 }
 
-/// Parses a size in bytes: `65535`, or with a suffix `K`, `M` or `G` (powers
-/// of 1024; `KB`, `KiB` and lower case work too), e.g. `64K` or `4M`.
-pub fn parse_size(s: &str) -> Result<u64> {
-    let bad = || Error::InvalidSpec(format!("invalid size '{s}' (use e.g. 65535, 64K or 4M)"));
-    let t = s.trim();
-    let digits = t
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .unwrap_or(t.len());
-    let (num, unit) = t.split_at(digits);
-    let unit = unit.trim().to_ascii_lowercase();
-    let unit = unit
-        .strip_suffix("ib")
-        .or_else(|| unit.strip_suffix('b'))
-        .unwrap_or(&unit);
-    let mult: u64 = match unit {
-        "" => 1,
-        "k" => 1 << 10,
-        "m" => 1 << 20,
-        "g" => 1 << 30,
-        _ => return Err(bad()),
-    };
-    let v: f64 = num.parse().map_err(|_| bad())?;
-    let n = v * mult as f64;
-    if !(n.is_finite() && n >= 0.0 && n < u64::MAX as f64) {
-        return Err(bad());
-    }
-    Ok(n.round() as u64)
-}
+pub use super::parse_size;
 
 fn role(s: &str) -> Result<TcpRole> {
     match s {

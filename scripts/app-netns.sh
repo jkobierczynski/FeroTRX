@@ -10,7 +10,7 @@
 #     server 192.168.20.80 vlan 20        masquerade out of rt.20
 #
 # Usage: sudo scripts/app-netns.sh [path/to/ferotrx] [extra ferotrx tcp options]
-# (the options go to the runs with both ends emulated, 1, 4 and 7)
+# (the options go to the runs with both ends emulated, 1, 4, 7 and 10)
 # Needs root, ip (iproute2) and iptables (or iptables-nft). Removes the lab
 # when done.
 #
@@ -42,6 +42,14 @@
 #    subscribe at the emulated broker.
 # 9. If mosquitto is installed: a real broker on the router, and the
 #    emulated clients publish to it over MQTT 3.1.1 and 5.
+# 10. HTTP/2 (examples/lab-h2.toml): over TLS with ALPN h2 and six streams
+#    at once, without TLS with large windows and frames, and against a
+#    server that allows two streams (refused streams are asked again).
+# 11. If curl (with HTTP/2) is installed: curl --http2 over TLS, HTTP/1.1
+#    on the same port, --http2-prior-knowledge without TLS, and h2load with
+#    20 streams per connection if it is installed.
+# 12. If nghttpd and openssl are installed: nghttpd on the router, over TLS
+#    and without, and the emulated HTTP/2 clients load pages from it.
 #
 # LOSS=0.03 makes the router drop 3% of the packets it forwards.
 # IPV6=1 does the same over IPv6 (fd00:10::/64 and fd00:20::/64).
@@ -526,6 +534,131 @@ EOT
     bg_pid=
 else
     echo "no mosquitto or ethtool: skipping the emulated MQTT clients against mosquitto"
+fi
+
+sed '/^\[client\]/,$d' "$examples/lab-h2.toml" >"$tmp/h2.toml"
+cat >>"$tmp/h2.toml" <<EOT
+[client]
+ip = "0.0.0.0"
+[server]
+ip = "0.0.0.0"
+EOT
+echo "== HTTP/2 over TLS and without through the router"
+# shellcheck disable=SC2086
+"$BIN" tcp -p "$tmp/h2.toml" $links $client $server -n 140 --cps 70 -q "$@" >"$log" 2>&1 || status=$?
+cat "$log"
+check_template h2 12
+check_template h2c 8
+check_template limited 8
+check_tls h2 none
+grep -Eq "^    h2 client: .*TLSv1\.3 TLS13_[A-Z0-9_]* h2 x" "$log" ||
+    fail "h2: not TLS 1.3 with ALPN h2"
+grep -Eq "^    h2 client: .*404 x[1-9]" "$log" || fail "h2: no 404 answers counted"
+grep -Eq "^    h2 client: .*201 x[1-9]" "$log" || fail "h2: no 201 answers counted"
+
+if command -v curl >/dev/null 2>&1 && [ $have_ethtool = yes ] &&
+    curl -V | grep -q '^Features:.* HTTP2'; then
+    echo "== curl against the emulated HTTP/2 server"
+    sed '/^\[client\]/,$d' "$tmp/h2.toml" >"$tmp/h2-server.toml"
+    printf '[server]\nip = "0.0.0.0"\n' >>"$tmp/h2-server.toml"
+    # shellcheck disable=SC2086
+    "$BIN" tcp -p "$tmp/h2-server.toml" $server_links $server -d 10s -q >"$tmp/server" 2>&1 &
+    bg_pid=$!
+    sleep 1
+    tls_base=$(url "$(net 20)80" 443 | sed 's/^http:/https:/')
+    plain_base=$(url "$(net 20)80" 8080)
+    hget() { # url, extra curl options
+        u=$1
+        shift
+        r curl --noproxy '*' -k -s -o "$tmp/body" \
+            -w '%{http_code} %{size_download} %{http_version}' --max-time 5 "$@" "$u" 2>&1 || true
+    }
+    h2=$(hget "$tls_base/" --http2)
+    big=$(hget "$tls_base/big" --http2)
+    missing=$(hget "$tls_base/missing" --http2)
+    post=$(hget "$tls_base/api" --http2 -X POST --data-binary "hello")
+    h1=$(hget "$tls_base/style.css" --http1.1)
+    h2c=$(hget "$plain_base/big" --http2-prior-knowledge)
+    plain=$(hget "$plain_base/" --http1.1)
+    echo "  curl: / $h2, /big $big, /missing $missing, POST /api $post, HTTP/1.1 /style.css $h1"
+    echo "  curl: h2c /big $h2c, HTTP/1.1 on the h2c port $plain"
+    [ "${h2%% *}" = 200 ] && [ "${h2##* }" = 2 ] || fail "curl --http2: / was not 200 over HTTP/2 ($h2)"
+    [ "$big" = "200 102400 2" ] || fail "curl --http2: /big was not 200 with 102400 bytes ($big)"
+    [ "${missing%% *}" = 404 ] || fail "curl --http2: /missing was not 404 ($missing)"
+    [ "${post%% *}" = 201 ] || fail "curl --http2: POST /api was not 201 ($post)"
+    [ "$h1" = "200 21 1.1" ] || fail "curl --http1.1 over TLS: not HTTP/1.1 200 ($h1)"
+    [ "$h2c" = "200 262144 2" ] || fail "curl --http2-prior-knowledge: /big was not 200 with 256 KB ($h2c)"
+    [ "${plain%% *}" = 200 ] && [ "${plain##* }" = 1.1 ] ||
+        fail "curl --http1.1 on the h2c port: not HTTP/1.1 200 ($plain)"
+    if command -v h2load >/dev/null 2>&1; then
+        # Many streams at once on few connections.
+        load=$(r h2load -n 400 -c 4 -m 20 "$plain_base/" 2>&1 || true)
+        echo "$load" | grep -E '^requests:|^status codes:' | sed 's/^/  h2load: /'
+        echo "$load" | grep -q '^requests: 400 total, 400 started, 400 done, 400 succeeded' ||
+            fail "h2load: not every request succeeded"
+    fi
+    wait "$bg_pid" || fail "the emulated HTTP/2 server failed connections from curl"
+    bg_pid=
+    cat "$tmp/server"
+else
+    echo "no curl with HTTP/2, or no ethtool: skipping curl against the emulated HTTP/2 server"
+fi
+
+if command -v nghttpd >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 &&
+    [ $have_ethtool = yes ]; then
+    echo "== the emulated HTTP/2 client against nghttpd"
+    mkdir -p "$tmp/h2www"
+    echo "a page from nghttpd" >"$tmp/h2www/index.html"
+    head -c 200000 /dev/zero >"$tmp/h2www/big"
+    [ -f "$tmp/rsa.pem" ] ||
+        openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tmp/rsa-key.pem" -out "$tmp/rsa.pem" \
+            -days 2 -subj /CN=router.lab -addext subjectAltName=DNS:router.lab >/dev/null 2>&1
+    for mode in tls plain; do
+        if [ $mode = tls ]; then
+            port=8443
+            ip netns exec $NS nghttpd -d "$tmp/h2www" $port "$tmp/rsa-key.pem" "$tmp/rsa.pem" \
+                >"$tmp/nghttpd" 2>&1 &
+            app='app = "h2"'
+            extra='[tls]
+server_name = "router.lab"'
+        else
+            port=8444
+            ip netns exec $NS nghttpd -d "$tmp/h2www" --no-tls $port >"$tmp/nghttpd" 2>&1 &
+            app='app = "h2c"'
+            extra=
+        fi
+        bg_pid=$!
+        sleep 1
+        cat >"$tmp/h2-client.toml" <<EOT
+$app
+port = $port
+[http2]
+requests = ["GET /index.html 200", "GET /big 200", "GET /missing 404"]
+per_connection = 6
+concurrent = 3
+$extra
+[client]
+ip = "0.0.0.0"
+EOT
+        # shellcheck disable=SC2086
+        "$BIN" tcp -p "$tmp/h2-client.toml" $client_links $client --connect "$(net 10)1" \
+            -n 10 --cps 10 -q >"$log" 2>&1 || status=$?
+        cat "$log"
+        line=$(grep -E "^  client: " "$log" || true)
+        echo "$line" | grep -Eq "^  client: 10 connections, 10 established, 10 completed;" ||
+            fail "HTTP/2 $mode: the emulated client did not complete its connections to nghttpd"
+        echo "$line" | grep -Eq "60 transactions \((200 x40, 404 x20|404 x20, 200 x40)\), 0 failed" ||
+            fail "HTTP/2 $mode: nghttpd's answers were not the expected ones"
+        if [ $mode = tls ]; then
+            echo "$line" | grep -q "10 TLS handshakes (TLSv1\.[23] [A-Z0-9_]* h2 x10" ||
+                fail "HTTP/2 over TLS: ALPN did not pick h2"
+        fi
+        kill "$bg_pid" 2>/dev/null || true
+        wait "$bg_pid" 2>/dev/null || true
+        bg_pid=
+    done
+else
+    echo "no nghttpd, openssl or ethtool: skipping the emulated HTTP/2 client against nghttpd"
 fi
 
 echo "router: connections masqueraded, and dropped:"

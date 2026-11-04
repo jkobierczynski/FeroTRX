@@ -24,13 +24,15 @@
 //!   profile to the code that reads the protocol's table, so programs can add
 //!   their own protocols.
 //!
-//! The built-in protocols are [`http`] (HTTP/1.1 client and server), [`dns`]
+//! The built-in protocols are [`http`] (HTTP/1.1 client and server),
+//! [`http2`] (HTTP/2 client and server, h2 and h2c), [`dns`]
 //! (over UDP, and over TCP with length prefixes), [`mqtt`] (client and
 //! broker, 3.1.1 and 5.0) and [`ntp`]; [`tls`]
 //! (feature `tls`) runs any stream protocol over TLS (HTTPS = TLS + HTTP).
 
 pub mod dns;
 pub mod http;
+pub mod http2;
 pub mod mqtt;
 pub mod ntp;
 #[cfg(feature = "profile")]
@@ -304,12 +306,12 @@ impl AppCx {
         &self.protocol_errors
     }
 
-    /// True if nothing that happened failed: no protocol errors, every
-    /// transaction as expected.
     pub fn handshakes(&self) -> &[AppHandshake] {
         &self.handshakes
     }
 
+    /// True if nothing that happened failed: no protocol errors, every
+    /// transaction and handshake as expected.
     pub fn all_ok(&self) -> bool {
         self.protocol_errors.is_empty()
             && self.transactions.iter().all(|t| t.ok)

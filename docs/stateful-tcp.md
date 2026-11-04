@@ -131,7 +131,8 @@ Instead of `pcap`, a session can be written out as `[[message]]` tables
 (`from = "client"`, `text = "..."` or `hex = "..."`, plus `port`). Or both
 ends can speak an [application protocol](app-protocols.md) instead of
 replaying fixed bytes: `app = "http"` with an `[http]` table of requests and
-routes, `app = "https"` for the same over TLS, or `app = "dns"` for DNS
+routes, `app = "https"` for the same over TLS, `app = "h2"` or `"h2c"` for
+HTTP/2 with an `[http2]` table, `app = "mqtt"`, or `app = "dns"` for DNS
 over TCP. Over the
 control API, `tcp.start` takes the same profile (`ferotrx ctl tcp-start
 lab-tcp.toml --upload -i enp0s3`), and `tcp.stats` reports the counters.

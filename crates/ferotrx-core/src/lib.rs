@@ -163,15 +163,15 @@ pub use size_mix::{SizeMix, FCS_LEN, L1_OVERHEAD, RFC2544_SIZES};
 pub use source::{CaptureSource, PacketSource};
 pub use stream::{run, run_with_progress, RunConfig, RunStats, Stream};
 pub use tcp::{
-    memory_ports, run_engine, run_tcp, split_port, split_ports, MemoryPort, PacketPort, PortEngine,
-    PortJob, TcpClientConfig, TcpConfig, TcpEndpoint, TcpEngine, TcpFlow, TcpJob, TcpMessage,
-    TcpOptions, TcpProgram, TcpRole, TcpRunConfig, TcpServerConfig, TcpSideStats, TcpStats,
-    TcpTemplate, TcpTemplateStats,
+    memory_ports, parse_size, run_engine, run_tcp, split_port, split_ports, MemoryPort, PacketPort,
+    PortEngine, PortJob, TcpClientConfig, TcpConfig, TcpEndpoint, TcpEngine, TcpFlow, TcpJob,
+    TcpMessage, TcpOptions, TcpProgram, TcpRole, TcpRunConfig, TcpServerConfig, TcpSideStats,
+    TcpStats, TcpTemplate, TcpTemplateStats,
 };
 #[cfg(feature = "profile")]
 pub use tcp::{
-    parse_connect_addr, parse_groups, parse_ip_prefix, parse_port_range, parse_size, TcpHostSpec,
-    TcpProfile, TcpSource, TcpTemplateSpec,
+    parse_connect_addr, parse_groups, parse_ip_prefix, parse_port_range, TcpHostSpec, TcpProfile,
+    TcpSource, TcpTemplateSpec,
 };
 pub use traffic::{parse_shape_point, Arrivals, Schedule, ShapePoint, TrafficModel};
 pub use transform::{

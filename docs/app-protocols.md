@@ -15,8 +15,9 @@ The protocols plug into the engines through a small interface
 (over UDP and over TCP) and NTP are built in (0.16.0, M23), and a program
 can add its own. [TLS](#tls-and-https) runs under any of the stream
 protocols, with real handshakes: HTTPS, DNS over TLS (0.17.0, M24).
-[MQTT](#mqtt) 3.1.1 and 5.0 clients and a broker came in 0.18.0 (M25). The
-plan for the other protocols is [at the end](#what-comes-next).
+[MQTT](#mqtt) 3.1.1 and 5.0 clients and a broker came in 0.18.0 (M25), and
+[HTTP/2](#http2) over TLS and without in 0.19.0 (M26). The plan for the
+other protocols is [at the end](#what-comes-next).
 
 ## Quick start
 
@@ -178,7 +179,7 @@ verify = true
 | `versions` | `["1.2", "1.3"]` | The versions an end speaks. 1.0, 1.1 and SSL are refused: rustls does not speak them. |
 | `cipher_suites` | all | Suites in order of preference, by their names: `TLS13_AES_128_GCM_SHA256`, `TLS13_AES_256_GCM_SHA384`, `TLS13_CHACHA20_POLY1305_SHA256`, `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` (and `_AES_256_GCM_SHA384`, `_CHACHA20_POLY1305_SHA256`), `TLS_ECDHE_RSA_WITH_...` (the same three; they need an RSA certificate). The `TLS_`/`TLS13_` prefix can be left out. |
 | `groups` | all | Key exchange groups: `X25519`, `secp256r1`, `secp384r1`. |
-| `alpn` | `["http/1.1"]` for HTTP, else none | ALPN protocols in order of preference. |
+| `alpn` | `["http/1.1"]` for HTTP; for HTTP/2 `["h2"]` (client) and `["h2", "http/1.1"]` (server); else none | ALPN protocols in order of preference. |
 | `server_name` | none | Client: the name it asks for (SNI) and checks the certificate against. Without one it connects by address and sends no SNI. |
 | `verify` | false | Client: check the server's certificate, against `ca` or else the CA the run generates. |
 | `ca` | | Client: a PEM file of the CAs it trusts; implies `verify`. |
@@ -220,6 +221,69 @@ once the handshake is done, so its response times leave the handshake out.
 [examples/lab-https.toml](../examples/lab-https.toml) has four templates:
 TLS 1.3 with a verified certificate and resumed sessions, TLS 1.2 with one
 cipher suite and client certificates, refused handshakes, and DNS over TLS.
+
+## HTTP/2
+
+`app = "h2"` plays HTTP/2 over TLS (port 443, ALPN `h2`), `app = "h2c"`
+HTTP/2 without TLS (port 80; the client starts with the connection preface,
+"prior knowledge", as `curl --http2-prior-knowledge` does), and
+`app = "http2"` is the same as `h2c` but takes `tls = true` or a `[tls]`
+table. All three read an `[http2]` table with every key of
+[`[http]`](#http11) except `pipeline`, and these of HTTP/2:
+
+```toml
+[[template]]
+name = "h2"
+app = "h2"
+[template.http2]
+requests = ["GET /", "GET /style.css", "GET /big", "GET /missing 404"]
+per_connection = 12     # requests per connection
+concurrent = 6          # streams in flight at once
+[[template.http2.route]]
+path = "/big"
+body_size = "100K"
+[template.tls]
+server_name = "www.lab.local"
+names = ["www.lab.local"]
+verify = true
+```
+
+| Key | Default | What |
+|---|---|---|
+| `concurrent` | 100 | Client: requests in flight at once on a connection, at most what the server allows. With `think_time`, one at a time. |
+| `max_concurrent_streams` | 100 | Server: `SETTINGS_MAX_CONCURRENT_STREAMS`. Streams over it are refused (`REFUSED_STREAM`); the client asks for refused requests again. |
+| `window` | 65535 | `SETTINGS_INITIAL_WINDOW_SIZE` of each stream; over 65535 the connection's window is raised to it too. |
+| `frame_size` | 16384 | `SETTINGS_MAX_FRAME_SIZE`: the largest frame this end takes (16384 to 16777215). |
+| `header_table_size` | 4096 | `SETTINGS_HEADER_TABLE_SIZE`: this end's HPACK table, and the most its encoder uses of the other end's. 0 turns indexing off. |
+| `huffman` | true | Huffman code header strings where that makes them shorter. |
+| `scheme` | `http`, `https` over TLS | Client: the `:scheme`. |
+
+Both ends speak HTTP/2 for real: SETTINGS and their acknowledgements,
+HEADERS and CONTINUATION with HPACK (static and dynamic tables with size
+updates, Huffman coding, values such as `authorization` and `cookie` never
+indexed), DATA under stream and connection flow control with WINDOW_UPDATE,
+PING, RST_STREAM and GOAWAY with error codes. A request's headers are
+`:method`, `:scheme`, `:authority` (the `host` key), `:path`, then
+`user-agent`, `accept`, its own headers in lower case and `content-length`
+for a body; headers HTTP/2 does not carry (`connection`, `host`,
+`transfer-encoding`, ...) are left out. The server answers each stream from
+the routes as HTTP/1.1 does (`delay` holds one stream, not the others;
+`close` sends GOAWAY after the answer; `chunked` does not apply).
+
+The server also takes HTTP/1.1 on the same port: a connection that does not
+start with the preface gets the HTTP/1.1 server with the same routes, and
+over TLS it offers ALPN `h2` and `http/1.1`, so `curl --http1.1` works too.
+It does not upgrade an HTTP/1.1 connection (`Upgrade: h2c`): it answers it
+in HTTP/1.1, which clients accept.
+
+The transactions are the status codes, as for HTTP/1.1, with response times
+per stream; a stream the server resets counts as `reset CODE` and fails, a
+GOAWAY with an error is a protocol error, and so is a connection the server
+ends before every request was answered.
+
+[examples/lab-h2.toml](../examples/lab-h2.toml) has a page and what it
+loads over TLS with six streams at once, h2c with large windows and frames,
+and a server that allows two streams for clients that try eight.
 
 ## MQTT
 
@@ -368,10 +432,19 @@ the other [lab scripts](lab-scripts.md) and runs, in turn:
    retained QoS 1 message that a subscriber then gets, an MQTT 5 QoS 2
    publish, and a wrong password that must be refused;
 9. `mosquitto` on the router, and the emulated clients publishing and
-   subscribing with QoS 0, 1 and 2 over MQTT 3.1.1 and 5.
+   subscribing with QoS 0, 1 and 2 over MQTT 3.1.1 and 5;
+10. the three templates of `examples/lab-h2.toml` (h2 over TLS with six
+    streams at once, h2c with large windows and frames, a server that
+    allows two streams), checking that ALPN gave `h2`;
+11. the emulated HTTP/2 server alone, with `curl --http2` over TLS (a page,
+    a 100 KB download, a 404, a POST), `curl --http1.1` on the same port,
+    `curl --http2-prior-knowledge` without TLS, and `h2load` with 20 streams
+    per connection;
+12. `nghttpd` on the router, over TLS and without, and the emulated HTTP/2
+    client loading a page, a 200 KB file and a missing page from it.
 
 `LOSS=0.03`, `IPV6=1` and `NO_VLAN=1` work as in the other scripts, and
-options after the binary go to the runs with both ends emulated, 1, 4 and 7
+options after the binary go to the runs with both ends emulated, 1, 4, 7 and 10
 (`-B af_xdp --workers 2`).
 CI runs it plain, with loss, over IPv6 and over AF_XDP with two workers.
 
@@ -423,8 +496,9 @@ and TCP), and the built-in ones are in `crates/ferotrx-core/src/app/`.
 
 ## Limits
 
-* HTTP/1.1 only: no HTTP/2, no `Expect: 100-continue` from the client, no
-  request bodies sent chunked. Bodies are counted, not kept or compared.
+* HTTP: no `Expect: 100-continue` from the client, no request bodies sent
+  chunked, no HTTP/2 server push, priorities or `Upgrade: h2c`. Bodies are
+  counted, not kept or compared.
 * TLS 1.2 and 1.3 only, with the cipher suites and groups rustls has (no
   CBC, RSA key exchange, DHE or post-quantum groups); no generated RSA
   certificates, no OCSP or certificate revocation, no renegotiation, no
@@ -446,7 +520,7 @@ Tracked in [#37](https://github.com/jkobierczynski/FeroTRX/issues/37) and in
 | SSH | high | banner and key exchange, then encrypted-looking traffic |
 | DHCP | high | done as [host emulation](host-emulation.md) (M19); a DHCP server role later |
 | SIP/RTP | high | SIP dialogs over UDP (needs multi-message UDP transactions), RTP media streams at codec rates |
-| HTTP/2 | high | frames, HPACK, streams; over TLS with ALPN |
+| HTTP/2 | high | done (M26): frames, HPACK, streams, flow control; h2 over TLS with ALPN and h2c; later server push and priorities |
 | MQTT | high | done (M25): 3.1.1 and 5.0, QoS 0-2, retained messages, logins; later a broker that routes between connections |
 | SMB | medium | negotiate, session setup, tree connect, reads and writes |
 | QUIC/HTTP/3 | medium | needs TLS 1.3 first |
