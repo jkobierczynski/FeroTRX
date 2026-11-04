@@ -229,15 +229,16 @@ impl PacketSink for BatchingSink {
 #[test]
 fn batching_sinks_hand_over_before_each_wait() {
     // Paced: what is queued is handed over before the engine waits for the next
-    // packet. 50 pps leaves 20 ms gaps, so the engine waits before most packets
-    // even on a slow machine whose sleeps overshoot.
+    // packet. The engine only waits when the next deadline is still ahead, so
+    // a sleep that overshoots past it skips one hand-over. 10 pps leaves
+    // 100 ms gaps: CI's macOS runners overshoot 20 ms gaps, these hold.
     let a = one_packet(1);
     let mut streams =
-        [Stream::new("a", CaptureSource::new(&a).loops(6)).with_rate(Rate::Pps(50.0))];
+        [Stream::new("a", CaptureSource::new(&a).loops(5)).with_rate(Rate::Pps(10.0))];
     let mut sink = BatchingSink::default();
     run(&mut streams, &mut sink, &RunConfig::default()).unwrap();
     let handed: usize = sink.sent.iter().map(|&(n, _)| n).sum();
-    assert_eq!(handed + sink.queued, 6);
+    assert_eq!(handed + sink.queued, 5);
     assert!(sink.sent.len() >= 2, "{:?}", sink.sent.len());
     assert!(sink.queued >= 1); // the last one goes out with flush
 
