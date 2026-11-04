@@ -119,7 +119,10 @@ IPv6 groups over MLD.
   compatibility modes of RFC 3376 and 3810, without their timers back).
 * IPv6 hosts also report the solicited-node groups of their addresses, as
   real hosts do, so MLD snooping switches forward neighbor solicitations to
-  them. These are not listed with the groups.
+  them. These are not listed with the groups. When a `tcp` or `udp` run
+  emulates hosts, a static IPv6 client or server gets a host of its own
+  for this (its first address only), so it stays reachable through such a
+  switch.
 * Frames to a joined group are counted per group (`frames received`).
 * At the end, an IGMPv2 leave or IGMPv3 CHANGE_TO_INCLUDE {}, an MLD done or
   MLDv2 CHANGE_TO_INCLUDE {} (not with `release = false`).

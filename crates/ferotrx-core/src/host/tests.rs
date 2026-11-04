@@ -800,6 +800,51 @@ fn configurations_are_checked() {
     assert!(HostEngine::new(vec![h], HostOptions::default()).is_ok());
 }
 
+/// With a SLAAC client, a static IPv6 server gets a host too, so that it
+/// joins its solicited-node group (MLD snooping bridges need that to pass
+/// neighbor solicitations); the engine still answers for the address.
+#[test]
+fn a_static_ipv6_end_joins_its_solicited_node_group() {
+    let program = TcpProgram::new(80, vec![TcpMessage::new(TcpRole::Client, "x")]);
+    let server_ip: Ipv6Addr = "fd00:77::20".parse().unwrap();
+    let config = TcpConfig {
+        templates: vec![TcpTemplate::new(
+            Arc::new(program),
+            std::net::SocketAddr::new(server_ip.into(), 80),
+        )],
+        client: Some(TcpClientConfig::new(
+            TcpEndpoint::new(0, mac(1), Ipv6Addr::UNSPECIFIED.into()).with_prefix(0),
+        )),
+        server: Some(TcpServerConfig::new(
+            TcpEndpoint::new(1, mac(2), server_ip.into()).with_prefix(64),
+        )),
+        options: TcpOptions::default(),
+    };
+    let emu = Emulation {
+        addressing: Addressing::Slaac,
+        ..Emulation::default()
+    };
+    let plan = EndpointHosts::new(&config, Some(&emu), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan.hosts().len(), 2);
+    let server = &plan.hosts()[1];
+    assert!(!server.announce);
+    assert!(matches!(server.ipv6, Some(Ipv6Mode::Static { ip, .. }) if ip == server_ip));
+    // A static IPv4 server next to a DHCP client stays without a host.
+    let v4 = Emulation {
+        addressing: Addressing::Dhcp,
+        ..Emulation::default()
+    };
+    let mut config4 = config.clone();
+    config4.server.as_mut().unwrap().endpoint =
+        TcpEndpoint::new(1, mac(2), "10.77.0.20".parse().unwrap());
+    let plan4 = EndpointHosts::new(&config4, Some(&v4), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan4.hosts().len(), 1);
+}
+
 /// A TCP client that gets its address by DHCP connects to a static server
 /// on the same link; the run starts once the lease is there.
 #[test]

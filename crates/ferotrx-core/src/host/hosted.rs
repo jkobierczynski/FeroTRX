@@ -82,9 +82,6 @@ impl Emulation {
     }
 
     fn host(&self, ep: &TcpEndpoint, what: &str) -> Result<Option<HostConfig>> {
-        if !self.is_needed() {
-            return Ok(None);
-        }
         let err = |m: String| Err(Error::Host(format!("{what}: {m}")));
         if self.addressing.is_dynamic() && ep.ip_count > 1 {
             return err(format!(
@@ -195,13 +192,13 @@ impl EndpointHosts {
             index: [None, None],
             server_placeholder: None,
         };
-        for (i, (ep, emu)) in config
+        let ends: Vec<_> = config
             .endpoints_mut()
             .into_iter()
-            .zip([client, server])
-            .enumerate()
-        {
-            let (Some(ep), Some(emu)) = (ep, emu) else {
+            .map(|ep| ep.cloned())
+            .collect();
+        for (i, (ep, emu)) in ends.iter().zip([client, server]).enumerate() {
+            let (Some(ep), Some(emu)) = (ep, emu.filter(|e| e.is_needed())) else {
                 continue;
             };
             let what = if i == 0 { "client" } else { "server" };
@@ -210,6 +207,25 @@ impl EndpointHosts {
                 out.hosts.push(h);
                 if i == 1 && emu.addressing.is_dynamic() {
                     out.server_placeholder = Some(ep.ip);
+                }
+            }
+        }
+        // With hosts emulated, a static IPv6 end on its own gets a host as
+        // well, so that it joins its solicited-node group: a switch or
+        // bridge with MLD snooping would otherwise not pass it the
+        // neighbor solicitations for its address.
+        if !out.hosts.is_empty() {
+            for (i, ep) in ends.iter().enumerate() {
+                let Some(ep) = ep.as_ref().filter(|ep| ep.ip.is_ipv6()) else {
+                    continue;
+                };
+                if out.index[i].is_some() {
+                    continue;
+                }
+                let what = if i == 0 { "client" } else { "server" };
+                if let Some(h) = Emulation::default().host(ep, what)? {
+                    out.index[i] = Some(out.hosts.len());
+                    out.hosts.push(h);
                 }
             }
         }
