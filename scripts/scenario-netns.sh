@@ -24,7 +24,7 @@
 # when done. KEEP=DIR keeps the reports in DIR.
 set -eu
 
-if [ $# -gt 0 ]; then
+if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
     BIN=$1
     shift
 else

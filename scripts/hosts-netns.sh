@@ -37,7 +37,7 @@ if [ "$(id -u)" != 0 ]; then
     exit 2
 fi
 
-if [ $# -gt 0 ]; then
+if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
     BIN=$1
     shift
 else

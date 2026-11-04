@@ -47,9 +47,9 @@
 #   c0 --- rc 192.168.10.1/24 (router) rs 192.168.20.1/24 --- s0
 set -eu
 
-# The binary: the first argument, else a build in this checkout, else the
+# The binary: the first argument (unless it is an option), else a build in this checkout, else the
 # installed one.
-if [ $# -gt 0 ]; then
+if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
     BIN=$1
     shift
 else

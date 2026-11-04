@@ -33,7 +33,7 @@
 # instead of a shared trunk.
 set -eu
 
-if [ $# -gt 0 ]; then
+if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
     BIN=$1
     shift
 else
