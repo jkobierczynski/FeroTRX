@@ -1051,6 +1051,9 @@ fn lab_info(l: &ferotrx_io::Lab, unavailable: Option<String>) -> LabInfo {
     if c.dhcp {
         opts.push("DHCP on VLAN 10 (.200-.250)".into());
     }
+    if c.queues > 1 {
+        opts.push(format!("{} queues on the link", c.queues));
+    }
     if !opts.is_empty() {
         summary.push(format!("router: {}", opts.join(", ")));
     }

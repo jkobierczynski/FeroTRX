@@ -20,6 +20,8 @@ pub struct LabForm {
     pub block_tcp: String,
     pub block_udp: String,
     pub dhcp: bool,
+    /// Queues on each end of the link, for workers with AF_XDP.
+    pub queues: String,
 }
 
 impl LabForm {
@@ -33,6 +35,7 @@ impl LabForm {
             block_tcp: String::new(),
             block_udp: String::new(),
             dhcp: false,
+            queues: String::new(),
         }
     }
 
@@ -68,6 +71,17 @@ impl LabForm {
         });
         if let Some(l) = loss {
             p["loss"] = json!(l);
+        }
+        match self.queues.trim() {
+            "" => {}
+            q => {
+                let n: u32 = q
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=64).contains(n))
+                    .ok_or_else(|| format!("queues: '{q}' is not a number from 1 to 64"))?;
+                p["queues"] = json!(n);
+            }
         }
         if !self.delay.trim().is_empty() {
             p["delay"] = json!(self.delay.trim());
@@ -141,6 +155,10 @@ impl FeroApp {
                     ui.checkbox(&mut form.dhcp, "on VLAN 10, 192.168.10.200-250 (dnsmasq)")
                         .on_hover_text("For hosts with ip = \"dhcp\" (examples/lab-tcp-dhcp.toml); with IPv6 also router advertisements and DHCPv6");
                     ui.end_row();
+                    ui.label("Queues");
+                    ui.add(egui::TextEdit::singleline(&mut form.queues).hint_text("1").desired_width(80.0))
+                        .on_hover_text("Queues on each end of the ftrx-lab link: as many as the workers of an AF_XDP run (Port settings or Stateful: Workers, backend af_xdp)");
+                    ui.end_row();
                 });
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -212,6 +230,14 @@ mod tests {
         assert_eq!(p.block_tcp, vec![80, 443]);
         assert_eq!(p.delay.as_deref(), Some("5ms"));
         assert_eq!(p.ipv6, Some(true));
+        assert_eq!(p.queues, None);
+        f.queues = "4".into();
+        let p: ferotrx_ctl::protocol::LabStartParams =
+            serde_json::from_value(f.params().unwrap()).unwrap();
+        assert_eq!(p.queues, Some(4));
+        f.queues = "0".into();
+        assert!(f.params().is_err());
+        f.queues.clear();
         f.block_udp = "dns".into();
         assert!(f.params().is_err());
         f.block_udp.clear();
