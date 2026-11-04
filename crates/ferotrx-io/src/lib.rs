@@ -47,7 +47,8 @@ mod port;
 pub use dpdk::{DpdkConfig, DpdkPort, DpdkSink};
 pub use host::{describe_host, describe_interface};
 pub use lab::{
-    lab_unavailable, remove_lab, Lab, LabConfig, LAB_INTERFACE, LAB_NAMESPACE, LAB_ROUTER_MAC,
+    lab_unavailable, remove_lab, Lab, LabConfig, LAB_INTERFACE, LAB_NAMESPACE, LAB_RECEIVER_IP,
+    LAB_RECEIVER_IP6, LAB_RECEIVER_MAC, LAB_ROUTER_MAC,
 };
 pub use port::{interface_mac, open_port, open_port_with, open_receiver, PortSettings};
 #[cfg(feature = "pcap")]

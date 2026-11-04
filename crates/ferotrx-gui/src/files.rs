@@ -30,6 +30,13 @@ pub enum Target {
     FileOut,
     /// A certificate or key in the server form: 0 CA, 1 cert, 2 key.
     Pem(u8),
+    /// A scenario to open in the Scenario tab (on this computer, or on the
+    /// server when it is this computer).
+    OpenScenario,
+    /// Where to save the scenario being edited.
+    SaveScenario,
+    /// Where to save the report of the scenario run shown: JSON, or JUnit XML.
+    ScenarioReport { junit: bool },
 }
 
 /// The kinds of file a dialog lists first.
@@ -38,6 +45,8 @@ pub enum Kind {
     Profile,
     Capture,
     Pem,
+    Report,
+    Junit,
 }
 
 impl Kind {
@@ -46,6 +55,8 @@ impl Kind {
             Kind::Profile => ("Profiles (*.toml)", &["toml"]),
             Kind::Capture => ("Captures (*.pcap, *.pcapng)", &["pcap", "pcapng", "cap"]),
             Kind::Pem => ("PEM files (*.pem, *.crt, *.key)", &["pem", "crt", "key"]),
+            Kind::Report => ("Reports (*.json)", &["json"]),
+            Kind::Junit => ("JUnit XML (*.xml)", &["xml"]),
         }
     }
 }

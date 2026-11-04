@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ferotrx_ctl::protocol::{
-    InterfaceEntry, RunInfo, RxRunInfo, ServerInfo, TcpRunInfo, UdpRunInfo,
+    InterfaceEntry, RunInfo, RxRunInfo, ScenarioRunInfo, ServerInfo, TcpRunInfo, UdpRunInfo,
 };
 use ferotrx_ctl::{Client, ClientError, ClientTls};
 use serde::{Deserialize, Serialize};
@@ -150,6 +150,7 @@ pub struct Snapshot {
     pub tcp: Vec<TcpRunInfo>,
     pub udp: Vec<UdpRunInfo>,
     pub rx: Vec<RxRunInfo>,
+    pub scenarios: Vec<ScenarioRunInfo>,
 }
 
 /// What a worker tells the GUI.
@@ -316,6 +317,7 @@ fn snapshot(c: &mut Client) -> Result<Snapshot, ClientError> {
         tcp: list(c.tcp_runs())?,
         udp: list(c.udp_runs())?,
         rx: list(c.rx_runs())?,
+        scenarios: list(c.scenario_runs())?,
     })
 }
 

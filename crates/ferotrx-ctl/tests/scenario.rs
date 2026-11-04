@@ -201,3 +201,163 @@ fn a_missing_interface_is_an_error_not_a_failure() {
     );
     assert_eq!(report.summary.skipped, 3);
 }
+
+/// A controller whose TCP and UDP ports are the cable of [`runner`].
+fn controller() -> ferotrx_ctl::Controller {
+    let spare: Arc<Mutex<Option<MemoryPort>>> = Arc::default();
+    ferotrx_ctl::Controller::new().with_port_opener(move |name, _| {
+        let mut spare = spare.lock().unwrap();
+        match name {
+            "a" => {
+                let (a, b) = memory_ports();
+                *spare = Some(b);
+                Ok(Box::new(a))
+            }
+            "b" => Ok(Box::new(spare.take().ok_or("open a first")?)),
+            "void" => Ok(Box::new(memory_ports().0)),
+            other => Err(format!("no interface {other}").into()),
+        }
+    })
+}
+
+/// The checks of SCENARIO that run on ports (no traffic check).
+fn port_checks() -> String {
+    SCENARIO
+        .split("\n[[check]]\nname = \"stream\"")
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+fn wait_for(c: &ferotrx_ctl::Controller, id: u64) -> ferotrx_ctl::protocol::ScenarioRunInfo {
+    use serde_json::json;
+    for _ in 0..300 {
+        let v = c.call("scenario.get", json!({ "id": id })).unwrap();
+        let info: ferotrx_ctl::protocol::ScenarioRunInfo = serde_json::from_value(v).unwrap();
+        if !info.state.is_running() {
+            return info;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("scenario run {id} did not end");
+}
+
+#[test]
+fn the_server_runs_scenarios_and_reports_each_check() {
+    use ferotrx_ctl::protocol::{RunState, ScenarioInfo, ScenarioRunInfo};
+    use serde_json::json;
+    let c = controller();
+    let text = port_checks();
+
+    let v = c.call("scenario.check", json!({ "toml": text })).unwrap();
+    let info: ScenarioInfo = serde_json::from_value(v).unwrap();
+    assert_eq!(info.name, "memory-lab");
+    let names: Vec<&str> = info.checks.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["echo", "dns", "telnet blocked"]);
+    assert_eq!(info.checks[2].expect, "blocked");
+    assert!(info.checks[0].conditions.contains(&"cps > 1".to_string()));
+
+    let v = c.call("scenario.start", json!({ "toml": text })).unwrap();
+    let started: ScenarioRunInfo = serde_json::from_value(v).unwrap();
+    assert_eq!(started.state, RunState::Running);
+    let done = wait_for(&c, started.id);
+    assert_eq!(done.state, RunState::Finished);
+    let states: Vec<&str> = done.checks.iter().map(|c| c.state.as_str()).collect();
+    assert_eq!(states, ["pass", "pass", "pass"], "{done:#?}");
+    let report = done.report.as_ref().unwrap();
+    assert!(report.passed());
+    assert_eq!(
+        done.checks[0].report.as_ref().unwrap().metrics["completed"],
+        10.0
+    );
+    assert_eq!(c.scenario_runs().len(), 1);
+
+    // `set` and `only`, as `ferotrx scenario run --set --check`.
+    let v = c
+        .call(
+            "scenario.start",
+            json!({ "toml": text, "set": { "server_iface": "void" }, "only": ["dns"] }),
+        )
+        .unwrap();
+    let id = v["id"].as_u64().unwrap();
+    // The server never answers: stop the run rather than wait for timeouts.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let v = c.call("scenario.stop", json!({ "id": id })).unwrap();
+    let stopped: ScenarioRunInfo = serde_json::from_value(v).unwrap();
+    assert!(!stopped.state.is_running(), "{stopped:#?}");
+    let states: Vec<&str> = stopped.checks.iter().map(|c| c.state.as_str()).collect();
+    assert_eq!(states[0], "skipped");
+    assert_eq!(states[2], "skipped");
+    assert_ne!(states[1], "pass");
+
+    let e = c
+        .call("scenario.start", json!({ "toml": text, "only": ["nope"] }))
+        .unwrap_err();
+    assert!(
+        e.message.contains("no check called 'nope'"),
+        "{}",
+        e.message
+    );
+    c.call("scenario.remove", json!({ "id": id })).unwrap();
+    assert_eq!(c.scenario_runs().len(), 1);
+}
+
+#[test]
+fn scenario_files_stay_inside_the_data_directories() {
+    use ferotrx_ctl::FilePolicy;
+    use serde_json::json;
+    let d = std::env::temp_dir().join(format!("ferotrx-scn-files-{}", std::process::id()));
+    std::fs::create_dir_all(d.join("data")).unwrap();
+    std::fs::write(d.join("secret.toml"), "port = 7\n").unwrap();
+    std::fs::write(d.join("data/echo.toml"), "port = 7\n[[message]]\nfrom = \"client\"\ntext = \"hi\"\n[client]\niface = \"a\"\nip = \"10.9.0.1\"\n[server]\niface = \"b\"\nip = \"10.9.0.2\"\n").unwrap();
+    let c = controller().with_file_policy(FilePolicy::dirs([d.join("data")]).unwrap());
+    let scenario = |file: &str| format!("[[check]]\nname = \"x\"\ntcp = \"{file}\"\n");
+
+    let v = c
+        .call("scenario.check", json!({ "toml": scenario("echo.toml") }))
+        .unwrap();
+    assert_eq!(v["checks"][0]["source"], "echo.toml");
+    let e = c
+        .call(
+            "scenario.check",
+            json!({ "toml": scenario("../secret.toml") }),
+        )
+        .unwrap_err();
+    assert!(e.message.contains("outside"), "{}", e.message);
+    let e = c
+        .call(
+            "scenario.check",
+            json!({ "toml": scenario("echo.toml"), "base_dir": d.display().to_string() }),
+        )
+        .unwrap_err();
+    assert!(e.message.contains("outside"), "{}", e.message);
+    std::fs::write(d.join("data/s.toml"), scenario("echo.toml")).unwrap();
+    let v = c
+        .call("scenario.check", json!({ "path": "s.toml" }))
+        .unwrap();
+    assert_eq!(v["name"], "s");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_scenario_that_names_a_lab_needs_one_or_lab_false() {
+    use serde_json::json;
+    let c = controller();
+    let text = format!("{}\n[lab]\nblock_tcp = [8080]\n", port_checks());
+    let v = c.call("scenario.check", json!({ "toml": text })).unwrap();
+    assert_eq!(v["lab"]["block_tcp"], json!([8080]));
+    // This controller allows no labs.
+    let e = c
+        .call("scenario.start", json!({ "toml": text }))
+        .unwrap_err();
+    assert!(e.message.contains("serve --lab"), "{}", e.message);
+    // On what is there.
+    let v = c
+        .call(
+            "scenario.start",
+            json!({ "toml": text, "lab": false, "only": ["echo"] }),
+        )
+        .unwrap();
+    let done = wait_for(&c, v["id"].as_u64().unwrap());
+    assert!(done.report.unwrap().passed());
+}

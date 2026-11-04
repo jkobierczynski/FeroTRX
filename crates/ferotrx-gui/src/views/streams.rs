@@ -370,6 +370,9 @@ impl FeroApp {
                 }
             }
             Target::FileOut => self.work.file_out = shown,
+            Target::OpenScenario | Target::SaveScenario | Target::ScenarioReport { .. } => {
+                self.scenario_file(target, &path)
+            }
             Target::ReplayPcap(n) => {
                 let Some(port) = self.sel_port.clone().filter(|_| i < self.servers.len()) else {
                     return;

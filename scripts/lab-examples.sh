@@ -3,14 +3,17 @@
 # (`ferotrx serve --lab`, `lab.start`), as the GUI does: a TCP run of
 # examples/lab-tcp.toml, a UDP run of examples/lab-udp-mix.toml and a replay
 # of examples/lab-built-packets.toml (to the router's MAC 02:00:00:00:00:01)
-# on ftrx-lab, then `lab.stop`. Checks that connections complete and that
-# transactions are answered, through NAT, and that the lab is gone after.
+# on ftrx-lab, then examples/lab-scenario.toml as a scenario run on the server
+# (`scenario.start`), then `lab.stop`. Checks that connections complete and
+# that transactions are answered, through NAT, that every check of the
+# scenario passes, and that the lab is gone after.
 #
 # Usage: sudo scripts/lab-examples.sh [path/to/ferotrx]
 # Needs root, ip (iproute2), iptables, jq, and VLAN support (8021q).
 #
 # BLOCK=1 also checks a lab whose router resets TCP to port 80: no
-# connection of lab-tcp.toml may complete.
+# connection of lab-tcp.toml may complete, and the scenario's web check (only
+# that one) fails.
 set -eu
 
 BIN=${1:-}
@@ -97,14 +100,42 @@ routed=$(($(fwd) - before))
 echo "the router sent $routed packets out of rt.20"
 # 50 DNS packets per second from 2 s on, a ping a second: about 100.
 [ "$routed" -ge 60 ] || fail "only $routed replayed packets were routed (router MAC $(ip netns exec ferotrx-lab cat /sys/class/net/ftrxlab-rt/address))"
+# 192.168.20.50 is also the server of lab-tcp.toml: let the router find its
+# emulated MAC again.
+ip netns exec ferotrx-lab ip neigh del 192.168.20.50 dev rt.20 || true
+
+# Waits for a scenario run to end and prints its JSON.
+wait_scenario() { # id
+    i=0
+    while [ "$(ctl call scenario.get "{\"id\": $1}" --json | jq -r .state)" = running ]; do
+        i=$((i + 1))
+        [ $i -lt 1200 ] || { echo "scenario run $1 did not end" >&2; break; }
+        sleep 0.1
+    done
+    ctl call scenario.get "{\"id\": $1}" --json
+}
+
+echo "== scenario: examples/lab-scenario.toml, run by the server on the lab it names"
+id=$(ctl call scenario.start '{"path": "examples/lab-scenario.toml"}' --json | jq .id)
+wait_scenario "$id" >"$tmp/scenario.json"
+jq -r '.checks[] | "  " + .state + "  " + .name + ": " + (.report.summary // "")' "$tmp/scenario.json"
+[ "$(jq -r '.report.summary | "\(.passed)/\(.checks)"' "$tmp/scenario.json")" = 6/6 ] ||
+    fail "lab-scenario.toml: $(jq -c .report.summary "$tmp/scenario.json")"
 
 if [ "${BLOCK:-}" = 1 ]; then
     echo "== lab with TCP port 80 reset"
-    lab '{"block_tcp": [80], "ipv6": false}'
+    lab '{"block_tcp": [80, 8080], "block_udp": [123], "ipv6": false}'
     id=$(ctl call tcp.start '{"path": "examples/lab-tcp.toml", "iface": "ftrx-lab", "connections": 50, "cps": 50}' --json | jq .id)
     wait_run tcp "$id" >"$tmp/tcp.json"
     jq -c '.client | {started, completed, reset, timed_out}' "$tmp/tcp.json"
     [ "$(jq .client.completed "$tmp/tcp.json")" = 0 ] || fail "connections completed through a blocked port"
+    echo "== scenario with TCP port 80 reset: only the web check fails"
+    # On the lab as it is ("lab": false), not the one the scenario names.
+    id=$(ctl call scenario.start '{"path": "examples/lab-scenario.toml", "lab": false}' --json | jq .id)
+    wait_scenario "$id" >"$tmp/scenario.json"
+    jq -r '.checks[] | "  " + .state + "  " + .name' "$tmp/scenario.json"
+    [ "$(jq -r '[.checks[].state] | join(",")' "$tmp/scenario.json")" = fail,pass,pass,pass,pass,pass ] ||
+        fail "lab-scenario.toml with port 80 reset: $(jq -c '[.checks[].state]' "$tmp/scenario.json")"
 fi
 
 echo "== lab.stop"

@@ -2,6 +2,7 @@
 
 mod capture;
 mod lab;
+mod scenario;
 mod stateful;
 mod stats;
 mod streams;
@@ -10,6 +11,7 @@ use eframe::egui::{self, RichText};
 
 pub use capture::CaptureState;
 pub use lab::LabForm;
+pub use scenario::ScenarioState;
 pub use stateful::StatefulState;
 pub use streams::EditorState;
 
@@ -34,6 +36,7 @@ impl FeroApp {
             Tab::Streams => self.streams_tab(ui),
             Tab::Stateful => self.stateful_tab(ui),
             Tab::Capture => self.capture_tab(ui),
+            Tab::Scenario => self.scenario_tab(ui),
             Tab::Charts => self.charts_tab(ui),
         });
         self.dialogs(ctx);
@@ -58,6 +61,11 @@ impl FeroApp {
                     Tab::Capture,
                     "Capture",
                     "Open a capture, look at its packets, edit them",
+                ),
+                (
+                    Tab::Scenario,
+                    "Scenario",
+                    "Checks with expected outcomes, run on the server",
                 ),
                 (Tab::Charts, "Charts", "Rates of the runs over time"),
             ] {

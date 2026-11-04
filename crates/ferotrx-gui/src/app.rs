@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::conn::{ConnSettings, Connection, Event, Request, Snapshot};
 use crate::model::{start_params, PortConfig, PortKind, ProfileDraft};
 use crate::protocols::Registry;
-use crate::views::{CaptureState, EditorState, StatefulState};
+use crate::views::{CaptureState, EditorState, ScenarioState, StatefulState};
 
 const STORAGE_KEY: &str = "ferotrx-gui";
 /// Points kept per run in the rate charts.
@@ -74,6 +74,10 @@ pub enum Pending {
     Lab(String),
     /// `interfaces.list`, after the lab changed the server's links.
     Interfaces,
+    /// `scenario.check` of a file on the server.
+    ScenarioChecked,
+    /// `scenario.start`: show the run.
+    ScenarioStarted,
     /// Any other call: log this on success.
     Done(String),
 }
@@ -181,6 +185,7 @@ pub enum Tab {
     Streams,
     Stateful,
     Capture,
+    Scenario,
     Charts,
 }
 
@@ -210,6 +215,7 @@ pub struct FeroApp {
     pub editor: EditorState,
     pub capture: CaptureState,
     pub stateful: StatefulState,
+    pub scenario: ScenarioState,
     pub log: Vec<LogLine>,
     pub next_tag: u64,
     pub started: Instant,
@@ -233,6 +239,8 @@ pub struct Options {
     pub port: Option<String>,
     /// A profile file to read into that port's streams.
     pub profile: Option<String>,
+    /// A scenario to open in the Scenario tab.
+    pub scenario: Option<String>,
 }
 
 impl FeroApp {
@@ -257,6 +265,7 @@ impl FeroApp {
             editor: EditorState::default(),
             capture: CaptureState::default(),
             stateful: StatefulState::default(),
+            scenario: ScenarioState::default(),
             log: Vec::new(),
             next_tag: 1,
             started: Instant::now(),
@@ -327,6 +336,12 @@ impl FeroApp {
                 }
                 Err(e) => app.error(&key, format!("{path}: {e}")),
             }
+        }
+        if let Some(path) = &opts.scenario {
+            if let Err(e) = app.scenario.open(path) {
+                app.error("", e);
+            }
+            app.tab = Tab::Scenario;
         }
         if let Some(path) = opts.capture {
             app.capture.path = path;
@@ -558,6 +573,32 @@ impl FeroApp {
                         self.error(&name, format!("{what} failed: {e}"));
                     }
                     (Pending::Done(what), Ok(_)) => self.info(&name, what),
+                    (Pending::ScenarioChecked, Ok(v)) => {
+                        self.scenario.checked = Some(
+                            serde_json::from_value::<ferotrx_ctl::protocol::ScenarioInfo>(v)
+                                .map_err(|e| e.to_string()),
+                        );
+                    }
+                    (Pending::ScenarioChecked, Err(e)) => {
+                        self.scenario.checked = Some(Err(e.to_string()));
+                    }
+                    (Pending::ScenarioStarted, Ok(v)) => {
+                        match serde_json::from_value::<ferotrx_ctl::protocol::ScenarioRunInfo>(v) {
+                            Ok(r) => {
+                                self.scenario.run = Some(r.id);
+                                let s = &mut self.servers[i];
+                                s.snap.scenarios.retain(|x| x.id != r.id);
+                                s.snap.scenarios.push(r.clone());
+                                self.info(
+                                    &name,
+                                    format!("scenario {} started as run {}", r.scenario, r.id),
+                                );
+                                // It may have built the lab router.
+                                self.call(i, "lab.get", Value::Null, Pending::Lab(String::new()));
+                            }
+                            Err(e) => self.error(&name, format!("scenario.start: {e}")),
+                        }
+                    }
                     (p, Err(e)) => {
                         let what = match p {
                             Pending::LoadThenStart { port, .. } | Pending::Checked { port } => {
@@ -568,6 +609,9 @@ impl FeroApp {
                                 format!("{what} failed: {e}")
                             }
                             Pending::Interfaces => format!("interfaces.list: {e}"),
+                            Pending::ScenarioChecked | Pending::ScenarioStarted => {
+                                format!("scenario: {e}")
+                            }
                         };
                         self.error(&name, what);
                     }

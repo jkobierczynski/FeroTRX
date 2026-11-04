@@ -1,12 +1,12 @@
 //! Running scenario checks on real interfaces: [`LabRunner`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use ferotrx_core::scenario::{
-    tcp_metrics, tcp_summary, traffic_metrics, traffic_summary, udp_metrics, udp_summary, Check,
-    CheckRun, CheckRunner, Workload,
+    run_scenario, tcp_metrics, tcp_summary, traffic_metrics, traffic_summary, udp_metrics,
+    udp_summary, Check, CheckRun, CheckRunner, Progress, RunOptions, Scenario, Workload,
 };
 use ferotrx_core::{
     Job, PacketPort, PacketReceiver, PacketSink, Profile, RunConfig, RxSettings, SendSettings,
@@ -14,6 +14,7 @@ use ferotrx_core::{
 };
 
 use crate::controller::ReceiverOpener;
+use crate::protocol::{RunState, ScenarioCheckInfo, ScenarioInfo, ScenarioRunInfo};
 use crate::tcp::{start_tcp_with, PortOpener};
 use crate::udp::start_udp_with;
 
@@ -264,4 +265,183 @@ impl CheckRunner for LabRunner {
             Workload::Traffic(p) => self.traffic(check, p, stop),
         }
     }
+}
+
+/// What `scenario.check` and a scenario run show of a check.
+pub fn check_info(c: &Check) -> ScenarioCheckInfo {
+    ScenarioCheckInfo {
+        name: c.name.clone(),
+        kind: c.kind().as_str().into(),
+        description: c.description.clone(),
+        source: c.source.clone(),
+        expect: c.expect.as_str().into(),
+        conditions: c.conditions().into_iter().map(|c| c.text).collect(),
+        attempts: c.attempts,
+        iface: c.iface.clone(),
+        rx: c.rx.clone(),
+        ..Default::default()
+    }
+}
+
+/// What `scenario.check` answers.
+pub fn scenario_info(s: &Scenario) -> ScenarioInfo {
+    ScenarioInfo {
+        name: s.name.clone(),
+        description: s.description.clone(),
+        vars: s.vars.clone(),
+        checks: s.checks.iter().map(check_info).collect(),
+        lab: s.lab.clone(),
+    }
+}
+
+/// A scenario running on a thread of its own, for `scenario.*`.
+pub(crate) struct ScenarioRun {
+    info: Mutex<ScenarioRunInfo>,
+    stop: Arc<AtomicBool>,
+    started: Instant,
+    ended: (Mutex<bool>, Condvar),
+}
+
+impl ScenarioRun {
+    /// Starts running `scenario` with `runner`: the checks named in `only`,
+    /// or all.
+    pub fn spawn(
+        id: u64,
+        scenario: Scenario,
+        only: Vec<String>,
+        runner: LabRunner,
+    ) -> std::io::Result<Arc<Self>> {
+        let checks = scenario
+            .checks
+            .iter()
+            .map(|c| {
+                let mut i = check_info(c);
+                i.state = if only.is_empty() || only.contains(&c.name) {
+                    "waiting".into()
+                } else {
+                    "skipped".into()
+                };
+                i
+            })
+            .collect();
+        let run = Arc::new(ScenarioRun {
+            info: Mutex::new(ScenarioRunInfo {
+                id,
+                scenario: scenario.name.clone(),
+                description: scenario.description.clone(),
+                file: scenario.path.as_ref().map(|p| p.display().to_string()),
+                state: RunState::Running,
+                elapsed_s: 0.0,
+                checks,
+                report: None,
+                error: None,
+            }),
+            stop: Arc::new(AtomicBool::new(false)),
+            started: Instant::now(),
+            ended: (Mutex::new(false), Condvar::new()),
+        });
+        let r = run.clone();
+        std::thread::Builder::new()
+            .name(format!("scenario-{id}"))
+            .spawn(move || r.main(scenario, only, runner))?;
+        Ok(run)
+    }
+
+    fn main(self: Arc<Self>, scenario: Scenario, only: Vec<String>, runner: LabRunner) {
+        let me = self.clone();
+        let mut runner = runner.with_progress(move |check, line| {
+            me.update(&check.name, |c| c.progress = line.to_string());
+        });
+        let me = self.clone();
+        let mut progress = move |p: Progress<'_>| match p {
+            Progress::Starting { check, attempt } => me.update(&check.name, |c| {
+                c.state = "running".into();
+                c.attempt = attempt;
+                c.progress.clear();
+            }),
+            Progress::Finished(r) => me.update(&r.name, |c| {
+                c.state = r.verdict.as_str().into();
+                c.attempt = r.attempts;
+                c.progress.clear();
+                c.report = Some(r.clone());
+            }),
+        };
+        let stop = self.stop.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_scenario(
+                &scenario,
+                &mut runner,
+                RunOptions {
+                    only,
+                    stop,
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    progress: Some(&mut progress),
+                },
+            )
+        }));
+        {
+            let mut info = lock(&self.info);
+            info.elapsed_s = self.started.elapsed().as_secs_f64();
+            match result {
+                Ok(report) => {
+                    info.state = if report.stopped {
+                        RunState::Stopped
+                    } else {
+                        RunState::Finished
+                    };
+                    info.report = Some(report);
+                }
+                Err(e) => {
+                    info.state = RunState::Failed;
+                    info.error = Some(
+                        e.downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "the scenario runner panicked".into()),
+                    );
+                }
+            }
+        }
+        *lock(&self.ended.0) = true;
+        self.ended.1.notify_all();
+    }
+
+    fn update(&self, check: &str, f: impl FnOnce(&mut ScenarioCheckInfo)) {
+        let mut info = lock(&self.info);
+        if let Some(c) = info.checks.iter_mut().find(|c| c.name == check) {
+            f(c);
+        }
+    }
+
+    pub fn info(&self) -> ScenarioRunInfo {
+        let mut info = lock(&self.info).clone();
+        if info.state.is_running() {
+            info.elapsed_s = self.started.elapsed().as_secs_f64();
+        }
+        info
+    }
+
+    pub fn is_running(&self) -> bool {
+        !*lock(&self.ended.0)
+    }
+
+    /// Asks the run to stop: the running check ends, the rest are skipped.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Waits up to `timeout` for the run to end; true if it has.
+    pub fn wait(&self, timeout: Duration) -> bool {
+        let ended = lock(&self.ended.0);
+        let (ended, _) = self
+            .ended
+            .1
+            .wait_timeout_while(ended, timeout, |e| !*e)
+            .unwrap_or_else(|e| e.into_inner());
+        *ended
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
