@@ -399,6 +399,7 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
         match &mut t.source {
             TcpSource::Pcap { flow, .. } => *flow = Some(n - 1),
             TcpSource::Program(_) => bail!("--flow needs a capture, not [[message]] tables"),
+            TcpSource::App(a) => bail!("--flow needs a capture, not app = \"{}\"", a.name()),
         }
     }
     args.hosts.apply(
@@ -456,7 +457,10 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
             if many {
                 println!("{}:", template_line(t, i));
             }
-            show(&t.program()?);
+            match t.app() {
+                Some(a) => println!("{}", a.describe()),
+                None => show(&t.program()?),
+            }
         }
         return Ok(());
     }
@@ -542,6 +546,9 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
     let failed = stats.client.failed() + stats.server.failed();
     let mismatched = stats.client.mismatched + stats.server.mismatched;
     if failed + mismatched > 0 {
+        if profile.templates.iter().any(|t| t.app().is_some()) {
+            bail!("{failed} connections failed, {mismatched} failed the protocol's checks or carried other bytes than the capture");
+        }
         bail!("{failed} connections failed, {mismatched} carried other bytes than the capture");
     }
     Ok(())
@@ -630,10 +637,15 @@ fn side_line(c: &TcpCounters) -> String {
     if c.active > 0 {
         line.push_str(&format!(", {} open", c.active));
     }
+    let mismatched = if c.app.is_some() {
+        "failed the protocol's checks"
+    } else {
+        "with other bytes than the capture"
+    };
     for (n, what) in [
         (c.reset, "reset"),
         (c.timed_out, "timed out"),
-        (c.mismatched, "with other bytes than the capture"),
+        (c.mismatched, mismatched),
     ] {
         if n > 0 {
             line.push_str(&format!(", {n} {what}"));
@@ -654,6 +666,17 @@ fn side_line(c: &TcpCounters) -> String {
     }
     if c.max_in_flight > 0 {
         line.push_str(&format!("; at most {} bytes in flight", c.max_in_flight));
+    }
+    if let Some(a) = &c.app {
+        line.push_str(&format!(
+            "; {} transactions ({}), {} failed",
+            a.transactions,
+            crate::udp::codes_line(a),
+            a.failed
+        ));
+        if let Some(r) = &a.response_time {
+            line.push_str(&format!("; {}", crate::udp::response_line(r)));
+        }
     }
     line
 }

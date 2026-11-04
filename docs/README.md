@@ -27,6 +27,9 @@ The [README](../README.md) has the overview and a quickstart.
   Engine internals: [The stateful TCP engine](tcp-engine.md).
 * [Stateful UDP and DNS](stateful-udp.md): `ferotrx udp`, DNS, NTP and UDP
   sessions. Engine internals: [The stateful UDP engine](udp-engine.md).
+* [Application protocols](app-protocols.md): HTTP/1.1 clients and servers,
+  DNS over UDP and TCP, NTP, as `app = "..."` in TCP and UDP profiles;
+  writing your own.
 * [Host emulation](host-emulation.md): `ferotrx host`, DHCP, SLAAC, DHCPv6,
   IGMP/MLD, router advertisements.
 * [TCP and UDP over AF_XDP and DPDK](fast-ports.md).

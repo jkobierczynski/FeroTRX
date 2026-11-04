@@ -394,6 +394,27 @@ class HostInfo(Record):
     groups: list[HostGroupInfo] = field(default_factory=list)
 
 
+# ----- application protocols -----
+
+
+@dataclass(kw_only=True)
+class AppCounters(Record):
+    """What an application protocol counted on one side (HTTP, DNS, NTP)."""
+
+    #: Requests answered (client), answers sent (server).
+    transactions: int = 0
+    #: Transactions that did not go as expected (status, response code).
+    failed: int = 0
+    #: Transactions answered with an error status or code (HTTP 4xx/5xx, NXDOMAIN).
+    errors: int = 0
+    #: Things the other end sent that the protocol could not take.
+    protocol_errors: int = 0
+    #: Transactions by status or response code, e.g. ``{"200": 98, "404": 2}``.
+    codes: dict[str, int] = field(default_factory=dict)
+    #: Client: from each request to its whole answer.
+    response_time: LatencyCounters | None = None
+
+
 # ----- tcp.* -----
 
 
@@ -417,6 +438,8 @@ class TcpCounters(Record):
     paws_dropped: int = 0
     #: Most bytes one connection had in flight at once.
     max_in_flight: int = 0
+    #: What the application protocol counted, for templates that play one.
+    app: AppCounters | None = None
 
 
 @dataclass(kw_only=True)
@@ -491,6 +514,8 @@ class UdpCounters(Record):
     payload_rx: int = 0
     #: Client: from each request to its answer.
     response_time: LatencyCounters | None = None
+    #: What the application protocol counted (DNS, NTP), by response code.
+    app: AppCounters | None = None
 
 
 @dataclass(kw_only=True)

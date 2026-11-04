@@ -381,6 +381,7 @@ impl MergeStats for TcpSideStats {
         self.timeouts += o.timeouts;
         self.paws_dropped += o.paws_dropped;
         self.max_in_flight = self.max_in_flight.max(o.max_in_flight);
+        self.app.merge(&o.app);
     }
 }
 
@@ -426,6 +427,7 @@ impl MergeStats for UdpSideStats {
         self.payload_tx += o.payload_tx;
         self.payload_rx += o.payload_rx;
         self.response_time.merge(&o.response_time);
+        self.app.merge(&o.app);
     }
 }
 

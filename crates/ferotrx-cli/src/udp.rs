@@ -185,7 +185,10 @@ fn show(app: &UdpApp) {
                 );
             }
         }
-        UdpApp::Dns(w) => {
+        UdpApp::App(_) => {
+            let Some(w) = app.dns_workload() else {
+                return;
+            };
             for q in &w.queries {
                 println!("  query  {q}");
             }
@@ -196,7 +199,6 @@ fn show(app: &UdpApp) {
                 println!("  error  {n} {r}");
             }
         }
-        UdpApp::Ntp => {}
     }
 }
 
@@ -477,7 +479,7 @@ fn ms(us: Option<f64>) -> String {
     us.map_or("-".into(), |u| format!("{:.2}", u / 1000.0))
 }
 
-fn response_line(r: &LatencyCounters) -> String {
+pub(crate) fn response_line(r: &LatencyCounters) -> String {
     format!(
         "response time ms min {} avg {} p50 {} p99 {} max {}",
         ms(r.min_us),
@@ -511,6 +513,21 @@ fn side_line(c: &UdpCounters) -> String {
     ));
     if let Some(r) = &c.response_time {
         line.push_str(&format!("; {}", response_line(r)));
+    }
+    if let Some(a) = &c.app {
+        line.push_str(&format!("; {}", codes_line(a)));
+    }
+    line
+}
+
+/// Transactions by status or response code: `NOERROR x40, NXDOMAIN x2`.
+pub(crate) fn codes_line(a: &ferotrx_ctl::protocol::AppCounters) -> String {
+    let mut v: Vec<(&String, &u64)> = a.codes.iter().collect();
+    v.sort_by(|x, y| y.1.cmp(x.1).then(x.0.cmp(y.0)));
+    let codes: Vec<String> = v.iter().map(|(k, n)| format!("{k} x{n}")).collect();
+    let mut line = codes.join(", ");
+    if a.protocol_errors > 0 {
+        line.push_str(&format!(", {} protocol errors", a.protocol_errors));
     }
     line
 }

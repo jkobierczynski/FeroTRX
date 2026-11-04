@@ -36,6 +36,13 @@ pub fn tcp_metrics(s: &TcpStats) -> Metrics {
     put(&mut m, "server_completed", sv.completed as f64);
     put(&mut m, "server_failed", sv.failed() as f64);
     put(&mut m, "server_mismatched", sv.mismatched as f64);
+    let a = &c.app;
+    put(&mut m, "app_transactions", a.transactions as f64);
+    put(&mut m, "app_failed", a.failed as f64);
+    put(&mut m, "app_failed_pct", pct(a.failed, a.transactions));
+    put(&mut m, "app_errors", a.errors as f64);
+    put(&mut m, "protocol_errors", a.protocol_errors as f64);
+    latency_metrics(&mut m, "response", &a.response_time);
     m
 }
 

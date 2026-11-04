@@ -15,9 +15,10 @@ use std::time::Duration;
 use super::hosts::{self, Host, MAX_HOPS};
 use super::program::{TcpProgram, TcpRole};
 use super::wire::{self, Path, Segment, TcpHeader, TcpOpts, ACK, FIN, PSH, RST, SYN};
+use crate::app::{App, AppCx, AppRole, AppSession, Receive, SessionInit, Transport};
 use crate::net::{ETHERTYPE_IPV4, ETHERTYPE_IPV6, IPPROTO_ICMPV6};
 use crate::traffic::EventClock;
-use crate::{Error, MacAddr, Result, TrafficModel};
+use crate::{AppStats, Error, MacAddr, Result, TrafficModel};
 
 /// An address as a number, for address ranges of either IP version.
 pub(crate) fn ip_num(ip: IpAddr) -> u128 {
@@ -221,7 +222,12 @@ impl TcpEndpoint {
 pub struct TcpTemplate {
     /// A short name for reports, e.g. `http`.
     pub name: String,
+    /// What a connection replays, unless the template plays `app`.
     pub program: Arc<TcpProgram>,
+    /// An application protocol (see [`crate::app`]) that plays the
+    /// connections instead of `program`: both ends react to what the other
+    /// sends, as HTTP or DNS over TCP does.
+    pub app: Option<App>,
     /// Where clients connect: the first server address, and the port. Behind
     /// a port forward, the router's address and the forwarded port. Of the
     /// client's IP version.
@@ -255,6 +261,7 @@ impl TcpTemplate {
         Self {
             name: "default".into(),
             program,
+            app: None,
             connect,
             connect_ips: 1,
             listen_port: connect.port(),
@@ -263,6 +270,26 @@ impl TcpTemplate {
             model: TrafficModel::default(),
             connections: 0,
             concurrency: 0,
+        }
+    }
+
+    /// A template whose connections play application protocol `app`
+    /// (see [`crate::app`]), connecting to `connect` and listening on its port.
+    pub fn with_app_protocol(app: App, connect: SocketAddr) -> Self {
+        let mut t = Self::new(
+            Arc::new(TcpProgram::new(connect.port(), Vec::new())),
+            connect,
+        );
+        t.name = app.name().to_string();
+        t.app = Some(app);
+        t
+    }
+
+    /// What the template plays, in a line.
+    pub fn describe(&self) -> String {
+        match &self.app {
+            Some(a) => a.describe(),
+            None => self.program.to_string(),
         }
     }
 
@@ -504,7 +531,7 @@ pub struct TcpConfig {
 }
 
 /// Counters of one side.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TcpSideStats {
     /// Connections opened (client: SYN sent; server: SYN accepted).
     pub started: u64,
@@ -534,6 +561,9 @@ pub struct TcpSideStats {
     pub paws_dropped: u64,
     /// Most bytes one connection had in flight, unacknowledged, at once.
     pub max_in_flight: u64,
+    /// What the application protocol counted, for templates that play one:
+    /// requests and answers by status, failures, response times.
+    pub app: AppStats,
 }
 
 impl TcpSideStats {
@@ -544,7 +574,7 @@ impl TcpSideStats {
 }
 
 /// Counters of one template in a TCP run.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TcpTemplateStats {
     pub name: String,
     pub client: TcpSideStats,
@@ -600,6 +630,8 @@ struct Shared {
     streams: [Vec<u8>; 2],
     closer: TcpRole,
     options: TcpOptions,
+    /// The application protocol that plays instead of the program.
+    app: Option<App>,
 }
 
 fn idx(role: TcpRole) -> usize {
@@ -610,7 +642,17 @@ fn idx(role: TcpRole) -> usize {
 }
 
 impl Shared {
-    fn new(program: &TcpProgram, options: TcpOptions) -> Self {
+    fn new(t: &TcpTemplate, options: TcpOptions) -> Self {
+        let program = &*t.program;
+        if let Some(app) = &t.app {
+            return Shared {
+                actions: [Vec::new(), Vec::new()],
+                streams: [Vec::new(), Vec::new()],
+                closer: TcpRole::Client,
+                options,
+                app: Some(app.clone()),
+            };
+        }
         let mut actions = [Vec::new(), Vec::new()];
         let mut offsets = [0usize, 0usize];
         let mut previous: Option<TcpRole> = None;
@@ -638,6 +680,7 @@ impl Shared {
             ],
             closer: program.closer,
             options,
+            app: None,
         }
     }
 }
@@ -738,6 +781,16 @@ struct Conn {
     /// The earliest time this connection is queued for in the engine's
     /// timers (`Duration::MAX`: not queued).
     scheduled: Duration,
+
+    /// The application protocol's session, for templates that play one.
+    app: Option<Box<dyn AppSession>>,
+    /// Out-of-order segments' bytes, kept for the session: (sequence
+    /// number, data). Only with `app`.
+    app_ooo: Vec<(u32, Vec<u8>)>,
+    /// The session was told the other end closed.
+    app_told_closed: bool,
+    /// The session asked to close.
+    app_close: bool,
 }
 
 type Key = (SocketAddr, SocketAddr);
@@ -880,6 +933,10 @@ impl Conn {
             last_rx: now,
             counted: false,
             scheduled: Duration::MAX,
+            app: None,
+            app_ooo: Vec::new(),
+            app_told_closed: false,
+            app_close: false,
         }
     }
 
@@ -1022,8 +1079,72 @@ impl Conn {
         out.segment(self.port, &self.path, &h, &data);
     }
 
+    /// Calls the application session with `f` and does what it asks:
+    /// queues what it sends, keeps its timer, counts its transactions.
+    fn app_call(
+        &mut self,
+        out: &mut Out,
+        now: Duration,
+        f: impl FnOnce(&mut dyn AppSession, &mut AppCx),
+    ) {
+        let Some(mut app) = self.app.take() else {
+            return;
+        };
+        let mut cx = AppCx::new(now, now);
+        f(&mut *app, &mut cx);
+        self.app = Some(app);
+        let mut n = 0u64;
+        for d in cx.take_sends() {
+            n += d.len() as u64;
+            self.snd_buf.extend(&d);
+        }
+        if let Some(w) = cx.wake() {
+            self.hold = Some(w);
+        }
+        self.app_close |= cx.wants_close();
+        self.mismatched |= !cx.all_ok();
+        let (role, tpl) = (self.role, self.tpl);
+        out.add(role, tpl, |s| {
+            s.payload_tx += n;
+            cx.count_into(&mut s.app);
+        });
+    }
+
+    /// Hands bytes that arrived in order to the application session.
+    fn app_receive(&mut self, out: &mut Out, data: &[u8], now: Duration) {
+        if data.is_empty() || self.fin_queued {
+            return;
+        }
+        self.app_call(out, now, |a, cx| {
+            if a.receive(data, cx) == Receive::NotMine {
+                cx.protocol_error("bytes the protocol does not take");
+                cx.close();
+            }
+        });
+    }
+
+    /// The application session's part of `advance`: its timer, the other
+    /// end's FIN, and our FIN once it is done.
+    fn advance_app(&mut self, out: &mut Out, now: Duration) {
+        if self.hold.is_some_and(|t| now >= t) {
+            self.hold = None;
+            self.app_call(out, now, |a, cx| a.timer(cx));
+        }
+        if self.fin_rcvd && !self.app_told_closed {
+            self.app_told_closed = true;
+            self.app_call(out, now, |a, cx| a.peer_closed(cx));
+        }
+        if !self.fin_queued && (self.app_close || (self.fin_rcvd && self.hold.is_none())) {
+            self.fin_queued = true;
+        }
+    }
+
     /// Plays the program as far as it can go now.
     fn advance(&mut self, sh: &Shared, out: &mut Out, now: Duration) {
+        if self.app.is_some() {
+            self.advance_app(out, now);
+            return;
+        }
         let me = idx(self.role);
         loop {
             match sh.actions[me].get(self.step) {
@@ -1379,7 +1500,7 @@ impl Conn {
         if seg.has(ACK) {
             self.on_ack(o, out, seg, now);
         }
-        self.on_data(sh, out, seg);
+        self.on_data(sh, out, seg, now);
         self.advance(sh, out, now);
         self.transmit(o, out, now);
         self.check_closed(o, out, now)
@@ -1395,6 +1516,7 @@ impl Conn {
         self.deadline = None;
         self.last_rx = now;
         out.add(self.role, self.tpl, |s| s.established += 1);
+        self.app_call(out, now, |a, cx| a.start(cx));
     }
 
     fn on_ack(&mut self, o: &TcpOptions, out: &mut Out, seg: &Segment, now: Duration) {
@@ -1534,7 +1656,7 @@ impl Conn {
     }
 
     /// Takes the data and FIN of a segment, in order or not.
-    fn on_data(&mut self, sh: &Shared, out: &mut Out, seg: &Segment) {
+    fn on_data(&mut self, sh: &Shared, out: &mut Out, seg: &Segment, now: Duration) {
         let len = seg.data.len();
         if len > 0 {
             if !self.fin_rcvd {
@@ -1552,10 +1674,22 @@ impl Conn {
                     self.verify_at(sh, self.rx_total, data);
                     self.deliver(out, data.len());
                     self.rcv_nxt = end;
-                    self.take_ooo(out);
+                    if self.app.is_some() {
+                        self.app_receive(out, data, now);
+                    }
+                    self.take_ooo(out, now);
                 } else if wire::seq_lt(self.rcv_nxt, seq) && wire::seq_lt(seq, end) {
                     let at = span(self.irs.wrapping_add(1), seq);
                     self.verify_at(sh, at, &seg.data[..span(seq, end)]);
+                    if self.app.is_some()
+                        && !self
+                            .app_ooo
+                            .iter()
+                            .any(|(s, d)| *s == seq && d.len() >= span(seq, end))
+                    {
+                        self.app_ooo
+                            .push((seq, seg.data[..span(seq, end)].to_vec()));
+                    }
                     add_range(&mut self.ooo, self.rcv_nxt, seq, end);
                     self.ooo.truncate(MAX_OOO);
                     self.ooo_last = seq;
@@ -1577,15 +1711,20 @@ impl Conn {
     }
 
     /// Takes the out-of-order ranges the in-order data has reached.
-    fn take_ooo(&mut self, out: &mut Out) {
+    fn take_ooo(&mut self, out: &mut Out, now: Duration) {
         while let Some(&(l, r)) = self.ooo.first() {
             if wire::seq_lt(self.rcv_nxt, l) {
                 break;
             }
             self.ooo.remove(0);
             if wire::seq_lt(self.rcv_nxt, r) {
-                self.deliver(out, span(self.rcv_nxt, r));
+                let from = self.rcv_nxt;
+                self.deliver(out, span(from, r));
                 self.rcv_nxt = r;
+                if self.app.is_some() {
+                    let data = self.ooo_bytes(from, r);
+                    self.app_receive(out, &data, now);
+                }
             }
         }
         if self.fin_pending == Some(self.rcv_nxt) {
@@ -1593,16 +1732,35 @@ impl Conn {
         }
     }
 
+    /// The kept out-of-order bytes from `from` to `to`, for the application
+    /// session; forgets those before `to`.
+    fn ooo_bytes(&mut self, from: u32, to: u32) -> Vec<u8> {
+        let mut v = vec![0u8; span(from, to)];
+        for (seq, d) in &self.app_ooo {
+            let end = seq.wrapping_add(d.len() as u32);
+            let lo = if wire::seq_lt(*seq, from) { from } else { *seq };
+            let hi = if wire::seq_lt(to, end) { to } else { end };
+            if wire::seq_lt(lo, hi) {
+                let (src, dst, n) = (span(*seq, lo), span(from, lo), span(lo, hi));
+                v[dst..dst + n].copy_from_slice(&d[src..src + n]);
+            }
+        }
+        self.app_ooo
+            .retain(|(seq, d)| wire::seq_lt(to, seq.wrapping_add(d.len() as u32)));
+        v
+    }
+
     fn take_fin(&mut self) {
         self.fin_rcvd = true;
         self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
         self.fin_pending = None;
         self.ooo.clear();
+        self.app_ooo.clear();
     }
 
     /// Checks received bytes at offset `at` of the other end's stream.
     fn verify_at(&mut self, sh: &Shared, at: usize, data: &[u8]) {
-        if sh.options.verify && !self.mismatched {
+        if sh.options.verify && !self.mismatched && sh.app.is_none() {
             let expected = &sh.streams[idx(self.role.peer())];
             if expected.get(at..at + data.len()) != Some(data) {
                 self.mismatched = true;
@@ -1829,6 +1987,22 @@ impl TcpEngine {
             if client.is_some() && t.connect.port() == 0 {
                 return Err(Error::Tcp(format!("{what}: connect to port 0")));
             }
+            if let Some(app) = &t.app {
+                let check = |role| {
+                    app.validate(role, Transport::Stream).map_err(|e| {
+                        Error::Tcp(format!(
+                            "{what}: {}",
+                            e.to_string().trim_start_matches("profile: ")
+                        ))
+                    })
+                };
+                if server.is_some() {
+                    check(AppRole::Server)?;
+                }
+                if client.is_some() && t.weight > 0 {
+                    check(AppRole::Client)?;
+                }
+            }
             if server.is_some() {
                 if let Some(j) = listen.insert(t.listen_port, i) {
                     return Err(Error::Tcp(format!(
@@ -1900,7 +2074,7 @@ impl TcpEngine {
         let seed = options.seed | 1;
         let shared: Vec<Shared> = templates
             .iter()
-            .map(|t| Shared::new(&t.program, options.clone()))
+            .map(|t| Shared::new(t, options.clone()))
             .collect();
         let stats = TcpStats {
             templates: templates
@@ -2127,6 +2301,17 @@ impl TcpEngine {
                 now,
             );
             conn.negotiate(seg);
+            if let Some(app) = &shared[tpl].app {
+                let index = out.stats.templates.get(tpl).map_or(0, |t| t.server.started);
+                conn.app = Some(app.session(&SessionInit {
+                    role: AppRole::Server,
+                    transport: Transport::Stream,
+                    index,
+                    seed: u64::from(iss) << 32 | u64::from(ts_offset),
+                    local: key.0,
+                    remote: key.1,
+                }));
+            }
             conn.send_syn(opts, &mut out, now);
             out.add(role, tpl, |s| {
                 s.started += 1;
@@ -2400,6 +2585,16 @@ impl TcpEngine {
             opts,
             now,
         );
+        if let Some(app) = &self.shared[tpl].app {
+            conn.app = Some(app.session(&SessionInit {
+                role: AppRole::Client,
+                transport: Transport::Stream,
+                index: self.opened[tpl] - 1,
+                seed: u64::from(iss) << 32 | u64::from(ts_offset),
+                local: key.0,
+                remote: connect,
+            }));
+        }
         let mut out = Out {
             frames: &mut self.out,
             ip_id: &mut self.ip_id,

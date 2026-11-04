@@ -144,6 +144,7 @@ impl UdpTemplateSpec {
             UdpSource::Program(_) => format!("t{}", index + 1),
             UdpSource::Dns { .. } => "dns".into(),
             UdpSource::Ntp => "ntp".into(),
+            UdpSource::App(a) => a.name().to_string(),
         }
     }
 
@@ -172,9 +173,10 @@ impl UdpTemplateSpec {
                 if pcap.is_some() && !extra.recursion_desired {
                     w.recursion_desired = false;
                 }
-                UdpApp::Dns(Arc::new(w))
+                UdpApp::dns(Arc::new(w))
             }
-            UdpSource::Ntp => UdpApp::Ntp,
+            UdpSource::Ntp => UdpApp::ntp(),
+            UdpSource::App(a) => UdpApp::App(a.clone()),
         })
     }
 }
@@ -197,6 +199,8 @@ pub enum UdpSource {
         extra: DnsWorkload,
     },
     Ntp,
+    /// Another application protocol (`app = "NAME"` and its `[NAME]` table).
+    App(crate::App),
 }
 
 impl std::fmt::Display for UdpSource {
@@ -211,6 +215,7 @@ impl std::fmt::Display for UdpSource {
             UdpSource::Dns { pcap: Some(p), .. } => write!(f, "DNS from {}", p.display()),
             UdpSource::Dns { pcap: None, extra } => write!(f, "{extra}"),
             UdpSource::Ntp => f.write_str("NTP"),
+            UdpSource::App(a) => write!(f, "{}", a.describe()),
         }
     }
 }
@@ -419,6 +424,25 @@ impl RawWhat {
     }
 }
 
+/// The protocol from the registry, if the table had one (then it takes no
+/// other settings of what to play but `port`), else what the table says.
+fn app_or(app: Option<crate::App>, what: RawWhat, base_dir: &Path) -> Result<UdpSource> {
+    let Some(app) = app else {
+        return what.source(base_dir);
+    };
+    let rest = RawWhat { port: None, ..what };
+    if !rest.is_empty() {
+        return Err(Error::Profile(format!(
+            "app = \"{}\" takes its settings from its [{}] table, not `pcap`, \
+             [[message]], `queries` or `records`",
+            app.name(),
+            app.name()
+        )));
+    }
+    app.validate(crate::app::AppRole::Server, crate::Transport::Datagram)?;
+    Ok(UdpSource::App(app))
+}
+
 impl UdpProfile {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -428,7 +452,24 @@ impl UdpProfile {
 
     /// Parses a profile; `pcap` paths are relative to `base_dir`.
     pub fn from_toml(text: &str, base_dir: &Path) -> Result<Self> {
-        let raw: RawProfile = toml::from_str(text).map_err(|e| Error::Profile(e.to_string()))?;
+        Self::from_toml_with(text, base_dir, &crate::app::AppRegistry::builtin())
+    }
+
+    /// Parses a profile whose `app = "..."` names, besides `replay` and the
+    /// built-in `dns` and `ntp`, come from `registry` with their `[NAME]`
+    /// tables (see [`AppRegistry`](crate::app::AppRegistry)). `dns` with a
+    /// `[dns]` table is read from the registry too.
+    pub fn from_toml_with(
+        text: &str,
+        base_dir: &Path,
+        registry: &crate::app::AppRegistry,
+    ) -> Result<Self> {
+        let mut doc = crate::app::document(text)?;
+        let own = |name: &str, table: bool| {
+            name == "replay" || (!table && (name == "dns" || name == "ntp"))
+        };
+        let apps = crate::app::take_apps(&mut doc, registry, base_dir, own)?;
+        let raw: RawProfile = apps.raw(text, doc)?;
         check_format(raw.format)?;
         let model = parse_model(raw.model.as_deref(), &raw.shape)
             .map_err(|e| Error::Profile(e.to_string()))?;
@@ -445,9 +486,9 @@ impl UdpProfile {
         let mut top_port = None;
         let templates = if raw.template.is_empty() {
             top_port = top.port;
-            vec![UdpTemplateSpec::new(top.source(base_dir)?)]
+            vec![UdpTemplateSpec::new(app_or(apps.top, top, base_dir)?)]
         } else {
-            if !top.is_empty() {
+            if !top.is_empty() || apps.top.is_some() {
                 return Err(Error::Profile(
                     "give what to play at the top, or [[template]] tables, not both".into(),
                 ));
@@ -471,7 +512,8 @@ impl UdpProfile {
                 };
                 out.push(UdpTemplateSpec {
                     name: t.name,
-                    source: what.source(base_dir).map_err(ctx)?,
+                    source: app_or(apps.templates.get(i).cloned().flatten(), what, base_dir)
+                        .map_err(ctx)?,
                     weight: t.weight.unwrap_or(1),
                     port: t.port,
                     connect: t
@@ -745,7 +787,7 @@ mod tests {
         assert_eq!(p.options.timeout, Duration::from_millis(300));
         assert_eq!(p.options.retries, 4);
         let apps = p.apps().unwrap();
-        let UdpApp::Dns(w) = &apps[0] else {
+        let Some(w) = apps[0].dns_workload() else {
             panic!("{apps:?}")
         };
         assert_eq!(w.queries[1].qtype, DnsType::MX);
@@ -812,7 +854,7 @@ mod tests {
         };
         assert_eq!(echo.messages[1].data, b"pong");
         assert_eq!(echo.messages[1].delay, Duration::from_millis(5));
-        let UdpApp::Dns(w) = &c.templates[0].app else {
+        let Some(w) = c.templates[0].app.dns_workload() else {
             panic!()
         };
         assert_eq!(w.queries.len(), 8);

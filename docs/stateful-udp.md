@@ -19,6 +19,10 @@ to its request. Three kinds of transactions:
 * **Replay**: a UDP session from a capture (or written out), datagram for
   datagram, checked byte for byte.
 
+DNS and NTP are [application protocols](app-protocols.md) (since 0.16.0):
+the same DNS also runs over TCP, and `app = "NAME"` with a `[NAME]` table
+picks any other protocol a program registered.
+
 ```sh
 ferotrx udp --list capture.pcap                          # the UDP sessions in a capture
 ferotrx udp examples/dns-lookups.pcap --app dns --show   # its queries and records

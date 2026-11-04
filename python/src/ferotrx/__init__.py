@@ -22,6 +22,7 @@ from .errors import (
     Unauthorized,
 )
 from .types import (
+    AppCounters,
     Counters,
     FlowCounters,
     HostAddressInfo,
@@ -48,7 +49,7 @@ from .types import (
     UdpTemplateCounters,
 )
 
-__version__ = "0.14.0"
+__version__ = "0.16.0"
 
 __all__ = [
     "__version__",
@@ -84,6 +85,7 @@ __all__ = [
     "HostInfo",
     "HostAddressInfo",
     "HostGroupInfo",
+    "AppCounters",
     "TcpCounters",
     "TcpTemplateCounters",
     "TcpRunInfo",

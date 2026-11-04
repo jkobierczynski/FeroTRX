@@ -205,7 +205,7 @@ let mut client = UdpClientConfig::new(
 client.rate = 1000.0;
 client.transactions = 10_000;
 let engine = UdpEngine::new(UdpConfig {
-    templates: vec![UdpTemplate::new(UdpApp::Dns(Arc::new(dns)), "10.0.0.2:53".parse()?)],
+    templates: vec![UdpTemplate::new(UdpApp::dns(Arc::new(dns)), "10.0.0.2:53".parse()?)],
     client: Some(client),
     server: Some(UdpServerConfig::new(
         UdpEndpoint::new(1, "02:00:00:00:00:02".parse()?, "10.0.0.2".parse()?),

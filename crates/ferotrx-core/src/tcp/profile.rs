@@ -216,6 +216,7 @@ impl TcpTemplateSpec {
                 }
             }
             TcpSource::Program(_) => format!("t{}", index + 1),
+            TcpSource::App(a) => a.name().to_string(),
         }
     }
 
@@ -228,6 +229,16 @@ impl TcpTemplateSpec {
                 TcpProgram::from_capture(&cap, *flow)
             }
             TcpSource::Program(p) => Ok(p.clone()),
+            // Nothing to replay: the protocol plays. The port is its default.
+            TcpSource::App(a) => Ok(TcpProgram::new(a.default_port(), Vec::new())),
+        }
+    }
+
+    /// The application protocol the template plays, if any.
+    pub fn app(&self) -> Option<&crate::App> {
+        match &self.source {
+            TcpSource::App(a) => Some(a),
+            _ => None,
         }
     }
 }
@@ -240,6 +251,8 @@ pub enum TcpSource {
     Pcap { path: PathBuf, flow: Option<usize> },
     /// A program written out in the profile.
     Program(TcpProgram),
+    /// An application protocol (`app = "http"` and its `[http]` table).
+    App(crate::App),
 }
 
 impl std::fmt::Display for TcpSource {
@@ -251,6 +264,7 @@ impl std::fmt::Display for TcpSource {
                 flow: Some(i),
             } => write!(f, "{} flow {}", path.display(), i + 1),
             TcpSource::Program(p) => write!(f, "{} messages", p.messages.len()),
+            TcpSource::App(a) => write!(f, "{}", a.describe()),
         }
     }
 }
@@ -738,7 +752,19 @@ impl TcpProfile {
 
     /// Parses a profile; `pcap` paths are relative to `base_dir`.
     pub fn from_toml(text: &str, base_dir: &Path) -> Result<Self> {
-        let raw: RawProfile = toml::from_str(text).map_err(|e| Error::Profile(e.to_string()))?;
+        Self::from_toml_with(text, base_dir, &crate::app::AppRegistry::builtin())
+    }
+
+    /// Parses a profile whose `app = "..."` names come from `registry`
+    /// (see [`AppRegistry`](crate::app::AppRegistry)).
+    pub fn from_toml_with(
+        text: &str,
+        base_dir: &Path,
+        registry: &crate::app::AppRegistry,
+    ) -> Result<Self> {
+        let mut doc = crate::app::document(text)?;
+        let apps = crate::app::take_apps(&mut doc, registry, base_dir, |_, _| false)?;
+        let raw: RawProfile = apps.raw(text, doc)?;
         check_format(raw.format)?;
         let model = parse_model(raw.model.as_deref(), &raw.shape)
             .map_err(|e| Error::Profile(e.to_string()))?;
@@ -748,18 +774,34 @@ impl TcpProfile {
             || raw.closer.is_some()
             || !raw.message.is_empty();
         let templates = if raw.template.is_empty() {
-            let source = source(
-                raw.pcap,
-                raw.flow,
-                raw.port,
-                raw.closer,
-                raw.message,
-                base_dir,
-                false,
-            )?;
-            vec![TcpTemplateSpec::new(source)]
+            if let Some(app) = apps.top {
+                if raw.pcap.is_some()
+                    || raw.flow.is_some()
+                    || raw.closer.is_some()
+                    || !raw.message.is_empty()
+                {
+                    return Err(Error::Profile(format!(
+                        "app = \"{}\" takes no `pcap`, `flow`, `closer` or [[message]]",
+                        app.name()
+                    )));
+                }
+                let mut t = TcpTemplateSpec::new(TcpSource::App(app));
+                t.port = raw.port;
+                vec![t]
+            } else {
+                let source = source(
+                    raw.pcap,
+                    raw.flow,
+                    raw.port,
+                    raw.closer,
+                    raw.message,
+                    base_dir,
+                    false,
+                )?;
+                vec![TcpTemplateSpec::new(source)]
+            }
         } else {
-            if top_level {
+            if top_level || apps.top.is_some() {
                 return Err(Error::Profile(
                     "give `pcap` or [[message]] at the top, or [[template]] tables, not both"
                         .into(),
@@ -772,8 +814,23 @@ impl TcpProfile {
                     Error::Profile(m) => Error::Profile(format!("template {label}: {m}")),
                     e => Error::Profile(format!("template {label}: {e}")),
                 };
-                let src = source(t.pcap, t.flow, t.port, t.closer, t.message, base_dir, true)
-                    .map_err(ctx)?;
+                let src = match apps.templates.get(i).cloned().flatten() {
+                    Some(app) => {
+                        if t.pcap.is_some()
+                            || t.flow.is_some()
+                            || t.closer.is_some()
+                            || !t.message.is_empty()
+                        {
+                            return Err(ctx(Error::Profile(format!(
+                                "app = \"{}\" takes no `pcap`, `flow`, `closer` or [[message]]",
+                                app.name()
+                            ))));
+                        }
+                        TcpSource::App(app)
+                    }
+                    None => source(t.pcap, t.flow, t.port, t.closer, t.message, base_dir, true)
+                        .map_err(ctx)?,
+                };
                 out.push(TcpTemplateSpec {
                     name: t.name,
                     source: src,
@@ -971,6 +1028,7 @@ impl TcpProfile {
             templates.push(TcpTemplate {
                 name,
                 program: program.clone(),
+                app: t.app().cloned(),
                 connect,
                 connect_ips: ips,
                 listen_port: listen,

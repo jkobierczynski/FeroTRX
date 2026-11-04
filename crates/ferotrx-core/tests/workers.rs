@@ -230,7 +230,7 @@ fn udp_dns_over_three_workers() {
     client.transactions = 301;
     client.rate = 3000.0;
     let config = UdpConfig {
-        templates: vec![UdpTemplate::new(UdpApp::Dns(dns), sock("10.0.0.53:53"))],
+        templates: vec![UdpTemplate::new(UdpApp::dns(dns), sock("10.0.0.53:53"))],
         client: Some(client),
         server: Some(UdpServerConfig::new(UdpEndpoint::new(
             1,
