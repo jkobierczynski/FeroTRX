@@ -329,6 +329,18 @@ impl Scenario {
 
     /// Parses a scenario; profile files and their pcaps are relative to `base_dir`.
     pub fn from_toml(text: &str, base_dir: &Path, overrides: &[(String, String)]) -> Result<Self> {
+        Self::from_toml_with(text, base_dir, overrides, &|p: &Path| Ok(p.to_path_buf()))
+    }
+
+    /// [`from_toml`](Scenario::from_toml), asking `allow` before a profile
+    /// file is read: it returns the path to read, or why the file may not
+    /// be read (a server that only reads files in its data directories).
+    pub fn from_toml_with(
+        text: &str,
+        base_dir: &Path,
+        overrides: &[(String, String)],
+        allow: &dyn Fn(&Path) -> std::result::Result<PathBuf, String>,
+    ) -> Result<Self> {
         // The variables first, then the text with them filled in.
         let blank: toml::Table = toml::from_str(&blank_vars(text))
             .map_err(|e| Error::Profile(format!("scenario: {e}")))?;
@@ -369,6 +381,7 @@ impl Scenario {
                 c,
                 name.clone(),
                 base_dir,
+                allow,
                 &vars,
                 (
                     &raw.iface,
@@ -401,6 +414,7 @@ impl Scenario {
         c: RawCheck,
         name: String,
         base_dir: &Path,
+        allow: &dyn Fn(&Path) -> std::result::Result<PathBuf, String>,
         vars: &BTreeMap<String, String>,
         defaults: (
             &Option<String>,
@@ -428,7 +442,7 @@ impl Scenario {
         };
         let (text, dir, source) = match raw {
             RawWorkload::Path(p) => {
-                let path = base_dir.join(&p);
+                let path = allow(&base_dir.join(&p)).map_err(Error::Profile)?;
                 let text = std::fs::read_to_string(&path)
                     .map_err(|e| Error::Profile(format!("cannot read {}: {e}", path.display())))?;
                 let text = substitute(&text, vars, &p)?;

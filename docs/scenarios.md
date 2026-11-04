@@ -282,6 +282,26 @@ a firewall that drops TCP 8080 and UDP 123), runs
 pass, then makes the router reset TCP to port 80 and runs it again with
 `--baseline last`, which must fail with exactly "web through NAT" regressed.
 
+## On a control server, and from the GUI
+
+`ferotrx serve` runs scenarios too (`scenario.check`, `scenario.start`,
+`scenario.get`, `scenario.stop`; see [remote control](remote-control.md#the-protocol)).
+The scenario is a file on the server or its text, with `base_dir` for the
+profile files it names; every file is checked against the server's data
+directories, as for `tcp.start`. `scenario.get` shows each check as it
+goes, and the report, the same as `--report` writes, once the run has ended.
+
+```sh
+ferotrx ctl call scenario.start '{"path": "examples/lab-scenario.toml"}'
+ferotrx ctl call scenario.get '{"id": 1}' --json | jq '.checks[] | {name, state}'
+```
+
+The GUI's Scenario tab is built on this: edit or open a scenario on your
+own computer, check it there (the profiles too), run it on the server and
+read the verdict, conditions and counters of each check (see
+[the GUI](gui.md#scenarios)). [`examples/lab-scenario.toml`](../examples/lab-scenario.toml)
+fits the lab router (`ferotrx lab up`, or "Lab router…" in the GUI).
+
 ## From a program
 
 The scenario code is in `ferotrx_core::scenario` (file format, conditions,
@@ -301,9 +321,8 @@ assert!(report.passed(), "{}", report.text());
 
 ## Limits
 
-* Checks run one after the other, not at the same time, and on this
-  machine only: no agents yet, and no `scenario.*` method on the control
-  server.
+* Checks run one after the other, not at the same time, and on one
+  machine: no agents yet.
 * Latency needs the sender and the receiver on the same machine (or clocks
   in step), as for `--rx`.
 * A comparison goes by check names; renaming a check shows it as removed and

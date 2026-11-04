@@ -1,0 +1,81 @@
+# A scenario for the lab router (`ferotrx lab up`, `ferotrx serve --lab`, or
+# "Lab router…" in the GUI): what must get through the router, and what must
+# not. Every check is judged by its expectation and its own conditions.
+#
+#   sudo ferotrx lab up &
+#   sudo ferotrx scenario run examples/lab-scenario.toml
+#
+# Or from the GUI: the Scenario tab, open this file, "Run on the server".
+# Rebuild the lab with "Reset TCP to ports: 80" and run it again: the web
+# check fails, the others still pass.
+#
+# Profile files (lab-tcp.toml, lab-udp-mix.toml) are read from this folder.
+
+format = 1
+name = "lab-router"
+description = "The lab router: web, DNS and a UDP mix get through; an unrouted network does not"
+# Every check sends on the lab's trunk unless its profile names another.
+iface = "${iface}"
+
+[vars]
+iface = "ftrx-lab"
+clients = "192.168.10"
+servers = "192.168.20"
+
+# Every connection of examples/http.pcap completes through the NAT, byte
+# for byte: 200 connections at 20 per second.
+[[check]]
+name = "web through the lab"
+tcp = "lab-tcp.toml"
+require = ["timed_out == 0"]
+
+# DNS lookups through the NAT, every one answered as expected, quickly.
+[[check]]
+name = "DNS through the lab"
+require = ["response_avg < 100ms"]
+[check.udp]
+transactions = 100
+rate = 100
+queries = ["www.lab.local A", "lab.local MX", "missing.lab.local A NXDOMAIN"]
+records = ["www.lab.local A ${servers}.80", "lab.local MX 10 mail.lab.local"]
+[check.udp.client]
+ip = "${clients}.100/24"
+ips = 10
+gateway = "${clients}.1"
+vlan = 10
+[check.udp.server]
+ip = "${servers}.53/24"
+gateway = "${servers}.1"
+vlan = 20
+[check.udp.udp]
+timeout = "300ms"
+retries = 3
+
+# DNS, NTP and a replayed exchange at once, for 4 seconds. Transactions
+# still open when the time is up are not answered, so not "complete": most
+# must be answered, and none wrongly.
+[[check]]
+name = "UDP mix"
+udp = "lab-udp-mix.toml"
+duration = "4s"
+expect = "any"
+require = ["answered_pct > 95%", "mismatched == 0"]
+
+# The router has no route to 192.168.30.0/24: no handshake completes.
+[[check]]
+name = "no route to 192.168.30.0/24"
+expect = "blocked"
+duration = "3s"
+[check.tcp]
+port = 80
+connect = "192.168.30.80"
+connections = 3
+[[check.tcp.message]]
+from = "client"
+text = "GET / HTTP/1.0\r\n\r\n"
+[check.tcp.client]
+ip = "${clients}.100/24"
+gateway = "${clients}.1"
+vlan = 10
+[check.tcp.tcp]
+syn_retries = 1

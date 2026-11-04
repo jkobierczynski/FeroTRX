@@ -48,6 +48,11 @@
 //! | `rx.stop` | `id`, `wait` (true) | `RxRunInfo` |
 //! | `rx.stats` / `rx.remove` | `id` | `RxRunInfo` |
 //! | `rx.list` | | `RxRunInfo[]` |
+//! | `scenario.check` | [`ScenarioStartParams`](protocol::ScenarioStartParams): `path` or `toml` (+ `base_dir`), `set`, `iface` | [`ScenarioInfo`](protocol::ScenarioInfo) |
+//! | `scenario.start` | `ScenarioStartParams` (+ `only`) | [`ScenarioRunInfo`](protocol::ScenarioRunInfo) |
+//! | `scenario.stop` | `id`, `wait` (true) | `ScenarioRunInfo` |
+//! | `scenario.get` / `scenario.remove` | `id` | `ScenarioRunInfo` |
+//! | `scenario.list` | | `ScenarioRunInfo[]` |
 //! | `lab.start` | [`LabStartParams`](protocol::LabStartParams) | [`LabInfo`](protocol::LabInfo) |
 //! | `lab.stop` / `lab.get` | | `LabInfo` |
 //! | `stats.subscribe` | `id` (optional), `interval_ms` (1000) | `{"subscription": n}` |
@@ -82,7 +87,9 @@
 //! [`LabRunner`] runs the checks of a `ferotrx_core::scenario::Scenario` on
 //! this machine's interfaces with the same functions: [`start_tcp`],
 //! [`start_udp`] and a [`ferotrx_core::Job`] with a receiver. `ferotrx
-//! scenario run` uses it.
+//! scenario run` uses it, and so does the server for `scenario.start`: the
+//! checks run on a thread of their own, and `scenario.get` shows each
+//! check's state, live counters and report as they come.
 //!
 //! # Security
 //!
@@ -133,7 +140,7 @@ pub use controller::{
 };
 pub use files::{FilePolicy, DEFAULT_MAX_UPLOAD};
 pub use protocol::{Role, RpcError};
-pub use scenario::{LabRunner, SinkOpener};
+pub use scenario::{check_info, scenario_info, LabRunner, SinkOpener};
 pub use server::{Server, ServerConfig, MAX_LINE};
 pub use tcp::{start_tcp, start_tcp_with, PortOpener, TcpStarted};
 pub use tls::{common_name, fingerprint, ClientTls, Issued, LabPki, ServerTls, TlsError};

@@ -70,6 +70,11 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 | `rx.stop` | `id`, `wait` (default true) | the receiver, final counters |
 | `rx.stats`, `rx.remove` | `id` | the receiver |
 | `rx.list` | | every receiver |
+| `scenario.check` | a scenario as `path` (on the server) or `toml` (+ `base_dir`); optional `set` (`{name: value}`, as `--set`), `iface` | its checks and their conditions; nothing runs |
+| `scenario.start` | as `scenario.check`, and optional `only` (check names) | the scenario run: its checks run one after the other on the server |
+| `scenario.get`, `scenario.remove` | `id` | the scenario run: `state`, each check's `state` (`waiting`, `running`, `pass`, `fail`, `error`, `skipped`), live `progress` and `report`, and the whole report once it has ended |
+| `scenario.stop` | `id`, `wait` (default true) | the scenario run: the running check ends, the rest are skipped |
+| `scenario.list` | | every scenario run |
 | `lab.start` | optional `ipv6`, `nat`, `loss`, `delay`, `block_tcp`, `block_udp`, `dhcp`, `queues` | the lab router, built (server started with `--lab`; see [lab scripts](lab-scripts.md#a-standing-lab-router)) |
 | `lab.stop` | | the lab router, removed |
 | `lab.get` | | the lab router, or why there can be none |

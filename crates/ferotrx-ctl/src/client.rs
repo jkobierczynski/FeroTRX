@@ -324,6 +324,39 @@ impl Client {
         self.call("rx.remove", &RunId { id })
     }
 
+    /// Reads a scenario on the server and lists its checks (`scenario.check`).
+    pub fn scenario_check(
+        &mut self,
+        params: &ScenarioStartParams,
+    ) -> Result<ScenarioInfo, ClientError> {
+        self.call("scenario.check", params)
+    }
+
+    /// Starts a scenario run; follow it with [`scenario_get`](Client::scenario_get).
+    pub fn scenario_start(
+        &mut self,
+        params: &ScenarioStartParams,
+    ) -> Result<ScenarioRunInfo, ClientError> {
+        self.call("scenario.start", params)
+    }
+
+    pub fn scenario_get(&mut self, id: u64) -> Result<ScenarioRunInfo, ClientError> {
+        self.call("scenario.get", &RunId { id })
+    }
+
+    /// Stops a scenario run and waits for it to end.
+    pub fn scenario_stop(&mut self, id: u64) -> Result<ScenarioRunInfo, ClientError> {
+        self.call("scenario.stop", &StopParams { id, wait: true })
+    }
+
+    pub fn scenario_runs(&mut self) -> Result<Vec<ScenarioRunInfo>, ClientError> {
+        self.call("scenario.list", &Value::Null)
+    }
+
+    pub fn scenario_remove(&mut self, id: u64) -> Result<ScenarioRunInfo, ClientError> {
+        self.call("scenario.remove", &RunId { id })
+    }
+
     /// Asks for `stats` notifications about one run, or all running runs.
     /// Read them with [`next_stats`](Client::next_stats).
     pub fn subscribe(&mut self, id: Option<u64>, interval_ms: u64) -> Result<u64, ClientError> {

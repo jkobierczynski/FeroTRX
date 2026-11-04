@@ -77,6 +77,30 @@ purpose) and DHCP on VLAN 10. Once it runs, the port `ftrx-lab` is selected
 and is the interface of the Stateful tab: open `examples/lab-udp-mix.toml`
 there and press Start. Details: [lab scripts](lab-scripts.md#a-standing-lab-router).
 
+## Scenarios
+
+The Scenario tab runs [scenarios](scenarios.md): checks with an expected
+outcome (`complete`, `blocked`) and conditions on their counters.
+
+* **Prepare it here.** With "from this computer" ticked, the scenario is
+  edited in the tab: Open or Browse a file, or New for a small one for the
+  lab router; Save writes it back. Check reads it, and every profile it
+  names, on this computer, as `ferotrx scenario show` does, and lists the
+  checks; untick a check to leave it out of the run.
+* **Run it on the server.** "▶ Run on the server" sends the scenario. A
+  server on this computer reads the profiles from the scenario's folder; a
+  server elsewhere gets them put into the scenario (captures they replay
+  are read on the server, from "Server folder" or its data directory).
+  Without the tick the server reads a scenario file of its own.
+* **Read the report.** Each check shows waiting, running with its live
+  counters, then ✔, ✘ or ⚠ with its summary. Pick a check for its
+  conditions with the values they were judged on, the error if it could not
+  run, and all its counters. Save report… writes the JSON report
+  (`ferotrx scenario compare` reads it), JUnit… the XML for CI.
+
+`ferotrx-gui --scenario examples/lab-scenario.toml` opens a scenario in the
+tab at start. The lab scenario needs the lab router running.
+
 ## Ports and their settings
 
 A port's streams are sent together, as one profile named `gui-<port>`
@@ -164,6 +188,6 @@ GUI can drive a server across the lab as easily as the local one.
 * Saving and opening whole workspaces (all ports and servers) as a file.
 * Editing the bytes of a packet in the hex view directly.
 * Charts of receive-side loss and latency over time.
-* Starting scenarios and benchmarks from the GUI (`ferotrx scenario`,
-  `ferotrx bench` on the command line).
+* Benchmarks from the GUI (`ferotrx bench` on the command line), and
+  comparing scenario runs (`ferotrx scenario compare` on saved reports).
 * Several servers' runs started together (distributed agents, issue #21).

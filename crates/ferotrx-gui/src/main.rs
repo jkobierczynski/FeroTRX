@@ -34,6 +34,9 @@ struct Args {
     /// Profile file whose streams to load into that port.
     #[arg(long, value_name = "FILE")]
     profile: Option<String>,
+    /// A scenario to open in the Scenario tab.
+    #[arg(long, value_name = "FILE")]
+    scenario: Option<String>,
     /// A capture to open in the Capture tab.
     capture: Option<String>,
 }
@@ -67,6 +70,7 @@ fn main() -> eframe::Result {
         capture: args.capture,
         port: args.port,
         profile: args.profile,
+        scenario: args.scenario,
     };
     let native = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
