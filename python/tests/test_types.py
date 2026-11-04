@@ -168,3 +168,33 @@ def test_tcp_run_hosts() -> None:
     (h,) = info.hosts
     assert h.ipv4 is not None and h.ipv4.source == "dhcp" and h.ipv4.lease_s == 3600.0
     assert h.groups[0].rx_packets == 5 and h.ipv6 is None
+
+
+def test_tcp_run_app_and_tls_counters() -> None:
+    info = TcpRunInfo.from_dict(
+        {
+            "id": 3,
+            "state": "finished",
+            "client": {
+                "completed": 2,
+                "app": {
+                    "transactions": 4,
+                    "failed": 0,
+                    "errors": 2,
+                    "codes": {"200": 2, "404": 2},
+                    "tls": {
+                        "handshakes": 2,
+                        "failed": 0,
+                        "resumed": 1,
+                        "negotiated": {"TLSv1.3 TLS13_AES_256_GCM_SHA384 http/1.1": 2},
+                        "time": {"avg_us": 1200.0},
+                    },
+                },
+            },
+        }
+    )
+    app = info.client.app
+    assert app is not None and app.codes["404"] == 2
+    assert app.tls is not None and app.tls.resumed == 1 and app.tls.unexpected == 0
+    assert app.tls.time is not None and app.tls.time.avg_us == 1200.0
+    assert info.server.app is None

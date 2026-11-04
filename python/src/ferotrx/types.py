@@ -398,6 +398,25 @@ class HostInfo(Record):
 
 
 @dataclass(kw_only=True)
+class HandshakeCounters(Record):
+    """TLS handshakes of one side, for protocols run over TLS."""
+
+    #: Handshakes that ended, either way.
+    handshakes: int = 0
+    #: Handshakes that failed, expected or not.
+    failed: int = 0
+    #: Handshakes with another outcome than the profile expected.
+    unexpected: int = 0
+    #: Handshakes that resumed a session.
+    resumed: int = 0
+    #: What they negotiated or why they failed, e.g.
+    #: ``{"TLSv1.3 TLS13_AES_256_GCM_SHA384 http/1.1": 200}``.
+    negotiated: dict[str, int] = field(default_factory=dict)
+    #: From each handshake's first message to its end.
+    time: LatencyCounters | None = None
+
+
+@dataclass(kw_only=True)
 class AppCounters(Record):
     """What an application protocol counted on one side (HTTP, DNS, NTP)."""
 
@@ -413,6 +432,8 @@ class AppCounters(Record):
     codes: dict[str, int] = field(default_factory=dict)
     #: Client: from each request to its whole answer.
     response_time: LatencyCounters | None = None
+    #: TLS handshakes, for protocols run over TLS (HTTPS).
+    tls: HandshakeCounters | None = None
 
 
 # ----- tcp.* -----

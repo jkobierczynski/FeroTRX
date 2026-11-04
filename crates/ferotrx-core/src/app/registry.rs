@@ -102,7 +102,9 @@ pub(crate) struct ProfileApps {
 
 /// Takes the application protocols out of a profile document: where a
 /// table (the top level or a `[[template]]`) has `app = "NAME"`, its `NAME`
-/// table configures the protocol from `registry`. Both keys are removed, so
+/// table configures the protocol from `registry`, and `tls = true` or a
+/// `[tls]` table runs it over TLS (`app = "https"` is HTTP over TLS). The
+/// keys are removed, so
 /// the rest of the profile reads as before. `own(name, has_table)` says
 /// which names the profile reads itself (UDP's `replay`, and its `dns` and
 /// `ntp` without a table); those stay.
@@ -114,9 +116,19 @@ pub(crate) fn take_apps(
 ) -> Result<ProfileApps> {
     let take = |t: &mut toml::Table, what: &str| -> Result<Option<App>> {
         let name = match t.get("app") {
+            None if t.contains_key("tls") => {
+                return Err(Error::Profile(format!(
+                    "{what}`tls` needs an application protocol on top, e.g. app = \"https\""
+                )))
+            }
             None => return Ok(None),
             Some(toml::Value::String(s)) => s.to_ascii_lowercase(),
             Some(_) => return Err(Error::Profile(format!("{what}`app` must be a name"))),
+        };
+        // `https` is HTTP over TLS: the [http] table and TLS on.
+        let (name, force_tls) = match name.as_str() {
+            "https" if !registry.contains("https") => ("http".to_string(), true),
+            _ => (name, false),
         };
         let table = match t.get(&name) {
             None => None,
@@ -132,15 +144,35 @@ pub(crate) fn take_apps(
         }
         t.remove("app");
         t.remove(&name);
+        let tls = match t.remove("tls") {
+            None if force_tls => Some(toml::Table::new()),
+            None | Some(toml::Value::Boolean(false)) => None,
+            Some(toml::Value::Boolean(true)) => Some(toml::Table::new()),
+            Some(toml::Value::Table(x)) => Some(x),
+            Some(_) => {
+                return Err(Error::Profile(format!(
+                    "{what}`tls` must be true or a table of TLS settings"
+                )))
+            }
+        };
+        let fail = |e: Error| {
+            Error::Profile(format!(
+                "{what}{}",
+                e.to_string().trim_start_matches("profile: ")
+            ))
+        };
         let app = registry
             .parse(&name, &table.unwrap_or_default(), base_dir)
-            .map_err(|e| {
-                Error::Profile(format!(
-                    "{what}{}",
-                    e.to_string().trim_start_matches("profile: ")
-                ))
-            })?;
-        Ok(Some(app))
+            .map_err(fail)?;
+        match tls {
+            None => Ok(Some(app)),
+            Some(table) => with_tls(app, &table, base_dir)
+                .map(Some)
+                .map_err(|e| match e {
+                    Error::Profile(m) => fail(Error::Profile(format!("[tls]: {m}"))),
+                    e => fail(e),
+                }),
+        }
     };
     let top = take(doc, "")?;
     let mut templates = Vec::new();
@@ -175,6 +207,18 @@ impl ProfileApps {
         };
         r.map_err(|e: toml::de::Error| Error::Profile(e.to_string()))
     }
+}
+
+#[cfg(feature = "tls")]
+fn with_tls(app: App, table: &toml::Table, base_dir: &Path) -> Result<App> {
+    super::tls::parse(app, table, base_dir).map(App::new)
+}
+
+#[cfg(not(feature = "tls"))]
+fn with_tls(_: App, _: &toml::Table, _: &Path) -> Result<App> {
+    Err(Error::Profile(
+        "this FeroTRX was built without TLS (feature `tls`)".into(),
+    ))
 }
 
 /// Parses a profile's text into a document for [`take_apps`].

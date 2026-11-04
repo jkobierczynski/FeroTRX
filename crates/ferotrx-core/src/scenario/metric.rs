@@ -298,6 +298,39 @@ pub const TCP_METRICS: &[MetricDef] = &[
         "99th percentile of the time to an answer",
     ),
     m("response_max", Millis, Lower, "slowest application answer"),
+    m(
+        "tls_handshakes",
+        Count,
+        Higher,
+        "client TLS handshakes that ended, either way",
+    ),
+    m(
+        "tls_failed",
+        Count,
+        Lower,
+        "client TLS handshakes that failed",
+    ),
+    m(
+        "tls_unexpected",
+        Count,
+        Lower,
+        "client TLS handshakes with another outcome than expected",
+    ),
+    m(
+        "tls_resumed",
+        Count,
+        Higher,
+        "client TLS handshakes that resumed a session",
+    ),
+    m("handshake_min", Millis, Lower, "fastest TLS handshake"),
+    m("handshake_avg", Millis, Lower, "average TLS handshake time"),
+    m(
+        "handshake_p99",
+        Millis,
+        Lower,
+        "99th percentile of the TLS handshake time",
+    ),
+    m("handshake_max", Millis, Lower, "slowest TLS handshake"),
 ];
 
 /// Metrics of a UDP check: the client side, and the server's with `server_`.

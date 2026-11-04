@@ -667,6 +667,9 @@ fn side_line(c: &TcpCounters) -> String {
     if c.max_in_flight > 0 {
         line.push_str(&format!("; at most {} bytes in flight", c.max_in_flight));
     }
+    if let Some(h) = c.app.as_ref().and_then(|a| a.tls.as_ref()) {
+        line.push_str(&format!("; {}", tls_line(h)));
+    }
     if let Some(a) = &c.app {
         line.push_str(&format!(
             "; {} transactions ({}), {} failed",
@@ -677,6 +680,33 @@ fn side_line(c: &TcpCounters) -> String {
         if let Some(r) = &a.response_time {
             line.push_str(&format!("; {}", crate::udp::response_line(r)));
         }
+    }
+    line
+}
+
+/// `200 TLS handshakes (TLSv1.3 TLS13_AES_256_GCM_SHA384 http/1.1 x200), 150
+/// resumed, 0 failed; handshake ms avg 1.20 p99 3.40`
+fn tls_line(h: &ferotrx_ctl::protocol::HandshakeCounters) -> String {
+    let mut v: Vec<(&String, &u64)> = h.negotiated.iter().collect();
+    v.sort_by(|x, y| y.1.cmp(x.1).then(x.0.cmp(y.0)));
+    let what: Vec<String> = v.iter().map(|(k, n)| format!("{k} x{n}")).collect();
+    let mut line = format!(
+        "{} TLS handshakes ({}), {} resumed, {} failed",
+        h.handshakes,
+        what.join(", "),
+        h.resumed,
+        h.failed
+    );
+    if h.unexpected > 0 {
+        line.push_str(&format!(" ({} not as expected)", h.unexpected));
+    }
+    if let Some(t) = &h.time {
+        line.push_str(&format!(
+            "; handshake ms avg {} p99 {} max {}",
+            crate::udp::ms(t.avg_us),
+            crate::udp::ms(t.p99_us),
+            crate::udp::ms(t.max_us)
+        ));
     }
     line
 }

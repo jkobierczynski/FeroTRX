@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-cli"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1348,10 +1348,12 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-core"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "ferotrx-packet",
  "pcap-file",
+ "rcgen",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1360,7 +1362,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-ctl"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "ferotrx-core",
  "ferotrx-io",
@@ -1376,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-gui"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "clap",
  "eframe",
@@ -1393,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-io"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "cc",
  "ferotrx-core",
@@ -1404,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-packet"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "ferotrx-core",
 ]

@@ -475,7 +475,7 @@ fn template_lines(t: &UdpTemplateCounters) -> Vec<String> {
         .collect()
 }
 
-fn ms(us: Option<f64>) -> String {
+pub(crate) fn ms(us: Option<f64>) -> String {
     us.map_or("-".into(), |u| format!("{:.2}", u / 1000.0))
 }
 
