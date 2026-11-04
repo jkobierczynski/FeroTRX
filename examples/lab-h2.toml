@@ -1,0 +1,128 @@
+# FeroTRX stateful TCP profile: HTTP/2 over TLS (h2) and without (h2c),
+# through a NAT router between two VLANs.
+#
+#   FeroTRX host --- switch (trunk) --- router --- VLAN 10: 192.168.10.0/24 (clients)
+#                                              \-- VLAN 20: 192.168.20.0/24 (server)
+#
+# Run it with:
+#   sudo ferotrx tcp -p examples/lab-h2.toml -i <interface>
+#
+# Each client connection multiplexes its requests on streams, up to
+# `concurrent` at once, under HTTP/2 flow control; the server answers them
+# from its routes. The [http2] table takes every key of [http] (requests,
+# routes, per_connection, host, ...) except `pipeline`, and HTTP/2's own.
+# The server also answers HTTP/1.1, on the same port:
+#
+#   only the server (leave out [client]):
+#     curl -k --http2 https://192.168.20.80/
+#     curl --http2-prior-knowledge http://192.168.20.80:8080/
+#     curl -k --http1.1 https://192.168.20.80/      (ALPN http/1.1)
+#   only the clients (leave out [server]), against a real server:
+#     sudo ferotrx tcp -p examples/lab-h2.toml -i eth0 --connect 192.168.20.10
+#
+# As in examples/lab-tcp.toml, the `ip`s must be free addresses in each VLAN,
+# not addresses of the FeroTRX machine, and `gateway` the router's address.
+format = 1
+cps = 50
+connections = 300
+concurrency = 100
+
+# A page and what it loads, as a browser would: over TLS with ALPN h2, six
+# streams at once.
+[[template]]
+name = "h2"
+app = "h2"                  # HTTP/2 over TLS, port 443
+weight = 4
+
+[template.http2]
+host = "www.lab.local"
+requests = [
+  "GET /",
+  "GET /style.css",
+  "GET /app.js",
+  "GET /big",
+  "GET /missing 404",
+  "POST /api 201",
+]
+per_connection = 12         # requests per connection
+concurrent = 6              # streams in flight at once
+
+[[template.http2.route]]
+path = "/"
+body = "<html><head><link rel=stylesheet href=/style.css></head></html>\n"
+content_type = "text/html"
+
+[[template.http2.route]]
+path = "/style.css"
+body = "body { color: teal }\n"
+content_type = "text/css"
+
+[[template.http2.route]]
+path = "/app.js"
+body_size = "20K"
+content_type = "text/javascript"
+
+[[template.http2.route]]
+path = "/big"
+body_size = "100K"          # more than a 64 KB window: flow control works
+
+[[template.http2.route]]
+method = "POST"
+path = "/api"
+status = 201
+delay = "2ms"
+
+[template.tls]
+server_name = "www.lab.local"
+names = ["www.lab.local"]
+verify = true
+
+# Without TLS ("prior knowledge"), larger windows and frames, and plain
+# header strings.
+[[template]]
+name = "h2c"
+app = "h2c"                 # HTTP/2 without TLS
+port = 8080
+weight = 2
+
+[template.http2]
+requests = ["GET /", "GET /big"]
+per_connection = 8
+window = 1048576            # SETTINGS_INITIAL_WINDOW_SIZE, and the connection's
+frame_size = 65536          # SETTINGS_MAX_FRAME_SIZE
+header_table_size = 8192    # SETTINGS_HEADER_TABLE_SIZE (HPACK)
+huffman = false
+
+[[template.http2.route]]
+path = "/"
+body = "hello over h2c\n"
+
+[[template.http2.route]]
+path = "/big"
+body_size = "256K"
+
+# A server that allows two streams at once, and clients that try eight:
+# what is refused (REFUSED_STREAM) before the server's SETTINGS arrive is
+# asked again.
+[[template]]
+name = "limited"
+app = "h2c"
+port = 8081
+weight = 1
+
+[template.http2]
+requests = ["GET /"]
+per_connection = 8
+concurrent = 8
+max_concurrent_streams = 2
+
+[client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20

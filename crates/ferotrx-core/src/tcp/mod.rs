@@ -38,11 +38,41 @@ pub use engine::{
 };
 #[cfg(feature = "profile")]
 pub use profile::{
-    parse_connect_addr, parse_groups, parse_ip_prefix, parse_port_range, parse_size, TcpHostSpec,
-    TcpProfile, TcpSource, TcpTemplateSpec,
+    parse_connect_addr, parse_groups, parse_ip_prefix, parse_port_range, TcpHostSpec, TcpProfile,
+    TcpSource, TcpTemplateSpec,
 };
 pub use program::{TcpFlow, TcpMessage, TcpProgram, TcpRole};
 pub use run::{
     memory_ports, run_engine, run_tcp, split_port, split_ports, MemoryPort, PacketPort, PortEngine,
     PortJob, TcpJob, TcpRunConfig,
 };
+
+/// Parses a size in bytes: `65535`, or with a suffix `K`, `M` or `G` (powers
+/// of 1024; `KB`, `KiB` and lower case work too), e.g. `64K` or `4M`.
+pub fn parse_size(s: &str) -> crate::Result<u64> {
+    let bad =
+        || crate::Error::InvalidSpec(format!("invalid size '{s}' (use e.g. 65535, 64K or 4M)"));
+    let t = s.trim();
+    let digits = t
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(t.len());
+    let (num, unit) = t.split_at(digits);
+    let unit = unit.trim().to_ascii_lowercase();
+    let unit = unit
+        .strip_suffix("ib")
+        .or_else(|| unit.strip_suffix('b'))
+        .unwrap_or(&unit);
+    let mult: u64 = match unit {
+        "" => 1,
+        "k" => 1 << 10,
+        "m" => 1 << 20,
+        "g" => 1 << 30,
+        _ => return Err(bad()),
+    };
+    let v: f64 = num.parse().map_err(|_| bad())?;
+    let n = v * mult as f64;
+    if !(n.is_finite() && n >= 0.0 && n < u64::MAX as f64) {
+        return Err(bad());
+    }
+    Ok(n.round() as u64)
+}

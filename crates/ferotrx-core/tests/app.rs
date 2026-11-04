@@ -747,3 +747,128 @@ fn mqtt_qos_over_a_lossy_reordering_link_and_in_profiles() {
     assert_eq!((c.completed, c.mismatched), (4, 0), "{c:?}");
     assert_eq!(c.app.codes.get("CONNACK bad credentials"), Some(&4));
 }
+
+#[test]
+fn http2_over_a_lossy_reordering_link() {
+    use ferotrx_core::app::http2::Http2;
+    let mut h2 = Http2 {
+        http: web(),
+        ..Default::default()
+    };
+    h2.http.client.per_connection = 8;
+    h2.settings.concurrent = 4;
+    let t = TcpTemplate::with_app_protocol(App::new(h2), "10.0.0.80:80".parse().unwrap());
+    let (mut client, mut server) = tcp_pair(vec![t], 20);
+    let mut link = Link::new(37, 11);
+    let took = simulate(
+        &mut [&mut client, &mut server],
+        &mut link,
+        Duration::from_secs(120),
+    );
+    let c = &client.stats().client;
+    let s = &server.stats().server;
+    assert!(client.is_done(), "not done after {took:?}: {c:?}");
+    assert!(link.dropped > 10, "{}", link.dropped);
+    assert_eq!((c.completed, c.mismatched, c.failed()), (20, 0, 0), "{c:?}");
+    assert_eq!((s.completed + s.active, s.mismatched), (20, 0), "{s:?}");
+    assert_eq!((c.app.transactions, c.app.failed), (160, 0), "{:?}", c.app);
+    assert_eq!(c.app.codes["404"], 40, "{:?}", c.app.codes);
+    assert_eq!(s.app.transactions, 160);
+}
+
+#[test]
+fn http2_profiles_over_tls_and_without() {
+    let run = |text: &str| {
+        let p = TcpProfile::from_toml(text, Path::new(".")).unwrap();
+        let programs: Vec<_> = p.programs().unwrap().into_iter().map(Arc::new).collect();
+        let config = p
+            .config(&programs, &["lo".to_string()], Some("lo"))
+            .unwrap();
+        let port = config.templates[0].listen_port;
+        let mut client_cfg = config.clone();
+        client_cfg.server = None;
+        let mut server_cfg = config;
+        server_cfg.client = None;
+        let mut client = TcpEngine::new(client_cfg).unwrap();
+        let mut server = TcpEngine::new(server_cfg).unwrap();
+        simulate(
+            &mut [&mut client, &mut server],
+            &mut Link::new(0, 0),
+            Duration::from_secs(30),
+        );
+        (
+            port,
+            client.stats().client.clone(),
+            server.stats().server.clone(),
+        )
+    };
+    let body = r#"
+        connections = 5
+        cps = 200
+        [http2]
+        requests = ["GET /", "GET /missing 404"]
+        per_connection = 4
+        window = 1048576
+        [[http2.route]]
+        path = "/"
+        body = "hello over h2\n"
+        [client]
+        ip = "10.0.0.1/24"
+        [server]
+        ip = "10.0.0.80/24"
+    "#;
+    // h2: over TLS, ALPN h2.
+    let (port, c, s) = run(&format!("app = \"h2\"\n{body}"));
+    assert_eq!(port, 443);
+    assert_eq!(
+        (c.completed, c.mismatched, c.app.transactions),
+        (5, 0, 20),
+        "{:?}",
+        c.app
+    );
+    assert!(
+        c.app.negotiated.keys().all(|k| k.ends_with(" h2")),
+        "{:?}",
+        c.app.negotiated
+    );
+    assert_eq!(s.app.transactions, 20);
+    // h2c: without TLS, and the same with app = "http2".
+    for app in ["h2c", "http2"] {
+        let (port, c, _) = run(&format!("app = \"{app}\"\n{body}"));
+        assert_eq!(port, 80);
+        assert_eq!((c.completed, c.mismatched, c.app.transactions), (5, 0, 20));
+        assert_eq!(c.app.handshakes, 0);
+    }
+    // An HTTP/1.1 client and an HTTP/2 server on one port (ALPN gives the
+    // server's second choice).
+    let text = r#"format = 1
+        connections = 4
+        cps = 200
+        [client]
+        ip = "10.0.0.1/24"
+        [server]
+        ip = "10.0.0.80/24"
+        [[template]]
+        name = "h1"
+        app = "https"
+        [template.http]
+        requests = ["GET /"]
+        [[template]]
+        name = "h2"
+        app = "h2"
+        [template.http2]
+        requests = ["GET /"]
+        "#;
+    let p = TcpProfile::from_toml(text, Path::new(".")).unwrap();
+    assert_eq!(p.templates.len(), 2);
+    let e = TcpProfile::from_toml(
+        &format!(
+            "app = \"http2\"\n[http2]\npipeline = true\n{}",
+            "[server]\nip = \"10.0.0.80/24\"\n"
+        ),
+        Path::new("."),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("pipeline"), "{e}");
+}

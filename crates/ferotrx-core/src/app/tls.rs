@@ -340,6 +340,7 @@ impl AppProtocol for Tls {
     fn name(&self) -> &str {
         match self.inner.name() {
             "http" => "https",
+            "http2" => "h2",
             _ => "tls",
         }
     }
@@ -354,7 +355,7 @@ impl AppProtocol for Tls {
 
     fn default_port(&self) -> u16 {
         match self.inner.name() {
-            "http" => 443,
+            "http" | "http2" => 443,
             "dns" => 853,
             "mqtt" => 8883,
             _ => self.inner.default_port(),
@@ -1129,12 +1130,19 @@ mod profile {
         };
         let mut client = settings(&end(&r.client)?, base).map_err(|e| prefix("client", e))?;
         let server = settings(&end(&r.server)?, base).map_err(|e| prefix("server", e))?;
-        if client.alpn.is_empty() && server.alpn.is_empty() && inner.name() == "http" {
-            client.alpn = vec!["http/1.1".into()];
+        // ALPN for HTTP unless given: `http/1.1`, or for HTTP/2 `h2` (whose
+        // server also takes HTTP/1.1).
+        let (c_alpn, s_alpn): (&[&str], &[&str]) = match inner.name() {
+            "http" => (&["http/1.1"], &["http/1.1"]),
+            "http2" => (&["h2"], &["h2", "http/1.1"]),
+            _ => (&[], &[]),
+        };
+        if client.alpn.is_empty() && server.alpn.is_empty() {
+            client.alpn = c_alpn.iter().map(|a| a.to_string()).collect();
         }
         let mut server = server;
-        if server.alpn.is_empty() && inner.name() == "http" {
-            server.alpn = vec!["http/1.1".into()];
+        if server.alpn.is_empty() {
+            server.alpn = s_alpn.iter().map(|a| a.to_string()).collect();
         }
         Tls::with_ends(inner, client, server)
     }

@@ -14,7 +14,7 @@ pub type AppParser = Arc<dyn Fn(&toml::Table, &Path) -> Result<App> + Send + Syn
 
 /// Application protocols by the name profiles give them with `app = "..."`.
 ///
-/// [`AppRegistry::builtin`] has `http`, `dns`, `mqtt` and `ntp`; add your own with
+/// [`AppRegistry::builtin`] has `http`, `http2`, `dns`, `mqtt` and `ntp`; add your own with
 /// [`register`](Self::register) and read profiles with
 /// [`TcpProfile::from_toml_with`](crate::TcpProfile::from_toml_with).
 ///
@@ -38,10 +38,13 @@ impl AppRegistry {
         Self::default()
     }
 
-    /// The built-in protocols: `http`, `dns`, `mqtt`, `ntp`.
+    /// The built-in protocols: `http`, `http2`, `dns`, `mqtt`, `ntp`.
     pub fn builtin() -> Self {
         let mut r = Self::new();
         r.register("http", |t, base| super::http::parse(t, base).map(App::new));
+        r.register("http2", |t, base| {
+            super::http2::parse(t, base).map(App::new)
+        });
         r.register("dns", |t, base| super::dns::parse(t, base).map(App::new));
         r.register("ntp", |t, _| super::ntp::parse(t).map(App::new));
         r.register("mqtt", |t, _| super::mqtt::parse(t).map(App::new));
@@ -126,9 +129,12 @@ pub(crate) fn take_apps(
             Some(toml::Value::String(s)) => s.to_ascii_lowercase(),
             Some(_) => return Err(Error::Profile(format!("{what}`app` must be a name"))),
         };
-        // `https` is HTTP over TLS: the [http] table and TLS on.
+        // `https` is HTTP over TLS: the [http] table and TLS on; `h2` is
+        // HTTP/2 over TLS and `h2c` HTTP/2 without, both with [http2].
         let (name, force_tls) = match name.as_str() {
             "https" if !registry.contains("https") => ("http".to_string(), true),
+            "h2" if !registry.contains("h2") => ("http2".to_string(), true),
+            "h2c" if !registry.contains("h2c") => ("http2".to_string(), false),
             _ => (name, false),
         };
         let table = match t.get(&name) {
@@ -162,9 +168,11 @@ pub(crate) fn take_apps(
                 e.to_string().trim_start_matches("profile: ")
             ))
         };
-        let app = registry
-            .parse(&name, &table.unwrap_or_default(), base_dir)
-            .map_err(fail)?;
+        let mut table = table.unwrap_or_default();
+        if name == "http2" && tls.is_some() && !table.contains_key("scheme") {
+            table.insert("scheme".into(), "https".into());
+        }
+        let app = registry.parse(&name, &table, base_dir).map_err(fail)?;
         match tls {
             None => Ok(Some(app)),
             Some(table) => with_tls(app, &table, base_dir)

@@ -33,7 +33,7 @@ mod pcap_port {
                 .promisc(true)
                 .immediate_mode(true)
                 .snaplen(65535)
-                .buffer_size(8 << 20)
+                .buffer_size(32 << 20)
                 .open()
                 .map_err(|e| format!("cannot open {name}: {e}"))?;
             // Npcap cannot filter by direction; the engine ignores its own frames.
