@@ -100,6 +100,9 @@ routed=$(($(fwd) - before))
 echo "the router sent $routed packets out of rt.20"
 # 50 DNS packets per second from 2 s on, a ping a second: about 100.
 [ "$routed" -ge 60 ] || fail "only $routed replayed packets were routed (router MAC $(ip netns exec ferotrx-lab cat /sys/class/net/ftrxlab-rt/address))"
+# 192.168.20.50 is also the server of lab-tcp.toml: let the router find its
+# emulated MAC again.
+ip netns exec ferotrx-lab ip neigh del 192.168.20.50 dev rt.20 || true
 
 # Waits for a scenario run to end and prints its JSON.
 wait_scenario() { # id
