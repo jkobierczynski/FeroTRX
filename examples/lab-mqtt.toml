@@ -1,0 +1,91 @@
+# FeroTRX stateful TCP profile: MQTT clients and a broker, through a NAT
+# router between two VLANs.
+#
+#   FeroTRX host --- switch (trunk) --- router --- VLAN 10: 192.168.10.0/24 (clients)
+#                                              \-- VLAN 20: 192.168.20.0/24 (broker)
+#
+# Run it with:
+#   sudo ferotrx tcp -p examples/lab-mqtt.toml -i <interface>
+#
+# Each client connects, subscribes, publishes its messages, waits for every
+# acknowledgement and for its own messages to come back on the filters they
+# match, and disconnects. Either end works against real software:
+#
+#   only the broker (leave out [client]):
+#     mosquitto_sub -h 192.168.20.80 -t 'lab/#' -v -u sensor -P lab
+#   only the clients (leave out [server]), against mosquitto:
+#     sudo ferotrx tcp -p examples/lab-mqtt.toml -i eth0 --connect 192.168.20.10
+#
+# As in examples/lab-tcp.toml, the `ip`s must be free addresses in each VLAN,
+# not addresses of the FeroTRX machine, and `gateway` the router's address.
+format = 1
+cps = 50
+connections = 300
+concurrency = 100
+
+# Sensors: QoS 0, 1 and 2, a retained state message, their own messages back.
+[[template]]
+name = "sensors"
+app = "mqtt"                # port 1883
+weight = 4
+
+[template.mqtt]
+version = "3.1.1"           # or "5"
+client_id = "sensor-{n}"    # {n}: the connection's number
+username = "sensor"
+password = "lab"
+keep_alive = "30s"
+subscribe = ["lab/sensors/# 2"]          # FILTER [QOS]
+publish = [                              # TOPIC [QOS] [SIZE]
+  "lab/sensors/temp 0 16",
+  "lab/sensors/humidity 1 16",
+  "lab/sensors/alarm 2 64",
+]
+per_connection = 6          # messages each connection publishes, in turn
+interval = "5ms"            # between them
+wait = "5s"                 # for acknowledgements and echoes after the last
+users = { sensor = "lab" }  # the broker's logins (none: anyone)
+max_qos = 2
+
+[[template.mqtt.message]]   # a message with more settings
+topic = "lab/sensors/state"
+qos = 1
+retain = true
+payload = "online"
+
+# MQTT 5 over TLS (port 8883).
+[[template]]
+name = "secure"
+app = "mqtt"
+tls = true
+weight = 2
+
+[template.mqtt]
+version = "5"
+subscribe = ["lab/secure/+ 1"]
+publish = ["lab/secure/a 1 1K", "lab/secure/b 2 1K"]
+per_connection = 4
+
+# A client with a wrong password: the broker must refuse it.
+[[template]]
+name = "intruder"
+app = "mqtt"
+port = 1884
+weight = 1
+
+[template.mqtt]
+username = "sensor"
+password = "guess"
+expect = "bad credentials"  # the CONNACK refusal expected
+users = { sensor = "lab" }
+
+[client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20

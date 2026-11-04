@@ -25,11 +25,13 @@
 //!   their own protocols.
 //!
 //! The built-in protocols are [`http`] (HTTP/1.1 client and server), [`dns`]
-//! (over UDP, and over TCP with length prefixes) and [`ntp`]; [`tls`]
+//! (over UDP, and over TCP with length prefixes), [`mqtt`] (client and
+//! broker, 3.1.1 and 5.0) and [`ntp`]; [`tls`]
 //! (feature `tls`) runs any stream protocol over TLS (HTTPS = TLS + HTTP).
 
 pub mod dns;
 pub mod http;
+pub mod mqtt;
 pub mod ntp;
 #[cfg(feature = "profile")]
 mod registry;

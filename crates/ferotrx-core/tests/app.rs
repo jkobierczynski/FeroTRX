@@ -679,3 +679,71 @@ fn https_profiles_and_handshakes_that_must_fail() {
         assert!(e.contains(says) && e.contains("[tls]"), "{e}");
     }
 }
+
+#[test]
+fn mqtt_qos_over_a_lossy_reordering_link_and_in_profiles() {
+    use ferotrx_core::app::mqtt::{Mqtt, MqttVersion};
+    let mut m = Mqtt::default();
+    m.client.version = MqttVersion::V5;
+    m.client.subscribe = vec!["lab/# 2".parse().unwrap()];
+    m.client.publish = vec![
+        "lab/a 0 100".parse().unwrap(),
+        "lab/b 1 3K".parse().unwrap(),
+        "lab/c 2 20K".parse().unwrap(),
+    ];
+    m.client.per_connection = 6;
+    m.client.interval = Duration::from_millis(2);
+    let t = TcpTemplate::with_app_protocol(App::new(m), "10.0.0.80:1883".parse().unwrap());
+    let (mut client, mut server) = tcp_pair(vec![t], 20);
+    let mut link = Link::new(43, 17);
+    let took = simulate(
+        &mut [&mut client, &mut server],
+        &mut link,
+        Duration::from_secs(120),
+    );
+    let c = &client.stats().client;
+    assert!(client.is_done(), "not done after {took:?}: {c:?}");
+    assert!(link.dropped > 5, "{}", link.dropped);
+    assert_eq!((c.completed, c.mismatched, c.failed()), (20, 0, 0), "{c:?}");
+    assert_eq!(c.app.failed, 0, "{:?}", c.app.codes);
+    assert_eq!(c.app.codes.get("received"), Some(&120), "{:?}", c.app.codes);
+    assert_eq!(c.app.codes.get("PUBACK"), Some(&40));
+    assert_eq!(c.app.codes.get("PUBCOMP"), Some(&40));
+    assert_eq!(c.app.codes.get("published"), Some(&40));
+
+    // In a profile, with a login the broker refuses.
+    let text = r#"
+        connections = 4
+        cps = 200
+        app = "mqtt"
+        [mqtt]
+        username = "u"
+        password = "p"
+        users = { u = "q" }
+        expect = "bad credentials"
+        [client]
+        ip = "10.0.0.1/24"
+        [server]
+        ip = "10.0.0.80/24"
+    "#;
+    let p = TcpProfile::from_toml(text, Path::new(".")).unwrap();
+    let programs: Vec<_> = p.programs().unwrap().into_iter().map(Arc::new).collect();
+    let config = p
+        .config(&programs, &["lo".to_string()], Some("lo"))
+        .unwrap();
+    assert_eq!(config.templates[0].listen_port, 1883);
+    let mut client_cfg = config.clone();
+    client_cfg.server = None;
+    let mut server_cfg = config;
+    server_cfg.client = None;
+    let mut client = TcpEngine::new(client_cfg).unwrap();
+    let mut server = TcpEngine::new(server_cfg).unwrap();
+    simulate(
+        &mut [&mut client, &mut server],
+        &mut Link::new(0, 0),
+        Duration::from_secs(30),
+    );
+    let c = &client.stats().client;
+    assert_eq!((c.completed, c.mismatched), (4, 0), "{c:?}");
+    assert_eq!(c.app.codes.get("CONNACK bad credentials"), Some(&4));
+}

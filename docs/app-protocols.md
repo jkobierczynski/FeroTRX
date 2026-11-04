@@ -14,8 +14,9 @@ The protocols plug into the engines through a small interface
 (`ferotrx_core::app`) and are not built into the TCP code. HTTP/1.1, DNS
 (over UDP and over TCP) and NTP are built in (0.16.0, M23), and a program
 can add its own. [TLS](#tls-and-https) runs under any of the stream
-protocols, with real handshakes: HTTPS, DNS over TLS (0.17.0, M24). The plan
-for the other protocols is [at the end](#what-comes-next).
+protocols, with real handshakes: HTTPS, DNS over TLS (0.17.0, M24).
+[MQTT](#mqtt) 3.1.1 and 5.0 clients and a broker came in 0.18.0 (M25). The
+plan for the other protocols is [at the end](#what-comes-next).
 
 ## Quick start
 
@@ -220,6 +221,64 @@ once the handshake is done, so its response times leave the handshake out.
 TLS 1.3 with a verified certificate and resumed sessions, TLS 1.2 with one
 cipher suite and client certificates, refused handshakes, and DNS over TLS.
 
+## MQTT
+
+`app = "mqtt"` (port 1883; 8883 with `tls = true`) plays MQTT 3.1.1 or 5.0
+clients and a broker:
+
+```toml
+[[template]]
+name = "sensors"
+app = "mqtt"
+[template.mqtt]
+version = "3.1.1"                       # or "5"
+username = "sensor"
+password = "lab"
+subscribe = ["lab/sensors/# 2"]         # FILTER [QOS]
+publish = ["lab/sensors/temp 0 16", "lab/sensors/alarm 2 64"]   # TOPIC [QOS] [SIZE]
+per_connection = 6
+interval = "5ms"
+users = { sensor = "lab" }              # the broker's logins
+```
+
+Each client connects, checks the CONNACK, subscribes, publishes its share
+of the messages (they are used in turn across all connections), waits for
+every acknowledgement (PUBACK for QoS 1, PUBREC/PUBREL/PUBCOMP for QoS 2)
+and for each of its messages that matches one of its own filters to come
+back, then sends DISCONNECT. It acknowledges what the broker sends as the
+QoS asks, and pings when it has been quiet for `keep_alive`.
+
+| Key | Default | What |
+|---|---|---|
+| `version` | `3.1.1` | `3.1.1` or `5`. |
+| `client_id` | `ferotrx-{n}` | `{n}` is the connection's number. |
+| `username`, `password` | none | The login. |
+| `keep_alive` | `60s` | Sent in CONNECT; PINGREQ after that long without sending. |
+| `clean` | true | Clean session (clean start in MQTT 5). |
+| `subscribe` | none | Topic filters, `FILTER [QOS]`, with `+` and `#`. |
+| `publish` | `["ferotrx/test"]` | Messages, `TOPIC [QOS] [SIZE]` (QoS 0 and 32 bytes by default). |
+| `[[mqtt.message]]` | | Messages with `topic`, `qos`, `retain`, `payload` or `payload_size`. |
+| `per_connection` | the number of messages | Messages each connection publishes. |
+| `interval` | 0 | Between one publish and the next. |
+| `wait` | `5s` | How long to wait for acknowledgements and echoes after the last publish; what is still missing then fails. |
+| `expect` | `accepted` | The CONNACK expected: `bad credentials`, `not authorized`, `id rejected`, `bad version`, for testing refusals. |
+| `users` | none | The broker's logins; with none, anyone may connect. |
+| `max_qos` | 2 | The highest QoS the broker grants subscriptions. |
+| `retain` | true | The broker keeps retained messages (shared by all its connections) and sends them to new subscriptions. |
+
+The client's transactions are `CONNACK accepted` (or the refusal), `SUBACK`,
+`PUBACK` and `PUBCOMP` with their response times, `published` for QoS 0,
+and `received` and `retained` for what came in; `no acknowledgement` and
+`not received` fail. The broker counts `CONNACK ...`, `subscribe` and
+`publish QoS N`. The broker delivers a publish to the subscriptions of the
+connection that sent it, not to other connections: enough for echo tests,
+and for real clients publishing and subscribing (`mosquitto_pub`,
+`mosquitto_sub` for retained messages), but it is not a full broker.
+
+[examples/lab-mqtt.toml](../examples/lab-mqtt.toml) has sensors with QoS 0,
+1 and 2 and a retained message, MQTT 5 over TLS, and a client with a wrong
+password the broker refuses.
+
 ## NTP
 
 `app = "ntp"` in UDP profiles: client requests, matched by their transmit
@@ -302,10 +361,17 @@ the other [lab scripts](lab-scripts.md) and runs, in turn:
 5. the emulated HTTPS server alone, with `curl -k` over TLS 1.3 and 1.2;
 6. `openssl s_server` on the router with an RSA certificate, and the
    emulated client loading its page over TLS 1.2 with an ECDHE_RSA suite and
-   over TLS 1.3.
+   over TLS 1.3;
+7. the three templates of `examples/lab-mqtt.toml` (QoS 0, 1 and 2 with
+   echoes and a retained message, MQTT 5 over TLS, a refused login);
+8. `mosquitto_pub` and `mosquitto_sub` against the emulated broker: a
+   retained QoS 1 message that a subscriber then gets, an MQTT 5 QoS 2
+   publish, and a wrong password that must be refused;
+9. `mosquitto` on the router, and the emulated clients publishing and
+   subscribing with QoS 0, 1 and 2 over MQTT 3.1.1 and 5.
 
 `LOSS=0.03`, `IPV6=1` and `NO_VLAN=1` work as in the other scripts, and
-options after the binary go to the runs with both ends emulated, 1 and 4
+options after the binary go to the runs with both ends emulated, 1, 4 and 7
 (`-B af_xdp --workers 2`).
 CI runs it plain, with loss, over IPv6 and over AF_XDP with two workers.
 
@@ -381,6 +447,6 @@ Tracked in [#37](https://github.com/jkobierczynski/FeroTRX/issues/37) and in
 | DHCP | high | done as [host emulation](host-emulation.md) (M19); a DHCP server role later |
 | SIP/RTP | high | SIP dialogs over UDP (needs multi-message UDP transactions), RTP media streams at codec rates |
 | HTTP/2 | high | frames, HPACK, streams; over TLS with ALPN |
-| MQTT | high | connect, subscribe, publish with QoS 0-2 |
+| MQTT | high | done (M25): 3.1.1 and 5.0, QoS 0-2, retained messages, logins; later a broker that routes between connections |
 | SMB | medium | negotiate, session setup, tree connect, reads and writes |
 | QUIC/HTTP/3 | medium | needs TLS 1.3 first |
