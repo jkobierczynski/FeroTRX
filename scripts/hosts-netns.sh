@@ -32,6 +32,11 @@
 # address and a default route, and a TCP client with `--client-ip slaac`.
 set -eu
 
+if [ "$(id -u)" != 0 ]; then
+    echo "needs root (network namespaces, a bridge): sudo $0 $*" >&2
+    exit 2
+fi
+
 if [ $# -gt 0 ]; then
     BIN=$1
     shift
@@ -48,7 +53,12 @@ if [ -z "$BIN" ] || ! [ -x "$BIN" ]; then
 fi
 for tool in ip bridge dnsmasq ping; do
     if ! command -v $tool >/dev/null 2>&1; then
-        echo "$tool is not installed" >&2
+        case $tool in
+            ip | bridge) pkg=iproute2 ;;
+            dnsmasq) pkg="dnsmasq-base (or dnsmasq)" ;;
+            ping) pkg=iputils-ping ;;
+        esac
+        echo "$tool is not installed: apt-get install $pkg" >&2
         exit 2
     fi
 done

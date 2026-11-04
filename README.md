@@ -29,7 +29,8 @@ transactions (DNS lookups, NTP, replayed UDP sessions, with matching, timeouts a
 * **M17, traffic models and file checks (Poisson arrivals, bursts, ramps and rate shapes for streams, TCP connections and UDP transactions; `ferotrx check`; a `format` version in every file):** done (0.10.0).
 * **M18, stateful TCP and UDP over AF_XDP and DPDK (an XDP program of its own for receiving, `-B` for `ferotrx tcp` and `ferotrx udp`, a timer queue in the engines):** done (0.11.0).
 * **M19, host emulation (`ferotrx host`; DHCP, SLAAC and DHCPv6 addresses, gratuitous ARP and unsolicited neighbor advertisements, IGMP/MLD joins, router advertisements; `ip = "dhcp"` for TCP and UDP ends):** done (0.12.0).
-* **M20, one run on several cores (`--workers`: streams split packet by packet, TCP and UDP runs by flow, one AF_XDP queue per worker):** this release (0.13.0). See [docs/multi-core.md](docs/multi-core.md).
+* **M20, one run on several cores (`--workers`: streams split packet by packet, TCP and UDP runs by flow, one AF_XDP queue per worker):** done (ships in 0.14.0). See [docs/multi-core.md](docs/multi-core.md).
+* **M21, Python client (`pip install ./python`: blocking and asyncio clients for the control server, typed results, TLS and tokens):** this release (0.14.0).
 
 ## Crates
 
@@ -40,6 +41,7 @@ transactions (DNS lookups, NTP, replayed UDP sessions, with matching, timeouts a
 | `ferotrx-io` | Packet sinks: network interfaces through libpcap/Npcap, AF_XDP or DPDK; pcap files. Send-and-receive ports for stateful TCP and UDP, receivers for loss and latency. |
 | `ferotrx-ctl` | Remote control: a JSON-RPC server and client to load profiles, start and stop runs, and read live counters; the runner that plays scenario checks on interfaces. |
 | `ferotrx-cli` | The `ferotrx` command line tool. |
+| `python/` (Python package `ferotrx`) | The Python client for the control server: blocking and asyncio, typed results, TLS and tokens. Not a crate; see [docs/python-client.md](docs/python-client.md). |
 
 ## Install
 
@@ -418,8 +420,20 @@ ferotrx ctl --json stats 2                             # JSON for scripts
 
 The protocol is [JSON-RPC 2.0](https://www.jsonrpc.org/specification) over TCP,
 one JSON object per line, on port 4510. Any language with sockets and JSON can
-use it; see [`examples/ctl-client.py`](examples/ctl-client.py) for Python with
-no extra packages, or `ferotrx_ctl::Client` from Rust.
+use it. From Python, use the `ferotrx` package in [`python/`](python)
+([docs/python-client.md](docs/python-client.md)); from Rust, `ferotrx_ctl::Client`.
+[`examples/ctl-client.py`](examples/ctl-client.py) shows the protocol in one
+file of plain Python.
+
+```python
+import ferotrx  # pip install ./python
+
+with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-key.pem") as c:
+    c.load_profile("my-test.toml", upload=True)
+    run = c.start("my-test", iface="enp0s3", duration="60s")
+    for update in c.watch(run.id):
+        print(f"{update.run.total.pps:.0f} pps")
+```
 
 | Method | Params | Result |
 | --- | --- | --- |
@@ -520,7 +534,8 @@ operator client certificates, a second CA (`read-ca.pem`) for read-only
 client certificates, and a certificate and key per name; run it again to add
 clients, it reuses the CAs. Clients check the server against `--ca` (or
 `FEROTRX_CA`), for the host in `--connect` (or `--server-name`); in Python,
-`ssl.create_default_context(cafile="ca.pem")` (see `examples/ctl-client.py`).
+`ferotrx.Client(host, ca="ca.pem", cert=..., key=...)` (see
+[docs/python-client.md](docs/python-client.md)).
 Certificates from your own PKI work as well: any PEM certificate and key.
 
 **Files.** Profiles, the pcaps they name, `base_dir` and pcap outputs must be

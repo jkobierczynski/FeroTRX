@@ -1,6 +1,6 @@
 # One run on several cores
 
-FeroTRX 0.13.0 (M20) can spread one run over several engine threads, called
+FeroTRX 0.14.0 (M20) can spread one run over several engine threads, called
 workers, one per core. Until now every run had one thread for its streams or
 its TCP/UDP engine, which capped a stateful run at about 25 000 connections
 per second and a stateless one at what one thread can hand to the NIC.
