@@ -50,6 +50,9 @@ pub struct TcpArgs {
     #[command(flatten)]
     hosts: HostArgs,
 
+    #[command(flatten)]
+    send: crate::SendArgs,
+
     /// Where the client connects, IP:PORT ([IPv6]:PORT), or IP for each template's port.
     /// Default: the server's address and port. Needed when this machine runs
     /// only the client.
@@ -403,6 +406,7 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
     if args.duration.is_some() {
         profile.duration = args.duration;
     }
+    profile.output = args.send.settings()?.or(&profile.output);
 
     if args.show {
         let many = profile.templates.len() > 1;
@@ -434,6 +438,9 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
     )
     .map_err(|e| anyhow::anyhow!(e))?;
     if !args.quiet {
+        for d in &started.port_details {
+            eprintln!("port: {d}");
+        }
         if profile.templates.len() > 1 {
             for (i, t) in profile.templates.iter().enumerate() {
                 eprintln!("{}", template_line(t, i));

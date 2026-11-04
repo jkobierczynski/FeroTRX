@@ -8,6 +8,7 @@ use ferotrx_core::{wall_clock, TcpRunConfig, UdpEngine, UdpJob, UdpProfile};
 use crate::controller::StartError;
 use crate::protocol::{RunState, UdpRunInfo};
 use crate::tcp::PortOpener;
+use ferotrx_io::PortSettings;
 
 /// A UDP run started by [`start_udp`].
 pub struct UdpStarted {
@@ -17,6 +18,8 @@ pub struct UdpStarted {
     pub program: String,
     /// The interfaces, in port order.
     pub interfaces: Vec<String>,
+    /// How each port sends and receives, where it says (AF_XDP, DPDK).
+    pub port_details: Vec<String>,
 }
 
 /// Loads a UDP profile, opens its interfaces and starts a [`UdpJob`].
@@ -29,7 +32,7 @@ pub fn start_udp(
     iface: Option<&str>,
     config: TcpRunConfig,
 ) -> Result<UdpStarted, StartError> {
-    start_udp_with(profile, iface, config, &ferotrx_io::open_port)
+    start_udp_with(profile, iface, config, &ferotrx_io::open_port_with)
 }
 
 /// Like [`start_udp`], opening ports with `open` (for tests and embedding).
@@ -56,8 +59,15 @@ pub fn start_udp_with(
             .join("; "),
     };
     let mut ports = Vec::with_capacity(interfaces.len());
-    for name in &interfaces {
-        ports.push(open(name)?);
+    let mut port_details = Vec::new();
+    for (i, name) in interfaces.iter().enumerate() {
+        let settings = PortSettings {
+            send: profile.output.clone(),
+            macs: engine.port_macs(i),
+        };
+        let port = open(name, &settings)?;
+        port_details.extend(port.describe());
+        ports.push(port);
     }
     if config.duration.is_none() {
         config.duration = profile.duration;
@@ -66,6 +76,7 @@ pub fn start_udp_with(
         job: UdpJob::spawn(engine, ports, config)?,
         program,
         interfaces,
+        port_details,
     })
 }
 
@@ -73,6 +84,7 @@ pub(crate) struct UdpRun {
     pub id: u64,
     pub program: String,
     pub interfaces: Vec<String>,
+    pub ports: Vec<String>,
     pub job: UdpJob,
     pub stopped_by_request: AtomicBool,
 }
@@ -93,6 +105,7 @@ impl UdpRun {
             id: self.id,
             program: self.program.clone(),
             interfaces: self.interfaces.clone(),
+            ports: self.ports.clone(),
             state,
             error: self.job.error(),
             client: Default::default(),

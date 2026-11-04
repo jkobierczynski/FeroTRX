@@ -139,8 +139,74 @@ pub fn open_receiver(name: &str) -> Result<Box<dyn ferotrx_core::PacketReceiver>
     }
 }
 
-/// Opens an interface as a [`PacketPort`](ferotrx_core::PacketPort).
+/// How to open a [`PacketPort`](ferotrx_core::PacketPort) with
+/// [`open_port_with`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PortSettings {
+    /// The backend and its settings, as for sending (default libpcap/Npcap).
+    pub send: ferotrx_core::SendSettings,
+    /// The emulated hosts' MAC addresses on this interface. AF_XDP and DPDK
+    /// ports take only frames for these, besides broadcasts and multicasts;
+    /// libpcap ports take everything.
+    pub macs: Vec<MacAddr>,
+}
+
+/// Opens an interface as a [`PacketPort`](ferotrx_core::PacketPort) with
+/// libpcap/Npcap.
 pub fn open_port(name: &str) -> Result<Box<dyn ferotrx_core::PacketPort>, SinkError> {
+    open_pcap_port(name)
+}
+
+/// Opens an interface as a [`PacketPort`](ferotrx_core::PacketPort) with the
+/// backend `settings` choose. With the DPDK backend the name is a DPDK device,
+/// as for [`Output::Interface`](crate::Output::Interface).
+pub fn open_port_with(
+    name: &str,
+    settings: &PortSettings,
+) -> Result<Box<dyn ferotrx_core::PacketPort>, SinkError> {
+    use ferotrx_core::Backend;
+    let send = &settings.send;
+    send.validate()?;
+    let backend = send.backend();
+    if let Some(why) = crate::backend_missing(backend) {
+        return Err(format!("cannot open {name} with {backend}: {why}").into());
+    }
+    let fail =
+        |e: SinkError| -> SinkError { format!("cannot open {name} with {backend}: {e}").into() };
+    match backend {
+        Backend::Pcap => open_pcap_port(name),
+        #[cfg(all(feature = "af-xdp", target_os = "linux"))]
+        Backend::AfXdp => {
+            let config = crate::XdpPortConfig {
+                queue: send.queue(),
+                mode: send.xdp_mode(),
+                batch: send.batch(),
+                generic: false,
+            };
+            Ok(Box::new(
+                crate::XdpPort::open(name, &settings.macs, &config).map_err(fail)?,
+            ))
+        }
+        #[cfg(feature = "dpdk")]
+        Backend::Dpdk => {
+            let config = crate::DpdkConfig {
+                queue: send.queue(),
+                batch: send.batch(),
+                eal_args: send.dpdk_args().to_vec(),
+            };
+            Ok(Box::new(
+                crate::DpdkPort::open(name, &config).map_err(fail)?,
+            ))
+        }
+        #[allow(unreachable_patterns)]
+        _ => {
+            let _ = fail;
+            unreachable!("backend_missing covers backends this build lacks")
+        }
+    }
+}
+
+fn open_pcap_port(name: &str) -> Result<Box<dyn ferotrx_core::PacketPort>, SinkError> {
     #[cfg(feature = "pcap")]
     {
         Ok(Box::new(PcapPort::open(name)?))

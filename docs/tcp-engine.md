@@ -105,6 +105,14 @@ with SACK-based loss recovery after RFC 6675:
 * No urgent data, TCP Fast Open, MD5 or TCP-AO, and no simultaneous open.
 * The receive window does not shrink: the program reads everything at once.
 
+## Ports and rates
+
+The engine sends and receives through ports: libpcap/Npcap by default, or
+AF_XDP and DPDK with `-B` ([fast-ports.md](fast-ports.md)). One run is one
+engine on one thread. Connection timers (retransmission, idle, TIME_WAIT,
+message waits) sit in a queue ordered by time, so connections in TIME_WAIT
+cost nothing until theirs ends.
+
 ## Counters
 
 Per side and per template: connections started, established, completed,

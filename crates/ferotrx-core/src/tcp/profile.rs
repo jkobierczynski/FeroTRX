@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::profile::OutputFile;
+use crate::SendSettings;
+
 use super::engine::{
     TcpClientConfig, TcpConfig, TcpEndpoint, TcpOptions, TcpServerConfig, TcpTemplate,
 };
@@ -143,6 +146,9 @@ pub struct TcpProfile {
     pub source_ports: Range<u16>,
     pub duration: Option<Duration>,
     pub options: TcpOptions,
+    /// How the interfaces send and receive (the `[output]` table): libpcap,
+    /// AF_XDP or DPDK. The command line's settings win over these.
+    pub output: SendSettings,
 }
 
 /// One template of a [`TcpProfile`]: a kind of connection.
@@ -368,6 +374,7 @@ impl Default for TcpProfile {
             source_ports: 1024..65535,
             duration: None,
             options: TcpOptions::default(),
+            output: SendSettings::default(),
         }
     }
 }
@@ -397,6 +404,7 @@ struct RawProfile {
     client: Option<RawHost>,
     server: Option<RawHost>,
     tcp: Option<RawOptions>,
+    output: Option<OutputFile>,
 }
 
 #[derive(Deserialize)]
@@ -745,6 +753,9 @@ impl TcpProfile {
             p.source_ports = parse_port_range(&r)?;
         }
         p.duration = raw.duration.map(|d| parse_duration(&d)).transpose()?;
+        p.output = raw
+            .output
+            .map_or(Ok(SendSettings::default()), OutputFile::settings)?;
         if let Some(o) = raw.tcp {
             let d = |v: Option<String>, dflt: Duration| -> Result<Duration> {
                 v.map_or(Ok(dflt), |s| parse_duration(&s))
@@ -1267,6 +1278,27 @@ mod tests {
         ];
         let err = p.config(&progs, &["e".into()], Some("e")).unwrap_err();
         assert!(err.to_string().contains("without a port"), "{err}");
+    }
+
+    #[test]
+    fn output_table_picks_the_backend() {
+        let text = |output: &str| {
+            format!(
+                "port = 80\n[[message]]\nfrom = \"client\"\ntext = \"hi\"\n\
+                 [client]\nip = \"10.0.0.1\"\n{output}"
+            )
+        };
+        let p = TcpProfile::from_toml(&text(""), Path::new(".")).unwrap();
+        assert!(p.output.is_empty());
+        let p = TcpProfile::from_toml(
+            &text("[output]\nbackend = \"af_xdp\"\nqueue = 1\nbatch = 32\n"),
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(p.output.backend(), crate::Backend::AfXdp);
+        assert_eq!((p.output.queue(), p.output.batch()), (1, 32));
+        let e = TcpProfile::from_toml(&text("[output]\nbackend = \"nope\"\n"), Path::new("."));
+        assert!(e.unwrap_err().to_string().contains("[output]"));
     }
 
     #[test]

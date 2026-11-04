@@ -77,6 +77,9 @@ pub struct UdpArgs {
     #[command(flatten)]
     hosts: HostArgs,
 
+    #[command(flatten)]
+    send: crate::SendArgs,
+
     /// Where the client sends, IP:PORT ([IPv6]:PORT), or IP for each
     /// template's port. Default: the server. Needed when this machine runs
     /// only the client.
@@ -291,6 +294,7 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
     if args.duration.is_some() {
         profile.duration = args.duration;
     }
+    profile.output = args.send.settings()?.or(&profile.output);
 
     if args.show {
         let apps = profile.apps()?;
@@ -323,6 +327,9 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
     )
     .map_err(|e| anyhow::anyhow!(e))?;
     if !args.quiet {
+        for d in &started.port_details {
+            eprintln!("port: {d}");
+        }
         if profile.templates.len() > 1 {
             for (i, t) in profile.templates.iter().enumerate() {
                 eprintln!("{}", template_line(t, i));

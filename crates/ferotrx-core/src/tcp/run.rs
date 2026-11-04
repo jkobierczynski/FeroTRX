@@ -26,6 +26,12 @@ pub trait PacketPort: Send {
     fn flush(&mut self) -> std::result::Result<(), SinkError> {
         Ok(())
     }
+
+    /// One line on how the port sends and receives, for example
+    /// `af_xdp on eth0: 4 queue(s), XDP driver mode, zero-copy`.
+    fn describe(&self) -> Option<String> {
+        None
+    }
 }
 
 impl<P: PacketPort + ?Sized> PacketPort for Box<P> {
@@ -37,6 +43,9 @@ impl<P: PacketPort + ?Sized> PacketPort for Box<P> {
     }
     fn flush(&mut self) -> std::result::Result<(), SinkError> {
         (**self).flush()
+    }
+    fn describe(&self) -> Option<String> {
+        (**self).describe()
     }
 }
 
