@@ -36,10 +36,14 @@ use std::ops::Range;
 
 mod build;
 mod dns;
+mod import;
 mod l2;
 mod l3;
 mod l4;
 mod spec;
+
+pub use import::{import, Imported};
+pub use spec::{format_layers, parse_layers, quote, RawLayer};
 
 pub use build::{
     Arp, BuildError, Dns, Ethernet, Icmp, Ipv4, Ipv6, Ipv6Ext, Ipv6ExtKind, LayerSpec, PacketSpec,

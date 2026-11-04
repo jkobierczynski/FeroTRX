@@ -51,11 +51,31 @@ jobs:
         run: cargo test --workspace
       - name: Test core (Windows)
         if: runner.os == 'Windows'
-        run: cargo test -p ferotrx-core -p ferotrx-packet
+        run: cargo test -p ferotrx-core -p ferotrx-packet -p ferotrx-gui
       # The control server tests need no interfaces, so they run without libpcap/Npcap.
       - name: Test control API (Windows)
         if: runner.os == 'Windows'
         run: cargo test -p ferotrx-ctl --no-default-features
+
+      # The GUI opens a window, connects to a server and keeps running: on a
+      # virtual X display with Mesa's software OpenGL. `timeout` ending it
+      # (exit 124) is the pass; anything earlier is a crash.
+      - name: GUI smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y xvfb libxkbcommon-x11-0 libgl1-mesa-dri libegl1
+          cargo build -p ferotrx-cli -p ferotrx-gui
+          ./target/debug/ferotrx serve -l 127.0.0.1:4519 > "$RUNNER_TEMP/gui-serve.log" 2>&1 &
+          serve=$!
+          status=0
+          XDG_DATA_HOME="$RUNNER_TEMP/gui-data" timeout 15 xvfb-run -a \
+            ./target/debug/ferotrx-gui --connect 127.0.0.1:4519 --port null \
+            --profile examples/lab-built-packets.toml examples/web.pcap || status=$?
+          kill "$serve" || true
+          if [ "$status" != 124 ]; then
+            echo "::error::ferotrx-gui exited with $status before the timeout"
+            exit 1
+          fi
 
       # The Python client (python/) against real `ferotrx serve` processes:
       # tokens, roles, TLS and client certificates, every method family,

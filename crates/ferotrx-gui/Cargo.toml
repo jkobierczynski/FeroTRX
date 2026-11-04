@@ -1,0 +1,27 @@
+[package]
+name = "ferotrx-gui"
+description = "FeroTRX desktop GUI: ports, stream and packet editor, live stats, over the control API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ferotrx-gui"
+path = "src/main.rs"
+
+[dependencies]
+ferotrx-ctl.workspace = true
+ferotrx-packet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+ferotrx-core.workspace = true
+clap.workspace = true
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "accesskit", "persistence"] }
+egui_extras = "0.33"
+egui_plot = "0.34"
+
+[dev-dependencies]
+ferotrx-ctl = { workspace = true }

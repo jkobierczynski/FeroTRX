@@ -1,45 +1,138 @@
 //! The text form of a [`PacketSpec`]: `eth(dst=...)/ipv4(src=...)/udp/dns(q=...)`.
 
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 use crate::build::*;
 
+/// One layer of the text form before its fields are checked: the layer name
+/// (lower case, as written: `ip` stays `ip`) and its `key=value` arguments in
+/// order. Keys may repeat (`dns(q=a.example,q=b.example)`).
+///
+/// Editors use this to show and change a packet layer by layer without losing
+/// how it was written; [`RawLayer::to_layer`] checks one layer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RawLayer {
+    pub name: String,
+    pub args: Vec<(String, String)>,
+}
+
+impl RawLayer {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            args: Vec::new(),
+        }
+    }
+
+    /// Checks the layer and turns it into a [`LayerSpec`].
+    pub fn to_layer(&self) -> Result<LayerSpec, BuildError> {
+        layer(&self.name.to_ascii_lowercase(), &self.args)
+    }
+}
+
+impl fmt::Display for RawLayer {
+    /// The text form of the layer, quoting values that need it, so that
+    /// [`parse_layers`] reads it back as it was.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.name)?;
+        if self.args.is_empty() {
+            return Ok(());
+        }
+        f.write_str("(")?;
+        for (i, (k, v)) in self.args.iter().enumerate() {
+            if i > 0 {
+                f.write_str(",")?;
+            }
+            write!(f, "{k}={}", quote(v))?;
+        }
+        f.write_str(")")
+    }
+}
+
+/// A value as the text form writes it: bare when it can be, else in quotes
+/// with `\n`, `\r`, `\t`, `\0`, `\"` and `\\` escapes.
+pub fn quote(v: &str) -> String {
+    let bare = !v.is_empty()
+        && v.trim() == v
+        && !v.starts_with('"')
+        && !v.contains([',', ')', '\n', '\r', '\t', '\0']);
+    if bare {
+        return v.to_string();
+    }
+    let mut out = String::with_capacity(v.len() + 2);
+    out.push('"');
+    for c in v.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Splits the text form into layers without checking their fields: the first
+/// half of parsing a [`PacketSpec`].
+pub fn parse_layers(s: &str) -> Result<Vec<RawLayer>, BuildError> {
+    let mut p = Parser {
+        s: s.as_bytes(),
+        text: s,
+        at: 0,
+    };
+    let mut out = Vec::new();
+    loop {
+        p.ws();
+        let name = p.ident();
+        if name.is_empty() {
+            return err(format!(
+                "expected a layer name at position {} of '{s}'",
+                p.at + 1
+            ));
+        }
+        let args = p.args(&name)?;
+        out.push(RawLayer { name, args });
+        p.ws();
+        match p.peek() {
+            None => break,
+            Some(b'/') => p.at += 1,
+            Some(c) => {
+                return err(format!(
+                    "unexpected '{}' at position {} of '{s}'; layers are joined by '/'",
+                    c as char,
+                    p.at + 1
+                ))
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Joins layers into the text form: `eth/ipv4(dst=10.0.0.2)/udp`.
+pub fn format_layers(layers: &[RawLayer]) -> String {
+    layers
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 impl FromStr for PacketSpec {
     type Err = BuildError;
 
     fn from_str(s: &str) -> Result<Self, BuildError> {
-        let mut p = Parser {
-            s: s.as_bytes(),
-            text: s,
-            at: 0,
-        };
-        let mut spec = PacketSpec::new();
-        loop {
-            p.ws();
-            let name = p.ident();
-            if name.is_empty() {
-                return err(format!(
-                    "expected a layer name at position {} of '{s}'",
-                    p.at + 1
-                ));
-            }
-            let args = p.args(&name)?;
-            spec.layers.push(layer(&name, &args)?);
-            p.ws();
-            match p.peek() {
-                None => break,
-                Some(b'/') => p.at += 1,
-                Some(c) => {
-                    return err(format!(
-                        "unexpected '{}' at position {} of '{s}'; layers are joined by '/'",
-                        c as char,
-                        p.at + 1
-                    ))
-                }
-            }
-        }
-        Ok(spec)
+        Ok(PacketSpec {
+            layers: parse_layers(s)?
+                .iter()
+                .map(RawLayer::to_layer)
+                .collect::<Result<_, _>>()?,
+        })
     }
 }
 
@@ -516,6 +609,27 @@ fn layer(name: &str, args: &[(String, String)]) -> Result<LayerSpec, BuildError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_layers_round_trip() {
+        let text = r#"eth(dst=02:00:00:00:00:01)/ipv4(src=10.0.0.1)/udp/raw(text="a, b) \"c\"\n")"#;
+        let layers = parse_layers(text).unwrap();
+        assert_eq!(layers.len(), 4);
+        assert_eq!(layers[2], RawLayer::new("udp"));
+        assert_eq!(layers[3].args[0].1, "a, b) \"c\"\n");
+        let again = format_layers(&layers);
+        assert_eq!(parse_layers(&again).unwrap(), layers);
+        assert_eq!(again, text);
+        assert_eq!(quote("10.0.0.1"), "10.0.0.1");
+        assert_eq!(quote(""), "\"\"");
+        assert_eq!(quote(" x"), "\" x\"");
+        assert!(layers[1].to_layer().is_ok());
+        let bad = RawLayer {
+            name: "ipv4".into(),
+            args: vec![("src".into(), "nope".into())],
+        };
+        assert_eq!(bad.to_layer().unwrap_err().0, "ipv4: invalid src 'nope'");
+    }
 
     #[test]
     fn parses_fields_and_quotes() {

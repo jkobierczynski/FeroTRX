@@ -31,7 +31,8 @@ ferotrx ctl --json stats 2                             # JSON for scripts
 The protocol is [JSON-RPC 2.0](https://www.jsonrpc.org/specification) over TCP,
 one JSON object per line, on port 4510. Any language with sockets and JSON can
 use it. From Python, use the `ferotrx` package in [`python/`](../python)
-([docs/python-client.md](python-client.md)); from Rust, `ferotrx_ctl::Client`.
+([docs/python-client.md](python-client.md)); from Rust, `ferotrx_ctl::Client`; with a
+window, the [desktop GUI](gui.md).
 [`examples/ctl-client.py`](../examples/ctl-client.py) shows the protocol in one
 file of plain Python.
 
