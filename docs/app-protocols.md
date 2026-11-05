@@ -19,7 +19,8 @@ protocols, with real handshakes: HTTPS, DNS over TLS (0.17.0, M24).
 [HTTP/2](#http2) over TLS and without in 0.19.0 (M26), [SSH](#ssh)
 clients and servers that work with OpenSSH in 0.20.0 (M27), and
 [SIP](#sip-and-rtp) phones and a SIP server with RTP audio, which work with
-SIPp, in 0.21.0 (M28). The plan for the other protocols is
+SIPp, in 0.21.0 (M28), and [SMB](#smb) 2 and 3 file clients and a file
+server, which work with smbclient and Samba, in 0.23.0 (M30). The plan for the other protocols is
 [at the end](#what-comes-next).
 
 ## Quick start
@@ -424,7 +425,7 @@ refused, and so are channels other than `session` (port forwarding).
 | `rekey_after` | never | Client: a new key exchange after this many bytes (`1M`). |
 | `window` | `2M` | Client: each channel's receive window. |
 | `ciphers` | all three | Both ends: the ciphers, best first. |
-| `version` | `FeroTRX_0.21.0` | Both ends: the software version after `SSH-2.0-` (`OpenSSH_9.6`). |
+| `version` | `FeroTRX_0.23.0` | Both ends: the software version after `SSH-2.0-` (`OpenSSH_9.6`). |
 | `users` | none | Server: user names and passwords; with none, any password. |
 | `authorized_keys` | none | Server: public key lines (`ssh-ed25519 AAAA...`), or a file of them; with none, any key. |
 | `host_key` | `generate` | Server: an OpenSSH Ed25519 key file. A generated one is new on every run, and the run prints its fingerprint. |
@@ -565,6 +566,110 @@ sudo ferotrx udp -p examples/lab-sip.toml -i eth0 --connect 192.168.20.10
 register and call with G.711, calls without registering with Opus, and a
 busy line.
 
+## SMB
+
+`app = "smb"` (port 445) plays SMB 2 and 3 file clients and a file server
+over Direct TCP. smbclient works against the emulated server, and the
+emulated clients work against Samba and Windows:
+
+```toml
+[[template]]
+name = "office"
+app = "smb"
+[template.smb]
+user = "alice"
+password = "lab"
+share = "lab"
+signing = "required"
+ops = [
+    "write report-{n}.bin 1M",
+    "read report-{n}.bin",
+    "list docs",
+    "delete report-{n}.bin",
+]
+users = { alice = "lab" }            # the server's logins
+shares = ["lab", "public"]
+read_only = ["public"]
+files = { "readme.txt" = "4K", "docs/manual.txt" = "512K" }
+```
+
+Each client connection negotiates the best dialect both ends have (3.1.1,
+3.0.2, 3.0, 2.1, 2.0.2; 3.1.1 with its SHA-512 pre-auth integrity hash),
+logs in with NTLMv2 in SPNEGO (or anonymously, with `user = ""`), connects
+to its share and plays its operations, each a CREATE, then the reads,
+writes or directory queries, and a CLOSE:
+
+* `write PATH SIZE`: creates or overwrites the file with SIZE bytes, in
+  `chunk`s with `window` writes in flight;
+* `read PATH`: reads the whole file the same way. A file the connection
+  wrote is checked byte for byte (`read wrong data` when it differs);
+* `list [DIR]`: lists a directory (the share's root without one);
+* `delete PATH`, `mkdir DIR`, `rmdir DIR`.
+
+`{n}` in a path is the connection's number. An operation that must fail
+ends with `expect STATUS`: `write x.bin 1K expect ACCESS_DENIED`. Then the
+client disconnects the tree and logs off. It signs its requests
+(HMAC-SHA256 for 2.x, AES-128-CMAC for 3.x, with SMB 3's key derivation)
+when the server requires signing or `signing = "required"`, signs the tree
+connect of every 3.1.1 session that has a key, as 3.1.1 asks, and checks
+the signatures on what comes back.
+
+The server takes the dialects and logins its profile allows: its `users`
+(NTLMv2, checked with the password), or with no users anyone, as a guest
+(unsigned). It keeps its shares in memory, shared by all its connections:
+the `files` of `files` in each share at the start (with filler content),
+and whatever clients write. It answers what smbclient and Windows send for
+files and directories: CREATE with every disposition, delete on close,
+READ, WRITE, FLUSH, CLOSE, QUERY_DIRECTORY (`.` and `..`, `*` and `?`),
+QUERY_INFO for the usual file and volume classes, SET_INFO (end of file,
+rename, delete), LOCK, ECHO, compounded requests, and
+FSCTL_VALIDATE_NEGOTIATE_INFO. Read-only shares refuse writes with
+`STATUS_ACCESS_DENIED`; unknown shares give `STATUS_BAD_NETWORK_NAME`.
+
+| Key | Default | What |
+|---|---|---|
+| `user` | `guest` | Client: the user name; `""` logs in anonymously. |
+| `password` | none | Client: the password. |
+| `domain` | `WORKGROUP` | Client: the domain in the NTLM answer. |
+| `workstation` | `FEROTRX` | Client: its name in the NTLM answer. |
+| `share` | `lab` | Client: the share it connects to. |
+| `ops` | write, read, list, delete of `ferotrx-{n}.bin` (64 KB) | Client: the operations, above. |
+| `chunk` | `64K` | Client: the size of each read and write, at most what the server allows (8 MB with large MTU, else 64 KB). |
+| `window` | 4 | Client: reads or writes in flight at once. |
+| `wait` | `30s` | Client: how long it waits for an answer. |
+| `expect` | none | Client: the status the login or tree connect must fail with: `LOGON_FAILURE`, `BAD_NETWORK_NAME`. |
+| `dialects` | all five | Both ends: offered (client) or accepted (server): `3.1.1`, `3.0.2`, `3.0`, `2.1`, `2.0.2`. |
+| `signing` | `auto` | Both ends: `required` (the client always signs; the server requires it), `auto` (the client signs when the server requires it), `off` (the client never signs). |
+| `users` | none | Server: user names and passwords; with none, anyone logs in, as a guest. |
+| `guest` | false | Server: with users, also take unknown users and anonymous logins, as guests. |
+| `shares` | `["lab"]` | Server: its shares. |
+| `read_only` | none | Server: the shares that refuse writes. |
+| `files` | `{ "readme.txt" = "4K" }` | Server: the files in every share at the start, with their sizes; directories in their paths are made too. |
+| `name`, `workgroup`, `dns_domain` | `FEROTRX`, `WORKGROUP`, none | Server: the names in its NTLM challenge. |
+| `max_io` | `1M` | Server: the largest read and write it takes. |
+
+The client's transactions are `negotiate 3.1.1`, `login` (`login guest`,
+`login anonymous`), `tree connect`, each operation by its name (`write`,
+`read`, `list`, ...) with the time from its CREATE to its CLOSE, and
+`logoff`; a failure adds its status: `login STATUS_LOGON_FAILURE`, `read
+STATUS_OBJECT_NAME_NOT_FOUND`. Each login is a handshake, by dialect and
+signing (`SMB 3.1.1 signed AES-CMAC`, `SMB 2.1 signed HMAC-SHA256`, `SMB
+3.1.1 unsigned`, `SMB 3.1.1 guest`, `failed: STATUS_LOGON_FAILURE`). The
+server counts each request by its command (`CREATE`, `READ`, `WRITE`),
+with the status when it was an error (`CREATE STATUS_ACCESS_DENIED`).
+
+```sh
+# smbclient against the emulated server (leave [client] out):
+smbclient //192.168.20.80/lab -U alice%lab -c 'put report.pdf; ls; get readme.txt'
+# The emulated clients against Samba or Windows (leave [server] out, and
+# give a user, password and share that server has):
+sudo ferotrx tcp -p examples/lab-smb.toml -i eth0 --connect 192.168.20.10
+```
+
+[examples/lab-smb.toml](../examples/lab-smb.toml) has SMB 3.1.1 office
+users with signing, an SMB 2.1 client, anonymous reads of a read-only
+share, and a wrong password.
+
 ## NTP
 
 `app = "ntp"` in UDP profiles: client requests, matched by their transmit
@@ -649,7 +754,8 @@ Checks of kind `udp` have `app_transactions`, `app_failed` and
 `protocol_errors`, and with SIP calls `media_streams`, `media_received`,
 `media_lost`, `media_loss_pct` (the worse of the two ways) and
 `jitter_min`/`_avg`/`_p99`/`_max`: `require = ["media_loss_pct < 1",
-"jitter_p99 < 30ms"]`.
+"jitter_p99 < 30ms"]`. SMB's logins count as handshakes, so `tls_handshakes`,
+`tls_failed` and `handshake_p99` work for them too.
 
 ## Lab script
 
@@ -734,6 +840,33 @@ sudo apt-get install sip-tester ethtool
 sudo scripts/sip-netns.sh
 ```
 
+SMB has one too, [`scripts/smb-netns.sh`](../scripts/smb-netns.sh):
+
+1. the templates of `examples/lab-smb.toml` with smaller files (SMB 3.1.1
+   signed with AES-CMAC, SMB 2.1 signed with HMAC-SHA256, anonymous reads of
+   a read-only share that refuses a write, a wrong password), checking every
+   operation, the dialect and signing of every login, and that every file
+   read back is what was written;
+2. the emulated server alone, and `smbclient` on the router: with SMB
+   3.1.1, 3.0, 2.1 and 2.0.2, signed, it uploads 300 KB, lists the share,
+   downloads the upload (compared with the original), reads the server's
+   `readme.txt` and deletes the upload; a wrong password must get
+   `NT_STATUS_LOGON_FAILURE`, and an anonymous login can read the public
+   share but not write to it;
+3. Samba's `smbd` on the router (its own configuration, share and password
+   database in a temporary directory, nothing of the system's), and the
+   emulated clients writing, reading back, listing and deleting with SMB
+   3.1.1 (signed and not), 3.0.2 and 2.1, and a wrong password that `smbd`
+   must refuse.
+
+CI runs it plain, with loss, over IPv6 (run 1 only) and over AF_XDP. Runs 2
+and 3 need `smbclient`, `smbd` and `ethtool`.
+
+```sh
+sudo apt-get install smbclient samba ethtool
+sudo scripts/smb-netns.sh
+```
+
 ## Writing a protocol
 
 A protocol is two traits in `ferotrx_core::app`:
@@ -803,6 +936,11 @@ and TCP), and the built-in ones are in `crates/ferotrx-core/src/app/`.
   re-INVITEs from our end, no session timers, PRACK, SUBSCRIBE/NOTIFY,
   MESSAGE or DTMF (RFC 4733); a phone's media goes to the other end's
   signaling address; calls with media do not run on several workers yet.
+* SMB: no encryption (a server that requires it is refused), no SMB 1, no
+  Kerberos (NTLMv2 only, without the MIC and SPNEGO mechListMIC), no leases,
+  oplocks, durable handles or multichannel, no named pipes (so no share
+  listing with `smbclient -L`), no security descriptors; the server's files
+  live in memory, and its directory listings do not page over changes.
 * The control API and the GUI do not have editors for the protocol tables
   yet; profiles carry them as TOML.
 
@@ -819,5 +957,5 @@ Tracked in [#37](https://github.com/jkobierczynski/FeroTRX/issues/37) and in
 | SIP/RTP | high | done (M28): registration with digest, calls, RTP/RTCP at codec rates with loss and jitter, SIPp both ways; later SIP over TCP/TLS, SRTP, DTMF, a proxy role |
 | HTTP/2 | high | done (M26): frames, HPACK, streams, flow control; h2 over TLS with ALPN and h2c; later server push and priorities |
 | MQTT | high | done (M25): 3.1.1 and 5.0, QoS 0-2, retained messages, logins; later a broker that routes between connections |
-| SMB | medium | negotiate, session setup, tree connect, reads and writes |
+| SMB | medium | done (M30): SMB 2.0.2 to 3.1.1, NTLMv2, signing, files and directories, smbclient and Samba both ways; later encryption (AES-GCM/CCM), Kerberos, leases |
 | QUIC/HTTP/3 | medium | needs TLS 1.3 first |

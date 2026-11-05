@@ -1,0 +1,107 @@
+# FeroTRX stateful TCP profile: SMB 2 and 3 file clients and a file server,
+# through a NAT router between two VLANs.
+#
+#   FeroTRX host --- switch (trunk) --- router --- VLAN 10: 192.168.10.0/24 (clients)
+#                                              \-- VLAN 20: 192.168.20.0/24 (server)
+#
+# Run it with:
+#   sudo ferotrx tcp -p examples/lab-smb.toml -i <interface>
+#
+# Each client negotiates a dialect, logs in with NTLMv2, connects to a
+# share, writes a file, reads it back (checking every byte), lists the
+# share, deletes the file, and logs off. The server keeps its shares in
+# memory: the `files` in each at the start, and what clients write. The run
+# reports each operation (write, read, list, ...), how long it took, and the
+# dialect and signing of each login.
+#
+# Either end works against other SMB software:
+#   only the server (leave out [client]), and smbclient:
+#     smbclient //192.168.20.80/lab -U alice%lab -c 'ls; get readme.txt -'
+#   only the clients (leave out [server]), against Samba or Windows:
+#     sudo ferotrx tcp -p examples/lab-smb.toml -i eth0 --connect 192.168.20.10
+#   (with a user and password that server knows, and its share's name).
+#
+# As in examples/lab-tcp.toml, the `ip`s must be free addresses in each VLAN,
+# not addresses of the FeroTRX machine, and `gateway` the router's address.
+format = 1
+cps = 10
+connections = 50
+concurrency = 20
+
+# Office users: SMB 3.1.1, signed, a 1 MB file up and down.
+[[template]]
+name = "office"
+app = "smb"                 # port 445
+weight = 4
+
+[template.smb]
+user = "alice"
+password = "lab"
+share = "lab"
+signing = "required"        # "auto" (default): when the server requires it
+ops = [
+    "write report-{n}.bin 1M",
+    "read report-{n}.bin",
+    "read docs/manual.txt",
+    "list docs",
+    "delete report-{n}.bin",
+]
+chunk = "256K"              # each read and write
+window = 4                  # in flight at once
+users = { alice = "lab", bob = "lab" }   # the server's; none: anyone, as a guest
+shares = ["lab", "public"]
+read_only = ["public"]
+files = { "readme.txt" = "4K", "docs/manual.txt" = "512K" }
+
+# An old client: SMB 2.1 only, signed with HMAC-SHA256.
+[[template]]
+name = "legacy"
+app = "smb"
+port = 1445
+weight = 1
+
+[template.smb]
+user = "bob"
+password = "lab"
+dialects = ["2.1", "2.0.2"]
+signing = "required"
+ops = ["write old-{n}.doc 64K", "read old-{n}.doc", "delete old-{n}.doc"]
+users = { bob = "lab" }
+
+# Anonymous reads of a read-only share, and a write it must refuse.
+[[template]]
+name = "public"
+app = "smb"
+port = 1446
+weight = 1
+
+[template.smb]
+user = ""
+share = "public"
+ops = ["read readme.txt", "list", "write intruder.txt 1K expect ACCESS_DENIED"]
+shares = ["public"]
+read_only = ["public"]
+
+# A wrong password, which the server must refuse.
+[[template]]
+name = "intruder"
+app = "smb"
+port = 1447
+weight = 1
+
+[template.smb]
+user = "alice"
+password = "guess"
+expect = "LOGON_FAILURE"
+users = { alice = "lab" }
+
+[client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20
