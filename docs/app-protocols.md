@@ -16,8 +16,9 @@ The protocols plug into the engines through a small interface
 can add its own. [TLS](#tls-and-https) runs under any of the stream
 protocols, with real handshakes: HTTPS, DNS over TLS (0.17.0, M24).
 [MQTT](#mqtt) 3.1.1 and 5.0 clients and a broker came in 0.18.0 (M25), and
-[HTTP/2](#http2) over TLS and without in 0.19.0 (M26). The plan for the
-other protocols is [at the end](#what-comes-next).
+[HTTP/2](#http2) over TLS and without in 0.19.0 (M26), and [SSH](#ssh)
+clients and servers that work with OpenSSH in 0.20.0 (M27). The plan for
+the other protocols is [at the end](#what-comes-next).
 
 ## Quick start
 
@@ -343,6 +344,115 @@ and for real clients publishing and subscribing (`mosquitto_pub`,
 1 and 2 and a retained message, MQTT 5 over TLS, and a client with a wrong
 password the broker refuses.
 
+## SSH
+
+`app = "ssh"` (port 22) plays SSH-2 clients and servers that speak the real
+protocol, so OpenSSH's `ssh` works against the emulated server and the
+emulated client logs in to `sshd`:
+
+```toml
+[[template]]
+name = "admin"
+app = "ssh"
+[template.ssh]
+user = "admin"
+password = "lab"
+commands = ["uptime", "hostname", "echo hello"]
+users = { admin = "lab" }            # the server's logins
+[[template.ssh.route]]
+command = "uptime"
+output = " 10:00:00 up 3 days\n"
+delay = "20ms"
+
+[[template]]
+name = "backup"
+app = "ssh"
+port = 2222
+[template.ssh]
+user = "backup"
+key = "generate"                     # or an OpenSSH key file
+ciphers = ["aes256-gcm@openssh.com"]
+rekey_after = "1M"
+[[template.ssh.command]]
+run = "cat > /dev/null"
+input_size = "512K"
+[[template.ssh.command]]
+run = "head -c 2M /dev/zero"
+output_size = "2M"
+```
+
+Each connection does the version exchange and a curve25519-sha256 key
+exchange (RFC 8731) with an ssh-ed25519 host key, then encrypts with
+chacha20-poly1305@openssh.com, aes256-gcm@openssh.com or
+aes128-gcm@openssh.com (the first of the client's list that the server
+has). The client checks the host key's signature, and its fingerprint if
+the profile gives one. It logs in with its key (an Ed25519 signature,
+RFC 4252) and then, if the server refuses the key, with its password, and
+runs its share of the commands: one session channel each, `exec`, the
+command's input and EOF, then stdout and stderr up to the exit status and
+the channel's close. Channels have flow control both ways. When every
+command has run, the client sends DISCONNECT. Either end takes a new key
+exchange whenever the other starts one, and `rekey_after` makes the client
+start one after that many bytes.
+
+The server takes logins from its `users` and `authorized_keys` (with none,
+it takes any password or any key with a valid signature) and answers each
+command from its routes. A route's `command` matches the whole command line,
+or its start when it ends with `*`. Commands no route has get the
+built-ins: `echo`, `true`, `false`, `exit N`, `whoami`, `hostname`, `cat`
+(sends its input back), `cat > /dev/null` (swallows it) and
+`head -c SIZE /dev/zero`. Others fail with exit status 127 and
+`sh: 1: NAME: not found`, as a shell would. A `shell` request (plain `ssh
+HOST`) gets a small shell that runs the same commands line by line; after a
+`pty-req` it echoes what is typed, handles backspace, Ctrl-C and Ctrl-D,
+and ends lines with CR LF. `env`, `window-change` and `signal` are
+accepted, `subsystem` (sftp, so also `scp`), agent and X11 forwarding are
+refused, and so are channels other than `session` (port forwarding).
+
+| Key | Default | What |
+|---|---|---|
+| `user` | `lab` | Client: the user name. |
+| `password` | `lab`, none with `key` | Client: the password. |
+| `key` | none | Client: an unencrypted Ed25519 key file from `ssh-keygen -t ed25519 -N ''` (relative to the profile), or `generate`. Tried before the password. |
+| `commands` | `["echo hello"]` | Client: command lines, each expected to exit 0. |
+| `[[ssh.command]]` | | Client: commands with `run`, `input` or `input_size` (sent on stdin, then EOF), `exit` (the status expected) and `output_size` (the stdout size expected). |
+| `per_connection` | the number of commands | Commands each connection runs, used in turn across connections. |
+| `fingerprint` | none | Client: the server's host key must be this one (`SHA256:...`, as `ssh-keygen -l` prints it). |
+| `expect` | `success` | Client: `failure` when the login (or the key exchange) must fail. |
+| `rekey_after` | never | Client: a new key exchange after this many bytes (`1M`). |
+| `window` | `2M` | Client: each channel's receive window. |
+| `ciphers` | all three | Both ends: the ciphers, best first. |
+| `version` | `FeroTRX_0.20.0` | Both ends: the software version after `SSH-2.0-` (`OpenSSH_9.6`). |
+| `users` | none | Server: user names and passwords; with none, any password. |
+| `authorized_keys` | none | Server: public key lines (`ssh-ed25519 AAAA...`), or a file of them; with none, any key. |
+| `host_key` | `generate` | Server: an OpenSSH Ed25519 key file. A generated one is new on every run, and the run prints its fingerprint. |
+| `banner` | none | Server: shown before the login. |
+| `max_auth_tries` | 6 | Server: failed logins before it disconnects. |
+| `hostname` | `ferotrx` | Server: what `hostname` prints. |
+| `[[ssh.route]]` | | Server: `command`, `output` or `output_size`, `stderr`, `exit`, `delay`. |
+
+The transactions are the logins (`auth password`, `auth publickey`,
+`auth refused`), the commands by exit status (`exit 0`, `exit 127`; `exit-signal`
+gives `signal NAME`) with response times from opening the channel to its
+close, `rekey` for each later key exchange, and on the server `shell exit
+N`. A command fails when its status or output size is not the expected one.
+The first key exchange is the connection's handshake, labelled with what it
+agreed on (`curve25519-sha256 ssh-ed25519 chacha20-poly1305@openssh.com`),
+and its time is from the connection's start to the new keys. The summary
+line calls them `SSH key exchanges`.
+
+Against OpenSSH, the generated host key is unknown, so tell `ssh` not to
+keep it:
+
+```sh
+ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no admin@192.168.20.80 uptime
+ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no admin@192.168.20.80   # the shell
+```
+
+[examples/lab-ssh.toml](../examples/lab-ssh.toml) has operators logging in
+with a password, backups with a key, an upload, a download, a route's exit
+status and re-keying, and a wrong password that the server refuses.
+
 ## NTP
 
 `app = "ntp"` in UDP profiles: client requests, matched by their transmit
@@ -441,10 +551,21 @@ the other [lab scripts](lab-scripts.md) and runs, in turn:
     `curl --http2-prior-knowledge` without TLS, and `h2load` with 20 streams
     per connection;
 12. `nghttpd` on the router, over TLS and without, and the emulated HTTP/2
-    client loading a page, a 200 KB file and a missing page from it.
+    client loading a page, a 200 KB file and a missing page from it;
+13. the three templates of `examples/lab-ssh.toml` (password logins with a
+    delayed route, key logins with an upload, a download and an exit status
+    over AES-256-GCM with re-keys, a refused password);
+14. the emulated SSH server alone, with OpenSSH's `ssh` from the router: a
+    key login, `echo`, a route, 1 MB down, 300 KB echoed by `cat`, an exit
+    status, each cipher, a re-key every 64 KB, a shell on a pty, and with
+    `sshpass` a right and a wrong password;
+15. `sshd` on the router (its own config, host key and authorized key; root
+    by key only, on the lab address), and the emulated client logging in
+    with the key, checking the host key fingerprint and running commands
+    with each cipher while re-keying every 512 KB.
 
 `LOSS=0.03`, `IPV6=1` and `NO_VLAN=1` work as in the other scripts, and
-options after the binary go to the runs with both ends emulated, 1, 4, 7 and 10
+options after the binary go to the runs with both ends emulated, 1, 4, 7, 10 and 13
 (`-B af_xdp --workers 2`).
 CI runs it plain, with loss, over IPv6 and over AF_XDP with two workers.
 
@@ -504,6 +625,12 @@ and TCP), and the built-in ones are in `crates/ferotrx-core/src/app/`.
   certificates, no OCSP or certificate revocation, no renegotiation, no
   0-RTT early data. TLS handshakes cost CPU: a few thousand per second and
   core.
+* SSH: only curve25519-sha256, ssh-ed25519 (host and user keys) and the
+  three AEAD ciphers, which is what current OpenSSH prefers; no RSA or
+  ECDSA keys, no CBC/CTR ciphers or HMACs, no compression, no strict key
+  exchange (`kex-strict-*`), no keyboard-interactive logins, no sftp/scp,
+  forwarding or agent; one channel at a time per client connection; the
+  server's shell ignores route delays and runs no commands that read input.
 * A UDP transaction is one request and its answer; protocols with longer
   dialogs over UDP (SIP) need the engine to take several.
 * The control API and the GUI do not have editors for the protocol tables
@@ -517,7 +644,7 @@ Tracked in [#37](https://github.com/jkobierczynski/FeroTRX/issues/37) and in
 | Protocol | Importance | Plan |
 |---|---|---|
 | HTTPS/TLS | very high | done (M24); later maybe hello-only emulation of old versions (TLS 1.0/1.1) for middlebox tests |
-| SSH | high | banner and key exchange, then encrypted-looking traffic |
+| SSH | high | done (M27): real key exchange, ciphers, logins and command channels, OpenSSH both ways; later sftp/scp, port forwarding, RSA/ECDSA keys |
 | DHCP | high | done as [host emulation](host-emulation.md) (M19); a DHCP server role later |
 | SIP/RTP | high | SIP dialogs over UDP (needs multi-message UDP transactions), RTP media streams at codec rates |
 | HTTP/2 | high | done (M26): frames, HPACK, streams, flow control; h2 over TLS with ALPN and h2c; later server push and priorities |

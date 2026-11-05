@@ -794,6 +794,9 @@ struct Conn {
     app_told_closed: bool,
     /// The session asked to close.
     app_close: bool,
+    /// The application said the other end said goodbye: a reset from it
+    /// now ends the connection as completed.
+    goodbye: bool,
 }
 
 type Key = (SocketAddr, SocketAddr);
@@ -940,6 +943,7 @@ impl Conn {
             app_ooo: Vec::new(),
             app_told_closed: false,
             app_close: false,
+            goodbye: false,
         }
     }
 
@@ -1105,6 +1109,7 @@ impl Conn {
             self.hold = Some(w);
         }
         self.app_close |= cx.wants_close();
+        self.goodbye |= cx.said_goodbye();
         self.mismatched |= !cx.all_ok();
         let (role, tpl) = (self.role, self.tpl);
         out.add(role, tpl, |s| {
@@ -1418,7 +1423,11 @@ impl Conn {
             if !self.rst_acceptable(o, seg) {
                 return Fate::Keep;
             }
-            if !self.counted {
+            if self.goodbye {
+                // What it reset came after its goodbye: the conversation
+                // was over.
+                self.finish(out);
+            } else if !self.counted {
                 out.add(self.role, self.tpl, |s| s.reset += 1);
             }
             return Fate::Remove;

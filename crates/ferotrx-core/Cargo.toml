@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["profile", "tls"]
+default = ["profile", "tls", "ssh"]
 # Load multi-stream traffic profiles from TOML files.
 profile = ["serde", "dep:toml", "build"]
 # Serialize benchmark reports and run metadata (serde).
@@ -17,6 +17,8 @@ serde = ["dep:serde"]
 build = ["dep:ferotrx-packet"]
 # TLS under stream protocols (HTTPS), with rustls and generated lab certificates.
 tls = ["dep:rustls", "dep:rcgen"]
+# SSH client and server (curve25519, ed25519, AES-GCM and ChaCha20-Poly1305 via ring).
+ssh = ["dep:ring"]
 
 [dependencies]
 ferotrx-packet = { workspace = true, optional = true }
@@ -26,6 +28,7 @@ serde = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
+ring = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true

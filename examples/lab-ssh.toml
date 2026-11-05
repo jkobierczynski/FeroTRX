@@ -1,0 +1,105 @@
+# FeroTRX stateful TCP profile: SSH clients and servers, through a NAT
+# router between two VLANs.
+#
+#   FeroTRX host --- switch (trunk) --- router --- VLAN 10: 192.168.10.0/24 (clients)
+#                                              \-- VLAN 20: 192.168.20.0/24 (server)
+#
+# Run it with:
+#   sudo ferotrx tcp -p examples/lab-ssh.toml -i <interface>
+#
+# Each client does a real SSH-2 key exchange (curve25519-sha256, an
+# ssh-ed25519 host key, ChaCha20-Poly1305 or AES-GCM), logs in, runs its
+# commands, one session channel each, and disconnects. The server answers
+# from its routes and a few built-in commands (echo, true, false, exit N,
+# cat, cat > /dev/null, head -c SIZE /dev/zero, whoami, hostname). Either end
+# works against OpenSSH:
+#
+#   only the server (leave out [client]); the run prints each template's
+#   host key fingerprint (generated; `host_key = "FILE"` keeps one):
+#     ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no admin@192.168.20.80 uptime
+#     ssh ... admin@192.168.20.80          (a small shell; `exit` leaves)
+#   only the clients (leave out [server]), against sshd:
+#     sudo ferotrx tcp -p examples/lab-ssh.toml -i eth0 --connect 192.168.20.10
+#
+# As in examples/lab-tcp.toml, the `ip`s must be free addresses in each VLAN,
+# not addresses of the FeroTRX machine, and `gateway` the router's address.
+format = 1
+cps = 20
+connections = 100
+concurrency = 50
+
+# An operator: password login, a few commands, one of them slow.
+[[template]]
+name = "admin"
+app = "ssh"                 # port 22
+weight = 4
+
+[template.ssh]
+user = "admin"
+password = "lab"
+commands = ["uptime", "hostname", "whoami", "echo hello"]
+users = { admin = "lab" }   # the server's users; none: any password
+banner = "Authorized use only.\n"
+
+[[template.ssh.route]]
+command = "uptime"
+output = " 10:00:00 up 3 days,  2 users,  load average: 0.10, 0.20, 0.30\n"
+delay = "20ms"
+
+# Backups: public key login, an upload and a download, AES-GCM, and a new
+# key exchange every 1 MB.
+[[template]]
+name = "backup"
+app = "ssh"
+port = 2222
+weight = 1
+
+[template.ssh]
+user = "backup"
+key = "generate"            # or a file from `ssh-keygen -t ed25519 -N ''`
+ciphers = ["aes256-gcm@openssh.com"]
+rekey_after = "1M"
+# authorized_keys = "keys.pub"   # the server's keys; none: any key
+
+[[template.ssh.command]]
+run = "cat > /dev/null"
+input_size = "512K"
+
+[[template.ssh.command]]
+run = "head -c 2M /dev/zero"
+output_size = "2M"
+
+[[template.ssh.command]]
+run = "tar czf - /srv"      # a route: 512 KB, a warning and exit status 1
+exit = 1
+output_size = "512K"
+
+[[template.ssh.route]]
+command = "tar czf - *"
+output_size = "512K"
+stderr = "tar: Removing leading `/' from member names\n"
+exit = 1
+
+# A login that must be refused.
+[[template]]
+name = "intruder"
+app = "ssh"
+port = 2223
+weight = 1
+
+[template.ssh]
+user = "admin"
+password = "guess"
+users = { admin = "lab" }
+expect = "failure"
+
+[client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20
