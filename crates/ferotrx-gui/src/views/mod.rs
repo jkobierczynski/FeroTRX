@@ -1,5 +1,6 @@
 //! The panels of the window, each an `impl FeroApp` block.
 
+mod apps;
 mod capture;
 mod compare;
 mod groups;
@@ -11,13 +12,14 @@ mod streams;
 
 use eframe::egui::{self, RichText};
 
+pub use apps::{app_section, AppsState, ProfileKind};
 pub use capture::CaptureState;
 pub use compare::{CompareForm, Side as CompareSide};
 pub use groups::{GroupsState, Member, MemberKind};
 pub use lab::LabForm;
 pub use scenario::ScenarioState;
 pub use stateful::StatefulState;
-pub use streams::EditorState;
+pub use streams::{string_list, EditorState};
 
 use crate::app::{BottomTab, FeroApp, ServerState, Status, Tab};
 use crate::conn::ConnSettings;
@@ -39,6 +41,7 @@ impl FeroApp {
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
             Tab::Streams => self.streams_tab(ui),
             Tab::Stateful => self.stateful_tab(ui),
+            Tab::Apps => self.apps_tab(ui),
             Tab::Capture => self.capture_tab(ui),
             Tab::Scenario => self.scenario_tab(ui),
             Tab::Group => self.groups_tab(ui),
@@ -63,6 +66,11 @@ impl FeroApp {
                     Tab::Stateful,
                     "Stateful",
                     "TCP sessions and UDP transactions from profiles",
+                ),
+                (
+                    Tab::Apps,
+                    "Applications",
+                    "Edit TCP and UDP profiles with their protocols (HTTP, DNS, MQTT, SSH, SIP, SMB, TLS) and run them",
                 ),
                 (
                     Tab::Capture,

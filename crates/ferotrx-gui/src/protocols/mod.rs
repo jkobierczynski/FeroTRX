@@ -14,11 +14,13 @@
 //! knows still opens, in a key/value form, so the GUI never loses fields of a
 //! newer engine.
 
+pub mod apps;
 mod builtin;
 
 use eframe::egui;
 use ferotrx_packet::RawLayer;
 
+pub use apps::{builtin_app_editors, AppEditor, Transport};
 pub use builtin::builtin_editors;
 
 /// Where a protocol sits in the stack, for grouping the "add layer" menu.
@@ -215,6 +217,8 @@ pub trait ProtocolEditor: Send + Sync {
 pub struct Registry {
     editors: Vec<Box<dyn ProtocolEditor>>,
     unknown: Unknown,
+    /// Editors of application protocol profiles (`[http]`, `[mqtt]`, ...).
+    apps: Vec<Box<dyn AppEditor>>,
 }
 
 impl Default for Registry {
@@ -229,6 +233,7 @@ impl Registry {
         Self {
             editors: Vec::new(),
             unknown: Unknown,
+            apps: Vec::new(),
         }
     }
 
@@ -238,7 +243,48 @@ impl Registry {
         for e in builtin_editors() {
             r.register(e);
         }
+        for e in builtin_app_editors() {
+            r.register_app(e);
+        }
         r
+    }
+
+    /// Adds an application protocol editor; a later one for the same name
+    /// replaces the earlier one.
+    pub fn register_app(&mut self, editor: Box<dyn AppEditor>) {
+        self.apps.retain(|e| e.name() != editor.name());
+        self.apps.push(editor);
+    }
+
+    /// The editor for `app = "name"`, and whether that name runs over TLS
+    /// (`https`, `h2`).
+    pub fn app(&self, name: &str) -> Option<(&dyn AppEditor, bool)> {
+        let name = name.to_ascii_lowercase();
+        for e in &self.apps {
+            if e.name() == name {
+                return Some((e.as_ref(), false));
+            }
+            if let Some((_, tls)) = e.aliases().iter().find(|(a, _)| *a == name) {
+                return Some((e.as_ref(), *tls));
+            }
+        }
+        None
+    }
+
+    /// The protocols a TCP or UDP profile can pick, as their `app` names
+    /// (aliases included), in registration order.
+    pub fn app_names(&self, t: Transport) -> Vec<(&'static str, &'static str)> {
+        let mut out = Vec::new();
+        for e in &self.apps {
+            if e.name() == apps::TLS || !e.transports().contains(&t) {
+                continue;
+            }
+            out.push((e.name(), e.title()));
+            for (a, _) in e.aliases() {
+                out.push((*a, e.title()));
+            }
+        }
+        out
     }
 
     /// Adds an editor. One registered later for the same name replaces the

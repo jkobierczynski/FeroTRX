@@ -285,6 +285,7 @@ pub enum Tab {
     #[default]
     Streams,
     Stateful,
+    Apps,
     Capture,
     Scenario,
     Group,
@@ -319,6 +320,7 @@ pub struct FeroApp {
     pub stateful: StatefulState,
     pub scenario: ScenarioState,
     pub groups: crate::views::GroupsState,
+    pub apps: crate::views::AppsState,
     pub log: Vec<LogLine>,
     pub next_tag: u64,
     pub started: Instant,
@@ -390,6 +392,7 @@ impl FeroApp {
             stateful: StatefulState::default(),
             scenario: ScenarioState::default(),
             groups: Default::default(),
+            apps: Default::default(),
             log: Vec::new(),
             next_tag: 1,
             started: Instant::now(),
@@ -492,6 +495,7 @@ impl FeroApp {
         self.stateful = f.stateful;
         self.scenario = f.scenario;
         self.groups = f.groups;
+        self.apps = f.apps;
         self.tab = f.view.tab;
         self.bottom = f.view.bottom;
         if !f.capture.path.is_empty() {

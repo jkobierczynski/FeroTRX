@@ -179,7 +179,35 @@ pub fn check_file(
         Some(k) => k,
         None => detect_kind(&text)?,
     };
-    let dir = path.parent().unwrap_or(Path::new("."));
+    if kind == FileKind::Scenario {
+        let mut out = FileCheck {
+            kind: Some(kind),
+            ..Default::default()
+        };
+        scenario(&Scenario::from_path(path, overrides)?, &mut out)?;
+        return Ok(out);
+    }
+    check_text(
+        &text,
+        path.parent().unwrap_or(Path::new(".")),
+        Some(kind),
+        overrides,
+    )
+}
+
+/// Checks a file's text as [`check_file`] does, its relative paths
+/// starting at `dir`: for a profile being edited and not saved yet.
+pub fn check_text(
+    text: &str,
+    dir: &Path,
+    kind: Option<FileKind>,
+    overrides: &[(String, String)],
+) -> Result<FileCheck> {
+    let kind = match kind {
+        Some(k) => k,
+        None => detect_kind(text)?,
+    };
+    let text = text.to_string();
     let mut out = FileCheck {
         kind: Some(kind),
         ..Default::default()
@@ -190,7 +218,7 @@ pub fn check_file(
         FileKind::Udp => udp(&UdpProfile::from_toml(&text, dir)?, "", &mut out)?,
         FileKind::Bench => bench(&BenchProfile::from_toml(&text)?, &mut out)?,
         FileKind::Hosts => hosts(&crate::HostProfile::from_toml(&text)?, &mut out)?,
-        FileKind::Scenario => scenario(&Scenario::from_path(path, overrides)?, &mut out)?,
+        FileKind::Scenario => scenario(&Scenario::from_toml(&text, dir, overrides)?, &mut out)?,
     }
     Ok(out)
 }

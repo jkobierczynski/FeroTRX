@@ -45,6 +45,10 @@ pub enum Target {
     CompareReport { before: bool },
     /// Where to save a comparison.
     SaveComparison,
+    /// A TCP or UDP profile for the Applications tab.
+    OpenAppProfile,
+    /// Where to save the profile of the Applications tab.
+    SaveAppProfile,
 }
 
 /// The kinds of file a dialog lists first.
