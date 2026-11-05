@@ -155,4 +155,7 @@ Application protocols add their own `response_*` (request to whole answer).
 MOS 4.0 or more without loss and have an RTCP round trip; then, where the
 kernel has netem, it puts 200 ms of delay and 5% loss on the router's link
 to the server and checks that the round trip grows past 190 ms and the
-server's calls score about MOS 3.7 (3.3 to 4.0).
+server's calls score below 4.0 and at least 0.3 below the clean calls (about
+3.7 on a quiet machine). On a VM, stalls make some packets late for the
+jitter buffer: clean calls then score 4.3 rather than 4.38, and impaired
+ones nearer 3.3, as a phone on that VM would also suffer.
