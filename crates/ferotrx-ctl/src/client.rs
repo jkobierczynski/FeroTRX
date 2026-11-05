@@ -324,6 +324,28 @@ impl Client {
         self.call("rx.remove", &RunId { id })
     }
 
+    /// Starts an RFC 2544 benchmark on the server (`bench.start`).
+    pub fn bench_start(&mut self, params: &BenchStartParams) -> Result<BenchRunInfo, ClientError> {
+        self.call("bench.start", params)
+    }
+
+    pub fn bench_get(&mut self, id: u64) -> Result<BenchRunInfo, ClientError> {
+        self.call("bench.get", &RunId { id })
+    }
+
+    pub fn bench_runs(&mut self) -> Result<Vec<BenchRunInfo>, ClientError> {
+        self.call("bench.list", &Value::Null)
+    }
+
+    /// Stops a benchmark after the trial under way and waits for it to end.
+    pub fn bench_stop(&mut self, id: u64) -> Result<BenchRunInfo, ClientError> {
+        self.call("bench.stop", &StopParams { id, wait: true })
+    }
+
+    pub fn bench_remove(&mut self, id: u64) -> Result<BenchRunInfo, ClientError> {
+        self.call("bench.remove", &RunId { id })
+    }
+
     /// Reads a scenario on the server and lists its checks (`scenario.check`).
     pub fn scenario_check(
         &mut self,

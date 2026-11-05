@@ -47,7 +47,7 @@ use crate::{Error, LatencyStats, Result, SizeMix, FCS_LEN, L1_OVERHEAD};
 
 /// One of the RFC 2544 tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum BenchTest {
     Throughput,
@@ -310,7 +310,7 @@ pub trait TrialRunner {
 
 /// Latency figures in microseconds.
 #[derive(Clone, Debug, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LatencySummary {
     pub count: u64,
     pub min_us: Option<f64>,
@@ -344,7 +344,7 @@ impl From<&LatencyStats> for LatencySummary {
 
 /// One trial in the report: what was offered and what was achieved.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrialRecord {
     pub test: BenchTest,
     /// Repetition, from 1.
@@ -419,7 +419,7 @@ impl TrialRecord {
 /// Throughput of one size: the highest load that passed, per repetition and
 /// on average.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ThroughputResult {
     /// Average over the repetitions; 0 when no load passed.
     pub load_pct: f64,
@@ -436,7 +436,7 @@ pub struct ThroughputResult {
 
 /// Latency of one size at one load, over all its trials.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LatencyResult {
     pub load_pct: f64,
     pub trials: u32,
@@ -446,7 +446,7 @@ pub struct LatencyResult {
 
 /// Frame loss at one load, over its repetitions.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LossPoint {
     pub load_pct: f64,
     pub offered_pps: f64,
@@ -457,7 +457,7 @@ pub struct LossPoint {
 
 /// Back-to-back: the longest burst without loss.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BurstResult {
     pub load_pct: f64,
     /// Average over the repetitions.
@@ -471,7 +471,7 @@ pub struct BurstResult {
 
 /// Everything measured for one frame size or mix.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SizeReport {
     /// The size or mix as configured, e.g. `508` or `imix`.
     pub size: String,
@@ -486,7 +486,7 @@ pub struct SizeReport {
     pub throughput: Option<ThroughputResult>,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub latency: Option<LatencyResult>,
-    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Vec::is_empty"))]
     pub frame_loss: Vec<LossPoint>,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub back_to_back: Option<BurstResult>,
@@ -496,7 +496,7 @@ pub struct SizeReport {
 
 /// The settings a benchmark ran with, for the report.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConfigSummary {
     pub tests: Vec<BenchTest>,
     pub sizes: Vec<String>,
@@ -520,7 +520,7 @@ pub struct ConfigSummary {
 
 /// The results of [`run_benchmark`].
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BenchReport {
     pub config: ConfigSummary,
     /// The benchmark was stopped (or ran out of time) before the end.

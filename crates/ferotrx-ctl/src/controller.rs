@@ -15,6 +15,7 @@ use ferotrx_core::{
 };
 use ferotrx_io::Output;
 
+use crate::bench::{open_bench_sinks, BenchJob, BenchRun, BenchSinkOpener};
 use crate::files::FilePolicy;
 use crate::protocol::*;
 use crate::scenario::{scenario_info, LabRunner, RunLists, ScenarioRun};
@@ -137,6 +138,8 @@ pub struct Controller {
     auth_required: bool,
     files: FilePolicy,
     scenario_runs: Mutex<BTreeMap<u64, Arc<ScenarioRun>>>,
+    bench_runs: Mutex<BTreeMap<u64, Arc<BenchRun>>>,
+    open_bench_sinks: Arc<BenchSinkOpener>,
     open_port: Arc<PortOpener>,
     open_receiver: Arc<ReceiverOpener>,
     /// Whether `lab.start` may build a lab, and the one running.
@@ -180,6 +183,8 @@ impl Controller {
             auth_required: false,
             files: FilePolicy::unrestricted(),
             scenario_runs: Mutex::default(),
+            bench_runs: Mutex::default(),
+            open_bench_sinks: Arc::new(open_bench_sinks),
             open_port: Arc::new(ferotrx_io::open_port_with),
             open_receiver: Arc::new(ferotrx_io::open_receiver),
             lab_allowed: false,
@@ -265,6 +270,25 @@ impl Controller {
         open: impl Fn(&str) -> Result<Box<dyn PacketReceiver>, SinkError> + Send + Sync + 'static,
     ) -> Self {
         self.open_receiver = Arc::new(open);
+        self
+    }
+
+    /// Opens the sending interface of benchmarks with `open` instead of
+    /// libpcap/Npcap (or the backend asked for), e.g. in-memory ports in tests.
+    pub fn with_bench_sink_opener(
+        mut self,
+        open: impl Fn(
+                &str,
+                &SendSettings,
+                u32,
+                usize,
+            )
+                -> Result<(Vec<Box<dyn ferotrx_core::PacketSink + Send>>, String), SinkError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.open_bench_sinks = Arc::new(open);
         self
     }
 
@@ -394,6 +418,20 @@ impl Controller {
             "scenario.remove" => {
                 let p: RunId = parse(params)?;
                 to_value(self.scenario_remove(p.id)?)
+            }
+            "bench.start" => to_value(self.bench_start(parse(params)?)?),
+            "bench.get" => {
+                let p: RunId = parse(params)?;
+                to_value(self.bench_run(p.id)?.info())
+            }
+            "bench.list" => to_value(self.bench_runs()),
+            "bench.stop" => {
+                let p: StopParams = parse(params)?;
+                to_value(self.bench_stop(p.id, p.wait)?)
+            }
+            "bench.remove" => {
+                let p: RunId = parse(params)?;
+                to_value(self.bench_remove(p.id)?)
             }
             "lab.get" => to_value(self.lab_info()),
             "lab.start" => to_value(self.lab_start(parse(params)?)?),
@@ -639,6 +677,10 @@ impl Controller {
 
     /// Stops every run and waits for them, e.g. when the server shuts down.
     pub fn stop_all(&self) {
+        let benches: Vec<Arc<BenchRun>> = lock(&self.bench_runs).values().cloned().collect();
+        for r in &benches {
+            r.stop();
+        }
         let scenarios: Vec<Arc<ScenarioRun>> =
             lock(&self.scenario_runs).values().cloned().collect();
         for r in &scenarios {
@@ -831,6 +873,125 @@ impl Controller {
             )));
         }
         lock(&self.scenario_runs).remove(&id);
+        Ok(run.info())
+    }
+
+    /// Starts a benchmark (RFC 2544 tests, as `ferotrx bench`) on a thread
+    /// of its own; `bench.get` follows its trials.
+    pub fn bench_start(&self, p: BenchStartParams) -> Result<BenchRunInfo, RpcError> {
+        let bad = |e: String| RpcError::invalid_params(e);
+        let (text, name) = match (&p.path, &p.toml) {
+            (Some(path), None) => {
+                let file = self.files.readable(path)?;
+                let text = std::fs::read_to_string(&file).map_err(|e| {
+                    RpcError::failed(format!("cannot read {}: {e}", path.display()))
+                })?;
+                (text, path.display().to_string())
+            }
+            (None, Some(text)) => {
+                self.files.upload(text)?;
+                (text.clone(), "upload".to_string())
+            }
+            _ => return Err(RpcError::invalid_params("give either path or toml")),
+        };
+        let mut profile = ferotrx_core::BenchProfile::from_toml(&text)
+            .map_err(|e| RpcError::failed(format!("{name}: {e}")))?;
+        let c = &mut profile.config;
+        if !p.tests.is_empty() {
+            c.tests = p
+                .tests
+                .iter()
+                .map(|t| t.parse().map_err(|e: ferotrx_core::Error| e.to_string()))
+                .collect::<Result<_, _>>()
+                .map_err(bad)?;
+        }
+        if !p.sizes.is_empty() {
+            c.sizes = Vec::new();
+            for s in &p.sizes {
+                if s.trim().eq_ignore_ascii_case("rfc2544") {
+                    c.sizes.extend(
+                        ferotrx_core::RFC2544_SIZES
+                            .iter()
+                            .filter_map(|&n| ferotrx_core::SizeMix::fixed(n).ok()),
+                    );
+                } else {
+                    c.sizes.push(
+                        s.parse()
+                            .map_err(|e: ferotrx_core::Error| bad(e.to_string()))?,
+                    );
+                }
+            }
+        }
+        if let Some(r) = &p.line_rate {
+            c.line_rate_mbps = match r.parse::<Rate>().map_err(|e| bad(e.to_string()))? {
+                Rate::Mbps(m) => m,
+                _ => return Err(bad("line_rate is a bit rate such as 1gbps".into())),
+            };
+        }
+        if let Some(d) = &p.trial_duration {
+            c.trial_duration = parse_duration(d).map_err(|e| bad(e.to_string()))?;
+        }
+        if let Some(n) = p.repetitions {
+            c.repetitions = n;
+        }
+        c.validate().map_err(|e| bad(e.to_string()))?;
+        let send = OutputSpec {
+            backend: p.backend,
+            queue: p.queue,
+            xdp_mode: p.xdp_mode,
+            workers: p.workers,
+            ..Default::default()
+        }
+        .send_settings()?
+        .or(&profile.output);
+        let id = self.next_run.fetch_add(1, Ordering::Relaxed);
+        let job = BenchJob {
+            profile,
+            profile_name: name,
+            profile_text: text,
+            iface: p.iface,
+            rx: p.rx,
+            send,
+        };
+        let run = BenchRun::spawn(id, job, &*self.open_bench_sinks, &*self.open_receiver)
+            .map_err(RpcError::failed)?;
+        let info = run.info();
+        lock(&self.bench_runs).insert(id, run);
+        Ok(info)
+    }
+
+    fn bench_run(&self, id: u64) -> Result<Arc<BenchRun>, RpcError> {
+        lock(&self.bench_runs)
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| RpcError::not_found(format!("no benchmark run {id}")))
+    }
+
+    pub fn bench_runs(&self) -> Vec<BenchRunInfo> {
+        let runs: Vec<Arc<BenchRun>> = lock(&self.bench_runs).values().cloned().collect();
+        runs.iter().map(|r| r.info()).collect()
+    }
+
+    /// Stops a benchmark after the trial under way; its report is partial.
+    /// With `wait`, answers once it has ended (or after 10 s).
+    pub fn bench_stop(&self, id: u64, wait: bool) -> Result<BenchRunInfo, RpcError> {
+        let run = self.bench_run(id)?;
+        run.stop();
+        if wait {
+            run.wait(STOP_TIMEOUT);
+        }
+        Ok(run.info())
+    }
+
+    /// Forgets a benchmark run that has ended.
+    pub fn bench_remove(&self, id: u64) -> Result<BenchRunInfo, RpcError> {
+        let run = self.bench_run(id)?;
+        if run.is_running() {
+            return Err(RpcError::failed(format!(
+                "benchmark run {id} is still running; stop it first"
+            )));
+        }
+        lock(&self.bench_runs).remove(&id);
         Ok(run.info())
     }
 

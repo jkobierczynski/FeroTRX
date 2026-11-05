@@ -203,8 +203,8 @@ impl Role {
             "server.info" | "auth" => None,
             "interfaces.list" | "profile.get" | "profile.list" | "run.stats" | "run.list"
             | "tcp.stats" | "tcp.list" | "udp.stats" | "udp.list" | "rx.stats" | "rx.list"
-            | "lab.get" | "scenario.get" | "scenario.list" | "stats.subscribe"
-            | "stats.unsubscribe" => Some(Role::Read),
+            | "lab.get" | "scenario.get" | "scenario.list" | "bench.get" | "bench.list"
+            | "stats.subscribe" | "stats.unsubscribe" => Some(Role::Read),
             _ => Some(Role::Operator),
         }
     }
@@ -1384,6 +1384,88 @@ pub struct ScenarioRunInfo {
     pub report: Option<ScenarioReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+// ----- bench.* -----
+
+/// Parameters of `bench.start`: a benchmark profile (a `[benchmark]` table,
+/// see `docs/benchmarking.md`) as a file or as text, the interfaces, and
+/// values that replace the profile's, as `ferotrx bench` takes them.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BenchStartParams {
+    /// A benchmark profile on the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// The profile's text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toml: Option<String>,
+    /// Send on this interface.
+    pub iface: String,
+    /// Receive on this interface (may be `iface`).
+    pub rx: String,
+    /// `pcap` (default), `af_xdp` or `dpdk`; others from the profile's `[output]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xdp_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<u16>,
+    /// Tests instead of the profile's: `throughput`, `latency`, `frame_loss`,
+    /// `back_to_back`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tests: Vec<String>,
+    /// Frame sizes instead of the profile's: `508`, `rfc2544`, `imix`, `60:7,590:4,1514:1`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sizes: Vec<String>,
+    /// Speed of the link, e.g. `1gbps`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_rate: Option<String>,
+    /// Length of each trial, e.g. `10s`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_duration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repetitions: Option<u32>,
+}
+
+/// One trial of a benchmark, with the frame size it was for.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BenchTrialInfo {
+    pub size: String,
+    #[serde(flatten)]
+    pub trial: ferotrx_core::TrialRecord,
+}
+
+/// A benchmark run, as `bench.start`, `bench.get`, `bench.stop` and
+/// `bench.list` show it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BenchRunInfo {
+    pub id: u64,
+    /// The profile's file, or `upload`.
+    pub profile: String,
+    pub iface: String,
+    pub rx: String,
+    pub state: RunState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub elapsed_s: f64,
+    pub tests: Vec<String>,
+    pub sizes: Vec<String>,
+    /// Every trial so far, in order.
+    #[serde(default)]
+    pub trials: Vec<BenchTrialInfo>,
+    /// The machine, interfaces and backend, as the report has them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<ferotrx_core::RunInfo>,
+    /// The report, once the run has ended (also when stopped: partial).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<ferotrx_core::BenchReport>,
+    /// The report as `ferotrx bench` prints it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 // ----- stats.* -----
