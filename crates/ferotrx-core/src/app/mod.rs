@@ -39,6 +39,7 @@ pub mod ntp;
 #[cfg(feature = "profile")]
 mod registry;
 pub mod sip;
+pub mod smb;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 #[cfg(feature = "tls")]

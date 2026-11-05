@@ -227,6 +227,22 @@ jobs:
           sudo IPV6=1 scripts/sip-netns.sh ./target/debug/ferotrx
           sudo NO_VLAN=1 scripts/sip-netns.sh ./target/debug/ferotrx -B af_xdp
 
+      # SMB 2 and 3 through the NAT router: signed 3.1.1 and 2.1 clients that
+      # write, read back, list and delete files, an anonymous read-only
+      # share and a wrong password between emulated ends; smbclient against
+      # the emulated server, and the emulated clients against Samba's smbd;
+      # with 3% loss, over IPv6 and AF_XDP.
+      - name: SMB through a NAT router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo modprobe 8021q || true
+          sudo apt-get install -y ethtool smbclient samba
+          sudo scripts/smb-netns.sh ./target/debug/ferotrx
+          sudo NO_VLAN=1 LOSS=0.03 scripts/smb-netns.sh ./target/debug/ferotrx
+          sudo IPV6=1 scripts/smb-netns.sh ./target/debug/ferotrx
+          sudo NO_VLAN=1 scripts/smb-netns.sh ./target/debug/ferotrx -B af_xdp
+
       # Application protocols over stateful TCP through the NAT router: HTTP
       # (keep-alive, chunked, POST, 404) and DNS over TCP between emulated
       # ends, curl against the emulated web server, and the emulated client

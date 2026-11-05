@@ -694,14 +694,27 @@ fn side_line(c: &TcpCounters) -> String {
 
 /// `200 TLS handshakes (TLSv1.3 TLS13_AES_256_GCM_SHA384 http/1.1 x200), 150
 /// resumed, 0 failed; handshake ms avg 1.20 p99 3.40`, or for SSH `20 SSH key
-/// exchanges (curve25519-sha256 ssh-ed25519 aes256-gcm@openssh.com x20), 0 failed`
+/// exchanges (curve25519-sha256 ssh-ed25519 aes256-gcm@openssh.com x20), 0 failed`,
+/// or for SMB `20 SMB logins (SMB 3.1.1 signed AES-CMAC x20), 0 failed`
 fn tls_line(h: &ferotrx_ctl::protocol::HandshakeCounters) -> String {
     let mut v: Vec<(&String, &u64)> = h.negotiated.iter().collect();
     v.sort_by(|x, y| y.1.cmp(x.1).then(x.0.cmp(y.0)));
     let what: Vec<String> = v.iter().map(|(k, n)| format!("{k} x{n}")).collect();
     // SSH's key exchanges name their host key type; nothing resumes there.
     let ssh = h.negotiated.keys().any(|k| k.contains(" ssh-ed25519 "));
-    let mut line = if ssh {
+    // SMB's logins name the dialect and signing.
+    let smb = h
+        .negotiated
+        .keys()
+        .any(|k| k.starts_with("SMB ") || k.starts_with("failed: STATUS_"));
+    let mut line = if smb {
+        format!(
+            "{} SMB logins ({}), {} failed",
+            h.handshakes,
+            what.join(", "),
+            h.failed
+        )
+    } else if ssh {
         format!(
             "{} SSH key exchanges ({}), {} failed",
             h.handshakes,
