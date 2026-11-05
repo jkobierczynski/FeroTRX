@@ -973,3 +973,445 @@ fn templates_follow_a_dhcp_server() {
         "10.77.0.30".parse::<IpAddr>().unwrap()
     );
 }
+
+// --- DHCP server roles ----------------------------------------------------
+
+fn dhcp_server_host() -> HostConfig {
+    let mut s = DhcpServerConfig::new(Ipv4Addr::new(10, 77, 0, 100), Ipv4Addr::new(10, 77, 0, 102));
+    s.lease = Duration::from_secs(10);
+    s.dns = vec![Ipv4Addr::new(10, 77, 0, 53)];
+    s.domain = Some("lab.test".into());
+    s.router = Some(SERVER_IP);
+    HostConfig::new(0, SERVER_MAC)
+        .with_ipv4(Ipv4Mode::Static {
+            ip: SERVER_IP,
+            prefix: 24,
+            gateway: None,
+        })
+        .with_dhcp_server(s)
+}
+
+/// Runs two engines on one link for `until`, frames both ways.
+fn link_up(
+    a: &mut HostEngine,
+    b: &mut HostEngine,
+    from: Duration,
+    until: Duration,
+    step: Duration,
+) {
+    let mut now = from;
+    while now < until {
+        for turn in 0..2 {
+            let (x, y) = if turn == 0 {
+                (&mut *a, &mut *b)
+            } else {
+                (&mut *b, &mut *a)
+            };
+            x.poll(now);
+            for (_, f) in x.take_output() {
+                y.handle_frame(0, &f, now);
+            }
+        }
+        now += step;
+    }
+}
+
+#[test]
+fn a_dhcp_server_leases_renews_and_takes_releases() {
+    let mut server = HostEngine::new(vec![dhcp_server_host()], HostOptions::default()).unwrap();
+    let mut clients = (1..=2).map(dhcp_host).collect::<Vec<_>>();
+    clients[0].hostname = Some("lab-1".into());
+    let mut clients = HostEngine::new(clients, HostOptions::default()).unwrap();
+    link_up(&mut server, &mut clients, ms(0), ms(2000), ms(10));
+    assert!(clients.all_ready());
+    let s = clients.statuses();
+    let a = s[0].ipv4.as_ref().unwrap();
+    // The clients start in a random order within 100 ms.
+    let mut ips: Vec<IpAddr> = s.iter().map(|h| h.ipv4.as_ref().unwrap().ip).collect();
+    ips.sort();
+    assert_eq!(
+        ips,
+        vec![
+            IpAddr::V4(Ipv4Addr::new(10, 77, 0, 100)),
+            IpAddr::V4(Ipv4Addr::new(10, 77, 0, 101))
+        ]
+    );
+    assert_eq!(a.prefix, 24);
+    assert_eq!(a.gateway, Some(IpAddr::V4(SERVER_IP)), "the router option");
+    assert_eq!(a.server, Some(IpAddr::V4(SERVER_IP)));
+    assert_eq!(a.dns, vec![IpAddr::V4(Ipv4Addr::new(10, 77, 0, 53))]);
+    assert_eq!(a.lease, Some(Duration::from_secs(10)));
+    let st = server.statuses()[0].dhcp_server.clone().unwrap();
+    assert_eq!(st.pool, "10.77.0.100-10.77.0.102");
+    assert_eq!(st.pool_size, 3);
+    assert_eq!(st.leases.len(), 2);
+    let l1 = st.leases.iter().find(|l| l.mac == Some(mac(1))).unwrap();
+    assert_eq!(l1.ip, a.ip);
+    assert_eq!(l1.hostname.as_deref(), Some("lab-1"));
+    assert_eq!(st.counters.discovers, 2);
+    assert_eq!(st.counters.offers, 2);
+    assert_eq!(st.counters.acks, 2);
+
+    // Renewals at T1 (5 s), unicast to the server.
+    link_up(&mut server, &mut clients, ms(2000), ms(12_000), ms(10));
+    let s = clients.statuses();
+    assert!(
+        s.iter().all(|h| h.ipv4.as_ref().unwrap().renewals >= 1),
+        "{s:?}"
+    );
+    assert!(s.iter().all(|h| h.state == HostState::Ready));
+    let st = server.statuses()[0].dhcp_server.clone().unwrap();
+    assert!(st.counters.acks >= 4);
+    assert_eq!(st.counters.naks, 0);
+
+    // Releases at the end.
+    clients.finish();
+    for (_, f) in clients.take_output() {
+        server.handle_frame(0, &f, ms(12_000));
+    }
+    let st = server.statuses()[0].dhcp_server.clone().unwrap();
+    assert_eq!(st.counters.releases, 2);
+    assert!(st.leases.is_empty());
+}
+
+#[test]
+fn a_dhcp_server_and_its_clients_in_one_engine() {
+    // The server's own engine hands frames between its hosts.
+    let mut hosts = vec![dhcp_server_host()];
+    hosts.extend((1..=4).map(dhcp_host));
+    let mut engine = HostEngine::new(hosts, HostOptions::default()).unwrap();
+    let mut wire_frames = 0;
+    drive(&mut engine, ms(0), ms(2000), ms(10), |_, _, _| {
+        wire_frames += 1;
+        Vec::new()
+    });
+    let s = engine.statuses();
+    // Three addresses for four clients.
+    assert_eq!(
+        s.iter().filter(|h| h.state == HostState::Ready).count(),
+        4,
+        "{s:?}"
+    );
+    assert_eq!(
+        s.iter().filter(|h| h.state == HostState::Starting).count(),
+        1
+    );
+    let st = s[0].dhcp_server.clone().unwrap();
+    assert_eq!(st.leases.len(), 3);
+    assert!(st.counters.exhausted >= 1);
+    // The frames still go out on the port.
+    assert!(wire_frames > 0);
+}
+
+/// A DHCPv4 client message for the server tests.
+fn client_msg(
+    kind: u8,
+    mac: MacAddr,
+    ciaddr: Ipv4Addr,
+    requested: Option<Ipv4Addr>,
+    server: Option<Ipv4Addr>,
+) -> Vec<u8> {
+    hw::dhcp4_message(&hw::Dhcp4Out {
+        kind,
+        xid: 7,
+        secs: 0,
+        mac,
+        ciaddr,
+        requested,
+        server,
+        hostname: None,
+        broadcast: false,
+    })
+}
+
+fn to_server(
+    payload: &[u8],
+    src_mac: MacAddr,
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    sport: u16,
+) -> Vec<u8> {
+    let path = Path {
+        src_mac,
+        dst_mac: if dst == Ipv4Addr::BROADCAST {
+            wire::BROADCAST
+        } else {
+            SERVER_MAC
+        },
+        vlan: None,
+        src: src.into(),
+        dst: dst.into(),
+    };
+    wire::udp_frame(&path, sport, 67, payload, 0)
+}
+
+/// The server's answer: destination IP and MAC, UDP port and the message.
+fn answer_of(engine: &mut HostEngine) -> Vec<(IpAddr, MacAddr, u16, hw::Dhcp4In)> {
+    engine
+        .take_output()
+        .into_iter()
+        .filter_map(|(_, f)| {
+            let link = wire::parse_link(&f)?;
+            let ip = wire::parse_ip(&f[link.payload..], true)?;
+            let udp = wire::parse_udp(&ip, true)?;
+            let m = hw::parse_dhcp4(udp.data)?;
+            Some((ip.dst, link.dst, udp.dport, m))
+        })
+        .collect()
+}
+
+#[test]
+fn a_dhcp_server_naks_wrong_addresses_and_answers_relays() {
+    let mut engine = HostEngine::new(vec![dhcp_server_host()], HostOptions::default()).unwrap();
+    engine.poll(ms(0));
+    engine.take_output();
+    let z = Ipv4Addr::UNSPECIFIED;
+    let b = Ipv4Addr::BROADCAST;
+    // Init-reboot with an address of another network: a broadcast NAK.
+    let m = client_msg(
+        hw::DHCPREQUEST,
+        mac(1),
+        z,
+        Some(Ipv4Addr::new(192, 168, 1, 5)),
+        None,
+    );
+    assert!(engine.handle_frame(0, &to_server(&m, mac(1), z, b, 68), ms(1)));
+    let a = answer_of(&mut engine);
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].3.kind, hw::DHCPNAK);
+    assert_eq!((a[0].0, a[0].1), (IpAddr::V4(b), wire::BROADCAST));
+    // Init-reboot with a free pool address: acknowledged, unicast to the MAC.
+    let want = Ipv4Addr::new(10, 77, 0, 102);
+    let m = client_msg(hw::DHCPREQUEST, mac(1), z, Some(want), None);
+    engine.handle_frame(0, &to_server(&m, mac(1), z, b, 68), ms(2));
+    let a = answer_of(&mut engine);
+    assert_eq!(a[0].3.kind, hw::DHCPACK);
+    assert_eq!(a[0].3.yiaddr, want);
+    assert_eq!((a[0].0, a[0].1), (IpAddr::V4(want), mac(1)));
+    // Another client may not have it.
+    let m = client_msg(hw::DHCPREQUEST, mac(2), z, Some(want), None);
+    engine.handle_frame(0, &to_server(&m, mac(2), z, b, 68), ms(3));
+    assert_eq!(answer_of(&mut engine)[0].3.kind, hw::DHCPNAK);
+    // A request for another server's offer is not answered.
+    let m = client_msg(
+        hw::DHCPREQUEST,
+        mac(3),
+        z,
+        Some(Ipv4Addr::new(10, 77, 0, 100)),
+        Some(Ipv4Addr::new(10, 77, 0, 2)),
+    );
+    engine.handle_frame(0, &to_server(&m, mac(3), z, b, 68), ms(4));
+    assert!(answer_of(&mut engine).is_empty());
+    // Through a relay: giaddr set, the answer goes to the relay's port 67.
+    let relay = Ipv4Addr::new(10, 77, 0, 254);
+    let mut m = client_msg(hw::DHCPDISCOVER, mac(4), z, None, None);
+    m[24..28].copy_from_slice(&relay.octets());
+    let relay_mac = MacAddr([2, 0xaa, 0, 0, 0, 1]);
+    engine.handle_frame(0, &to_server(&m, relay_mac, relay, SERVER_IP, 67), ms(5));
+    let a = answer_of(&mut engine);
+    assert_eq!(a[0].3.kind, hw::DHCPOFFER);
+    assert_eq!((a[0].0, a[0].1, a[0].2), (IpAddr::V4(relay), relay_mac, 67));
+    // A decline keeps the address from being leased again.
+    let got = a[0].3.yiaddr;
+    let m = client_msg(hw::DHCPREQUEST, mac(4), z, Some(got), Some(SERVER_IP));
+    engine.handle_frame(0, &to_server(&m, mac(4), z, b, 68), ms(6));
+    assert_eq!(answer_of(&mut engine)[0].3.kind, hw::DHCPACK);
+    let m = client_msg(hw::DHCPDECLINE, mac(4), z, Some(got), Some(SERVER_IP));
+    engine.handle_frame(0, &to_server(&m, mac(4), z, b, 68), ms(7));
+    let m = client_msg(hw::DHCPDISCOVER, mac(4), z, Some(got), None);
+    engine.handle_frame(0, &to_server(&m, mac(4), z, b, 68), ms(8));
+    let a = answer_of(&mut engine);
+    assert_ne!(a[0].3.yiaddr, got);
+    let st = engine.statuses()[0].dhcp_server.clone().unwrap();
+    assert_eq!(st.counters.declines, 1);
+    assert_eq!(st.counters.naks, 2);
+}
+
+#[test]
+fn reservations_and_pool_checks() {
+    let mut cfg = dhcp_server_host();
+    let s = cfg.dhcp_server.as_mut().unwrap();
+    s.reservations.push((mac(7), Ipv4Addr::new(10, 77, 0, 7)));
+    let mut server = HostEngine::new(vec![cfg.clone()], HostOptions::default()).unwrap();
+    let mut clients = HostEngine::new(vec![dhcp_host(7)], HostOptions::default()).unwrap();
+    link_up(&mut server, &mut clients, ms(0), ms(1000), ms(10));
+    assert_eq!(
+        clients.statuses()[0].ipv4.as_ref().unwrap().ip,
+        IpAddr::V4(Ipv4Addr::new(10, 77, 0, 7))
+    );
+    for (change, want) in [
+        (
+            Box::new(|c: &mut HostConfig| c.ipv4 = Some(Ipv4Mode::Dhcp))
+                as Box<dyn Fn(&mut HostConfig)>,
+            "static IPv4",
+        ),
+        (
+            Box::new(|c: &mut HostConfig| {
+                c.dhcp_server.as_mut().unwrap().pool.1 = Ipv4Addr::new(10, 78, 0, 1)
+            }),
+            "subnet",
+        ),
+        (
+            Box::new(|c: &mut HostConfig| {
+                c.dhcp_server.as_mut().unwrap().pool.0 = Ipv4Addr::new(10, 77, 0, 200)
+            }),
+            "ends before",
+        ),
+    ] {
+        let mut c = cfg.clone();
+        change(&mut c);
+        let e = HostEngine::new(vec![c], HostOptions::default())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(e.contains(want), "{e}");
+    }
+}
+
+#[test]
+fn a_dhcpv6_server_with_router_advertisements() {
+    let mut router = RouterConfig::new(vec![("fd00:77::".parse().unwrap(), 64)]);
+    router.managed = true;
+    let mut s6 = Dhcpv6ServerConfig::new(
+        "fd00:77::100".parse().unwrap(),
+        "fd00:77::1ff".parse().unwrap(),
+    );
+    s6.lease = Duration::from_secs(20);
+    s6.dns = vec!["fd00:77::53".parse().unwrap()];
+    s6.domain = Some("lab.test".into());
+    let server = HostConfig::new(0, SERVER_MAC)
+        .with_router(router)
+        .with_dhcpv6_server(s6);
+    let mut server = HostEngine::new(vec![server], HostOptions::default()).unwrap();
+    let clients = (1..=2)
+        .map(|n| HostConfig::new(0, mac(n)).with_ipv6(Ipv6Mode::Dhcpv6))
+        .collect();
+    let mut clients = HostEngine::new(clients, HostOptions::default()).unwrap();
+    link_up(&mut server, &mut clients, ms(0), ms(3000), ms(10));
+    let s = clients.statuses();
+    assert!(clients.all_ready(), "{s:?}");
+    let a = s[0].ipv6.as_ref().unwrap();
+    assert_eq!(a.ip, IpAddr::V6("fd00:77::100".parse().unwrap()));
+    assert_eq!(a.prefix, 64);
+    assert_eq!(a.gateway, Some(IpAddr::V6(hw::link_local(SERVER_MAC))));
+    assert_eq!(a.dns, vec![IpAddr::V6("fd00:77::53".parse().unwrap())]);
+    assert_eq!(a.lease, Some(Duration::from_secs(20)));
+    assert_eq!(
+        s[1].ipv6.as_ref().unwrap().ip,
+        IpAddr::V6("fd00:77::101".parse().unwrap())
+    );
+    // Renewals at T1 = 10 s.
+    link_up(&mut server, &mut clients, ms(3000), ms(13_000), ms(20));
+    assert!(clients
+        .statuses()
+        .iter()
+        .all(|h| h.ipv6.as_ref().unwrap().renewals == 1));
+    let st = server.statuses()[0].dhcpv6_server.clone().unwrap();
+    assert_eq!(st.leases.len(), 2);
+    assert_eq!(st.leases[0].mac, Some(mac(1)));
+    assert_eq!(st.counters.discovers, 2);
+    assert_eq!(st.counters.offers, 2);
+    assert_eq!(st.counters.acks, 4);
+    assert_eq!(st.counters.naks, 0);
+    clients.finish();
+    for (_, f) in clients.take_output() {
+        server.handle_frame(0, &f, ms(13_000));
+    }
+    let st = server.statuses()[0].dhcpv6_server.clone().unwrap();
+    assert_eq!(st.counters.releases, 2);
+    assert!(st.leases.is_empty());
+}
+
+#[test]
+fn a_dhcpv6_server_answers_rapid_commit_confirm_and_information_requests() {
+    let s6 = Dhcpv6ServerConfig::new(
+        "fd00:77::100".parse().unwrap(),
+        "fd00:77::100".parse().unwrap(),
+    );
+    let server = HostConfig::new(0, SERVER_MAC).with_dhcpv6_server(s6);
+    let mut engine = HostEngine::new(vec![server], HostOptions::default()).unwrap();
+    engine.poll(ms(0));
+    engine.take_output();
+    let client_ll = hw::link_local(mac(1));
+    let send = |engine: &mut HostEngine, body: Vec<u8>, at: u64| -> Option<hw::Dhcp6In> {
+        let path = Path {
+            src_mac: mac(1),
+            dst_mac: wire::multicast_mac(hw::DHCP6_SERVERS),
+            vlan: None,
+            src: client_ll.into(),
+            dst: hw::DHCP6_SERVERS.into(),
+        };
+        engine.handle_frame(0, &wire::udp_frame(&path, 546, 547, &body, 0), ms(at));
+        let out = engine.take_output();
+        out.iter().find_map(|(_, f)| {
+            let link = wire::parse_link(f)?;
+            let ip = wire::parse_ip(&f[link.payload..], true)?;
+            assert_eq!(ip.dst, IpAddr::V6(client_ll));
+            assert_eq!(link.dst, mac(1));
+            let udp = wire::parse_udp(&ip, true)?;
+            assert_eq!(udp.dport, 546);
+            hw::parse_dhcp6(udp.data)
+        })
+    };
+    let msg = |kind: u8, mac: MacAddr, address: Option<Ipv6Addr>, rapid: bool| {
+        let mut b = hw::dhcp6_message(&hw::Dhcp6Out {
+            kind,
+            xid: 0x123456,
+            mac,
+            iaid: 1,
+            elapsed: 0,
+            server_id: None,
+            address,
+        });
+        if rapid {
+            b.extend_from_slice(&[0, 14, 0, 0]);
+        }
+        b
+    };
+    // A solicit with rapid commit: a reply that binds at once.
+    let r = send(&mut engine, msg(hw::DHCP6_SOLICIT, mac(1), None, true), 1).unwrap();
+    assert_eq!(r.kind, hw::DHCP6_REPLY);
+    assert_eq!(r.xid, 0x123456);
+    assert_eq!(r.client_id, hw::duid(mac(1)));
+    assert_eq!(r.server_id, hw::duid(SERVER_MAC));
+    assert_eq!(
+        r.address.unwrap().0,
+        "fd00:77::100".parse::<Ipv6Addr>().unwrap()
+    );
+    // The pool has one address: the next client gets NoAddrsAvail.
+    let r = send(&mut engine, msg(hw::DHCP6_SOLICIT, mac(2), None, false), 2).unwrap();
+    assert_eq!(r.kind, hw::DHCP6_ADVERTISE);
+    assert_eq!(r.status, Some(2));
+    assert!(r.address.is_none());
+    // Confirm: on link or not.
+    let r = send(
+        &mut engine,
+        msg(4, mac(1), Some("fd00:77::100".parse().unwrap()), false),
+        3,
+    )
+    .unwrap();
+    assert_eq!(r.status, None);
+    let r = send(
+        &mut engine,
+        msg(4, mac(1), Some("fd00:78::1".parse().unwrap()), false),
+        4,
+    )
+    .unwrap();
+    assert_eq!(r.status, Some(4));
+    // Rebind of an address the client does not hold: zero lifetimes.
+    let r = send(
+        &mut engine,
+        msg(
+            hw::DHCP6_REBIND,
+            mac(2),
+            Some("fd00:77::100".parse().unwrap()),
+            false,
+        ),
+        5,
+    )
+    .unwrap();
+    assert_eq!(r.address.unwrap().2, 0);
+    let st = engine.statuses()[0].dhcpv6_server.clone().unwrap();
+    assert_eq!(st.counters.exhausted, 1);
+    assert_eq!(st.leases.len(), 1);
+}

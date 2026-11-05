@@ -9,11 +9,13 @@
 #                  k0 (namespace ferotrx-hosts-k)   a querier every 2 s)
 #                                          dnsmasq: DHCP 10.77.0.100-199,
 #                                          DHCPv6 and router advertisements
+#   h2 --- veth ------------------ d0 (namespace ferotrx-hosts-d): a kernel
+#                                     DHCP client (busybox udhcpc/udhcpc6)
 #
 # Usage: sudo scripts/hosts-netns.sh [path/to/ferotrx] [extra ferotrx options]
 # (the extra options, e.g. -B af_xdp, go to each `ferotrx host` and `ferotrx tcp`)
-# Needs root, ip and bridge (iproute2), dnsmasq and ping. Removes the lab
-# when done.
+# Needs root, ip and bridge (iproute2), dnsmasq, busybox and ping. Removes
+# the lab when done.
 #
 # It checks that:
 #   1. three DHCP clients (`ferotrx host --ipv4 dhcp`) get leases from
@@ -24,12 +26,17 @@
 #   2. a static host's gratuitous ARP puts it in the lab's neighbor table
 #      before anything was sent to it;
 #   3. a TCP client with `--client-ip dhcp` gets a lease and plays
-#      examples/http.pcap with a static server on the other link.
+#      examples/http.pcap with a static server on the other link;
+#   4. a FeroTRX DHCP server leases addresses to a kernel client (busybox
+#      udhcpc: its reserved address, subnet, router, DNS, domain and lease
+#      time; a renewal; a ping to the server; a release at the end) and to
+#      two emulated clients in the same run.
 #
 # IPV6=1 does the IPv6 side instead: SLAAC and DHCPv6 hosts (dnsmasq's
 # router advertisements and DHCPv6), MLD joins of ff15::1234 in the snooping
 # table, a FeroTRX router whose advertisements give a kernel host (k0) an
-# address and a default route, and a TCP client with `--client-ip slaac`.
+# address and a default route, and a TCP client with `--client-ip slaac`; then a FeroTRX DHCPv6 server (with
+# router advertisements) for udhcpc6 and two emulated DHCPv6 clients.
 set -eu
 
 if [ "$(id -u)" != 0 ]; then
@@ -53,12 +60,13 @@ if [ -z "$BIN" ] || ! [ -x "$BIN" ]; then
     echo "or give its path: sudo $0 path/to/ferotrx" >&2
     exit 1
 fi
-for tool in ip bridge dnsmasq ping; do
+for tool in ip bridge dnsmasq busybox ping; do
     if ! command -v $tool >/dev/null 2>&1; then
         case $tool in
             ip | bridge) pkg=iproute2 ;;
             dnsmasq) pkg="dnsmasq-base (or dnsmasq)" ;;
             ping) pkg=iputils-ping ;;
+            busybox) pkg=busybox ;;
         esac
         echo "$tool is not installed: apt-get install $pkg" >&2
         exit 2
@@ -67,6 +75,7 @@ done
 echo "using $BIN"
 NS=ferotrx-hosts
 KNS=ferotrx-hosts-k
+DNS_NS=ferotrx-hosts-d
 examples=$(cd "$(dirname "$0")/../examples" && pwd)
 tmp=$(mktemp -d /tmp/ferotrx-hosts.XXXXXX)
 chmod 755 "$tmp"
@@ -74,15 +83,18 @@ chmod 755 "$tmp"
 cleanup() {
     [ -z "${dns_pid:-}" ] || kill "$dns_pid" 2>/dev/null || true
     [ -z "${host_pid:-}" ] || kill "$host_pid" 2>/dev/null || true
-    for l in h0 h1; do ip link del $l 2>/dev/null || true; done
+    [ -z "${client_pid:-}" ] || kill "$client_pid" 2>/dev/null || true
+    for l in h0 h1 h2; do ip link del $l 2>/dev/null || true; done
     ip netns del $NS 2>/dev/null || true
     ip netns del $KNS 2>/dev/null || true
+    ip netns del $DNS_NS 2>/dev/null || true
     rm -rf "$tmp"
 }
 trap cleanup EXIT
-for l in h0 h1; do ip link del $l 2>/dev/null || true; done
+for l in h0 h1 h2; do ip link del $l 2>/dev/null || true; done
 ip netns del $NS 2>/dev/null || true
 ip netns del $KNS 2>/dev/null || true
+ip netns del $DNS_NS 2>/dev/null || true
 
 v6=no
 if [ "${IPV6:-}" = 1 ]; then
@@ -157,6 +169,51 @@ fail() {
 # The bridge's snooping table has GROUP on PORT.
 in_mdb() { # port group
     r bridge mdb show dev br0 | grep "port $1 " | grep -q "grp $2 "
+}
+
+# Waits up to 10 s for the kernel DHCP client's script to log an event
+# matching $1.
+wait_event() {
+    i=0
+    while ! grep -q "$1" "$tmp/events" 2>/dev/null; do
+        if [ $i -ge 100 ]; then
+            return 1
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+}
+
+# A direct link h2 -- d0 (namespace $DNS_NS) for the FeroTRX DHCP server and
+# a kernel client, and the client's script: it logs each event with the
+# settings it got, and sets the address.
+dhcp_link() {
+    ip netns add $DNS_NS
+    ip link add h2 type veth peer name d0
+    quiet_v6 h2
+    ip link set d0 netns $DNS_NS
+    ip netns exec $DNS_NS ip link set lo up
+    ip netns exec $DNS_NS ip link set d0 address 02:dc:00:00:0f:01
+    if [ $v6 = yes ]; then
+        ip netns exec $DNS_NS sysctl -qw net.ipv6.conf.d0.accept_dad=0
+        ip netns exec $DNS_NS sysctl -qw net.ipv6.conf.d0.accept_ra=2
+    fi
+    ip link set h2 up
+    ip netns exec $DNS_NS ip link set d0 up
+    cat >"$tmp/dhcp-event.sh" <<EOT
+#!/bin/sh
+echo "\$1 ip=\${ip:-} mask=\${mask:-} subnet=\${subnet:-} router=\${router:-} dns=\${dns:-} domain=\${domain:-} serverid=\${serverid:-} lease=\${lease:-} ipv6=\${ipv6:-} search=\${search:-} " >>"$tmp/events"
+case "\$1" in
+    bound | renew)
+        [ -z "\${ip:-}" ] || ip addr replace "\$ip/\${mask:-24}" dev "\$interface"
+        [ -z "\${ipv6:-}" ] || ip -6 addr replace "\$ipv6/128" dev "\$interface" nodad
+        ;;
+    deconfig) ip -4 addr flush dev "\$interface" ;;
+esac
+exit 0
+EOT
+    chmod 755 "$tmp/dhcp-event.sh"
+    : >"$tmp/events"
 }
 
 # Waits up to 10 s for the host run to print a line matching $1.
@@ -235,6 +292,62 @@ if [ $v6 = no ]; then
         || fail "not all 20 connections completed"
     grep -q "ipv4 10.77.0.1[0-9][0-9]/24 via 10.77.0.1 (dhcp from 10.77.0.1" "$tmp/tcp.log" \
         || fail "the client's lease is not in the summary"
+
+    echo "== 4. A FeroTRX DHCP server for a kernel client and emulated clients"
+    dhcp_link
+    cat >"$tmp/server.toml" <<EOT
+format = 1
+[[host]]
+mac = "02:dc:00:00:0d:01"
+ipv4 = "10.88.0.1/24"
+[host.dhcp_server]
+pool = "10.88.0.100-10.88.0.104"
+lease = "30s"
+router = "10.88.0.1"
+dns = ["10.88.0.53"]
+domain = "lab.test"
+reservations = { "02:dc:00:00:0f:01" = "10.88.0.7" }
+[[host]]
+count = 2
+mac = "02:dc:00:00:0e:01"
+ipv4 = "dhcp"
+hostname = "emu-{n}"
+EOT
+    "$BIN" host "$tmp/server.toml" -i h2 --duration 10s "$@" >"$tmp/host.log" 2>&1 &
+    host_pid=$!
+    wait_for "02:dc:00:00:0d:01 ready" || fail "the server host did not get ready"
+    ip netns exec $DNS_NS busybox udhcpc -f -R -i d0 -s "$tmp/dhcp-event.sh" \
+        -x hostname:kernel-client -t 10 -T 1 -A 1 >"$tmp/udhcpc.log" 2>&1 &
+    client_pid=$!
+    wait_event "^bound" || fail "udhcpc got no lease"
+    sed 's/^/  /' "$tmp/events"
+    for want in ip=10.88.0.7 subnet=255.255.255.0 router=10.88.0.1 dns=10.88.0.53 \
+        domain=lab.test serverid=10.88.0.1 lease=30; do
+        grep "^bound" "$tmp/events" | grep -q " $want " || fail "udhcpc did not get $want"
+    done
+    ip netns exec $DNS_NS ip -4 addr show dev d0 | grep -q "inet 10.88.0.7/24" \
+        || fail "the kernel client did not set its address"
+    if ip netns exec $DNS_NS ping -c 1 -W 2 10.88.0.1 >/dev/null; then
+        echo "  the server answers pings"
+    else
+        fail "no answer from the server at 10.88.0.1"
+    fi
+    # A renewal now (udhcpc renews on SIGUSR1), unicast to the server.
+    kill -USR1 "$client_pid"
+    wait_event "^renew" || fail "udhcpc did not renew its lease"
+    # A release (-R) when it stops.
+    kill "$client_pid"
+    wait "$client_pid" 2>/dev/null || true
+    client_pid=
+    wait "$host_pid" || fail "ferotrx host (DHCP server) failed"
+    host_pid=
+    cat "$tmp/host.log"
+    [ "$(grep -c "^  host 02:dc:00:00:0e:0[12] ready after .* ipv4 10.88.0.10[0-4]/24 via 10.88.0.1 (dhcp from 10.88.0.1" "$tmp/host.log")" = 2 ] \
+        || fail "the emulated clients did not get leases from the FeroTRX server"
+    # At the end every client has released its lease: udhcpc's and the two
+    # emulated clients'.
+    grep -q "dhcp server 10.88.0.100-10.88.0.104 (0 of 5 leased; [0-9]* discovers, [0-9]* offers, 4 acks, 0 naks, 3 releases)" "$tmp/host.log" \
+        || fail "the server's counters are not as expected (4 acks, 3 releases)"
 else
     echo "== 1. SLAAC and DHCPv6 hosts with an MLD group"
     cat >"$tmp/hosts.toml" <<EOT
@@ -312,6 +425,57 @@ EOT
         || fail "not all 20 connections completed"
     grep -q "ipv6 fd00:77::dc:ff:fe00:1/64 via fe80::" "$tmp/tcp.log" \
         || fail "the client's SLAAC address is not in the summary"
+
+    echo "== 4. A FeroTRX DHCPv6 server for a kernel client and emulated clients"
+    dhcp_link
+    cat >"$tmp/server.toml" <<EOT
+format = 1
+[[host]]
+mac = "02:dc:00:00:0d:01"
+[host.dhcpv6_server]
+pool = "fd00:88::100-fd00:88::1ff"
+lease = "30s"
+dns = ["fd00:88::53"]
+domain = "lab.test"
+[host.router]
+prefixes = ["fd00:88::/64"]
+managed = true
+interval = "2s"
+[[host]]
+count = 2
+mac = "02:dc:00:00:0e:01"
+ipv6 = "dhcpv6"
+EOT
+    "$BIN" host "$tmp/server.toml" -i h2 --duration 10s "$@" >"$tmp/host.log" 2>&1 &
+    host_pid=$!
+    wait_for "02:dc:00:00:0d:01 ready" || fail "the server host did not get ready"
+    ip netns exec $DNS_NS busybox udhcpc6 -f -R -i d0 -s "$tmp/dhcp-event.sh" \
+        -t 10 -T 1 -A 1 >"$tmp/udhcpc.log" 2>&1 &
+    client_pid=$!
+    wait_event "^bound" || fail "udhcpc6 got no lease"
+    sed 's/^/  /' "$tmp/events"
+    # udhcpc6 writes addresses in full: fd00:0088:0000:...:0102.
+    grep "^bound" "$tmp/events" | grep -q " ipv6=fd00:0*88:[0:]*:\?0*1[0-9a-f][0-9a-f] " \
+        || fail "udhcpc6 got no address from the pool"
+    grep "^bound" "$tmp/events" | grep -q " dns=fd00:0*88:[0:]*:\?0*53 " \
+        || fail "udhcpc6 did not get the DNS server"
+    grep "^bound" "$tmp/events" | grep -q " search=lab.test " \
+        || fail "udhcpc6 did not get the domain search list"
+    if ip netns exec $DNS_NS ping -6 -c 1 -W 2 fe80::dc:ff:fe00:d01%d0 >/dev/null; then
+        echo "  the server answers pings at its link-local address"
+    else
+        fail "no answer from the server at fe80::dc:ff:fe00:d01"
+    fi
+    kill "$client_pid"
+    wait "$client_pid" 2>/dev/null || true
+    client_pid=
+    wait "$host_pid" || fail "ferotrx host (DHCPv6 server) failed"
+    host_pid=
+    cat "$tmp/host.log"
+    [ "$(grep -c "^  host 02:dc:00:00:0e:0[12] ready after .* ipv6 fd00:88::1[0-9a-f]*/64 via fe80::dc:ff:fe00:d01 (dhcpv6" "$tmp/host.log")" = 2 ] \
+        || fail "the emulated clients did not get leases from the FeroTRX server"
+    grep -q "dhcpv6 server fd00:88::100-fd00:88::1ff (0 of 256 leased; 3 discovers, .* 3 releases" "$tmp/host.log" \
+        || fail "the server's counters are not as expected (3 solicits, 3 releases)"
 fi
 
 if [ $status = 0 ]; then
@@ -319,5 +483,9 @@ if [ $status = 0 ]; then
 else
     echo "dnsmasq log:"
     tail -40 "$tmp/dnsmasq.log"
+    if [ -s "$tmp/udhcpc.log" ]; then
+        echo "udhcpc log:"
+        tail -40 "$tmp/udhcpc.log"
+    fi
 fi
 exit $status

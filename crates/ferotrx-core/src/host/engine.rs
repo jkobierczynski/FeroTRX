@@ -4,6 +4,9 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
+use super::server::{
+    self as srv, DhcpServerConfig, DhcpServerStatus, Dhcpv6ServerConfig, Server4, Server6,
+};
 use super::wire::{self as hw, Dhcp4Out, Dhcp6Out};
 use crate::net::{ETHERTYPE_IPV4, ETHERTYPE_IPV6, IPPROTO_ICMPV6, IPPROTO_UDP};
 use crate::tcp::wire::{self, Path, NDP_ADVERT, NDP_SOLICIT};
@@ -93,6 +96,10 @@ pub struct HostConfig {
     pub hostname: Option<String>,
     /// Send router advertisements; see [`RouterConfig`].
     pub router: Option<RouterConfig>,
+    /// Lease IPv4 addresses as a DHCP server; needs a static `ipv4`.
+    pub dhcp_server: Option<DhcpServerConfig>,
+    /// Lease IPv6 addresses as a DHCPv6 server.
+    pub dhcpv6_server: Option<Dhcpv6ServerConfig>,
 }
 
 impl HostConfig {
@@ -108,6 +115,8 @@ impl HostConfig {
             announce: false,
             hostname: None,
             router: None,
+            dhcp_server: None,
+            dhcpv6_server: None,
         }
     }
 
@@ -141,6 +150,21 @@ impl HostConfig {
         self
     }
 
+    pub fn with_dhcp_server(mut self, server: DhcpServerConfig) -> Self {
+        self.dhcp_server = Some(server);
+        self
+    }
+
+    pub fn with_dhcpv6_server(mut self, server: Dhcpv6ServerConfig) -> Self {
+        self.dhcpv6_server = Some(server);
+        self
+    }
+
+    /// True if the host serves DHCP or DHCPv6, or advertises as a router.
+    pub fn serves(&self) -> bool {
+        self.router.is_some() || self.dhcp_server.is_some() || self.dhcpv6_server.is_some()
+    }
+
     fn validate(&self) -> Result<()> {
         let what = format!("host {}", self.mac);
         let err = |m: String| Err(Error::Host(format!("{what}: {m}")));
@@ -150,12 +174,22 @@ impl HostConfig {
         if matches!(self.vlan, Some(v) if v == 0 || v > 4094) {
             return err("VLAN must be 1-4094".into());
         }
-        if self.ipv4.is_none()
-            && self.ipv6.is_none()
-            && self.router.is_none()
-            && self.groups.is_empty()
-        {
-            return err("give it an IPv4 or IPv6 address (static, dhcp, slaac or dhcpv6), groups to join, or router advertisements".into());
+        if self.ipv4.is_none() && self.ipv6.is_none() && !self.serves() && self.groups.is_empty() {
+            return err("give it an IPv4 or IPv6 address (static, dhcp, slaac or dhcpv6), groups to join, router advertisements or a DHCPv6 server".into());
+        }
+        if let Some(s) = &self.dhcp_server {
+            let own = match &self.ipv4 {
+                Some(Ipv4Mode::Static { ip, prefix, .. }) => Some((*ip, *prefix)),
+                _ => None,
+            };
+            if let Err(Error::Host(m)) = srv::validate4(s, own) {
+                return err(m);
+            }
+        }
+        if let Some(s) = &self.dhcpv6_server {
+            if let Err(Error::Host(m)) = srv::validate6(s) {
+                return err(m);
+            }
         }
         match &self.ipv4 {
             Some(Ipv4Mode::Static {
@@ -414,6 +448,10 @@ pub struct HostStatus {
     pub link_local: Option<Ipv6Addr>,
     pub groups: Vec<GroupStatus>,
     pub counters: HostCounters,
+    /// The leases and counters of its DHCP server role.
+    pub dhcp_server: Option<DhcpServerStatus>,
+    /// The leases and counters of its DHCPv6 server role.
+    pub dhcpv6_server: Option<DhcpServerStatus>,
 }
 
 /// Counters of a [`HostEngine`].
@@ -564,6 +602,8 @@ struct Emu {
     mld_version: u8,
     ra_next: Duration,
     ra_last: Option<Duration>,
+    srv4: Option<Server4>,
+    srv6: Option<Server6>,
 }
 
 impl Emu {
@@ -653,6 +693,13 @@ pub struct HostEngine {
     wake: Duration,
     finished: bool,
     until_settled: bool,
+    /// The latest time seen, for lease times in statuses.
+    now: Duration,
+    /// Hand frames between the engine's own hosts (a server role and its
+    /// clients on one port): the ports do not deliver what they send.
+    loopback: bool,
+    /// Frames of `out` already handed to the engine's own hosts.
+    looped: usize,
 }
 
 impl HostEngine {
@@ -688,8 +735,27 @@ impl HostEngine {
                     | 1;
                 let uses_v6 = cfg.ipv6.is_some()
                     || cfg.router.is_some()
+                    || cfg.dhcpv6_server.is_some()
                     || cfg.groups.iter().any(|g| g.is_ipv6());
                 let ll = hw::link_local(cfg.mac);
+                let srv4 = match (&cfg.dhcp_server, &cfg.ipv4) {
+                    (
+                        Some(s),
+                        Some(Ipv4Mode::Static {
+                            ip,
+                            prefix,
+                            gateway,
+                        }),
+                    ) => Some(Server4::new(s.clone(), *ip, *prefix, *gateway)),
+                    _ => None,
+                };
+                let srv6 = cfg.dhcpv6_server.as_ref().map(|s| {
+                    let own = match &cfg.ipv6 {
+                        Some(Ipv6Mode::Static { ip, .. }) => Some(*ip),
+                        _ => None,
+                    };
+                    Server6::new(s.clone(), cfg.mac, own)
+                });
                 Emu {
                     status: HostStatus {
                         port: cfg.port,
@@ -703,6 +769,8 @@ impl HostEngine {
                         link_local: uses_v6.then_some(ll),
                         groups: Vec::new(),
                         counters: HostCounters::default(),
+                        dhcp_server: None,
+                        dhcpv6_server: None,
                     },
                     start_at: gap.saturating_mul(i as u32),
                     started: false,
@@ -720,10 +788,19 @@ impl HostEngine {
                     mld_version: options.mld_version,
                     ra_next: NEVER,
                     ra_last: None,
+                    srv4,
+                    srv6,
                     cfg,
                 }
             })
-            .collect();
+            .collect::<Vec<Emu>>();
+        // A server role with other hosts on its port and VLAN.
+        let loopback = emus.iter().any(|s| {
+            s.cfg.serves()
+                && emus.iter().any(|o| {
+                    o.cfg.mac != s.cfg.mac && o.cfg.port == s.cfg.port && o.cfg.vlan == s.cfg.vlan
+                })
+        });
         Ok(Self {
             hosts: emus,
             options,
@@ -733,6 +810,9 @@ impl HostEngine {
             wake: Duration::ZERO,
             finished: false,
             until_settled: false,
+            now: Duration::ZERO,
+            loopback,
+            looped: 0,
         })
     }
 
@@ -765,7 +845,15 @@ impl HostEngine {
 
     /// Each host's state and addresses, as of now.
     pub fn statuses(&self) -> Vec<HostStatus> {
-        self.hosts.iter().map(|h| h.status.clone()).collect()
+        self.hosts
+            .iter()
+            .map(|h| {
+                let mut s = h.status.clone();
+                s.dhcp_server = h.srv4.as_ref().map(|v| v.status(self.now));
+                s.dhcpv6_server = h.srv6.as_ref().map(|v| v.status(self.now));
+                s
+            })
+            .collect()
     }
 
     /// The status of host `i`.
@@ -812,6 +900,7 @@ impl HostEngine {
             self.stats.tx_packets += 1;
             self.stats.tx_bytes += f.len() as u64;
         }
+        self.looped = 0;
         std::mem::take(&mut self.out)
     }
 
@@ -835,6 +924,39 @@ impl HostEngine {
     /// router discovery, IGMP/MLD, a duplicate check, a group's traffic, or
     /// something answered), false if another engine should see it.
     pub fn handle_frame(&mut self, port: usize, frame: &[u8], now: Duration) -> bool {
+        self.now = self.now.max(now);
+        let taken = self.take_frame(port, frame, now);
+        self.loop_back(now);
+        taken
+    }
+
+    /// Hands the frames the hosts sent to the engine's other hosts on the
+    /// same port, when one of them serves (see `loopback`).
+    fn loop_back(&mut self, now: Duration) {
+        if !self.loopback {
+            return;
+        }
+        while self.looped < self.out.len() {
+            let i = self.looped;
+            self.looped += 1;
+            let (port, frame) = (self.out[i].0, std::mem::take(&mut self.out[i].1));
+            if let Some(link) = wire::parse_link(&frame) {
+                let local = link.dst.0[0] & 1 != 0
+                    || self.hosts.iter().any(|h| {
+                        h.started
+                            && h.cfg.port == port
+                            && h.cfg.vlan == link.vlan
+                            && h.cfg.mac == link.dst
+                    });
+                if local {
+                    self.take_frame(port, &frame, now);
+                }
+            }
+            self.out[i].1 = frame;
+        }
+    }
+
+    fn take_frame(&mut self, port: usize, frame: &[u8], now: Duration) -> bool {
         let Some(link) = wire::parse_link(frame) else {
             return false;
         };
@@ -851,12 +973,16 @@ impl HostEngine {
         taken
     }
 
+    /// The started hosts on the frame's port and VLAN, but its sender.
     fn on_link(&self, port: usize, link: &wire::Link) -> impl Iterator<Item = usize> + '_ {
         let vlan = link.vlan;
+        let link = *link;
         self.hosts
             .iter()
             .enumerate()
-            .filter(move |(_, h)| h.cfg.port == port && h.cfg.vlan == vlan && h.started)
+            .filter(move |(_, h)| {
+                h.cfg.port == port && h.cfg.vlan == vlan && h.started && h.cfg.mac != link.src
+            })
             .map(|(i, _)| i)
     }
 
@@ -958,6 +1084,9 @@ impl HostEngine {
         let Some(udp) = wire::parse_udp(ip, false) else {
             return false;
         };
+        if udp.dport == hw::DHCP_SERVER_PORT {
+            return self.on_dhcp4_server(port, link, ip, udp.data, now);
+        }
         if udp.sport != hw::DHCP_SERVER_PORT || udp.dport != hw::DHCP_CLIENT_PORT {
             return false;
         }
@@ -973,6 +1102,44 @@ impl HostEngine {
         self.hosts[h].status.counters.dhcp_received += 1;
         self.on_dhcp4(h, link.src, &m, now);
         true
+    }
+
+    /// A client (or relay) message to the hosts' DHCP servers.
+    fn on_dhcp4_server(
+        &mut self,
+        port: usize,
+        link: &wire::Link,
+        ip: &wire::Ip,
+        data: &[u8],
+        now: Duration,
+    ) -> bool {
+        let Some(m) = srv::parse_dhcp4_request(data) else {
+            return false;
+        };
+        let servers: Vec<usize> = self
+            .on_link(port, link)
+            .filter(|&h| {
+                let host = &self.hosts[h];
+                host.v4_ready
+                    && host.srv4.as_ref().is_some_and(|s| {
+                        (link.dst == wire::BROADCAST || link.dst == host.cfg.mac)
+                            && (ip.dst == IpAddr::V4(Ipv4Addr::BROADCAST)
+                                || ip.dst == IpAddr::V4(s.ip()))
+                    })
+            })
+            .collect();
+        for &h in &servers {
+            let host = &mut self.hosts[h];
+            let (mac, vlan) = (host.cfg.mac, host.cfg.vlan);
+            if let Some(f) = host
+                .srv4
+                .as_mut()
+                .and_then(|s| s.handle(mac, vlan, link.src, &m, now))
+            {
+                self.out.push((port, f));
+            }
+        }
+        !servers.is_empty()
     }
 
     fn send_dhcp4(&mut self, h: usize, kind: u8, now: Duration) {
@@ -1399,6 +1566,9 @@ impl HostEngine {
         let Some(udp) = wire::parse_udp(ip, false) else {
             return false;
         };
+        if udp.dport == hw::DHCP6_SERVER_PORT {
+            return self.on_dhcp6_server(port, link, ip, udp.data, now);
+        }
         if udp.sport != hw::DHCP6_SERVER_PORT || udp.dport != hw::DHCP6_CLIENT_PORT {
             return false;
         }
@@ -1415,6 +1585,45 @@ impl HostEngine {
         self.hosts[h].status.counters.dhcp_received += 1;
         self.on_dhcp6(h, ip.src, &m, now);
         true
+    }
+
+    /// A client message to the hosts' DHCPv6 servers.
+    fn on_dhcp6_server(
+        &mut self,
+        port: usize,
+        link: &wire::Link,
+        ip: &wire::Ip,
+        data: &[u8],
+        now: Duration,
+    ) -> bool {
+        let IpAddr::V6(src) = ip.src else {
+            return false;
+        };
+        let Some(m) = srv::parse_dhcp6_request(data) else {
+            return false;
+        };
+        let servers: Vec<usize> = self
+            .on_link(port, link)
+            .filter(|&h| {
+                let host = &self.hosts[h];
+                host.srv6.is_some()
+                    && (ip.dst == IpAddr::V6(hw::DHCP6_SERVERS)
+                        || ip.dst == IpAddr::V6(host.ll)
+                        || host.ip6().is_some_and(|a| ip.dst == IpAddr::V6(a)))
+            })
+            .collect();
+        for &h in &servers {
+            let host = &mut self.hosts[h];
+            let (mac, vlan, ll) = (host.cfg.mac, host.cfg.vlan, host.ll);
+            if let Some(f) = host
+                .srv6
+                .as_mut()
+                .and_then(|s| s.handle(mac, vlan, ll, link.src, src, &m, now))
+            {
+                self.out.push((port, f));
+            }
+        }
+        !servers.is_empty()
     }
 
     fn send_dhcp6(&mut self, h: usize, kind: u8, now: Duration) {
@@ -1882,6 +2091,10 @@ impl HostEngine {
             let ll = host.ll;
             host.join(wire::solicited_node(ll).into(), true, now);
         }
+        if host.srv6.is_some() {
+            // So that snooping switches send the clients' messages here.
+            host.join(hw::DHCP6_SERVERS.into(), true, now);
+        }
         match host.cfg.ipv4.clone() {
             Some(Ipv4Mode::Static {
                 ip,
@@ -1929,6 +2142,7 @@ impl HostEngine {
     /// Runs the hosts' timers: retransmissions, renewals, announcements,
     /// reports and advertisements.
     pub fn poll(&mut self, now: Duration) {
+        self.now = self.now.max(now);
         if self.finished || now < self.wake {
             return;
         }
@@ -1948,6 +2162,7 @@ impl HostEngine {
             wake = wake.min(self.next_wake(h));
         }
         self.wake = wake;
+        self.loop_back(now);
     }
 
     fn poll_host(&mut self, h: usize, now: Duration) {
@@ -2153,6 +2368,7 @@ impl HostEngine {
                 self.out.push((host.cfg.port, f));
             }
         }
+        self.loop_back(self.now);
     }
 }
 

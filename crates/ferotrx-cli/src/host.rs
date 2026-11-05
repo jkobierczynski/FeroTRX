@@ -10,11 +10,11 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use ferotrx_core::{
-    parse_duration, parse_ipv4_mode, parse_ipv6_mode, parse_prefix6, HostConfig, HostEngine,
-    HostProfile, HostSpec, HostState, HostStats, HostStatus, MacAddr, PortJob, RouterConfig,
-    TcpRunConfig,
+    parse_duration, parse_ipv4_mode, parse_ipv6_mode, parse_pool, parse_prefix6, DhcpServerConfig,
+    Dhcpv6ServerConfig, HostConfig, HostEngine, HostProfile, HostSpec, HostState, HostStats,
+    HostStatus, MacAddr, PortJob, RouterConfig, TcpRunConfig,
 };
-use ferotrx_ctl::protocol::{HostAddressInfo, HostInfo};
+use ferotrx_ctl::protocol::{DhcpServerInfo, HostAddressInfo, HostInfo};
 
 #[derive(Args)]
 #[command(args_override_self = true)]
@@ -90,6 +90,28 @@ pub struct HostArgs {
     #[arg(long)]
     ra_other: bool,
 
+    /// Serve DHCP (an IPv4 range, needs a static --ipv4) or DHCPv6 (an IPv6
+    /// range) from this pool, e.g. 10.0.0.100-10.0.0.199; give one of each
+    /// for both.
+    #[arg(long, value_name = "FIRST-LAST")]
+    dhcp_pool: Vec<String>,
+
+    /// Lease time of the DHCP servers (default 1h).
+    #[arg(long, value_parser = parse_duration, value_name = "TIME")]
+    dhcp_lease: Option<Duration>,
+
+    /// Router option of the DHCP server (default: --gateway).
+    #[arg(long, value_name = "IP")]
+    dhcp_router: Option<std::net::Ipv4Addr>,
+
+    /// DNS server the DHCP (IPv4) or DHCPv6 (IPv6) server hands out; repeat for more.
+    #[arg(long, value_name = "IP")]
+    dhcp_dns: Vec<IpAddr>,
+
+    /// Domain name the DHCP servers hand out.
+    #[arg(long, value_name = "NAME")]
+    dhcp_domain: Option<String>,
+
     /// Hosts started per second (default: all at once).
     #[arg(long, value_name = "N")]
     rate: Option<f64>,
@@ -147,6 +169,7 @@ impl HostArgs {
             || self.announce
             || self.hostname.is_some()
             || !self.ra.is_empty()
+            || !self.dhcp_pool.is_empty()
     }
 
     /// The hosts the command line describes.
@@ -203,12 +226,78 @@ impl HostArgs {
         {
             bail!("the --ra-* options go with --ra PREFIX");
         }
+        self.dhcp_servers(&mut h)?;
         let mut spec = HostSpec::new(h);
         spec.count = self.count.unwrap_or(1);
         if spec.count == 0 {
             bail!("--count must be at least 1");
         }
+        if spec.count > 1 && !self.dhcp_pool.is_empty() {
+            bail!("a DHCP server is one host: leave out --count");
+        }
         Ok(spec)
+    }
+
+    /// The DHCP and DHCPv6 servers of --dhcp-pool.
+    fn dhcp_servers(&self, h: &mut HostConfig) -> Result<()> {
+        if self.dhcp_pool.is_empty() {
+            if self.dhcp_lease.is_some()
+                || self.dhcp_router.is_some()
+                || !self.dhcp_dns.is_empty()
+                || self.dhcp_domain.is_some()
+            {
+                bail!("the --dhcp-* options go with --dhcp-pool FIRST-LAST");
+            }
+            return Ok(());
+        }
+        for pool in &self.dhcp_pool {
+            match parse_pool(pool)? {
+                (IpAddr::V4(a), IpAddr::V4(b)) => {
+                    if h.dhcp_server.is_some() {
+                        bail!("give one IPv4 --dhcp-pool");
+                    }
+                    let mut s = DhcpServerConfig::new(a, b);
+                    s.router = self.dhcp_router;
+                    s.dns = self
+                        .dhcp_dns
+                        .iter()
+                        .filter_map(|d| match d {
+                            IpAddr::V4(d) => Some(*d),
+                            IpAddr::V6(_) => None,
+                        })
+                        .collect();
+                    h.dhcp_server = Some(s);
+                }
+                (IpAddr::V6(a), IpAddr::V6(b)) => {
+                    if h.dhcpv6_server.is_some() {
+                        bail!("give one IPv6 --dhcp-pool");
+                    }
+                    let mut s = Dhcpv6ServerConfig::new(a, b);
+                    s.dns = self
+                        .dhcp_dns
+                        .iter()
+                        .filter_map(|d| match d {
+                            IpAddr::V6(d) => Some(*d),
+                            IpAddr::V4(_) => None,
+                        })
+                        .collect();
+                    h.dhcpv6_server = Some(s);
+                }
+                _ => unreachable!("parse_pool checks the versions"),
+            }
+        }
+        if self.dhcp_router.is_some() && h.dhcp_server.is_none() {
+            bail!("--dhcp-router goes with an IPv4 --dhcp-pool");
+        }
+        if let Some(s) = h.dhcp_server.as_mut() {
+            crate::tcp::set(&mut s.lease, self.dhcp_lease);
+            s.domain = self.dhcp_domain.clone();
+        }
+        if let Some(s) = h.dhcpv6_server.as_mut() {
+            crate::tcp::set(&mut s.lease, self.dhcp_lease);
+            s.domain = self.dhcp_domain.clone();
+        }
+        Ok(())
     }
 }
 
@@ -223,7 +312,7 @@ pub fn cmd_host(args: HostArgs) -> Result<()> {
         }
         None => {
             if !args.any_host_option() {
-                bail!("give a host profile, or the hosts' addresses: --ipv4 dhcp, --ipv6 slaac, --join GROUP, --ra PREFIX ...");
+                bail!("give a host profile, or the hosts' addresses: --ipv4 dhcp, --ipv6 slaac, --join GROUP, --ra PREFIX, --dhcp-pool FIRST-LAST ...");
             }
             HostProfile {
                 hosts: vec![args.spec()?],
@@ -390,6 +479,11 @@ pub(crate) fn host_line(h: &HostInfo) -> String {
             g.group, g.reports, g.rx_packets
         ));
     }
+    for (kind, s) in [("dhcp", &h.dhcp_server), ("dhcpv6", &h.dhcpv6_server)] {
+        if let Some(s) = s {
+            parts.push(server_summary(kind, s));
+        }
+    }
     if !parts.is_empty() {
         line.push_str(": ");
         line.push_str(&parts.join("; "));
@@ -400,11 +494,60 @@ pub(crate) fn host_line(h: &HostInfo) -> String {
     line
 }
 
-/// Prints the emulated hosts of a run, one line each.
+/// A DHCP server role in a host's line: pool, leases and counters.
+fn server_summary(kind: &str, s: &DhcpServerInfo) -> String {
+    let mut t = format!(
+        "{kind} server {} ({} of {} leased; {} discovers, {} offers, {} acks, {} naks, {} releases",
+        s.pool,
+        s.leases.len(),
+        s.pool_size,
+        s.discovers,
+        s.offers,
+        s.acks,
+        s.naks,
+        s.releases
+    );
+    if s.declines > 0 {
+        t.push_str(&format!(", {} declines", s.declines));
+    }
+    if s.informs > 0 {
+        t.push_str(&format!(", {} informs", s.informs));
+    }
+    if s.exhausted > 0 {
+        t.push_str(&format!(", {} unanswered: pool full", s.exhausted));
+    }
+    t.push(')');
+    t
+}
+
+/// The leases of a host's DHCP server roles, one line each.
+pub(crate) fn lease_lines(h: &HostInfo) -> Vec<String> {
+    let mut out = Vec::new();
+    for s in [&h.dhcp_server, &h.dhcpv6_server].into_iter().flatten() {
+        for l in &s.leases {
+            let mut line = format!(
+                "lease {} to {}",
+                l.address,
+                l.mac.as_deref().unwrap_or(&l.client)
+            );
+            if let Some(n) = &l.hostname {
+                line.push_str(&format!(" ({n})"));
+            }
+            line.push_str(&format!(", {:.0} s left", l.remaining_s));
+            out.push(line);
+        }
+    }
+    out
+}
+
+/// Prints the emulated hosts of a run, one line each (and their servers' leases).
 pub(crate) fn print_hosts(hosts: &[HostStatus], indent: &str) {
     let infos: Vec<HostInfo> = hosts.iter().map(HostInfo::from).collect();
     for h in &infos {
         eprintln!("{indent}{}", host_line(h));
+        for l in lease_lines(h) {
+            eprintln!("{indent}  {l}");
+        }
     }
 }
 
@@ -412,5 +555,8 @@ pub(crate) fn print_hosts(hosts: &[HostStatus], indent: &str) {
 pub(crate) fn print_host_infos(hosts: &[HostInfo], indent: &str) {
     for h in hosts {
         println!("{indent}{}", host_line(h));
+        for l in lease_lines(h) {
+            println!("{indent}  {l}");
+        }
     }
 }

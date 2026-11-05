@@ -141,9 +141,12 @@ pub use error::{Error, Result};
 pub use field_engine::{FieldEngine, FieldVar, Side, VarField, VarOp};
 pub use flows::{FlowRouter, Route};
 #[cfg(feature = "profile")]
-pub use host::{parse_ipv4_mode, parse_ipv6_mode, parse_prefix6, HostProfile, HostSpec};
 pub use host::{
-    AddressSource, Addressing, Emulation, EndpointConfig, EndpointHosts, GroupStatus, HostAddress,
+    parse_ipv4_mode, parse_ipv6_mode, parse_pool, parse_prefix6, HostProfile, HostSpec,
+};
+pub use host::{
+    AddressSource, Addressing, DhcpLease, DhcpServerConfig, DhcpServerCounters, DhcpServerStatus,
+    Dhcpv6ServerConfig, Emulation, EndpointConfig, EndpointHosts, GroupStatus, HostAddress,
     HostConfig, HostCounters, HostEngine, HostOptions, HostState, HostStats, HostStatus, Hosted,
     HostedStats, Ipv4Mode, Ipv6Mode, RouterConfig,
 };

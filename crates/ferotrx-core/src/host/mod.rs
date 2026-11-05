@@ -16,6 +16,9 @@
 //!   counted.
 //! * Routers: a host with a [`RouterConfig`] sends router advertisements
 //!   with prefixes, and answers router solicitations.
+//! * DHCP servers: a host with a [`DhcpServerConfig`] (and a static IPv4
+//!   address) or a [`Dhcpv6ServerConfig`] leases addresses from a pool to
+//!   clients on its link, real ones or the engine's own hosts.
 //!
 //! [`HostEngine`] runs the hosts, sans-IO like the TCP and UDP engines; on
 //! its own (`ferotrx host`) it also answers ARP, neighbor solicitations and
@@ -27,6 +30,7 @@ mod engine;
 mod hosted;
 #[cfg(feature = "profile")]
 mod profile;
+mod server;
 pub(crate) mod wire;
 
 pub use engine::{
@@ -37,7 +41,12 @@ pub use hosted::{Addressing, Emulation, EndpointConfig, EndpointHosts, Hosted, H
 #[cfg(feature = "profile")]
 pub(crate) use profile::{host_options, RawOptions as RawHostOptions};
 #[cfg(feature = "profile")]
-pub use profile::{parse_ipv4_mode, parse_ipv6_mode, parse_prefix6, HostProfile, HostSpec};
+pub use profile::{
+    parse_ipv4_mode, parse_ipv6_mode, parse_pool, parse_prefix6, HostProfile, HostSpec,
+};
+pub use server::{
+    DhcpLease, DhcpServerConfig, DhcpServerCounters, DhcpServerStatus, Dhcpv6ServerConfig,
+};
 
 #[cfg(test)]
 mod tests;

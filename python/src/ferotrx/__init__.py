@@ -24,6 +24,8 @@ from .errors import (
 from .types import (
     AppCounters,
     Counters,
+    DhcpLeaseInfo,
+    DhcpServerInfo,
     FlowCounters,
     HandshakeCounters,
     HostAddressInfo,
@@ -51,7 +53,7 @@ from .types import (
     UdpTemplateCounters,
 )
 
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 
 __all__ = [
     "__version__",
@@ -86,6 +88,8 @@ __all__ = [
     "RunInfo",
     "RxRunInfo",
     "HostInfo",
+    "DhcpLeaseInfo",
+    "DhcpServerInfo",
     "HostAddressInfo",
     "HostGroupInfo",
     "AppCounters",

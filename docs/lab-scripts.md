@@ -25,7 +25,7 @@ this checkout, else the installed one); arguments after it go to the
 | `h3-netns.sh` | `ferotrx udp` HTTP/3 over QUIC (`examples/lab-h3.toml`: a verified certificate, Retry, key updates, a refused ALPN) through the router, then aioquic's client against the emulated server and the emulated clients against aioquic's server | `LOSS=0.03`, `IPV6=1` (emulated ends only), `NO_VLAN=1`, `PYTHON=` |
 | `latency-netns.sh` | a profile with two latency streams and a plain one, through a router with delay and loss | `DELAY=5ms`, `LOSS=0.02`, `DURATION=4s`, `IPV6=1` |
 | `bench-netns.sh` | `ferotrx bench` against a router that forwards 20 Mbit/s through a token bucket | `RATE=20`, `LINE=100`, `DELAY=2ms`, `SIZES="1020 imix"`, `TRIAL=1s` |
-| `hosts-netns.sh` | `ferotrx host` and `ferotrx tcp --client-ip dhcp` against dnsmasq and a bridge with IGMP/MLD snooping | `IPV6=1` (SLAAC, DHCPv6, MLD, router advertisements) |
+| `hosts-netns.sh` | `ferotrx host` and `ferotrx tcp --client-ip dhcp` against dnsmasq and a bridge with IGMP/MLD snooping; a FeroTRX DHCP server for busybox `udhcpc` and emulated clients | `IPV6=1` (SLAAC, DHCPv6, MLD, router advertisements, a DHCPv6 server for `udhcpc6`) |
 | `lab-examples.sh` | the control server's lab router (`serve --lab`, `lab.start`), with `examples/lab-tcp.toml` and `examples/lab-udp-mix.toml` as they are | `BLOCK=1` (router resets TCP to port 80) |
 | `scenario-netns.sh` | `examples/scenario-nat.toml`, then the same after breaking the router's firewall, which must show as a regression | `KEEP=DIR` keeps the reports |
 

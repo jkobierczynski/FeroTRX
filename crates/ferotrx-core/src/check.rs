@@ -289,6 +289,18 @@ fn hosts(p: &crate::HostProfile, out: &mut FileCheck) -> Result<()> {
             let p: Vec<String> = r.prefixes.iter().map(|(a, l)| format!("{a}/{l}")).collect();
             parts.push(format!("advertises {} every {:?}", p.join(" "), r.interval));
         }
+        if let Some(d) = &h.dhcp_server {
+            parts.push(format!(
+                "dhcp server {}-{} ({:?} leases)",
+                d.pool.0, d.pool.1, d.lease
+            ));
+        }
+        if let Some(d) = &h.dhcpv6_server {
+            parts.push(format!(
+                "dhcpv6 server {}-{} ({:?} leases)",
+                d.pool.0, d.pool.1, d.lease
+            ));
+        }
         out.summary.push(format!(
             "  host {}: {} from {}{}: {}",
             i + 1,

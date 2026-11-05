@@ -1081,7 +1081,7 @@ Tracked in [#37](https://github.com/jkobierczynski/FeroTRX/issues/37) and in
 |---|---|---|
 | HTTPS/TLS | very high | done (M24); later maybe hello-only emulation of old versions (TLS 1.0/1.1) for middlebox tests |
 | SSH | high | done (M27): real key exchange, ciphers, logins and command channels, OpenSSH both ways; later sftp/scp, port forwarding, RSA/ECDSA keys |
-| DHCP | high | done as [host emulation](host-emulation.md) (M19); a DHCP server role later |
+| DHCP | high | done as [host emulation](host-emulation.md): clients (M19), DHCP and DHCPv6 servers (M29) |
 | SIP/RTP | high | done (M28): registration with digest, calls, RTP/RTCP at codec rates with loss and jitter, SIPp both ways; later SIP over TCP/TLS, SRTP, DTMF, a proxy role |
 | HTTP/2 | high | done (M26): frames, HPACK, streams, flow control; h2 over TLS with ALPN and h2c; later server push and priorities |
 | MQTT | high | done (M25): 3.1.1 and 5.0, QoS 0-2, retained messages, logins; later a broker that routes between connections |

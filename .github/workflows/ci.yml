@@ -287,11 +287,12 @@ jobs:
       # (dnsmasq) that join a group and answer the bridge's queries, a
       # gratuitous ARP, a TCP client with a DHCP address; over IPv6, SLAAC and
       # DHCPv6 hosts, MLD, router advertisements that configure a kernel host,
-      # a TCP client with a SLAAC address. Then the same over AF_XDP.
+      # a TCP client with a SLAAC address; a FeroTRX DHCP and DHCPv6 server for
+      # busybox udhcpc/udhcpc6 and emulated clients. Then the same over AF_XDP.
       - name: Host emulation on a bridged LAN (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get install -y dnsmasq-base
+          sudo apt-get install -y dnsmasq-base busybox
           cargo build -p ferotrx-cli
           sudo scripts/hosts-netns.sh ./target/debug/ferotrx
           sudo IPV6=1 scripts/hosts-netns.sh ./target/debug/ferotrx
