@@ -92,13 +92,19 @@ fn a_benchmark_runs_on_the_server_and_reports_every_trial() {
     assert!(t.load_pct > 90.0, "{t:?}");
     assert!(size.latency.is_some());
     assert_eq!(done.trials.len(), size.trials.len());
-    assert!(done.trials.iter().all(|t| t.size == "252" && t.trial.lost == 0));
+    assert!(done
+        .trials
+        .iter()
+        .all(|t| t.size == "252" && t.trial.lost == 0));
     assert!(done.text.as_ref().unwrap().contains("Throughput"));
 
     // The report goes through JSON and back, as a client reads it.
     let json = serde_json::to_string(&done).unwrap();
     let back: BenchRunInfo = serde_json::from_str(&json).unwrap();
-    assert_eq!(back.report.unwrap().sizes[0].trials.len(), size.trials.len());
+    assert_eq!(
+        back.report.unwrap().sizes[0].trials.len(),
+        size.trials.len()
+    );
 
     assert_eq!(c.bench_runs().unwrap().len(), 1);
     c.bench_remove(run.id).unwrap();
@@ -130,14 +136,23 @@ fn bad_benchmarks_are_refused() {
     };
     let mut p = params();
     p.tests = vec!["speed".into()];
-    assert_eq!(code(c.bench_start(&p).unwrap_err()), RpcError::INVALID_PARAMS);
+    assert_eq!(
+        code(c.bench_start(&p).unwrap_err()),
+        RpcError::INVALID_PARAMS
+    );
     let mut p = params();
     p.line_rate = Some("1000pps".into());
-    assert_eq!(code(c.bench_start(&p).unwrap_err()), RpcError::INVALID_PARAMS);
+    assert_eq!(
+        code(c.bench_start(&p).unwrap_err()),
+        RpcError::INVALID_PARAMS
+    );
     let mut p = params();
     p.iface = "nope".into();
     assert_eq!(code(c.bench_start(&p).unwrap_err()), RpcError::FAILED);
     let p = BenchStartParams::default();
-    assert_eq!(code(c.bench_start(&p).unwrap_err()), RpcError::INVALID_PARAMS);
+    assert_eq!(
+        code(c.bench_start(&p).unwrap_err()),
+        RpcError::INVALID_PARAMS
+    );
     assert!(c.bench_get(99).is_err());
 }

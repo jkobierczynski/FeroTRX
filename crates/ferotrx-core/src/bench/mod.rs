@@ -486,7 +486,10 @@ pub struct SizeReport {
     pub throughput: Option<ThroughputResult>,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub latency: Option<LatencyResult>,
-    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Vec::is_empty"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
     pub frame_loss: Vec<LossPoint>,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub back_to_back: Option<BurstResult>,

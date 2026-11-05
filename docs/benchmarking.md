@@ -19,6 +19,10 @@ sudo ferotrx bench examples/bench-rfc2544.toml -i eth1 --rx eth2 \
 namespace whose output is limited to 20 Mbit/s by a token bucket, and checks
 that the benchmark finds that limit; CI runs it on every change.
 
+The [desktop GUI](gui.md#benchmarks) runs the same benchmarks on a control
+server (`bench.start`, see [remote control](remote-control.md#the-protocol))
+and shows every trial as it ends.
+
 ## A benchmark profile
 
 ```toml

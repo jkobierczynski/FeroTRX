@@ -51,7 +51,7 @@ from .types import (
     UdpTemplateCounters,
 )
 
-__version__ = "0.23.0"
+__version__ = "0.26.0"
 
 __all__ = [
     "__version__",
