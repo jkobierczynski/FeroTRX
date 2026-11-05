@@ -51,6 +51,8 @@ impl AppRegistry {
         r.register("mqtt", |t, _| super::mqtt::parse(t).map(App::new));
         r.register("sip", |t, _| super::sip::parse(t).map(App::new));
         r.register("smb", |t, _| super::smb::parse(t).map(App::new));
+        #[cfg(feature = "quic")]
+        r.register("h3", |t, base| super::quic::parse(t, base).map(App::new));
         #[cfg(feature = "ssh")]
         r.register("ssh", |t, base| super::ssh::parse(t, base).map(App::new));
         r
@@ -140,6 +142,7 @@ pub(crate) fn take_apps(
             "https" if !registry.contains("https") => ("http".to_string(), true),
             "h2" if !registry.contains("h2") => ("http2".to_string(), true),
             "h2c" if !registry.contains("h2c") => ("http2".to_string(), false),
+            "http3" | "quic" if !registry.contains(&name) => ("h3".to_string(), false),
             _ => (name, false),
         };
         let table = match t.get(&name) {
@@ -174,6 +177,24 @@ pub(crate) fn take_apps(
             ))
         };
         let mut table = table.unwrap_or_default();
+        if name == "h3" {
+            // QUIC always runs TLS: its settings go to the protocol.
+            match tls {
+                None => {}
+                Some(_) if table.contains_key("tls") => {
+                    return Err(Error::Profile(format!(
+                        "{what}TLS settings both in [tls] and [h3]"
+                    )))
+                }
+                Some(x) => {
+                    table.insert("tls".into(), toml::Value::Table(x));
+                }
+            }
+            return registry
+                .parse(&name, &table, base_dir)
+                .map(Some)
+                .map_err(fail);
+        }
         if name == "http2" && tls.is_some() && !table.contains_key("scheme") {
             table.insert("scheme".into(), "https".into());
         }

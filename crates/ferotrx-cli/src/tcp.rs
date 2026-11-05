@@ -696,7 +696,7 @@ fn side_line(c: &TcpCounters) -> String {
 /// resumed, 0 failed; handshake ms avg 1.20 p99 3.40`, or for SSH `20 SSH key
 /// exchanges (curve25519-sha256 ssh-ed25519 aes256-gcm@openssh.com x20), 0 failed`,
 /// or for SMB `20 SMB logins (SMB 3.1.1 signed AES-CMAC x20), 0 failed`
-fn tls_line(h: &ferotrx_ctl::protocol::HandshakeCounters) -> String {
+pub(crate) fn tls_line(h: &ferotrx_ctl::protocol::HandshakeCounters) -> String {
     let mut v: Vec<(&String, &u64)> = h.negotiated.iter().collect();
     v.sort_by(|x, y| y.1.cmp(x.1).then(x.0.cmp(y.0)));
     let what: Vec<String> = v.iter().map(|(k, n)| format!("{k} x{n}")).collect();
@@ -707,7 +707,20 @@ fn tls_line(h: &ferotrx_ctl::protocol::HandshakeCounters) -> String {
         .negotiated
         .keys()
         .any(|k| k.starts_with("SMB ") || k.starts_with("failed: STATUS_"));
-    let mut line = if smb {
+    // QUIC's handshakes say so.
+    let quic = h
+        .negotiated
+        .keys()
+        .any(|k| k.starts_with("QUIC ") || k.starts_with("failed: QUIC "));
+    let mut line = if quic {
+        format!(
+            "{} QUIC handshakes ({}), {} resumed, {} failed",
+            h.handshakes,
+            what.join(", "),
+            h.resumed,
+            h.failed
+        )
+    } else if smb {
         format!(
             "{} SMB logins ({}), {} failed",
             h.handshakes,
