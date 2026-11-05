@@ -41,6 +41,10 @@ pub enum Target {
     OpenWorkspace,
     /// Where to save the workspace.
     SaveWorkspace,
+    /// A scenario report for one side of a comparison.
+    CompareReport { before: bool },
+    /// Where to save a comparison.
+    SaveComparison,
 }
 
 /// The kinds of file a dialog lists first.
@@ -52,6 +56,7 @@ pub enum Kind {
     Report,
     Junit,
     Workspace,
+    Text,
 }
 
 impl Kind {
@@ -63,6 +68,7 @@ impl Kind {
             Kind::Report => ("Reports (*.json)", &["json"]),
             Kind::Junit => ("JUnit XML (*.xml)", &["xml"]),
             Kind::Workspace => ("Workspaces (*.ferotrx)", &["ferotrx"]),
+            Kind::Text => ("Text (*.txt, *.json)", &["txt", "json"]),
         }
     }
 }

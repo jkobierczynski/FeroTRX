@@ -1,6 +1,7 @@
 //! The panels of the window, each an `impl FeroApp` block.
 
 mod capture;
+mod compare;
 mod lab;
 mod scenario;
 mod stateful;
@@ -10,6 +11,7 @@ mod streams;
 use eframe::egui::{self, RichText};
 
 pub use capture::CaptureState;
+pub use compare::{CompareForm, Side as CompareSide};
 pub use lab::LabForm;
 pub use scenario::ScenarioState;
 pub use stateful::StatefulState;
@@ -411,6 +413,7 @@ impl FeroApp {
             self.connect(i);
         }
         self.lab_window(ctx);
+        self.compare_window(ctx);
         self.file_dialog(ctx);
     }
 }

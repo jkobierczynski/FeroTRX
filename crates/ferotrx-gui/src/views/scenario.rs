@@ -91,6 +91,8 @@ pub struct ScenarioState {
     /// The check whose details are shown.
     #[serde(skip)]
     pub sel_check: Option<String>,
+    /// The comparison window.
+    pub compare: super::compare::CompareForm,
 }
 
 impl Default for ScenarioState {
@@ -108,6 +110,7 @@ impl Default for ScenarioState {
             build_lab: true,
             run: None,
             sel_check: None,
+            compare: Default::default(),
         }
     }
 }
@@ -303,6 +306,7 @@ struct Actions {
     stop: Option<u64>,
     remove: Option<u64>,
     report: Option<bool>,
+    compare: bool,
 }
 
 impl FeroApp {
@@ -537,6 +541,9 @@ impl FeroApp {
                 },
             }
         }
+        if a.compare {
+            self.open_compare();
+        }
         if let Some(id) = a.stop {
             self.stop_run(i, "scenario", id);
         }
@@ -669,6 +676,13 @@ fn scenario_results(
                     }
                 }
             }
+        }
+        if ui
+            .small_button("Compare…")
+            .on_hover_text("Two runs or report files side by side, as ferotrx scenario compare")
+            .clicked()
+        {
+            a.compare = true;
         }
     });
     let checks: Vec<ScenarioCheckInfo> = match (run, &st.checked) {
