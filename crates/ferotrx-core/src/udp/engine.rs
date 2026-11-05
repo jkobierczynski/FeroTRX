@@ -701,7 +701,11 @@ impl Session {
             self.wake = Some(w);
         }
         let (role, tpl) = (self.role, self.tpl);
-        cx.add(role, tpl, |s| ax.count_into(&mut s.app));
+        let resent = ax.resent_count();
+        cx.add(role, tpl, |s| {
+            ax.count_into(&mut s.app);
+            s.retries += resent;
+        });
         if self.done && self.role == UdpRole::Server && !ax.wants_close() {
             // Something new on a finished server session.
             self.done = false;

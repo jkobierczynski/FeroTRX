@@ -28,7 +28,7 @@ The [README](../README.md) has the overview and a quickstart.
 * [Stateful UDP and DNS](stateful-udp.md): `ferotrx udp`, DNS, NTP and UDP
   sessions. Engine internals: [The stateful UDP engine](udp-engine.md).
 * [Application protocols](app-protocols.md): HTTP/1.1 and HTTP/2 clients
-  and servers, DNS over UDP and TCP, MQTT, SSH, SIP with RTP, SMB, NTP, as `app = "..."` in TCP and UDP profiles; TLS
+  and servers, DNS over UDP and TCP, MQTT, SSH, SIP with RTP, SMB, HTTP/3 over QUIC, NTP, as `app = "..."` in TCP and UDP profiles; TLS
   under them (HTTPS, DNS over TLS): versions, cipher suites, certificates,
   handshake counters; writing your own.
 * [Host emulation](host-emulation.md): `ferotrx host`, DHCP, SLAAC, DHCPv6, DHCP servers,

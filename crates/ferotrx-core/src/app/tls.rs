@@ -859,6 +859,16 @@ fn server_config(s: &TlsSettings, lab: &LabCa) -> Result<ServerConfig> {
     Ok(c)
 }
 
+/// The rustls configurations of both ends, with a lab CA of their own for
+/// what the settings leave out (for QUIC, which drives rustls itself).
+pub(crate) fn configs(
+    client: &TlsSettings,
+    server: &TlsSettings,
+) -> Result<(ClientConfig, ServerConfig)> {
+    let lab = LabCa::new(client.key_type)?;
+    Ok((client_config(client, &lab)?, server_config(server, &lab)?))
+}
+
 /// A client that takes any server certificate (`verify = false`), still
 /// checking the handshake signatures.
 #[derive(Debug)]
@@ -1097,6 +1107,30 @@ mod profile {
     /// from `base`). `[tls.client]` and `[tls.server]` set keys for one
     /// end only.
     pub fn parse(inner: App, table: &toml::Table, base: &Path) -> Result<Tls> {
+        let (mut client, server) = parse_ends(table, base)?;
+        // ALPN for HTTP unless given: `http/1.1`, or for HTTP/2 `h2` (whose
+        // server also takes HTTP/1.1).
+        let (c_alpn, s_alpn): (&[&str], &[&str]) = match inner.name() {
+            "http" => (&["http/1.1"], &["http/1.1"]),
+            "http2" => (&["h2"], &["h2", "http/1.1"]),
+            _ => (&[], &[]),
+        };
+        if client.alpn.is_empty() && server.alpn.is_empty() {
+            client.alpn = c_alpn.iter().map(|a| a.to_string()).collect();
+        }
+        let mut server = server;
+        if server.alpn.is_empty() {
+            server.alpn = s_alpn.iter().map(|a| a.to_string()).collect();
+        }
+        Tls::with_ends(inner, client, server)
+    }
+
+    /// The settings of both ends from a `[tls]` table, as [`parse`] reads
+    /// them, without ALPN defaults.
+    pub(crate) fn parse_ends(
+        table: &toml::Table,
+        base: &Path,
+    ) -> Result<(TlsSettings, TlsSettings)> {
         let r = raw(table)?;
         let end = |t: &Option<toml::Table>| -> Result<Raw> {
             let o = match t {
@@ -1128,23 +1162,9 @@ mod profile {
                 expect
             ))
         };
-        let mut client = settings(&end(&r.client)?, base).map_err(|e| prefix("client", e))?;
+        let client = settings(&end(&r.client)?, base).map_err(|e| prefix("client", e))?;
         let server = settings(&end(&r.server)?, base).map_err(|e| prefix("server", e))?;
-        // ALPN for HTTP unless given: `http/1.1`, or for HTTP/2 `h2` (whose
-        // server also takes HTTP/1.1).
-        let (c_alpn, s_alpn): (&[&str], &[&str]) = match inner.name() {
-            "http" => (&["http/1.1"], &["http/1.1"]),
-            "http2" => (&["h2"], &["h2", "http/1.1"]),
-            _ => (&[], &[]),
-        };
-        if client.alpn.is_empty() && server.alpn.is_empty() {
-            client.alpn = c_alpn.iter().map(|a| a.to_string()).collect();
-        }
-        let mut server = server;
-        if server.alpn.is_empty() {
-            server.alpn = s_alpn.iter().map(|a| a.to_string()).collect();
-        }
-        Tls::with_ends(inner, client, server)
+        Ok((client, server))
     }
 
     fn prefix(end: &str, e: Error) -> Error {
@@ -1157,6 +1177,8 @@ mod profile {
 
 #[cfg(feature = "profile")]
 pub use profile::parse;
+#[cfg(feature = "profile")]
+pub(crate) use profile::parse_ends;
 
 #[cfg(test)]
 mod tests {
