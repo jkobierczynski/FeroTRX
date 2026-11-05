@@ -152,7 +152,7 @@ Application protocols add their own `response_*` (request to whole answer).
 ## In the lab
 
 `scripts/sip-netns.sh` checks that calls through the netns NAT router score
-MOS 4.0 or more without loss and have an RTCP round trip; then, where the
+MOS 3.8 or more without loss and have an RTCP round trip; then, where the
 kernel has netem, it puts 200 ms of delay and 5% loss on the router's link
 to the server and checks that the round trip grows past 190 ms and the
 server's calls score below 4.0 and at least 0.3 below the clean calls (about

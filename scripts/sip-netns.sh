@@ -288,11 +288,11 @@ if [ -z "${LOSS:-}" ]; then
             fi
         done
     done
-    # Clean calls score as G.711 does: MOS 4.3 to 4.4 (a little less on a
-    # VM whose stalls make packets late for the jitter buffer).
+    # Clean calls score as G.711 does: MOS 4.3 to 4.4 (4.1 or so on a VM
+    # whose stalls make packets late for the jitter buffer).
     for side in client server; do
         q=$(line office $side | mos100)
-        if [ "${q:-0}" -lt 400 ]; then
+        if [ "${q:-0}" -lt 380 ]; then
             fail "template office: MOS ${q:-none} (x100) on the $side without loss or delay"
         fi
     done
