@@ -2,9 +2,10 @@
 
 mod capture;
 mod compare;
+mod groups;
 mod lab;
 mod scenario;
-mod stateful;
+pub(crate) mod stateful;
 mod stats;
 mod streams;
 
@@ -12,6 +13,7 @@ use eframe::egui::{self, RichText};
 
 pub use capture::CaptureState;
 pub use compare::{CompareForm, Side as CompareSide};
+pub use groups::{GroupsState, Member, MemberKind};
 pub use lab::LabForm;
 pub use scenario::ScenarioState;
 pub use stateful::StatefulState;
@@ -39,6 +41,7 @@ impl FeroApp {
             Tab::Stateful => self.stateful_tab(ui),
             Tab::Capture => self.capture_tab(ui),
             Tab::Scenario => self.scenario_tab(ui),
+            Tab::Group => self.groups_tab(ui),
             Tab::Charts => self.charts_tab(ui),
         });
         self.dialogs(ctx);
@@ -71,7 +74,12 @@ impl FeroApp {
                     "Scenario",
                     "Checks with expected outcomes, run on the server",
                 ),
-                (Tab::Charts, "Charts", "Rates of the runs over time"),
+                (
+                    Tab::Group,
+                    "Multi-server",
+                    "Runs on several servers, started and stopped together",
+                ),
+                (Tab::Charts, "Charts", "Rates, loss and latency over time"),
             ] {
                 ui.selectable_value(&mut self.tab, tab, label)
                     .on_hover_text(hover);

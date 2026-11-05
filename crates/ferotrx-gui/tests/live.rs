@@ -114,3 +114,68 @@ fn bad_streams_and_wrong_tokens_show_in_the_log() {
     assert!(err.text.contains("profile refused"), "{}", err.text);
     assert!(app.port_run(i, &port).is_none());
 }
+
+#[test]
+fn a_group_starts_on_two_servers_and_adds_up() {
+    use ferotrx_gui::views::{Member, MemberKind};
+
+    let a = server(None);
+    let b = server(None);
+    let mut app = FeroApp::with_workspace(
+        egui::Context::default(),
+        Workspace::default(),
+        Options {
+            connect: [&a, &b]
+                .iter()
+                .map(|addr| ConnSettings {
+                    addr: addr.to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        },
+    );
+    until(&mut app, "both connect", |x| {
+        x.servers
+            .iter()
+            .filter(|s| s.status == Status::Connected)
+            .count()
+            == 2
+    });
+    let port = PortKind::Null;
+    for (n, limit) in [(0, 300), (1, 500)] {
+        let i = app
+            .servers
+            .iter()
+            .position(|s| s.settings.addr == [&a, &b][n].as_str())
+            .unwrap();
+        app.port_work(i, &port).profile.streams = vec![StreamDraft {
+            name: format!("s{n}"),
+            rate: "5000pps".into(),
+            limit: Some(limit),
+            ..Default::default()
+        }];
+        let server = app.servers[i].settings.address();
+        app.groups.members.push(Member {
+            server,
+            kind: MemberKind::Streams,
+            port: Some(port.clone()),
+            ..Default::default()
+        });
+    }
+    app.start_group();
+    until(&mut app, "both runs to finish", |x| {
+        x.groups.members.iter().all(|m| {
+            x.member_stats(m)
+                .is_some_and(|s| !s.running && s.tx_packets > 0)
+        })
+    });
+    let total: u64 = app
+        .groups
+        .members
+        .iter()
+        .map(|m| app.member_stats(m).unwrap().tx_packets)
+        .sum();
+    assert_eq!(total, 800);
+    assert!(app.log.iter().all(|l| !l.error), "{:?}", app.log);
+}

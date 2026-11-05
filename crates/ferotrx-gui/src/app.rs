@@ -83,6 +83,10 @@ pub enum Pending {
     ScenarioChecked,
     /// `scenario.start`: show the run.
     ScenarioStarted,
+    /// `profile.load` of a multi-server group's member.
+    GroupLoaded { member: usize },
+    /// A start of a group's member.
+    GroupStarted { member: usize },
     /// Any other call: log this on success.
     Done(String),
 }
@@ -283,6 +287,7 @@ pub enum Tab {
     Stateful,
     Capture,
     Scenario,
+    Group,
     Charts,
 }
 
@@ -313,6 +318,7 @@ pub struct FeroApp {
     pub capture: CaptureState,
     pub stateful: StatefulState,
     pub scenario: ScenarioState,
+    pub groups: crate::views::GroupsState,
     pub log: Vec<LogLine>,
     pub next_tag: u64,
     pub started: Instant,
@@ -383,6 +389,7 @@ impl FeroApp {
             capture: CaptureState::default(),
             stateful: StatefulState::default(),
             scenario: ScenarioState::default(),
+            groups: Default::default(),
             log: Vec::new(),
             next_tag: 1,
             started: Instant::now(),
@@ -484,6 +491,7 @@ impl FeroApp {
     fn restore_forms(&mut self, f: crate::workspace::WorkspaceFile) {
         self.stateful = f.stateful;
         self.scenario = f.scenario;
+        self.groups = f.groups;
         self.tab = f.view.tab;
         self.bottom = f.view.bottom;
         if !f.capture.path.is_empty() {
@@ -562,6 +570,7 @@ impl FeroApp {
                 self.handle(i, e, now);
             }
         }
+        self.sample_group();
     }
 
     fn handle(&mut self, i: usize, e: Event, now: f64) {
@@ -739,6 +748,12 @@ impl FeroApp {
                         self.error(&name, format!("{what} failed: {e}"));
                     }
                     (Pending::Done(what), Ok(_)) => self.info(&name, what),
+                    (Pending::GroupLoaded { member }, r) => {
+                        self.group_loaded(member, r.map(drop).map_err(|e| e.to_string()))
+                    }
+                    (Pending::GroupStarted { member }, r) => {
+                        self.group_started(member, r.map_err(|e| e.to_string()))
+                    }
                     (Pending::ScenarioChecked, Ok(v)) => {
                         self.scenario.checked = Some(
                             serde_json::from_value::<ferotrx_ctl::protocol::ScenarioInfo>(v)
@@ -777,6 +792,9 @@ impl FeroApp {
                             Pending::Interfaces => format!("interfaces.list: {e}"),
                             Pending::ScenarioChecked | Pending::ScenarioStarted => {
                                 format!("scenario: {e}")
+                            }
+                            Pending::GroupLoaded { .. } | Pending::GroupStarted { .. } => {
+                                unreachable!("handled above")
                             }
                         };
                         self.error(&name, what);

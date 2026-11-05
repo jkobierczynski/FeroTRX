@@ -27,7 +27,7 @@ impl Kind {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StatefulState {
     pub kind: Kind,

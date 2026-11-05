@@ -35,6 +35,7 @@ pub struct WorkspaceFile {
     pub capture: CaptureSave,
     pub stateful: crate::views::StatefulState,
     pub scenario: crate::views::ScenarioState,
+    pub groups: crate::views::GroupsState,
     /// The window's layout (egui's memory: panel sizes, open sections,
     /// scroll positions), as RON text.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -119,6 +120,7 @@ impl FeroApp {
             },
             stateful: clone_json(&self.stateful),
             scenario: clone_json(&self.scenario),
+            groups: clone_json(&self.groups),
             layout: ctx
                 .and_then(|c| c.memory(|m| ron::to_string(m).ok()))
                 .unwrap_or_default(),
@@ -178,6 +180,7 @@ impl FeroApp {
         self.bottom = w.view.bottom;
         self.stateful = w.stateful;
         self.scenario = w.scenario;
+        self.groups = w.groups;
         self.capture = Default::default();
         if !w.capture.path.is_empty() {
             self.capture.path = w.capture.path;
