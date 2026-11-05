@@ -778,6 +778,11 @@ if [ -x "$sshd" ] && command -v ssh-keygen >/dev/null 2>&1 && [ $have_ethtool = 
     ssh-keygen -q -t ed25519 -N '' -C router.lab -f "$tmp/host"
     cp "$tmp/id.pub" "$tmp/authorized_keys"
     # Only this lab's key, only for root, only on the router's lab address.
+    # With PAM (passwords stay off) a root account locked for passwords, as
+    # Debian leaves it next to sudo, still logs in by key; without PAM sshd
+    # refuses locked accounts outright.
+    pam=no
+    [ ! -f /etc/pam.d/sshd ] || pam=yes
     cat >"$tmp/sshd_config" <<EOT
 Port 2022
 ListenAddress $(net 10)1
@@ -790,7 +795,7 @@ KbdInteractiveAuthentication no
 PermitRootLogin prohibit-password
 AllowUsers root
 StrictModes no
-UsePAM no
+UsePAM $pam
 X11Forwarding no
 AllowTcpForwarding no
 EOT
@@ -828,8 +833,11 @@ EOT
             -n 4 --cps 4 -q >"$log" 2>&1 || status=$?
         cat "$log"
         line=$(grep -E "^  client: " "$log" || true)
-        echo "$line" | grep -Eq "^  client: 4 connections, 4 established, 4 completed;" ||
+        if ! echo "$line" | grep -Eq "^  client: 4 connections, 4 established, 4 completed;"; then
             fail "SSH $c: the emulated client did not complete its connections to sshd"
+            echo "sshd said:"
+            sed 's/^/  /' "$tmp/sshd.log"
+        fi
         echo "$line" | grep -Eq "\), 0 failed" || fail "SSH $c: commands against sshd failed"
         echo "$line" | grep -q "auth publickey x4" || fail "SSH $c: no key logins"
         echo "$line" | grep -q "exit 7 x4" || fail "SSH $c: no exit status 7"
