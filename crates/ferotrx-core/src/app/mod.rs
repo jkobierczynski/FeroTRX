@@ -27,7 +27,8 @@
 //! The built-in protocols are [`http`] (HTTP/1.1 client and server),
 //! [`http2`] (HTTP/2 client and server, h2 and h2c), [`dns`]
 //! (over UDP, and over TCP with length prefixes), [`mqtt`] (client and
-//! broker, 3.1.1 and 5.0) and [`ntp`]; [`tls`]
+//! broker, 3.1.1 and 5.0), [`ntp`] and [`ssh`] (feature `ssh`: client and
+//! server, OpenSSH-compatible); [`tls`]
 //! (feature `tls`) runs any stream protocol over TLS (HTTPS = TLS + HTTP).
 
 pub mod dns;
@@ -37,6 +38,8 @@ pub mod mqtt;
 pub mod ntp;
 #[cfg(feature = "profile")]
 mod registry;
+#[cfg(feature = "ssh")]
+pub mod ssh;
 #[cfg(feature = "tls")]
 pub mod tls;
 
@@ -207,6 +210,7 @@ pub struct AppCx {
     wall: Duration,
     sends: Vec<Vec<u8>>,
     close: bool,
+    goodbye: bool,
     wake: Option<Duration>,
     transactions: Vec<AppTransaction>,
     protocol_errors: Vec<String>,
@@ -248,6 +252,18 @@ impl AppCx {
         self.close = true;
     }
 
+    /// The other end said goodbye in the protocol (SSH's DISCONNECT): its
+    /// socket is closed or closing, so a TCP reset from it after this does
+    /// not fail the connection. Whatever we still had in flight is not for
+    /// anyone.
+    pub fn goodbye(&mut self) {
+        self.goodbye = true;
+    }
+
+    pub fn said_goodbye(&self) -> bool {
+        self.goodbye
+    }
+
     /// Calls [`AppSession::timer`] at `at` (engine time); a later call
     /// replaces it.
     pub fn wake_at(&mut self, at: Duration) {
@@ -276,6 +292,7 @@ impl AppCx {
     /// layer in between to wrap.
     pub fn absorb(&mut self, mut inner: AppCx) -> Vec<Vec<u8>> {
         self.close |= inner.close;
+        self.goodbye |= inner.goodbye;
         if inner.wake.is_some() {
             self.wake = inner.wake;
         }

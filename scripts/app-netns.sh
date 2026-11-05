@@ -10,7 +10,7 @@
 #     server 192.168.20.80 vlan 20        masquerade out of rt.20
 #
 # Usage: sudo scripts/app-netns.sh [path/to/ferotrx] [extra ferotrx tcp options]
-# (the options go to the runs with both ends emulated, 1, 4, 7 and 10)
+# (the options go to the runs with both ends emulated, 1, 4, 7, 10 and 13)
 # Needs root, ip (iproute2) and iptables (or iptables-nft). Removes the lab
 # when done.
 #
@@ -50,6 +50,18 @@
 #    20 streams per connection if it is installed.
 # 12. If nghttpd and openssl are installed: nghttpd on the router, over TLS
 #    and without, and the emulated HTTP/2 clients load pages from it.
+# 13. SSH (examples/lab-ssh.toml): password logins with commands (one of
+#    them answered after a delay), public key logins with an upload, a
+#    download and a route's exit status over AES-GCM with a new key exchange
+#    every 1 MB, and a wrong password that the server must refuse.
+# 14. If ssh and ssh-keygen are installed: OpenSSH's client against the
+#    emulated server: a public key login, commands, 1 MB down and 300 KB
+#    echoed back, an exit status, each cipher, a re-key every 64 KB, a shell
+#    on a pty, and (with sshpass) a right and a wrong password.
+# 15. If sshd is installed: sshd on the router (its own config, host key and
+#    authorized key, root login by key only, nothing else), and the
+#    emulated clients log in with the key, check the host key fingerprint,
+#    and run commands with each cipher and a re-key every 512 KB.
 #
 # LOSS=0.03 makes the router drop 3% of the packets it forwards.
 # IPV6=1 does the same over IPv6 (fd00:10::/64 and fd00:20::/64).
@@ -659,6 +671,177 @@ EOT
     done
 else
     echo "no nghttpd, openssl or ethtool: skipping the emulated HTTP/2 client against nghttpd"
+fi
+
+# The SSH example without its addresses, as for HTTP.
+sed '/^\[client\]/,$d' "$examples/lab-ssh.toml" >"$tmp/ssh.toml"
+cat >>"$tmp/ssh.toml" <<EOT
+[client]
+ip = "0.0.0.0"
+[server]
+ip = "0.0.0.0"
+EOT
+echo "== SSH through the router"
+# shellcheck disable=SC2086
+"$BIN" tcp -p "$tmp/ssh.toml" $links $client $server -n 60 --cps 30 -q "$@" >"$log" 2>&1 || status=$?
+cat "$log"
+check_template admin 5
+check_template intruder 1
+line=$(grep -E "^    backup client: " "$log" || true)
+echo "$line" | grep -Eq "^    backup client: ([0-9]+) connections, [0-9]+ established, \1 completed;" ||
+    fail "backup: not every connection completed ($line)"
+echo "$line" | grep -Eq "\), 0 failed" || fail "backup: commands failed ($line)"
+echo "$line" | grep -Eq "rekey x[1-9]" || fail "backup: no new key exchanges"
+echo "$line" | grep -Eq "aes256-gcm@openssh\.com x[1-9]" || fail "backup: not AES-256-GCM"
+grep -Eq "^    admin client: .*curve25519-sha256 ssh-ed25519 chacha20-poly1305@openssh\.com x" "$log" ||
+    fail "admin: not curve25519 with ChaCha20-Poly1305"
+grep -Eq "^    intruder client: .*auth refused x[1-9]" "$log" || fail "intruder: no refused logins"
+
+if command -v ssh >/dev/null 2>&1 && command -v ssh-keygen >/dev/null 2>&1 &&
+    [ $have_ethtool = yes ]; then
+    echo "== ssh against the emulated SSH server"
+    ssh-keygen -q -t ed25519 -N '' -C ferotrx-lab -f "$tmp/id"
+    cat >"$tmp/ssh-server.toml" <<EOT
+app = "ssh"
+[ssh]
+users = { lab = "secret" }
+authorized_keys = "$tmp/id.pub"
+[[ssh.route]]
+command = "uptime"
+output = "up 1 day\n"
+[server]
+ip = "0.0.0.0"
+EOT
+    # shellcheck disable=SC2086
+    "$BIN" tcp -p "$tmp/ssh-server.toml" $server_links $server -d 15s -q >"$tmp/server" 2>&1 &
+    bg_pid=$!
+    sleep 1
+    host=$(net 20)80
+    sshc() { # ssh options and command
+        r ssh -F /dev/null -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
+            -o LogLevel=ERROR -o ConnectTimeout=5 -o IdentitiesOnly=yes -i "$tmp/id" \
+            -o BatchMode=yes -o PreferredAuthentications=publickey "$@"
+    }
+    hello=$(sshc "lab@$host" echo hello 2>&1 || true)
+    up=$(sshc "lab@$host" uptime 2>&1 || true)
+    big=$(sshc "lab@$host" head -c 1M /dev/zero | wc -c)
+    back=$(head -c 300000 /dev/zero | sshc "lab@$host" cat | wc -c)
+    code=0
+    sshc "lab@$host" exit 3 || code=$?
+    echo "  ssh: echo '$hello', uptime '$up', 1M down $big, 300000 echoed $back, exit 3 gave $code"
+    [ "$hello" = hello ] || fail "ssh: echo hello gave '$hello'"
+    [ "$up" = "up 1 day" ] || fail "ssh: the uptime route gave '$up'"
+    [ "$big" -eq 1048576 ] || fail "ssh: head -c 1M gave $big bytes"
+    [ "$back" -eq 300000 ] || fail "ssh: cat echoed $back of 300000 bytes"
+    [ "$code" -eq 3 ] || fail "ssh: exit 3 gave exit status $code"
+    for c in chacha20-poly1305@openssh.com aes256-gcm@openssh.com aes128-gcm@openssh.com; do
+        got=$(sshc -c "$c" "lab@$host" echo "$c" 2>&1 || true)
+        [ "$got" = "$c" ] || fail "ssh -c $c: '$got'"
+    done
+    echo "  ssh: all three ciphers work"
+    rk=$(sshc -o RekeyLimit=64K "lab@$host" head -c 2M /dev/zero | wc -c)
+    echo "  ssh: 2M with a re-key every 64K: $rk bytes"
+    [ "$rk" -eq 2097152 ] || fail "ssh with RekeyLimit=64K: $rk bytes"
+    code=0
+    printf 'whoami\nexit 5\n' | sshc -tt "lab@$host" >"$tmp/shell" 2>&1 || code=$?
+    shell=$(tr -d '\r' <"$tmp/shell")
+    echo "  ssh: shell on a pty: $(echo "$shell" | tr '\n' '|'), exit $code"
+    echo "$shell" | grep -qx 'lab' || fail "ssh -tt: whoami did not print lab in the shell"
+    [ "$code" -eq 5 ] || fail "ssh -tt: exit 5 gave exit status $code"
+    if command -v sshpass >/dev/null 2>&1; then
+        pw() { # password, command
+            p=$1
+            shift
+            r sshpass -p "$p" ssh -F /dev/null -o UserKnownHostsFile=/dev/null \
+                -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 \
+                -o PubkeyAuthentication=no -o PreferredAuthentications=password \
+                -o NumberOfPasswordPrompts=1 "lab@$host" "$@"
+        }
+        right=$(pw secret whoami 2>&1 || true)
+        wrong=0
+        pw guess whoami >/dev/null 2>&1 || wrong=$?
+        echo "  ssh: password login '$right', a wrong password gave exit status $wrong"
+        [ "$right" = lab ] || fail "ssh: the right password gave '$right'"
+        [ "$wrong" -ne 0 ] || fail "ssh: a wrong password was let in"
+    fi
+    wait "$bg_pid" || fail "the emulated SSH server failed connections from ssh"
+    bg_pid=
+    cat "$tmp/server"
+else
+    echo "no ssh, ssh-keygen or ethtool: skipping ssh against the emulated SSH server"
+fi
+
+sshd=$(command -v sshd || echo /usr/sbin/sshd)
+if [ -x "$sshd" ] && command -v ssh-keygen >/dev/null 2>&1 && [ $have_ethtool = yes ]; then
+    echo "== the emulated SSH client against sshd"
+    [ -f "$tmp/id" ] || ssh-keygen -q -t ed25519 -N '' -C ferotrx-lab -f "$tmp/id"
+    ssh-keygen -q -t ed25519 -N '' -C router.lab -f "$tmp/host"
+    cp "$tmp/id.pub" "$tmp/authorized_keys"
+    # Only this lab's key, only for root, only on the router's lab address.
+    cat >"$tmp/sshd_config" <<EOT
+Port 2022
+ListenAddress $(net 10)1
+HostKey $tmp/host
+PidFile $tmp/sshd.pid
+AuthorizedKeysFile $tmp/authorized_keys
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+AllowUsers root
+StrictModes no
+UsePAM no
+X11Forwarding no
+AllowTcpForwarding no
+EOT
+    mkdir -p /run/sshd
+    ip netns exec $NS "$sshd" -D -e -f "$tmp/sshd_config" >"$tmp/sshd.log" 2>&1 &
+    bg_pid=$!
+    sleep 1
+    fp=$(ssh-keygen -lf "$tmp/host.pub" | awk '{print $2}')
+    for c in chacha20-poly1305@openssh.com aes256-gcm@openssh.com aes128-gcm@openssh.com; do
+        cat >"$tmp/ssh-client.toml" <<EOT
+app = "ssh"
+port = 2022
+[ssh]
+user = "root"
+key = "$tmp/id"
+fingerprint = "$fp"
+ciphers = ["$c"]
+rekey_after = "512K"
+commands = ["echo hello"]
+[[ssh.command]]
+run = "head -c 1M /dev/zero"
+output_size = "1M"
+[[ssh.command]]
+run = "cat"
+input_size = "200K"
+output_size = "200K"
+[[ssh.command]]
+run = "exit 7"
+exit = 7
+[client]
+ip = "0.0.0.0"
+EOT
+        # shellcheck disable=SC2086
+        "$BIN" tcp -p "$tmp/ssh-client.toml" $client_links $client --connect "$(net 10)1" \
+            -n 4 --cps 4 -q >"$log" 2>&1 || status=$?
+        cat "$log"
+        line=$(grep -E "^  client: " "$log" || true)
+        echo "$line" | grep -Eq "^  client: 4 connections, 4 established, 4 completed;" ||
+            fail "SSH $c: the emulated client did not complete its connections to sshd"
+        echo "$line" | grep -Eq "\), 0 failed" || fail "SSH $c: commands against sshd failed"
+        echo "$line" | grep -q "auth publickey x4" || fail "SSH $c: no key logins"
+        echo "$line" | grep -q "exit 7 x4" || fail "SSH $c: no exit status 7"
+        echo "$line" | grep -Eq "rekey x[1-9]" || fail "SSH $c: sshd did no new key exchange"
+        echo "$line" | grep -q "4 SSH key exchanges (curve25519-sha256 ssh-ed25519 $c x4)" ||
+            fail "SSH $c: not the cipher asked for"
+    done
+    kill "$bg_pid" 2>/dev/null || true
+    wait "$bg_pid" 2>/dev/null || true
+    bg_pid=
+else
+    echo "no sshd, ssh-keygen or ethtool: skipping the emulated SSH client against sshd"
 fi
 
 echo "router: connections masqueraded, and dropped:"

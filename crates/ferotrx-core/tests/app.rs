@@ -872,3 +872,78 @@ fn http2_profiles_over_tls_and_without() {
     .to_string();
     assert!(e.contains("pipeline"), "{e}");
 }
+
+#[test]
+fn ssh_over_a_lossy_reordering_link_and_in_profiles() {
+    use ferotrx_core::app::ssh::{Input, Ssh, SshCommand};
+    let mut s = Ssh::default();
+    s.client.commands = vec![
+        SshCommand::new("echo hello"),
+        SshCommand {
+            output_size: Some(200_000),
+            ..SshCommand::new("head -c 200000 /dev/zero")
+        },
+        SshCommand {
+            input: Input::Filler(100_000),
+            output_size: Some(100_000),
+            ..SshCommand::new("cat")
+        },
+    ];
+    s.client.per_connection = 3;
+    s.client.rekey_after = Some(150_000);
+    let t = TcpTemplate::with_app_protocol(App::new(s), "10.0.0.80:22".parse().unwrap());
+    let (mut client, mut server) = tcp_pair(vec![t], 10);
+    let mut link = Link::new(41, 13);
+    let took = simulate(
+        &mut [&mut client, &mut server],
+        &mut link,
+        Duration::from_secs(120),
+    );
+    let c = &client.stats().client;
+    let sv = &server.stats().server;
+    assert!(client.is_done(), "not done after {took:?}: {c:?}");
+    assert!(link.dropped > 5, "{}", link.dropped);
+    assert_eq!((c.completed, c.mismatched, c.failed()), (10, 0, 0), "{c:?}");
+    assert_eq!((sv.completed + sv.active, sv.mismatched), (10, 0), "{sv:?}");
+    assert_eq!(c.app.failed, 0, "{:?}", c.app.codes);
+    assert_eq!(c.app.codes["auth password"], 10, "{:?}", c.app.codes);
+    assert_eq!(c.app.codes["exit 0"], 30);
+    assert!(c.app.codes["rekey"] >= 10, "{:?}", c.app.codes);
+    assert_eq!((c.app.handshakes, c.app.handshake_failures), (10, 0));
+
+    // In a profile, with a login the server refuses.
+    let text = r#"
+        connections = 4
+        cps = 200
+        app = "ssh"
+        [ssh]
+        user = "root"
+        password = "guess"
+        users = { root = "lab" }
+        expect = "failure"
+        [client]
+        ip = "10.0.0.1/24"
+        [server]
+        ip = "10.0.0.80/24"
+    "#;
+    let p = TcpProfile::from_toml(text, Path::new(".")).unwrap();
+    let programs: Vec<_> = p.programs().unwrap().into_iter().map(Arc::new).collect();
+    let config = p
+        .config(&programs, &["lo".to_string()], Some("lo"))
+        .unwrap();
+    assert_eq!(config.templates[0].listen_port, 22);
+    let mut client_cfg = config.clone();
+    client_cfg.server = None;
+    let mut server_cfg = config;
+    server_cfg.client = None;
+    let mut client = TcpEngine::new(client_cfg).unwrap();
+    let mut server = TcpEngine::new(server_cfg).unwrap();
+    simulate(
+        &mut [&mut client, &mut server],
+        &mut Link::new(0, 0),
+        Duration::from_secs(30),
+    );
+    let c = &client.stats().client;
+    assert_eq!((c.completed, c.mismatched), (4, 0), "{c:?}");
+    assert_eq!(c.app.codes.get("auth refused"), Some(&4));
+}

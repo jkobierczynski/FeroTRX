@@ -221,11 +221,13 @@ jobs:
       # against the emulated broker and the emulated clients against
       # mosquitto; HTTP/2 (h2 and h2c) between emulated ends, curl and h2load
       # against the emulated server and the emulated client against nghttpd;
-      # with 3% loss, over IPv6, and over AF_XDP with two workers.
+      # SSH between emulated ends, ssh (and sshpass) against the emulated
+      # server and the emulated client against sshd; with 3% loss, over IPv6,
+      # and over AF_XDP with two workers.
       - name: Application protocols through a NAT router (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get install -y ethtool curl openssl mosquitto mosquitto-clients nghttp2-client nghttp2-server
+          sudo apt-get install -y ethtool curl openssl mosquitto mosquitto-clients nghttp2-client nghttp2-server openssh-client openssh-server sshpass
           cargo build -p ferotrx-cli
           sudo modprobe 8021q || true
           sudo scripts/app-netns.sh ./target/debug/ferotrx
