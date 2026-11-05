@@ -519,12 +519,53 @@ fn side_line(c: &UdpCounters) -> String {
         "; {} datagrams ({} bytes) sent, {} ({} bytes) received",
         c.datagrams_tx, c.payload_tx, c.datagrams_rx, c.payload_rx
     ));
-    if let Some(r) = &c.response_time {
+    if let Some(r) = c
+        .response_time
+        .as_ref()
+        .or(c.app.as_ref().and_then(|a| a.response_time.as_ref()))
+    {
         line.push_str(&format!("; {}", response_line(r)));
     }
     if let Some(a) = &c.app {
         line.push_str(&format!("; {}", codes_line(a)));
+        if let Some(m) = &a.media {
+            line.push_str(&format!("; {}", media_line(m)));
+        }
     }
+    line
+}
+
+/// RTP of the calls: `16 media streams (PCMU x16): 4800 packets sent,
+/// 4790 received, 10 lost (0.21%), jitter ms avg 0.40 max 1.20, 32 RTCP`.
+pub(crate) fn media_line(m: &ferotrx_ctl::protocol::MediaCounters) -> String {
+    let mut codecs: Vec<(&String, &u64)> = m.codecs.iter().collect();
+    codecs.sort_by(|x, y| y.1.cmp(x.1).then(x.0.cmp(y.0)));
+    let codecs: Vec<String> = codecs.iter().map(|(k, n)| format!("{k} x{n}")).collect();
+    let mut line = format!(
+        "{} media streams ({}): {} packets sent, {} received, {} lost ({:.2}%)",
+        m.streams,
+        codecs.join(", "),
+        m.packets_sent,
+        m.packets_received,
+        m.lost,
+        m.loss_pct
+    );
+    for (n, what) in [(m.duplicates, "duplicates"), (m.reordered, "reordered")] {
+        if n > 0 {
+            line.push_str(&format!(", {n} {what}"));
+        }
+    }
+    if let Some(j) = &m.jitter {
+        line.push_str(&format!(
+            ", jitter ms avg {} max {}",
+            ms(j.avg_us),
+            ms(j.max_us)
+        ));
+    }
+    line.push_str(&format!(
+        ", RTCP {} sent {} received",
+        m.rtcp_sent, m.rtcp_received
+    ));
     line
 }
 

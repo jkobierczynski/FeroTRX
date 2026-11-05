@@ -419,6 +419,29 @@ class HandshakeCounters(Record):
 
 
 @dataclass(kw_only=True)
+class MediaCounters(Record):
+    """Media streams (RTP) of one side, for protocols that carry them (SIP)."""
+
+    #: Streams (calls' audio) that ended.
+    streams: int = 0
+    packets_sent: int = 0
+    packets_received: int = 0
+    #: Packets that never came (sequence numbers missing).
+    lost: int = 0
+    #: Lost, of the packets expected, in percent.
+    loss_pct: float = 0.0
+    duplicates: int = 0
+    #: Packets that came after a later one.
+    reordered: int = 0
+    #: Each stream's interarrival jitter (RFC 3550) at its end.
+    jitter: LatencyCounters | None = None
+    rtcp_sent: int = 0
+    rtcp_received: int = 0
+    #: Streams by codec, e.g. ``{"PCMU": 16}``.
+    codecs: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(kw_only=True)
 class AppCounters(Record):
     """What an application protocol counted on one side (HTTP, DNS, NTP)."""
 
@@ -436,6 +459,8 @@ class AppCounters(Record):
     response_time: LatencyCounters | None = None
     #: TLS handshakes, for protocols run over TLS (HTTPS).
     tls: HandshakeCounters | None = None
+    #: Media streams, for protocols that carry them (SIP calls' RTP).
+    media: MediaCounters | None = None
 
 
 # ----- tcp.* -----

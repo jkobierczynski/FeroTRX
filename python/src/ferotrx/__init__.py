@@ -26,6 +26,7 @@ from .types import (
     Counters,
     FlowCounters,
     HandshakeCounters,
+    MediaCounters,
     HostAddressInfo,
     HostGroupInfo,
     HostInfo,
@@ -50,7 +51,7 @@ from .types import (
     UdpTemplateCounters,
 )
 
-__version__ = "0.20.0"
+__version__ = "0.21.0"
 
 __all__ = [
     "__version__",
@@ -88,6 +89,7 @@ __all__ = [
     "HostGroupInfo",
     "AppCounters",
     "HandshakeCounters",
+    "MediaCounters",
     "TcpCounters",
     "TcpTemplateCounters",
     "TcpRunInfo",

@@ -22,6 +22,8 @@ fn ep(mac: MacAddr, ip: &str) -> TcpEndpoint {
 /// A link between the engines that drops every `drop_every`-th TCP frame
 /// and holds every `delay_every`-th back by 5 ms, so later ones overtake it.
 struct Link {
+    /// The IP protocol whose frames it drops and delays (TCP, or UDP).
+    proto: u8,
     drop_every: u64,
     delay_every: u64,
     seen: u64,
@@ -32,6 +34,7 @@ struct Link {
 impl Link {
     fn new(drop_every: u64, delay_every: u64) -> Self {
         Self {
+            proto: 6,
             drop_every,
             delay_every,
             seen: 0,
@@ -41,7 +44,7 @@ impl Link {
     }
 
     fn pass(&mut self, f: Vec<u8>, now: Duration, out: &mut Vec<Vec<u8>>) {
-        let tcp = f.len() > 23 && f[12..14] == [0x08, 0x00] && f[23] == 6;
+        let tcp = f.len() > 23 && f[12..14] == [0x08, 0x00] && f[23] == self.proto;
         if tcp {
             self.seen += 1;
             if self.drop_every > 0 && self.seen.is_multiple_of(self.drop_every) {
@@ -946,4 +949,101 @@ fn ssh_over_a_lossy_reordering_link_and_in_profiles() {
     let c = &client.stats().client;
     assert_eq!((c.completed, c.mismatched), (4, 0), "{c:?}");
     assert_eq!(c.app.codes.get("auth refused"), Some(&4));
+}
+
+#[test]
+fn sip_calls_with_rtp_over_a_lossy_reordering_link_and_in_profiles() {
+    let text = r#"
+format = 1
+rate = 50
+transactions = 24
+concurrency = 24
+
+[[template]]
+name = "call"
+app = "sip"
+weight = 4
+[template.sip]
+user = "alice"
+password = "lab"
+call = "bob"
+duration = "3s"
+codecs = ["PCMA", "PCMU"]
+users = { alice = "lab" }
+ring = "50ms"
+
+[[template]]
+name = "busy"
+app = "sip"
+port = 5070
+weight = 1
+[template.sip]
+register = false
+call = "carol"
+answer = 486
+expect = 486
+
+[[template]]
+name = "intruder"
+app = "sip"
+port = 5080
+weight = 1
+[template.sip]
+user = "alice"
+password = "guess"
+users = { alice = "lab" }
+algorithm = "SHA-256"
+expect = "failure"
+
+[client]
+ip = "10.0.0.1/24"
+ips = 4
+[server]
+ip = "10.0.0.80/24"
+"#;
+    let p = UdpProfile::from_toml(text, Path::new(".")).unwrap();
+    let apps = p.apps().unwrap();
+    assert_eq!(apps[0].kind(), "sip");
+    let config = p.config(&apps, &["lo".to_string()], Some("lo")).unwrap();
+    let (mut cc, mut sc) = (config.clone(), config);
+    cc.server = None;
+    sc.client = None;
+    let (mut client, mut server) = (UdpEngine::new(cc).unwrap(), UdpEngine::new(sc).unwrap());
+    let mut link = Link::new(23, 7);
+    link.proto = 17;
+    simulate(
+        &mut [&mut client, &mut server],
+        &mut link,
+        Duration::from_secs(120),
+    );
+    assert!(link.dropped > 10, "{}", link.dropped);
+    let st = client.stats();
+    let c = &st.client;
+    assert_eq!(
+        (c.sent, c.answered, c.timed_out, c.mismatched),
+        (24, 24, 0, 0),
+        "{c:?}"
+    );
+    let call = &st.templates[0].client.app;
+    assert_eq!(call.codes.get("INVITE 200"), Some(&16), "{call:?}");
+    assert_eq!(call.codes.get("BYE 200"), Some(&16), "{call:?}");
+    assert_eq!(call.response_time.count(), 48);
+    let m = &call.media;
+    assert_eq!((m.streams, m.codecs.get("PCMA")), (16, Some(&16)), "{m:?}");
+    // 3 s of 20 ms packets per call, some of them lost.
+    assert!(m.packets_sent >= 16 * 149, "{m:?}");
+    assert!(m.lost > 0 && m.lost < m.packets_sent / 10, "{m:?}");
+    assert!(m.rtcp_sent >= 16, "{m:?}");
+    let busy = &st.templates[1].client.app;
+    assert_eq!(busy.codes.get("INVITE 486"), Some(&4), "{busy:?}");
+    assert_eq!(busy.failed, 0);
+    let intruder = &st.templates[2].client.app;
+    assert_eq!(intruder.codes.get("REGISTER 403"), Some(&4), "{intruder:?}");
+    assert_eq!(intruder.failed, 0);
+    let s = &server.stats().server;
+    assert_eq!(s.app.media.streams, 16, "{s:?}");
+    assert!(s.app.media.packets_received > 16 * 140);
+    assert_eq!(s.active, 0, "{s:?}");
+    // The media ports are all given back.
+    assert_eq!(client.open_transactions(), 0);
 }

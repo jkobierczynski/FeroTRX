@@ -38,6 +38,7 @@ pub mod mqtt;
 pub mod ntp;
 #[cfg(feature = "profile")]
 mod registry;
+pub mod sip;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 #[cfg(feature = "tls")]
@@ -114,6 +115,24 @@ pub trait AppProtocol: Send + Sync + 'static {
     fn validate(&self, _role: AppRole, _transport: Transport) -> Result<()> {
         Ok(())
     }
+    /// Over UDP: whether a session plays a whole dialog (SIP) instead of
+    /// one request and its answer. The UDP engine then hands the session
+    /// every datagram of its addresses, sends what it sends when it sends
+    /// it, and leaves timers and retransmissions to it: the session ends
+    /// when it calls [`AppCx::close`] (a server's: nothing is open now; it
+    /// stays for repeats, and opens again when it takes something new), or
+    /// when nothing arrives for the session timeout while it has no timer.
+    fn dialog(&self) -> bool {
+        false
+    }
+    /// Over UDP: how many consecutive ports each session gets for media
+    /// (2 for RTP and RTCP), from the engine's media port range. The session
+    /// learns the first with [`AppCx::media_port`], sends from them with
+    /// [`AppCx::send_media`] and gets what arrives on them in
+    /// [`AppSession::media`]. Only for [`dialog`](Self::dialog) protocols.
+    fn media_ports(&self) -> u16 {
+        0
+    }
     /// A session for one connection or transaction.
     fn session(&self, init: &SessionInit) -> Box<dyn AppSession>;
     /// For downcasting to the concrete protocol (`app.as_any().downcast_ref`).
@@ -148,6 +167,9 @@ pub trait AppSession: Send {
     fn peer_closed(&mut self, _cx: &mut AppCx) {}
     /// The time given to [`AppCx::wake_at`] has come.
     fn timer(&mut self, _cx: &mut AppCx) {}
+    /// A datagram arrived on one of the session's media ports (see
+    /// [`AppProtocol::media_ports`]) from `from`.
+    fn media(&mut self, _port: u16, _from: SocketAddr, _data: &[u8], _cx: &mut AppCx) {}
 }
 
 /// A transaction a session finished: an HTTP request and its response, a DNS
@@ -204,11 +226,34 @@ pub struct AppHandshake {
     pub time: Option<Duration>,
 }
 
+/// What a media stream (RTP and its RTCP) carried, as a session counts it
+/// with [`AppCx::media`] when the stream ends.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MediaReport {
+    /// The codec, e.g. `PCMU`.
+    pub codec: String,
+    pub packets_sent: u64,
+    pub packets_received: u64,
+    /// Packets that never came: the sequence numbers between the first and
+    /// the last received that are missing.
+    pub lost: u64,
+    pub duplicates: u64,
+    /// Packets that came after one with a later sequence number.
+    pub reordered: u64,
+    /// The interarrival jitter (RFC 3550) when the stream ended.
+    pub jitter: Duration,
+    pub rtcp_sent: u64,
+    pub rtcp_received: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct AppCx {
     now: Duration,
     wall: Duration,
     sends: Vec<Vec<u8>>,
+    media_port: Option<u16>,
+    media_sends: Vec<(u16, u16, Vec<u8>)>,
+    media: Vec<MediaReport>,
     close: bool,
     goodbye: bool,
     wake: Option<Duration>,
@@ -244,6 +289,37 @@ impl AppCx {
         if !d.is_empty() {
             self.sends.push(d);
         }
+    }
+
+    /// The session's first media port (see [`AppProtocol::media_ports`]).
+    pub fn media_port(&self) -> Option<u16> {
+        self.media_port
+    }
+
+    /// A context for a session with media ports from `port`.
+    pub fn with_media_port(mut self, port: Option<u16>) -> Self {
+        self.media_port = port;
+        self
+    }
+
+    /// Sends one datagram from media port `from` (one of the session's) to
+    /// port `to` of the other end's address.
+    pub fn send_media(&mut self, from: u16, to: u16, data: impl Into<Vec<u8>>) {
+        self.media_sends.push((from, to, data.into()));
+    }
+
+    /// The media datagrams sent, as (from port, to port, data). Empties it.
+    pub fn take_media_sends(&mut self) -> Vec<(u16, u16, Vec<u8>)> {
+        std::mem::take(&mut self.media_sends)
+    }
+
+    /// Counts a media stream that ended.
+    pub fn media(&mut self, m: MediaReport) {
+        self.media.push(m);
+    }
+
+    pub fn media_reports(&self) -> &[MediaReport] {
+        &self.media
     }
 
     /// Closes the connection once what was sent has gone (TCP), or ends
@@ -299,6 +375,8 @@ impl AppCx {
         self.transactions.append(&mut inner.transactions);
         self.protocol_errors.append(&mut inner.protocol_errors);
         self.handshakes.append(&mut inner.handshakes);
+        self.media.append(&mut inner.media);
+        self.media_sends.append(&mut inner.media_sends);
         inner.sends
     }
 
@@ -348,6 +426,9 @@ impl AppCx {
         stats.protocol_errors += self.protocol_errors.len() as u64;
         for h in &self.handshakes {
             stats.record_handshake(h);
+        }
+        for m in &self.media {
+            stats.media.record(m);
         }
     }
 }
@@ -455,6 +536,66 @@ pub struct AppStats {
     pub negotiated: BTreeMap<String, u64>,
     /// From each handshake's first message to its end.
     pub handshake_time: LatencyStats,
+    /// Media streams (RTP), for protocols that carry them (SIP).
+    pub media: MediaStats,
+}
+
+/// Media streams of one side: what [`MediaReport`]s added up to.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MediaStats {
+    /// Streams that ended.
+    pub streams: u64,
+    pub packets_sent: u64,
+    pub packets_received: u64,
+    pub lost: u64,
+    pub duplicates: u64,
+    pub reordered: u64,
+    /// Each stream's jitter at its end.
+    pub jitter: LatencyStats,
+    pub rtcp_sent: u64,
+    pub rtcp_received: u64,
+    /// Streams by codec.
+    pub codecs: BTreeMap<String, u64>,
+}
+
+impl MediaStats {
+    pub fn record(&mut self, m: &MediaReport) {
+        self.streams += 1;
+        self.packets_sent += m.packets_sent;
+        self.packets_received += m.packets_received;
+        self.lost += m.lost;
+        self.duplicates += m.duplicates;
+        self.reordered += m.reordered;
+        self.jitter.record(Some(m.jitter));
+        self.rtcp_sent += m.rtcp_sent;
+        self.rtcp_received += m.rtcp_received;
+        *self.codecs.entry(m.codec.clone()).or_default() += 1;
+    }
+
+    pub fn merge(&mut self, o: &Self) {
+        self.streams += o.streams;
+        self.packets_sent += o.packets_sent;
+        self.packets_received += o.packets_received;
+        self.lost += o.lost;
+        self.duplicates += o.duplicates;
+        self.reordered += o.reordered;
+        self.jitter.merge(&o.jitter);
+        self.rtcp_sent += o.rtcp_sent;
+        self.rtcp_received += o.rtcp_received;
+        for (k, v) in &o.codecs {
+            *self.codecs.entry(k.clone()).or_default() += v;
+        }
+    }
+
+    /// Lost packets as a share of those expected (received and lost).
+    pub fn loss(&self) -> f64 {
+        let expected = self.packets_received + self.lost;
+        if expected == 0 {
+            0.0
+        } else {
+            self.lost as f64 / expected as f64
+        }
+    }
 }
 
 impl AppStats {
@@ -480,7 +621,10 @@ impl AppStats {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.transactions == 0 && self.protocol_errors == 0 && self.handshakes == 0
+        self.transactions == 0
+            && self.protocol_errors == 0
+            && self.handshakes == 0
+            && self.media.streams == 0
     }
 
     pub fn merge(&mut self, o: &Self) {
@@ -500,6 +644,7 @@ impl AppStats {
             *self.negotiated.entry(k.clone()).or_default() += v;
         }
         self.handshake_time.merge(&o.handshake_time);
+        self.media.merge(&o.media);
     }
 
     /// What the handshakes negotiated, most first:
@@ -543,6 +688,18 @@ impl fmt::Display for AppStats {
                 self.handshakes,
                 self.handshake_failures,
                 self.negotiated_text()
+            )?;
+        }
+        let m = &self.media;
+        if m.streams > 0 {
+            write!(
+                f,
+                "; {} media streams, {} packets sent, {} received, {} lost ({:.2}%)",
+                m.streams,
+                m.packets_sent,
+                m.packets_received,
+                m.lost,
+                m.loss() * 100.0
             )?;
         }
         Ok(())

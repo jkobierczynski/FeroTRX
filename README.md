@@ -9,7 +9,7 @@ macOS and Windows. Its engine is a library you can use from your own
 programs, and a control server lets scripts and the Python client drive it
 remotely.
 
-The current version is 0.20.0; see [DEVELOPMENT.md](DEVELOPMENT.md) for what
+The current version is 0.21.0; see [DEVELOPMENT.md](DEVELOPMENT.md) for what
 each milestone added and what comes next.
 
 ## Features
@@ -42,8 +42,10 @@ each milestone added and what comes next.
   and without (h2c) with HPACK, multiplexed streams and flow control; MQTT
   3.1.1 and 5.0 clients and a broker with QoS 0, 1 and 2; SSH clients and
   servers (curve25519, Ed25519, ChaCha20-Poly1305 and AES-GCM, password and
-  key logins, commands, re-keying) that work with OpenSSH; an interface for
-  protocols of your own.
+  key logins, commands, re-keying) that work with OpenSSH; SIP phones and a
+  SIP server (registration with digest authentication, calls) with RTP
+  audio at codec rates and its loss and jitter, which work with SIPp; an
+  interface for protocols of your own.
   [Guide](docs/app-protocols.md)
 * **Host emulation**: emulated hosts get addresses by DHCP, SLAAC or DHCPv6,
   announce them, join multicast groups and act as IPv6 routers.
@@ -124,7 +126,7 @@ The manual is in [docs/](docs/README.md):
 | [Fast send backends](docs/backends.md) | AF_XDP and DPDK |
 | [Stateful TCP](docs/stateful-tcp.md) and [the engine](docs/tcp-engine.md) | `tcp`, TCP profiles, templates |
 | [Stateful UDP and DNS](docs/stateful-udp.md) and [the engine](docs/udp-engine.md) | `udp`, DNS, NTP |
-| [Application protocols](docs/app-protocols.md) | HTTP/1.1 and HTTP/2, HTTPS and TLS, DNS over UDP, TCP and TLS, MQTT, SSH, NTP, your own |
+| [Application protocols](docs/app-protocols.md) | HTTP/1.1 and HTTP/2, HTTPS and TLS, DNS over UDP, TCP and TLS, MQTT, SSH, SIP and RTP, NTP, your own |
 | [Host emulation](docs/host-emulation.md) | `host`, DHCP, SLAAC, IGMP/MLD |
 | [TCP and UDP over AF_XDP and DPDK](docs/fast-ports.md) | fast ports for stateful runs |
 | [One run on several cores](docs/multi-core.md) | `--workers`, splitting streams and flows |

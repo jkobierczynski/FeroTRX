@@ -112,6 +112,23 @@ pub fn udp_metrics(s: &UdpStats) -> Metrics {
     latency_metrics(&mut m, "response", &c.response_time);
     put(&mut m, "tps", s.tps());
     put(&mut m, "server_answered", s.server.answered as f64);
+    let a = &c.app;
+    if !a.is_empty() {
+        put(&mut m, "app_transactions", a.transactions as f64);
+        put(&mut m, "app_failed", a.failed as f64);
+        put(&mut m, "protocol_errors", a.protocol_errors as f64);
+    }
+    // Media is counted on both ends; the worst way counts.
+    let (cm, sm) = (&c.app.media, &s.server.app.media);
+    if cm.streams > 0 || sm.streams > 0 {
+        put(&mut m, "media_streams", cm.streams.max(sm.streams) as f64);
+        put(&mut m, "media_received", cm.packets_received as f64);
+        put(&mut m, "media_lost", cm.lost.max(sm.lost) as f64);
+        put(&mut m, "media_loss_pct", cm.loss().max(sm.loss()) * 100.0);
+        let mut jitter = cm.jitter.clone();
+        jitter.merge(&sm.jitter);
+        latency_metrics(&mut m, "jitter", &jitter);
+    }
     m
 }
 

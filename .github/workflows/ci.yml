@@ -211,6 +211,22 @@ jobs:
           sudo IPV6=1 scripts/udp-netns.sh ./target/debug/ferotrx
           sudo IPV6=1 MIX=1 NO_VLAN=1 LOSS=0.03 scripts/udp-netns.sh ./target/debug/ferotrx
 
+      # SIP calls with RTP through the NAT router: phones that register with
+      # digest authentication and call, Opus calls and a busy line between
+      # emulated ends; SIPp's caller and registrations (right and wrong
+      # password) against the emulated server, and the emulated phones
+      # against SIPp's answering end; with 3% loss, over IPv6 and AF_XDP.
+      - name: SIP and RTP through a NAT router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo modprobe 8021q || true
+          sudo apt-get install -y ethtool sip-tester
+          sudo scripts/sip-netns.sh ./target/debug/ferotrx
+          sudo NO_VLAN=1 LOSS=0.03 scripts/sip-netns.sh ./target/debug/ferotrx
+          sudo IPV6=1 scripts/sip-netns.sh ./target/debug/ferotrx
+          sudo NO_VLAN=1 scripts/sip-netns.sh ./target/debug/ferotrx -B af_xdp
+
       # Application protocols over stateful TCP through the NAT router: HTTP
       # (keep-alive, chunked, POST, 404) and DNS over TCP between emulated
       # ends, curl against the emulated web server, and the emulated client
