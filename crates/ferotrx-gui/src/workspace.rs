@@ -366,9 +366,11 @@ mod tests {
         a.servers
             .push(crate::app::ServerState::new(ConnSettings::default()));
         let port = PortKind::Interface("eth1".into());
-        let mut s = StreamDraft::default();
-        s.name = "probe".into();
-        s.rate = "50pps".into();
+        let s = StreamDraft {
+            name: "probe".into(),
+            rate: "50pps".into(),
+            ..Default::default()
+        };
         a.port_work(0, &port).profile.streams.push(s);
         a.sel_port = Some(port.clone());
         a.tab = Tab::Scenario;

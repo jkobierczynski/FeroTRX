@@ -355,7 +355,7 @@ pub fn hex_view(
         if i < bytes.len() {
             *sel = Selection::at_byte(d, i);
         }
-        if let Some(c) = cursor.as_deref_mut() {
+        if let Some(c) = cursor {
             c.at = i;
             c.half = false;
             ui.memory_mut(|m| m.request_focus(focus_id));
