@@ -7,7 +7,7 @@ use ferotrx_ctl::protocol::{
     FlowCounters, LatencyCounters, RunInfo, RunState, RxRunInfo, TcpRunInfo, UdpRunInfo,
 };
 
-use crate::app::FeroApp;
+use crate::app::{FeroApp, FlowHistory, FlowPoint};
 use crate::packet_view::state_color;
 
 /// One run as a column of the grid.
@@ -317,15 +317,22 @@ impl FeroApp {
         let Some(s) = self.servers.get(self.sel_server) else {
             return;
         };
-        let id = ui.id().with("chart-mbps");
-        let mut mbps = ui.data_mut(|d| *d.get_persisted_mut_or(id, false));
+        let id = ui.id().with("chart-mode");
+        let mut mode = ui.data_mut(|d| *d.get_persisted_mut_or(id, ChartMode::Pps));
         ui.horizontal(|ui| {
-            ui.heading(format!("Send rates on {}", s.settings.addr));
+            ui.heading(format!("Charts of {}", s.settings.addr));
             ui.separator();
-            ui.selectable_value(&mut mbps, false, "packets/s");
-            ui.selectable_value(&mut mbps, true, "Mbit/s");
+            ui.selectable_value(&mut mode, ChartMode::Pps, "Send packets/s");
+            ui.selectable_value(&mut mode, ChartMode::Mbps, "Send Mbit/s");
+            ui.selectable_value(&mut mode, ChartMode::Receive, "Loss and latency")
+                .on_hover_text("Per flow: streams with a signature in runs with a receiver, and receivers (ferotrx rx)");
         });
-        ui.data_mut(|d| d.insert_persisted(id, mbps));
+        ui.data_mut(|d| d.insert_persisted(id, mode));
+        if mode == ChartMode::Receive {
+            receive_charts(ui, s);
+            return;
+        }
+        let mbps = mode == ChartMode::Mbps;
         if s.history.is_empty() {
             ui.weak("Start a run to see its rate here. Rates are measured between polls, once a second.");
             return;
@@ -348,9 +355,200 @@ impl FeroApp {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum ChartMode {
+    Pps,
+    Mbps,
+    Receive,
+}
+
+/// The latency series a chart can show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LatencySeries {
+    Avg,
+    P50,
+    P99,
+    P999,
+    Max,
+    Jitter,
+}
+
+impl LatencySeries {
+    const ALL: [LatencySeries; 6] = [
+        LatencySeries::Avg,
+        LatencySeries::P50,
+        LatencySeries::P99,
+        LatencySeries::P999,
+        LatencySeries::Max,
+        LatencySeries::Jitter,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            LatencySeries::Avg => "average",
+            LatencySeries::P50 => "p50",
+            LatencySeries::P99 => "p99",
+            LatencySeries::P999 => "p99.9",
+            LatencySeries::Max => "max",
+            LatencySeries::Jitter => "jitter",
+        }
+    }
+
+    fn help(self) -> &'static str {
+        match self {
+            LatencySeries::Avg => "Average of the packets received in each second",
+            LatencySeries::Jitter => "Smoothed variation from packet to packet (RFC 3550)",
+            _ => "Since the start of the run, to within 12.5%",
+        }
+    }
+
+    fn get(self, p: &FlowPoint) -> Option<f64> {
+        match self {
+            LatencySeries::Avg => p.avg_us,
+            LatencySeries::P50 => p.p50_us,
+            LatencySeries::P99 => p.p99_us,
+            LatencySeries::P999 => p.p999_us,
+            LatencySeries::Max => p.max_us,
+            LatencySeries::Jitter => p.jitter_us,
+        }
+    }
+}
+
+/// Loss, reordering and latency of every flow over time, in three charts
+/// on one time axis.
+fn receive_charts(ui: &mut egui::Ui, s: &crate::app::ServerState) {
+    if s.flows.is_empty() {
+        ui.weak(
+            "No flows with signatures yet. Give a port's streams a latency flow and the run a \
+             receiver (Streams tab, port settings), or start a receiver with ferotrx rx.",
+        );
+        return;
+    }
+    let id = ui.id().with("latency-series");
+    let mut on: Vec<bool> = ui.data_mut(|d| {
+        d.get_persisted_mut_or(id, vec![true, false, true, false, false, true])
+            .clone()
+    });
+    on.resize(LatencySeries::ALL.len(), false);
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Latency:");
+        for (n, l) in LatencySeries::ALL.iter().enumerate() {
+            ui.checkbox(&mut on[n], l.label()).on_hover_text(l.help());
+        }
+    });
+    ui.data_mut(|d| d.insert_persisted(id, on.clone()));
+    let group = ui.id().with("rx-axis");
+    let h = (ui.available_height() - 24.0) / 3.0;
+    let flows: Vec<&FlowHistory> = s.flows.values().collect();
+    let line = |label: String, pts: Vec<[f64; 2]>| Line::new(label, PlotPoints::from(pts));
+    Plot::new("rx-loss")
+        .height(h.max(80.0))
+        .legend(Legend::default())
+        .link_axis(group, [true, false])
+        .link_cursor(group, [true, false])
+        .y_axis_label("loss %")
+        .include_y(0.0)
+        .show(ui, |p| {
+            for f in &flows {
+                let pts = f.points.iter().map(|x| [x.t, x.loss_pct]).collect();
+                p.line(line(format!("{} loss", f.label), pts));
+            }
+        });
+    Plot::new("rx-order")
+        .height(h.max(80.0))
+        .legend(Legend::default())
+        .link_axis(group, [true, false])
+        .link_cursor(group, [true, false])
+        .y_axis_label("per second")
+        .include_y(0.0)
+        .show(ui, |p| {
+            for f in &flows {
+                let r = f.points.iter().map(|x| [x.t, x.reordered_ps]).collect();
+                p.line(line(format!("{} reordered", f.label), r));
+                if f.points.iter().any(|x| x.duplicates_ps > 0.0) {
+                    let d = f.points.iter().map(|x| [x.t, x.duplicates_ps]).collect();
+                    p.line(line(format!("{} duplicates", f.label), d));
+                }
+            }
+        });
+    Plot::new("rx-latency")
+        .height(h.max(80.0))
+        .legend(Legend::default())
+        .link_axis(group, [true, false])
+        .link_cursor(group, [true, false])
+        .x_axis_label("seconds")
+        .y_axis_label("ms")
+        .include_y(0.0)
+        .show(ui, |p| {
+            for f in &flows {
+                for (n, l) in LatencySeries::ALL.iter().enumerate() {
+                    if !on[n] {
+                        continue;
+                    }
+                    let pts = f
+                        .points
+                        .iter()
+                        .filter_map(|x| l.get(x).map(|v| [x.t, v / 1000.0]))
+                        .collect();
+                    p.line(line(format!("{} {}", f.label, l.label()), pts));
+                }
+            }
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intervals_of_a_flow() {
+        let lat = |avg| LatencyCounters {
+            avg_us: Some(avg),
+            p99_us: Some(900.0),
+            ..Default::default()
+        };
+        let a = FlowCounters {
+            flow: 1,
+            tx: Some(1000),
+            rx: 1000,
+            lost: 0,
+            latency: lat(100.0),
+            ..Default::default()
+        };
+        let b = FlowCounters {
+            tx: Some(2000),
+            rx: 1900,
+            lost: 100,
+            loss_pct: 5.0,
+            out_of_order: 20,
+            latency: lat(150.0),
+            ..a.clone()
+        };
+        let p = crate::app::flow_point(10.0, 2.0, &a, &b);
+        assert!(
+            (p.loss_pct - 10.0).abs() < 1e-9,
+            "100 of 1000 lost in the interval"
+        );
+        assert_eq!(p.total_loss_pct, 5.0);
+        assert_eq!(p.reordered_ps, 10.0);
+        assert_eq!(p.rx_ps, 450.0);
+        // 1900 * 150 - 1000 * 100 = 185000 over 900 packets.
+        assert!((p.avg_us.unwrap() - 205.555).abs() < 0.01, "{:?}", p.avg_us);
+        assert_eq!(p.p99_us, Some(900.0));
+
+        // A receiver alone counts gaps: expected = rx + lost.
+        let a = FlowCounters { tx: None, ..a };
+        let b = FlowCounters { tx: None, ..b };
+        let p = crate::app::flow_point(10.0, 1.0, &a, &b);
+        assert!((p.loss_pct - 10.0).abs() < 1e-9);
+
+        let mut h = FlowHistory::default();
+        h.add(1.0, &a);
+        h.add(2.0, &b);
+        assert_eq!(h.points.len(), 1);
+        h.add(3.0, &a);
+        assert!(h.points.is_empty(), "a counter going back starts again");
+    }
 
     #[test]
     fn numbers_get_thin_spaces() {

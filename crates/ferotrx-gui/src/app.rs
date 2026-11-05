@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use ferotrx_ctl::protocol::{InterfaceEntry, LabInfo, ProfileInfo, RunInfo, ServerInfo};
+use ferotrx_ctl::protocol::{
+    FlowCounters, InterfaceEntry, LabInfo, ProfileInfo, RunInfo, ServerInfo,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -111,6 +113,95 @@ impl RateHistory {
     }
 }
 
+/// One sample of a flow's loss and latency, for the receive charts.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FlowPoint {
+    /// Seconds since the GUI started.
+    pub t: f64,
+    /// Packets lost in this interval, as a percentage of those expected in it.
+    pub loss_pct: f64,
+    /// Lost so far, as a percentage of all expected.
+    pub total_loss_pct: f64,
+    /// Packets out of order and duplicates per second in this interval.
+    pub reordered_ps: f64,
+    pub duplicates_ps: f64,
+    /// Received per second in this interval.
+    pub rx_ps: f64,
+    /// Latency of the packets of this interval: their average (µs).
+    pub avg_us: Option<f64>,
+    /// Since the start: percentiles, maximum, and the smoothed jitter (µs).
+    pub p50_us: Option<f64>,
+    pub p99_us: Option<f64>,
+    pub p999_us: Option<f64>,
+    pub max_us: Option<f64>,
+    pub jitter_us: Option<f64>,
+}
+
+/// Loss and latency of one flow over time: a stream of a run with a
+/// receiver, or a flow a receiver (`rx.start`) sees.
+#[derive(Debug, Default)]
+pub struct FlowHistory {
+    pub label: String,
+    pub points: VecDeque<FlowPoint>,
+    last: Option<(f64, FlowCounters)>,
+}
+
+impl FlowHistory {
+    pub fn add(&mut self, t: f64, f: &FlowCounters) {
+        if let Some((t0, f0)) = &self.last {
+            let dt = t - t0;
+            if dt <= 0.05 {
+                return;
+            }
+            if f.rx < f0.rx || f.lost + f.rx < f0.lost + f0.rx {
+                // A new run under the same name: start again.
+                self.points.clear();
+            } else {
+                self.points.push_back(flow_point(t, dt, f0, f));
+                if self.points.len() > HISTORY {
+                    self.points.pop_front();
+                }
+            }
+        }
+        self.last = Some((t, f.clone()));
+    }
+}
+
+/// The figures of the interval between two samples of a flow's counters.
+pub fn flow_point(t: f64, dt: f64, a: &FlowCounters, b: &FlowCounters) -> FlowPoint {
+    let expected = |f: &FlowCounters| f.tx.unwrap_or(f.rx + f.lost);
+    let d_exp = expected(b).saturating_sub(expected(a));
+    let d_rx = b.rx.saturating_sub(a.rx);
+    let d_lost = b.lost.saturating_sub(a.lost);
+    let loss_pct = if d_exp > 0 {
+        (d_lost as f64 * 100.0 / d_exp as f64).min(100.0)
+    } else {
+        0.0
+    };
+    // The average of this interval's packets, from the two running averages.
+    let avg_us = match (a.latency.avg_us, b.latency.avg_us) {
+        (Some(x), Some(y)) if d_rx > 0 => {
+            Some(((y * b.rx as f64 - x * a.rx as f64) / d_rx as f64).max(0.0))
+        }
+        (None, Some(y)) if d_rx > 0 => Some(y),
+        _ => None,
+    };
+    FlowPoint {
+        t,
+        loss_pct,
+        total_loss_pct: b.loss_pct,
+        reordered_ps: b.out_of_order.saturating_sub(a.out_of_order) as f64 / dt,
+        duplicates_ps: b.duplicates.saturating_sub(a.duplicates) as f64 / dt,
+        rx_ps: d_rx as f64 / dt,
+        avg_us,
+        p50_us: b.latency.p50_us,
+        p99_us: b.latency.p99_us,
+        p999_us: b.latency.p999_us,
+        max_us: b.latency.max_us,
+        jitter_us: b.latency.jitter_us,
+    }
+}
+
 pub struct ServerState {
     pub settings: ConnSettings,
     pub conn: Option<Connection>,
@@ -120,6 +211,8 @@ pub struct ServerState {
     pub snap: Snapshot,
     /// Rate history per run (`run:3`, `tcp:1`, ...).
     pub history: BTreeMap<String, RateHistory>,
+    /// Loss and latency history per flow (`run:3/stream`, `rx:4/7`).
+    pub flows: BTreeMap<String, FlowHistory>,
     pub pending: HashMap<u64, Pending>,
     /// The stream run each port started last.
     pub port_runs: BTreeMap<String, u64>,
@@ -139,6 +232,7 @@ impl ServerState {
             interfaces: Vec::new(),
             snap: Snapshot::default(),
             history: BTreeMap::new(),
+            flows: BTreeMap::new(),
             pending: HashMap::new(),
             port_runs: BTreeMap::new(),
             lab: None,
@@ -506,6 +600,18 @@ impl FeroApp {
                     if r.state.is_running() || h.points.is_empty() {
                         h.add(now, r.total.packets, r.total.bytes);
                     }
+                    for st in &r.streams {
+                        if let Some(f) = &st.latency {
+                            let h = s
+                                .flows
+                                .entry(format!("run:{}/{}", r.id, st.name))
+                                .or_default();
+                            h.label = format!("run {} {}", r.id, st.name);
+                            if r.state.is_running() || h.points.is_empty() {
+                                h.add(now, f);
+                            }
+                        }
+                    }
                 }
                 for r in &snap.tcp {
                     let h = s.history.entry(format!("tcp:{}", r.id)).or_default();
@@ -527,6 +633,16 @@ impl FeroApp {
                     if r.state.is_running() || h.points.is_empty() {
                         h.add(now, r.counters.packets, r.counters.bytes);
                     }
+                    for f in &r.flows {
+                        let h = s
+                            .flows
+                            .entry(format!("rx:{}/{}", r.id, f.flow))
+                            .or_default();
+                        h.label = format!("rx {} flow {}", r.id, f.flow);
+                        if r.state.is_running() || h.points.is_empty() {
+                            h.add(now, f);
+                        }
+                    }
                 }
                 // Forget runs the server no longer has.
                 let alive: Vec<String> = snap
@@ -538,6 +654,10 @@ impl FeroApp {
                     .chain(snap.rx.iter().map(|r| format!("rx:{}", r.id)))
                     .collect();
                 s.history.retain(|k, _| alive.contains(k));
+                s.flows.retain(|k, _| {
+                    k.split_once('/')
+                        .is_some_and(|(run, _)| alive.iter().any(|a| a == run))
+                });
                 s.snap = *snap;
             }
             Event::Reply { tag, result } => {
