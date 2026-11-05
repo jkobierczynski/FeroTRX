@@ -527,6 +527,9 @@ fn side_line(c: &UdpCounters) -> String {
         line.push_str(&format!("; {}", response_line(r)));
     }
     if let Some(a) = &c.app {
+        if let Some(h) = &a.tls {
+            line.push_str(&format!("; {}", crate::tcp::tls_line(h)));
+        }
         line.push_str(&format!("; {}", codes_line(a)));
         if let Some(m) = &a.media {
             line.push_str(&format!("; {}", media_line(m)));

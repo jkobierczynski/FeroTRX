@@ -55,7 +55,7 @@ next to the profiles it uses.
 | **Servers and ports** (left) | Each server with its state, version and backends, and its ports: the interfaces it can send on, plus `file` (a pcap written on the server) and `null` (count and drop), which need no root and are good for trying a profile. ▶ marks a port that is sending. Right-click a server to connect, disconnect, edit or remove it; **Add server…** adds one. |
 | **Streams** tab | The selected port: Start, Stop and Check (load on the server without sending), Open…/Save… of profile files on this computer, the port settings, the stream table and the stream editor. |
 | **Stateful** tab | Start a TCP or UDP run from a profile, on the server or uploaded from here, with the usual overrides (rate, count, concurrency, duration, workers, backend). **Check** runs `ferotrx check` on a local file. |
-| **Applications** tab | Edit TCP and UDP profiles with forms for their application protocols (HTTP, HTTP/2, DNS, NTP, MQTT, SSH, SIP/RTP, SMB, TLS), check and run them. See [application profiles](#application-profiles). |
+| **Applications** tab | Edit TCP and UDP profiles with forms for their application protocols (HTTP, HTTP/2, HTTP/3, DNS, NTP, MQTT, SSH, SIP/RTP, SMB, TLS), check and run them. See [application profiles](#application-profiles). |
 | **Capture** tab | Open a pcap or pcapng file on this computer: packet list, decode tree and hex. Tick packets (or select one) and **Make a stream** to edit them in the Streams tab. |
 | **Scenario** tab | Write, check and run [scenarios](#scenarios), read their verdicts and compare two runs. |
 | **Benchmark** tab | RFC 2544 benchmarks run by the server, every trial as it ends. See [benchmarks](#benchmarks). |
@@ -144,7 +144,7 @@ the run settings, each template (`[[template]]`; + Template adds one with the
 protocol picked, copy duplicates one), the client and server ends, the TCP or UDP options and
 the profile text. A template's page picks its protocol from those its
 transport carries and shows that protocol's own form: HTTP requests and
-routes, HTTP/2 streams, DNS queries and zones, NTP, MQTT topics, SSH users,
+routes, HTTP/2 streams, HTTP/3 over QUIC, DNS queries and zones, NTP, MQTT topics, SSH users,
 keys and commands, SIP calls with their media, SMB shares and files. "Over
 TLS" adds the TLS form ([TLS](app-protocols.md#tls-and-https)): versions,
 ciphers, ALPN, SNI, certificates or the generated lab CA, and failures

@@ -747,6 +747,59 @@ const HTTP_SETTINGS: &[Setting] = &[
     s("server", "Server header", K::Text, Server).default("FeroTRX"),
 ];
 
+const H3_SETTINGS: &[Setting] = &[
+    s("requests", "Requests", K::List, Client)
+        .default("GET /")
+        .help("METHOD PATH [EXPECTED]"),
+    s(
+        "per_connection",
+        "Per connection",
+        K::Int(1_000_000),
+        Client,
+    )
+    .default("1"),
+    s(
+        "concurrent",
+        "Concurrent streams",
+        K::Int(1_000_000),
+        Client,
+    )
+    .default("10"),
+    s("host", ":authority", K::Text, Client).default("the address connected to"),
+    s("user_agent", "User-Agent", K::Text, Client).default("FeroTRX/<version>"),
+    s("think_time", "Think time", K::Duration, Client).default("0"),
+    s("server", "Server header", K::Text, Server).default("FeroTRX"),
+    s("huffman", "Huffman", K::Bool, Both).default("on"),
+    s("idle_timeout", "Idle timeout", K::Duration, Both).default("30s"),
+    s("max_data", "Connection window", K::Size, Both).default("16M"),
+    s("stream_window", "Stream window", K::Size, Both).default("1M"),
+    s("max_streams", "Max streams", K::Int(1_000_000), Both).default("100"),
+    s(
+        "max_uni_streams",
+        "Max unidirectional streams",
+        K::Int(1_000_000),
+        Both,
+    )
+    .default("3"),
+    s(
+        "initial_window",
+        "Initial congestion window",
+        K::Int(1_000_000),
+        Both,
+    )
+    .default("10")
+    .help("In 1200-byte datagrams"),
+    s(
+        "key_update_after",
+        "Key update after",
+        K::Int(u64::MAX),
+        Both,
+    )
+    .default("0")
+    .help("Packets in a key phase before a key update (0: never)"),
+    s("retry", "Retry", K::Bool, Server).help("Answer each client's first Initial with a Retry"),
+];
+
 const HTTP2_SETTINGS: &[Setting] = &[
     s("requests", "Requests", K::List, Client)
         .default("GET /")
@@ -1147,6 +1200,18 @@ pub fn builtin_app_editors() -> Vec<Box<dyn AppEditor>> {
             lists: HTTP_LISTS,
             subtables: &[],
             example: "requests = [\"GET /\", \"GET /style.css\"]\nper_connection = 4\nconcurrent = 4\n",
+        }),
+        t(TableEditor {
+            name: "h3",
+            aliases: &[("http3", false)],
+            title: "HTTP/3 (QUIC)",
+            table: "h3",
+            transports: UDP,
+            port: Some(443),
+            settings: H3_SETTINGS,
+            lists: HTTP_LISTS,
+            subtables: &[],
+            example: "requests = [\"GET /\", \"GET /missing 404\"]\nper_connection = 2\n",
         }),
         t(TableEditor {
             name: "dns",

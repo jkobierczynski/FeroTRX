@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["profile", "tls", "ssh"]
+default = ["profile", "tls", "ssh", "quic"]
 # Load multi-stream traffic profiles from TOML files.
 profile = ["serde", "dep:toml", "build"]
 # Serialize benchmark reports and run metadata (serde).
@@ -19,6 +19,8 @@ build = ["dep:ferotrx-packet"]
 tls = ["dep:rustls", "dep:rcgen"]
 # SSH client and server (curve25519, ed25519, AES-GCM and ChaCha20-Poly1305 via ring).
 ssh = ["dep:ring"]
+# QUIC and HTTP/3 (rustls for the TLS handshake and keys, ring for Retry tags).
+quic = ["tls", "dep:ring"]
 
 [dependencies]
 ferotrx-packet = { workspace = true, optional = true }

@@ -243,6 +243,22 @@ jobs:
           sudo IPV6=1 scripts/smb-netns.sh ./target/debug/ferotrx
           sudo NO_VLAN=1 scripts/smb-netns.sh ./target/debug/ferotrx -B af_xdp
 
+      # HTTP/3 over QUIC through the NAT router: browser-like connections
+      # with a verified certificate, a Retry server with key updates and a
+      # refused ALPN between emulated ends; aioquic's client against the
+      # emulated server, and the emulated clients against aioquic's server;
+      # with 3% loss, over IPv6 and AF_XDP.
+      - name: HTTP/3 and QUIC through a NAT router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo modprobe 8021q || true
+          sudo apt-get install -y ethtool openssl python3-aioquic
+          sudo scripts/h3-netns.sh ./target/debug/ferotrx
+          sudo NO_VLAN=1 LOSS=0.03 scripts/h3-netns.sh ./target/debug/ferotrx
+          sudo IPV6=1 scripts/h3-netns.sh ./target/debug/ferotrx
+          sudo NO_VLAN=1 scripts/h3-netns.sh ./target/debug/ferotrx -B af_xdp
+
       # Application protocols over stateful TCP through the NAT router: HTTP
       # (keep-alive, chunked, POST, 404) and DNS over TCP between emulated
       # ends, curl against the emulated web server, and the emulated client

@@ -20,7 +20,9 @@ protocols, with real handshakes: HTTPS, DNS over TLS (0.17.0, M24).
 clients and servers that work with OpenSSH in 0.20.0 (M27), and
 [SIP](#sip-and-rtp) phones and a SIP server with RTP audio, which work with
 SIPp, in 0.21.0 (M28), and [SMB](#smb) 2 and 3 file clients and a file
-server, which work with smbclient and Samba, in 0.23.0 (M30). The plan for the other protocols is
+server, which work with smbclient and Samba, in 0.23.0 (M30), and
+[HTTP/3 over QUIC](#http3-and-quic) clients and servers, which work with
+aioquic, in 0.24.0 (M31). The plan for the other protocols is
 [at the end](#what-comes-next).
 
 ## Quick start
@@ -670,6 +672,103 @@ sudo ferotrx tcp -p examples/lab-smb.toml -i eth0 --connect 192.168.20.10
 users with signing, an SMB 2.1 client, anonymous reads of a read-only
 share, and a wrong password.
 
+## HTTP/3 and QUIC
+
+`app = "h3"` (or `"http3"`; UDP port 443) plays HTTP/3 clients and
+servers over QUIC version 1, in UDP profiles (`ferotrx udp`). The requests
+and routes are those of [HTTP/1.1](#http11), in an `[h3]` table:
+
+```toml
+[[template]]
+name = "browser"
+app = "h3"
+[template.h3]
+host = "www.lab.local"
+requests = ["GET /", "GET /app.js", "GET /big", "GET /missing 404", "POST /api 201"]
+per_connection = 12         # requests per connection
+concurrent = 6              # streams in flight at once
+[[template.h3.route]]
+path = "/big"
+body_size = "300K"
+[template.tls]              # TLS 1.3, as for HTTPS; ALPN h3
+server_name = "www.lab.local"
+names = ["www.lab.local"]
+verify = true
+```
+
+Each client connection does the QUIC handshake (TLS 1.3 in CRYPTO frames,
+ALPN `h3`, the transport parameters checked), opens HTTP/3's control
+stream with its SETTINGS and the two QPACK streams, sends its requests on
+streams of their own, up to `concurrent` at once and as many as the server
+allows, checks each status, and closes the connection with `H3_NO_ERROR`.
+The server answers from its routes; a route with `close = true` sends
+GOAWAY, and the server closes once its answers are acknowledged.
+
+QUIC is written here, with rustls only for the TLS handshake and the keys:
+Initial, Handshake and 1-RTT packet number spaces with header and packet
+protection, coalesced packets, Initial datagrams padded to 1200 bytes,
+ACKs (delayed up to 25 ms in the application space), loss detection by
+packet and time thresholds with probe timeouts (RFC 9002), NewReno
+congestion control with pacing, the server's 3x anti-amplification limit
+before the client's address is validated, streams with flow control of
+each stream and of the connection and stream limits that grow as streams
+end, key updates both ways (`key_update_after` starts them), Retry
+(`retry = true`), Version Negotiation for other versions, idle timeouts,
+and CONNECTION_CLOSE with closing and draining periods. HTTP/3 field
+sections use QPACK's static table and literals (Huffman coded when that is
+shorter); the decoder allows no dynamic table, which its SETTINGS say.
+
+| Key | Default | What |
+|---|---|---|
+| `requests`, `request`, `route`, `per_connection`, `host`, `user_agent`, `think_time`, `server` | as for HTTP | The requests and routes ([HTTP/1.1](#http11)). |
+| `concurrent` | 10 | Client: requests in flight at once on a connection. |
+| `huffman` | true | Huffman code field strings where it makes them shorter. |
+| `idle_timeout` | `30s` | Both ends: the idle timeout this end announces (the shorter of the two counts). |
+| `max_data` | `16M` | Both ends: connection flow control, what the other end may send before this end reads. |
+| `stream_window` | `1M` | Both ends: stream flow control. |
+| `max_streams` | 100 | Both ends: bidirectional streams the other end may open (more as they end). |
+| `max_uni_streams` | 3 | Both ends: unidirectional streams the other end may open (HTTP/3 needs three). |
+| `initial_window` | 10 | Both ends: the first congestion window, in 1200-byte datagrams. |
+| `key_update_after` | 0 | Both ends: start a key update after this many packets in a key phase (0: never; the other end's are always followed). |
+| `retry` | false | Server: answer each client's first Initial with a Retry and take only Initials with its token. |
+
+The TLS settings come from `[tls]` (or `tls` in the `[h3]` table), with
+`[tls.client]` and `[tls.server]` for one end, as for
+[HTTPS](#tls-and-https); `versions` can only be 1.3, and `alpn` is `h3`
+unless given. A handshake that fails (a refused ALPN, a certificate that
+does not verify) closes the connection with its TLS alert as
+`CRYPTO_ERROR`, and counts as `failed: QUIC CRYPTO_ERROR 0x78
+no_application_protocol: ...`; `expect = "failure"` makes that the
+expected outcome.
+
+The client's transactions are its requests, by status, with the time from
+the request to the whole answer; the server's are the answers it sent.
+Each connection is a handshake (`QUIC v1 TLS13_AES_256_GCM_SHA384 h3`,
+resumed when a TLS ticket was used), and QUIC packets declared lost count
+as UDP datagrams "sent again":
+
+```text
+  client: 30 transactions, 30 answered, 27 sent again; ...; 30 QUIC handshakes
+  (QUIC v1 TLS13_AES_256_GCM_SHA384 h3 x25, failed: QUIC CRYPTO_ERROR 0x78
+  no_application_protocol: peer doesn't support any known protocol x5), 23
+  resumed, 5 failed; ...; 200 x185, 404 x65, 201 x40
+```
+
+Each UDP "transaction" is one QUIC connection: `rate` and `transactions`
+count connections, and `--connect` points the clients at another server.
+
+```sh
+# aioquic's client (scripts/h3-peer.py) against the emulated server:
+python3 scripts/h3-peer.py client https://192.168.20.80/ -c 5 -n 12
+# The emulated clients against another HTTP/3 server (leave [server] out):
+sudo ferotrx udp -p examples/lab-h3.toml -i eth0 --connect 192.168.20.10:443
+```
+
+[examples/lab-h3.toml](../examples/lab-h3.toml) has browser-like
+connections with a verified certificate, a server that sends Retry with
+connections that update their keys, and a client with an old draft's ALPN
+that the server refuses.
+
 ## NTP
 
 `app = "ntp"` in UDP profiles: client requests, matched by their transmit
@@ -867,6 +966,30 @@ sudo apt-get install smbclient samba ethtool
 sudo scripts/smb-netns.sh
 ```
 
+HTTP/3 has [`scripts/h3-netns.sh`](../scripts/h3-netns.sh), which runs:
+
+1. the templates of `examples/lab-h3.toml` between emulated ends (browser
+   connections of 12 requests, six at once, with a verified certificate; a
+   server that sends a Retry first, with key updates every 50 packets; an
+   old draft's ALPN that the server must refuse), checking every
+   connection, the handshakes, the 404s and 201s, and with `LOSS=` that
+   QUIC sent lost packets again;
+2. the emulated server alone, and aioquic's client
+   ([`scripts/h3-peer.py`](../scripts/h3-peer.py)) on the router: 5
+   connections of 12 requests at once, a key update, the Retry server, and
+   a refused ALPN;
+3. aioquic's server on the router (and one with Retry), and the emulated
+   clients against it, with key updates.
+
+CI runs it plain, with loss, over IPv6 (run 1 only) and over AF_XDP. Runs 2
+and 3 need python3 with aioquic, openssl and ethtool (`PYTHON=` picks the
+Python that has aioquic).
+
+```sh
+sudo apt-get install python3-aioquic openssl ethtool
+sudo scripts/h3-netns.sh
+```
+
 ## Writing a protocol
 
 A protocol is two traits in `ferotrx_core::app`:
@@ -941,6 +1064,11 @@ and TCP), and the built-in ones are in `crates/ferotrx-core/src/app/`.
   oplocks, durable handles or multichannel, no named pipes (so no share
   listing with `smbclient -L`), no security descriptors; the server's files
   live in memory, and its directory listings do not page over changes.
+* HTTP/3 and QUIC: QUIC version 1 only (no version 2, no 0-RTT early
+  data, no connection migration or NEW_CONNECTION_ID of our own, no ECN,
+  no DATAGRAM frames), datagrams of at most 1200 bytes (no path MTU
+  discovery), no QPACK dynamic table, no server push, no stateless reset;
+  NewReno only (no CUBIC yet).
 * The control API and the GUI do not have editors for the protocol tables
   yet; profiles carry them as TOML.
 
@@ -958,4 +1086,4 @@ Tracked in [#37](https://github.com/jkobierczynski/FeroTRX/issues/37) and in
 | HTTP/2 | high | done (M26): frames, HPACK, streams, flow control; h2 over TLS with ALPN and h2c; later server push and priorities |
 | MQTT | high | done (M25): 3.1.1 and 5.0, QoS 0-2, retained messages, logins; later a broker that routes between connections |
 | SMB | medium | done (M30): SMB 2.0.2 to 3.1.1, NTLMv2, signing, files and directories, smbclient and Samba both ways; later encryption (AES-GCM/CCM), Kerberos, leases |
-| QUIC/HTTP/3 | medium | needs TLS 1.3 first |
+| QUIC/HTTP/3 | medium | done (M31): QUIC v1 with loss recovery, congestion control, flow control, key updates and Retry; HTTP/3 with QPACK's static table; aioquic both ways; later 0-RTT, migration, the QPACK dynamic table |

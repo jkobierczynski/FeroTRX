@@ -112,6 +112,13 @@ pub fn detect_kind(text: &str) -> Result<FileKind> {
         let Some(name) = t.get("app").and_then(|a| a.as_str()) else {
             return false;
         };
+        // HTTP/3 runs TLS over UDP.
+        if ["h3", "http3", "quic"]
+            .iter()
+            .any(|n| name.eq_ignore_ascii_case(n))
+        {
+            return has(t, TCP);
+        }
         let stream_only = crate::app::AppRegistry::builtin()
             .parse(name, &toml::Table::new(), std::path::Path::new("."))
             .is_ok_and(|a| !a.supports(crate::Transport::Datagram));
@@ -524,6 +531,7 @@ mod tests {
             ("[[template]]\npcap = \"x.pcap\"", FileKind::Tcp),
             ("app = \"http\"", FileKind::Tcp),
             ("app = \"dns\"\nconnections = 5", FileKind::Tcp),
+            ("app = \"h3\"\n[tls]\nverify = true", FileKind::Udp),
             (
                 "[[template]]\napp = \"http\"\n[[template]]\napp = \"dns\"",
                 FileKind::Tcp,

@@ -1108,6 +1108,7 @@ mod tests {
             "lab-sip.toml",
             "lab-ssh.toml",
             "lab-smb.toml",
+            "lab-h3.toml",
         ] {
             let p = examples().join(f);
             let mut st = AppsState::default();

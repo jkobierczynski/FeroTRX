@@ -36,6 +36,8 @@ pub mod http;
 pub mod http2;
 pub mod mqtt;
 pub mod ntp;
+#[cfg(feature = "quic")]
+pub mod quic;
 #[cfg(feature = "profile")]
 mod registry;
 pub mod sip;
@@ -257,6 +259,7 @@ pub struct AppCx {
     media: Vec<MediaReport>,
     close: bool,
     goodbye: bool,
+    resent: u64,
     wake: Option<Duration>,
     transactions: Vec<AppTransaction>,
     protocol_errors: Vec<String>,
@@ -323,6 +326,16 @@ impl AppCx {
         &self.media
     }
 
+    /// Counts packets the protocol sent again (QUIC's lost packets): the
+    /// UDP engine's "sent again".
+    pub fn resent(&mut self, n: u64) {
+        self.resent += n;
+    }
+
+    pub fn resent_count(&self) -> u64 {
+        self.resent
+    }
+
     /// Closes the connection once what was sent has gone (TCP), or ends
     /// the transaction (UDP).
     pub fn close(&mut self) {
@@ -370,6 +383,7 @@ impl AppCx {
     pub fn absorb(&mut self, mut inner: AppCx) -> Vec<Vec<u8>> {
         self.close |= inner.close;
         self.goodbye |= inner.goodbye;
+        self.resent += inner.resent;
         if inner.wake.is_some() {
             self.wake = inner.wake;
         }
