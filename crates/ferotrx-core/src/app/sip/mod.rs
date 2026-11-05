@@ -527,6 +527,9 @@ struct Client {
     routes: Vec<String>,
     /// Our ACK to the 200, for 200s that come again.
     ack: Option<Vec<u8>>,
+    /// Our ACKs to refusals and challenges, by the INVITE's branch: the
+    /// server sends its answer again until one arrives (Timer D).
+    refusal_acks: Vec<(String, Vec<u8>)>,
     stream: Option<Stream>,
     hangup_at: Option<Duration>,
 }
@@ -550,6 +553,7 @@ impl Client {
             target: String::new(),
             routes: Vec::new(),
             ack: None,
+            refusal_acks: Vec::new(),
             stream: None,
             hangup_at: None,
         }
@@ -686,7 +690,7 @@ impl Client {
 
     /// The ACK of a refusal: the INVITE's branch and Request-URI (RFC 3261
     /// section 17.1.1.3).
-    fn ack_refusal(&self, resp: &Msg, txn: &Txn, cx: &mut AppCx) {
+    fn ack_refusal(&mut self, resp: &Msg, txn: &Txn, cx: &mut AppCx) {
         let uri = self.callee();
         let to = resp.get("To").unwrap_or("").to_string();
         let mut m = self.ua.request(
@@ -700,7 +704,9 @@ impl Client {
         );
         m.headers.retain(|(n, _)| n != "CSeq");
         m.header("CSeq", format!("{} ACK", txn.cseq));
-        cx.send(m.to_bytes());
+        let bytes = m.to_bytes();
+        cx.send(bytes.clone());
+        self.refusal_acks.push((txn.branch.clone(), bytes));
     }
 
     fn record(&self, cx: &mut AppCx, label: String, ok: bool, error: bool, rt: Option<Duration>) {
@@ -733,6 +739,14 @@ impl Client {
                 {
                     if let Some(a) = &self.ack {
                         cx.send(a.clone());
+                    }
+                }
+                // A refusal or challenge again: its ACK was lost.
+                if code >= 300 {
+                    if let Some(b) = m.branch() {
+                        if let Some((_, a)) = self.refusal_acks.iter().find(|(x, _)| *x == b) {
+                            cx.send(a.clone());
+                        }
                     }
                 }
                 return;

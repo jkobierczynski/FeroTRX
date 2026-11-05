@@ -679,7 +679,7 @@ impl Session {
         self.app = Some(app);
         self.taken = r == Receive::Taken;
         if r == Receive::NotMine {
-            if self.done {
+            if self.done && self.role == UdpRole::Server {
                 return Fate::Replace;
             }
             cx.add(self.role, self.tpl, |s| s.unmatched += 1);
@@ -702,7 +702,7 @@ impl Session {
         }
         let (role, tpl) = (self.role, self.tpl);
         cx.add(role, tpl, |s| ax.count_into(&mut s.app));
-        if self.done && !ax.wants_close() {
+        if self.done && self.role == UdpRole::Server && !ax.wants_close() {
             // Something new on a finished server session.
             self.done = false;
             self.mismatched = false;
@@ -824,6 +824,17 @@ impl Session {
         }
         self.deadline = None;
         match self.role {
+            // A dialog client lingers, to answer what the server sends
+            // again (a refusal whose ACK was lost), until it is quiet for
+            // the session timeout; it no longer holds the run open.
+            UdpRole::Client if self.dialog => {
+                // Its media ports go back now: the call is over.
+                cx.media.free(self);
+                self.media = None;
+                self.wake = None;
+                self.last_rx = self.last_rx.max(now);
+                Fate::Keep
+            }
             UdpRole::Client => Fate::Remove,
             UdpRole::Server => {
                 self.last_rx = self.last_rx.max(now);
@@ -1295,7 +1306,7 @@ impl UdpEngine {
             && self
                 .sessions
                 .values()
-                .all(|s| s.role == UdpRole::Server && s.done)
+                .all(|s| s.done && (s.role == UdpRole::Server || s.dialog))
     }
 
     /// Transactions open now, both sides.

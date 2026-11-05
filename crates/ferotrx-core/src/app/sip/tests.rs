@@ -134,15 +134,16 @@ fn play(sip: &Sip, limit: Duration, drop: impl Fn(u64) -> bool) -> (End, End) {
                 let (a, b) = ends.split_at_mut(1);
                 b[0].s = Some(mk(AppRole::Server, &b[0], &a[0]));
             }
-            if to == 0 && ends[0].closed {
-                continue; // the client session is gone
-            }
+            // A closed client lingers (the engine keeps it until it is
+            // quiet), so it still gets what the server sends again.
             let e = &mut ends[to];
             let mut cx = AppCx::new(now, now).with_media_port(Some(e.media));
             let peer = if to == 0 { "10.0.0.2" } else { "10.0.0.1" };
             match what {
                 What::Sig(d) => {
-                    e.closed = false;
+                    if to == 1 {
+                        e.closed = false;
+                    }
                     e.s.as_mut().unwrap().receive(&d, &mut cx);
                 }
                 What::Media {
@@ -154,7 +155,9 @@ fn play(sip: &Sip, limit: Duration, drop: impl Fn(u64) -> bool) -> (End, End) {
                     e.s.as_mut().unwrap().media(port, from, &data, &mut cx);
                 }
             }
+            let was_closed = to == 0 && e.closed;
             apply(e, &mut cx, to, now, &mut queue, &mut n);
+            e.closed |= was_closed;
         } else {
             for i in 0..2 {
                 if ends[i].wake.is_some_and(|w| w <= now) && !(i == 0 && ends[0].closed) {
@@ -225,8 +228,10 @@ fn survives_loss() {
         c.labels,
         s.labels
     );
-    let m = &c.media_reports[0];
-    assert!(m.lost > 0 && m.packets_received > 0, "{m:?}");
+    // Which way loses packets depends on how the sends interleave.
+    let (cm, sm) = (&c.media_reports[0], &s.media_reports[0]);
+    assert!(cm.lost + sm.lost > 0, "{cm:?} {sm:?}");
+    assert!(cm.packets_received > 0 && sm.packets_received > 0);
     assert!(s.closed, "{:?}", s.labels);
 }
 
@@ -259,6 +264,25 @@ fn wrong_password_and_busy_and_sha256() {
     sip.server.answer = 603;
     let (c, _) = play(&sip, Duration::from_secs(30), |_| false);
     assert_eq!(c.failed("INVITE 603"), 1, "{:?}", c.labels);
+}
+
+#[test]
+fn acks_a_refusal_again_after_closing() {
+    // Whichever datagram of a refused call is lost, the server gets its ACK
+    // within a few T1 and does not wait the 32 s of Timer H (the 407
+    // challenge comes first, so both refusals are tried).
+    for lost in 1..=8 {
+        let mut sip = lab();
+        sip.client.register = false;
+        sip.client.call = Some("carol".into());
+        sip.server.answer = 486;
+        sip.client.expect = SipExpect::Code(486);
+        let (c, s) = play(&sip, Duration::from_secs(10), |n| n == lost);
+        assert_eq!(c.ok("INVITE 486"), 1, "lost {lost}: {:?}", c.labels);
+        assert!(c.closed, "lost {lost}");
+        assert!(s.closed, "lost {lost}: server still waits: {:?}", s.labels);
+        assert_eq!(s.ok("INVITE 486"), 1, "lost {lost}: {:?}", s.labels);
+    }
 }
 
 #[test]

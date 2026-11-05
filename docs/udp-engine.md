@@ -33,7 +33,10 @@ wants, keeps its own retransmission timers, and ends when the protocol says
 so (a client's call is over; a server has no call open) or when nothing
 arrives for `session_timeout` while it waits for nothing of its own. Such a
 session also holds two ports from `media_ports` (`[udp]`, default
-16384-32767) for its RTP and RTCP, given back when it ends. See
+16384-32767) for its RTP and RTCP, given back when it ends. A client's
+session that has ended stays until it is quiet for `session_timeout`,
+without holding the run open, so it can ACK a refusal the server sends
+again because the first ACK was lost. See
 [SIP and RTP](app-protocols.md#sip-and-rtp).
 
 ## Matching
