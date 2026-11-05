@@ -539,7 +539,9 @@ fn side_line(c: &UdpCounters) -> String {
 }
 
 /// RTP of the calls: `16 media streams (PCMU x16): 4800 packets sent,
-/// 4790 received, 10 lost (0.21%), jitter ms avg 0.40 max 1.20, 32 RTCP`.
+/// 4790 received, 10 lost (0.21%), jitter ms avg 0.40 max 1.20, RTCP 32
+/// sent 32 received, round trip ms avg 20.1 max 22.0; MOS 4.38 (worst 4.31),
+/// R 91.2 (very satisfied x16)`.
 pub(crate) fn media_line(m: &ferotrx_ctl::protocol::MediaCounters) -> String {
     let mut codecs: Vec<(&String, &u64)> = m.codecs.iter().collect();
     codecs.sort_by(|x, y| y.1.cmp(x.1).then(x.0.cmp(y.0)));
@@ -565,11 +567,51 @@ pub(crate) fn media_line(m: &ferotrx_ctl::protocol::MediaCounters) -> String {
             ms(j.max_us)
         ));
     }
+    if m.late > 0 {
+        line.push_str(&format!(", {} too late for the jitter buffer", m.late));
+    }
+    if m.loss_bursts > 0 {
+        line.push_str(&format!(
+            ", {} loss bursts (longest {})",
+            m.loss_bursts, m.max_burst
+        ));
+    }
     line.push_str(&format!(
         ", RTCP {} sent {} received",
         m.rtcp_sent, m.rtcp_received
     ));
+    if let Some(r) = &m.rtt {
+        line.push_str(&format!(
+            ", round trip ms avg {} max {}",
+            ms(r.avg_us),
+            ms(r.max_us)
+        ));
+    }
+    if m.remote_lost > 0 {
+        line.push_str(&format!(", {} of ours lost (their RTCP)", m.remote_lost));
+    }
+    if let (Some(mos), Some(worst), Some(r)) = (m.mos_avg, m.mos_min, m.r_avg) {
+        line.push_str(&format!(
+            "; MOS {mos:.2} (worst {worst:.2}), R {r:.1}{}",
+            bands_text(&m.bands)
+        ));
+    }
     line
+}
+
+/// ` (satisfied x3, many dissatisfied x1)`, or nothing.
+fn bands_text(bands: &[u64]) -> String {
+    let v: Vec<String> = ferotrx_core::app::quality::BANDS
+        .iter()
+        .zip(bands)
+        .filter(|(_, n)| **n > 0)
+        .map(|(b, n)| format!("{b} x{n}"))
+        .collect();
+    if v.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", v.join(", "))
+    }
 }
 
 /// Transactions by status or response code: `NOERROR x40, NXDOMAIN x2`.

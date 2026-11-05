@@ -427,7 +427,7 @@ refused, and so are channels other than `session` (port forwarding).
 | `rekey_after` | never | Client: a new key exchange after this many bytes (`1M`). |
 | `window` | `2M` | Client: each channel's receive window. |
 | `ciphers` | all three | Both ends: the ciphers, best first. |
-| `version` | `FeroTRX_0.26.0` | Both ends: the software version after `SSH-2.0-` (`OpenSSH_9.6`). |
+| `version` | `FeroTRX_0.27.0` | Both ends: the software version after `SSH-2.0-` (`OpenSSH_9.6`). |
 | `users` | none | Server: user names and passwords; with none, any password. |
 | `authorized_keys` | none | Server: public key lines (`ssh-ed25519 AAAA...`), or a file of them; with none, any key. |
 | `host_key` | `generate` | Server: an OpenSSH Ed25519 key file. A generated one is new on every run, and the run prints its fingerprint. |
@@ -513,15 +513,18 @@ The audio is RTP at the codec's rate, a packet every `ptime`: PCMU and PCMA
 (G.711, 160 bytes per 20 ms, a 1 kHz tone, so a capture plays in
 Wireshark), G.722, G.729 (20 bytes) and Opus (payload type 111, 80 bytes at
 32 kbit/s). RTCP goes on the next port: a sender report with a reception
-report and the CNAME after 2.5 s and every 5 s, and BYE at the end. Media
+report and the CNAME after 2.5 s and every 5 s (`rtcp_interval`), and BYE
+at the end. Media
 follows the signaling: it goes to the other end's signaling address, at the
 port its SDP gives, and then to wherever its RTP comes from (symmetric RTP).
 So it works through NAT: the server sees that the caller's SDP address is
 not where its SIP came from and waits for the caller's first packet before
 it sends. The receiving end counts the packets, the ones lost (sequence
 numbers missing between the first and the last), duplicates, reordered
-ones, and the interarrival jitter (RFC 3550). Each session gets two ports
-for this from `media_ports` in `[udp]` (default `16384-32767`).
+ones, the interarrival jitter (RFC 3550), packets too late for a jitter
+buffer, loss bursts and the RTCP round trip, and scores each call with the
+E-model (R and MOS): see [Call quality](call-quality.md). Each session gets
+two ports for this from `media_ports` in `[udp]` (default `16384-32767`).
 
 | Key | Default | What |
 |---|---|---|
@@ -537,6 +540,9 @@ for this from `media_ports` in `[udp]` (default `16384-32767`).
 | `ptime` | `20ms` | Both ends: audio per packet. |
 | `media` | `true` | Both ends: RTP and RTCP during calls; `false` calls without SDP. |
 | `t1` | `500ms` | Both ends: SIP's first retransmission interval. |
+| `jitter_buffer` | `60ms` | Both ends: packets later than this count as late, and as lost for the call's score. |
+| `rtcp_interval` | `5s` | Both ends: how often RTCP reports go; `1s` gives short calls a round trip. |
+| `ie`, `bpl` | the codec's | Both ends: the codec's E-model factors; see [Call quality](call-quality.md). |
 | `users` | none | Server: user names and passwords; with none, no authentication. |
 | `algorithm` | `MD5` | Server: the digest algorithm it asks for, `MD5` or `SHA-256` (RFC 8760). |
 | `answer` | 200 | Server: its final answer to INVITEs. |
@@ -836,8 +842,14 @@ which `ferotrx udp` prints as
 ```text
     office client: 40 transactions, 40 answered; ...; BYE 200 x40, INVITE 200 x40,
     REGISTER 200 x40; 40 media streams (PCMU x40): 6040 packets sent, 5961
-    received, 18 lost (0.30%), jitter ms avg 0.39 max 0.56, RTCP 80 sent 40 received
+    received, 18 lost (0.30%), jitter ms avg 0.39 max 0.56, 18 loss bursts (longest
+    1), RTCP 80 sent 40 received, round trip ms avg 1.10 max 2.70; MOS 4.37 (worst
+    4.35), R 91.3 (very satisfied x40)
 ```
+
+with the round trip, late packets, bursts and scores also in `media` (`rtt`,
+`late`, `loss_bursts`, `max_burst`, `remote_lost`, `r_avg`, `r_min`,
+`mos_avg`, `mos_min`, `bands`).
 
 The Python client reads them as `TcpCounters.app` and `UdpCounters.app`
 (`ferotrx.AppCounters`, with `tls` a `ferotrx.HandshakeCounters` and `media`
@@ -852,8 +864,11 @@ a `ferotrx.MediaCounters`).
 Checks of kind `udp` have `app_transactions`, `app_failed` and
 `protocol_errors`, and with SIP calls `media_streams`, `media_received`,
 `media_lost`, `media_loss_pct` (the worse of the two ways) and
-`jitter_min`/`_avg`/`_p99`/`_max`: `require = ["media_loss_pct < 1",
-"jitter_p99 < 30ms"]`. SMB's logins count as handshakes, so `tls_handshakes`,
+`jitter_min`/`_avg`/`_p99`/`_max`, `media_late`, `media_playout_loss_pct`,
+`max_burst`, `rtt_avg`, `rtt_max`, `mos`, `mos_min`, `r_factor` and
+`r_factor_min`: `require = ["media_loss_pct < 1", "jitter_p99 < 30ms",
+"mos >= 4.0"]`. TCP checks also have `connect_*` and `first_byte_*`
+([TCP connection times](call-quality.md#tcp-connection-times)). SMB's logins count as handshakes, so `tls_handshakes`,
 `tls_failed` and `handshake_p99` work for them too.
 
 ## Lab script
@@ -1082,7 +1097,7 @@ Tracked in [#37](https://github.com/jkobierczynski/FeroTRX/issues/37) and in
 | HTTPS/TLS | very high | done (M24); later maybe hello-only emulation of old versions (TLS 1.0/1.1) for middlebox tests |
 | SSH | high | done (M27): real key exchange, ciphers, logins and command channels, OpenSSH both ways; later sftp/scp, port forwarding, RSA/ECDSA keys |
 | DHCP | high | done as [host emulation](host-emulation.md): clients (M19), DHCP and DHCPv6 servers (M29) |
-| SIP/RTP | high | done (M28): registration with digest, calls, RTP/RTCP at codec rates with loss and jitter, SIPp both ways; later SIP over TCP/TLS, SRTP, DTMF, a proxy role |
+| SIP/RTP | high | done (M28): registration with digest, calls, RTP/RTCP at codec rates with loss and jitter, SIPp both ways; call scores (M32); later SIP over TCP/TLS, SRTP, DTMF, a proxy role |
 | HTTP/2 | high | done (M26): frames, HPACK, streams, flow control; h2 over TLS with ALPN and h2c; later server push and priorities |
 | MQTT | high | done (M25): 3.1.1 and 5.0, QoS 0-2, retained messages, logins; later a broker that routes between connections |
 | SMB | medium | done (M30): SMB 2.0.2 to 3.1.1, NTLMv2, signing, files and directories, smbclient and Samba both ways; later encryption (AES-GCM/CCM), Kerberos, leases |

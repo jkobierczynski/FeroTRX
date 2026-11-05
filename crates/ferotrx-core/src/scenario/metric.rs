@@ -331,6 +331,49 @@ pub const TCP_METRICS: &[MetricDef] = &[
         "99th percentile of the TLS handshake time",
     ),
     m("handshake_max", Millis, Lower, "slowest TLS handshake"),
+    m(
+        "connect_min",
+        Millis,
+        Lower,
+        "fastest TCP handshake, from the first SYN",
+    ),
+    m(
+        "connect_avg",
+        Millis,
+        Lower,
+        "average time from the first SYN to the end of the handshake",
+    ),
+    m(
+        "connect_p99",
+        Millis,
+        Lower,
+        "99th percentile of the TCP handshake time",
+    ),
+    m("connect_max", Millis, Lower, "slowest TCP handshake"),
+    m(
+        "first_byte_min",
+        Millis,
+        Lower,
+        "fastest first byte from the server, from the first SYN",
+    ),
+    m(
+        "first_byte_avg",
+        Millis,
+        Lower,
+        "average time from the first SYN to the server's first byte",
+    ),
+    m(
+        "first_byte_p99",
+        Millis,
+        Lower,
+        "99th percentile of the time to the server's first byte",
+    ),
+    m(
+        "first_byte_max",
+        Millis,
+        Lower,
+        "slowest first byte from the server",
+    ),
 ];
 
 /// Metrics of a UDP check: the client side, and the server's with `server_`.
@@ -361,6 +404,15 @@ pub const UDP_METRICS: &[MetricDef] = &[
     m("jitter_avg", Millis, Lower, "average stream jitter"),
     m("jitter_p99", Millis, Lower, "99th percentile of the stream jitter"),
     m("jitter_max", Millis, Lower, "highest stream jitter"),
+    m("media_late", Count, Lower, "RTP packets too late for the jitter buffer, the worse way"),
+    m("media_playout_loss_pct", Percent, Lower, "RTP packets lost or too late, of those expected, the worse way"),
+    m("max_burst", Count, Lower, "longest run of RTP packets lost or too late"),
+    m("rtt_avg", Millis, Lower, "average round trip of the media, from RTCP"),
+    m("rtt_max", Millis, Lower, "longest mean round trip of a stream, from RTCP"),
+    m("mos", Count, Higher, "estimated MOS (1 to 4.5, E-model) of the calls, average of the worse way"),
+    m("mos_min", Count, Higher, "estimated MOS of the worst call"),
+    m("r_factor", Count, Higher, "E-model R (0 to 100) of the calls, average of the worse way"),
+    m("r_factor_min", Count, Higher, "E-model R of the worst call"),
 ];
 
 /// Metrics of a traffic check. Latency figures are of the worst stream.

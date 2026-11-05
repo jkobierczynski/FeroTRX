@@ -36,6 +36,7 @@ pub mod http;
 pub mod http2;
 pub mod mqtt;
 pub mod ntp;
+pub mod quality;
 #[cfg(feature = "quic")]
 pub mod quic;
 #[cfg(feature = "profile")]
@@ -247,6 +248,28 @@ pub struct MediaReport {
     pub jitter: Duration,
     pub rtcp_sent: u64,
     pub rtcp_received: u64,
+    /// Packets that came too late for the jitter buffer (counted as lost
+    /// for the score, not in `lost`).
+    pub late: u64,
+    /// Runs of lost or late packets, and the longest run.
+    pub loss_bursts: u64,
+    pub max_burst: u64,
+    /// The burst ratio (G.113): 1 for random loss, more for bursts.
+    pub burst_ratio: f64,
+    /// The mean round trip from the other end's RTCP reports; none before
+    /// one came back with our sender report's time in it.
+    pub rtt: Option<Duration>,
+    /// What the other end's last RTCP report said about our packets: lost
+    /// in all, and its jitter.
+    pub remote_lost: Option<u64>,
+    pub remote_jitter: Option<Duration>,
+    /// The one-way delay the score took: half the round trip, the jitter
+    /// buffer and one packet time.
+    pub delay: Duration,
+    /// The E-model's R (0 to 100) and the estimated MOS (1 to 4.5); none
+    /// when nothing came.
+    pub r_factor: Option<f64>,
+    pub mos: Option<f64>,
 }
 
 #[derive(Debug, Default)]
@@ -571,6 +594,26 @@ pub struct MediaStats {
     pub rtcp_received: u64,
     /// Streams by codec.
     pub codecs: BTreeMap<String, u64>,
+    /// Packets too late for the jitter buffer.
+    pub late: u64,
+    /// Runs of lost or late packets, and the longest in any stream.
+    pub loss_bursts: u64,
+    pub max_burst: u64,
+    /// Each stream's mean RTCP round trip, for those that measured one.
+    pub rtt: LatencyStats,
+    /// Lost packets the other ends reported (RTCP) about ours.
+    pub remote_lost: u64,
+    /// Streams with a score (something came), and the sums and worst of
+    /// their R and MOS.
+    pub scored: u64,
+    pub r_sum: f64,
+    pub r_min: Option<f64>,
+    pub mos_sum: f64,
+    pub mos_min: Option<f64>,
+    /// Scored streams by G.109 band of R (see
+    /// [`quality::BANDS`](quality::BANDS)): 90 and up, 80, 70, 60, 50,
+    /// below 50.
+    pub bands: [u64; 6],
 }
 
 impl MediaStats {
@@ -585,6 +628,21 @@ impl MediaStats {
         self.rtcp_sent += m.rtcp_sent;
         self.rtcp_received += m.rtcp_received;
         *self.codecs.entry(m.codec.clone()).or_default() += 1;
+        self.late += m.late;
+        self.loss_bursts += m.loss_bursts;
+        self.max_burst = self.max_burst.max(m.max_burst);
+        if let Some(rtt) = m.rtt {
+            self.rtt.record(Some(rtt));
+        }
+        self.remote_lost += m.remote_lost.unwrap_or(0);
+        if let (Some(r), Some(mos)) = (m.r_factor, m.mos) {
+            self.scored += 1;
+            self.r_sum += r;
+            self.mos_sum += mos;
+            self.r_min = Some(self.r_min.map_or(r, |x| x.min(r)));
+            self.mos_min = Some(self.mos_min.map_or(mos, |x| x.min(mos)));
+            self.bands[quality::band(r)] += 1;
+        }
     }
 
     pub fn merge(&mut self, o: &Self) {
@@ -600,6 +658,23 @@ impl MediaStats {
         for (k, v) in &o.codecs {
             *self.codecs.entry(k.clone()).or_default() += v;
         }
+        self.late += o.late;
+        self.loss_bursts += o.loss_bursts;
+        self.max_burst = self.max_burst.max(o.max_burst);
+        self.rtt.merge(&o.rtt);
+        self.remote_lost += o.remote_lost;
+        self.scored += o.scored;
+        self.r_sum += o.r_sum;
+        self.mos_sum += o.mos_sum;
+        let min = |a: Option<f64>, b: Option<f64>| match (a, b) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.r_min = min(self.r_min, o.r_min);
+        self.mos_min = min(self.mos_min, o.mos_min);
+        for (a, b) in self.bands.iter_mut().zip(o.bands) {
+            *a += b;
+        }
     }
 
     /// Lost packets as a share of those expected (received and lost).
@@ -610,6 +685,38 @@ impl MediaStats {
         } else {
             self.lost as f64 / expected as f64
         }
+    }
+
+    /// Lost and late packets as a share of those expected: the loss a
+    /// phone's jitter buffer sees.
+    pub fn playout_loss(&self) -> f64 {
+        let expected = self.packets_received + self.lost;
+        if expected == 0 {
+            0.0
+        } else {
+            ((self.lost + self.late) as f64 / expected as f64).min(1.0)
+        }
+    }
+
+    /// The mean R and MOS of the scored streams.
+    pub fn r_avg(&self) -> Option<f64> {
+        (self.scored > 0).then(|| self.r_sum / self.scored as f64)
+    }
+
+    pub fn mos_avg(&self) -> Option<f64> {
+        (self.scored > 0).then(|| self.mos_sum / self.scored as f64)
+    }
+
+    /// The scored streams by band, best first, those with any:
+    /// `satisfied x3, many dissatisfied x1`.
+    pub fn bands_text(&self) -> String {
+        quality::BANDS
+            .iter()
+            .zip(self.bands)
+            .filter(|(_, n)| *n > 0)
+            .map(|(b, n)| format!("{b} x{n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -716,6 +823,9 @@ impl fmt::Display for AppStats {
                 m.lost,
                 m.loss() * 100.0
             )?;
+            if let (Some(mos), Some(worst)) = (m.mos_avg(), m.mos_min) {
+                write!(f, ", MOS {mos:.2} (worst {worst:.2})")?;
+            }
         }
         Ok(())
     }

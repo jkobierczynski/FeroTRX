@@ -40,7 +40,7 @@ use std::time::Duration;
 
 use self::digest::{Algorithm, Challenge, Credentials};
 use self::msg::{param, uri_of, uri_user, Msg, Start};
-use self::rtp::{Codec, Sdp, Stream};
+use self::rtp::{Codec, MediaQuality, Sdp, Stream};
 use super::{
     AppCx, AppProtocol, AppRng, AppRole, AppSession, AppTransaction, Receive, SessionInit,
     Transport,
@@ -129,7 +129,7 @@ impl Default for SipServer {
 }
 
 /// SIP: both ends' settings.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Sip {
     pub client: SipClient,
     pub server: SipServer,
@@ -142,6 +142,9 @@ pub struct Sip {
     pub media: bool,
     /// SIP's T1: the first retransmission interval (500 ms).
     pub t1: Duration,
+    /// The jitter buffer, RTCP interval and codec factors for the calls'
+    /// scores.
+    pub quality: MediaQuality,
 }
 
 impl Default for Sip {
@@ -157,6 +160,7 @@ impl Default for Sip {
             ptime: Duration::from_millis(20),
             media: true,
             t1: Duration::from_millis(500),
+            quality: MediaQuality::default(),
         }
     }
 }
@@ -227,6 +231,15 @@ impl AppProtocol for Sip {
         }
         if self.t1.is_zero() || self.ptime.is_zero() {
             return bad("t1 and ptime must be more than zero");
+        }
+        let q = &self.quality;
+        if q.rtcp_interval < Duration::from_millis(100) {
+            return bad("rtcp_interval must be at least 100ms");
+        }
+        if q.ie.is_some_and(|v| !(0.0..=95.0).contains(&v))
+            || q.bpl.is_some_and(|v| !(1.0..=100.0).contains(&v))
+        {
+            return bad("ie must be 0 to 95 and bpl 1 to 100");
         }
         match role {
             AppRole::Client => {
@@ -844,7 +857,14 @@ impl Client {
                 .or_else(|| sdp.pick(&sip.codecs, true))
             {
                 let cname = self.ua.cname(&self.c().user);
-                let mut s = Stream::new(codec, sip.ptime, port, &mut self.ua.rng, cname);
+                let mut s = Stream::new(
+                    codec,
+                    sip.ptime,
+                    port,
+                    &mut self.ua.rng,
+                    cname,
+                    &sip.quality,
+                );
                 s.set_remote(sdp.port);
                 s.start(now);
                 self.stream = Some(s);
@@ -972,7 +992,7 @@ impl AppSession for Client {
 
     fn media(&mut self, port: u16, from: SocketAddr, data: &[u8], cx: &mut AppCx) {
         if let Some(s) = self.stream.as_mut() {
-            s.receive(port, from.port(), data, cx.now());
+            s.receive(port, from.port(), data, cx.now(), cx.wall());
         }
         self.schedule(cx);
     }
@@ -1311,7 +1331,14 @@ impl Server {
                             .unwrap_or("ferotrx")
                             .to_string();
                         let cname = self.ua.cname(&user);
-                        let mut s = Stream::new(codec, sip.ptime, port, &mut self.ua.rng, cname);
+                        let mut s = Stream::new(
+                            codec,
+                            sip.ptime,
+                            port,
+                            &mut self.ua.rng,
+                            cname,
+                            &sip.quality,
+                        );
                         s.set_remote(offer.port);
                         // Behind NAT the offer's address is not where the
                         // caller is: wait for its first packet.
@@ -1514,11 +1541,11 @@ impl AppSession for Server {
     }
 
     fn media(&mut self, port: u16, from: SocketAddr, data: &[u8], cx: &mut AppCx) {
-        let now = cx.now();
+        let (now, wall) = (cx.now(), cx.wall());
         for c in self.calls.values_mut() {
             if let Some(s) = c.stream.as_mut() {
                 if port == s.local || port == s.local + 1 {
-                    s.receive(port, from.port(), data, now);
+                    s.receive(port, from.port(), data, now, wall);
                 }
             }
         }
@@ -1552,6 +1579,10 @@ mod raw {
         pub codecs: Option<Vec<String>>,
         pub ptime: Option<String>,
         pub media: Option<bool>,
+        pub jitter_buffer: Option<String>,
+        pub rtcp_interval: Option<String>,
+        pub ie: Option<f64>,
+        pub bpl: Option<f64>,
         pub t1: Option<String>,
         #[serde(default)]
         pub users: BTreeMap<String, String>,
@@ -1618,6 +1649,11 @@ pub fn parse(t: &toml::Table) -> Result<Sip> {
     sip.ptime = dur(r.ptime, sip.ptime)?;
     sip.media = r.media.unwrap_or(true);
     sip.t1 = dur(r.t1, sip.t1)?;
+    let q = &mut sip.quality;
+    q.jitter_buffer = dur(r.jitter_buffer, q.jitter_buffer)?;
+    q.rtcp_interval = dur(r.rtcp_interval, q.rtcp_interval)?;
+    q.ie = r.ie;
+    q.bpl = r.bpl;
     let s = &mut sip.server;
     s.users = r.users;
     if let Some(a) = r.algorithm {

@@ -18,7 +18,7 @@ use super::wire::{self, Path, Segment, TcpHeader, TcpOpts, ACK, FIN, PSH, RST, S
 use crate::app::{App, AppCx, AppRole, AppSession, Receive, SessionInit, Transport};
 use crate::net::{ETHERTYPE_IPV4, ETHERTYPE_IPV6, IPPROTO_ICMPV6};
 use crate::traffic::EventClock;
-use crate::{AppStats, Error, MacAddr, Result, TrafficModel};
+use crate::{AppStats, Error, LatencyStats, MacAddr, Result, TrafficModel};
 
 /// An address as a number, for address ranges of either IP version.
 pub(crate) fn ip_num(ip: IpAddr) -> u128 {
@@ -561,6 +561,10 @@ pub struct TcpSideStats {
     pub paws_dropped: u64,
     /// Most bytes one connection had in flight, unacknowledged, at once.
     pub max_in_flight: u64,
+    /// Client: from the first SYN to the end of the handshake.
+    pub connect_time: LatencyStats,
+    /// Client: from the first SYN to the first byte from the server.
+    pub first_byte: LatencyStats,
     /// What the application protocol counted, for templates that play one:
     /// requests and answers by status, failures, response times.
     pub app: AppStats,
@@ -776,6 +780,8 @@ struct Conn {
     /// A segment timed for the round-trip time, without timestamps: the
     /// sequence number that acknowledges it, and when it went out.
     rtt_probe: Option<(u32, Duration)>,
+    /// When the connection began (the first SYN, or the SYN accepted).
+    opened: Duration,
     retries: u32,
     /// Retransmission timer, or the end of TIME_WAIT.
     deadline: Option<Duration>,
@@ -934,6 +940,7 @@ impl Conn {
             srtt: None,
             rttvar: Duration::ZERO,
             rtt_probe: Some((i.iss.wrapping_add(1), now)),
+            opened: now,
             retries: 0,
             deadline: Some(now + o.rto),
             last_rx: now,
@@ -1528,6 +1535,10 @@ impl Conn {
         self.deadline = None;
         self.last_rx = now;
         out.add(self.role, self.tpl, |s| s.established += 1);
+        if self.role == TcpRole::Client {
+            let t = now.saturating_sub(self.opened);
+            out.add(self.role, self.tpl, |s| s.connect_time.record(Some(t)));
+        }
         self.app_call(out, now, |a, cx| a.start(cx));
     }
 
@@ -1684,7 +1695,7 @@ impl Conn {
                     let skip = span(seq, self.rcv_nxt);
                     let data = &seg.data[skip..span(seq, end)];
                     self.verify_at(sh, self.rx_total, data);
-                    self.deliver(out, data.len());
+                    self.deliver(out, data.len(), now);
                     self.rcv_nxt = end;
                     if self.app.is_some() {
                         self.app_receive(out, data, now);
@@ -1731,7 +1742,7 @@ impl Conn {
             self.ooo.remove(0);
             if wire::seq_lt(self.rcv_nxt, r) {
                 let from = self.rcv_nxt;
-                self.deliver(out, span(from, r));
+                self.deliver(out, span(from, r), now);
                 self.rcv_nxt = r;
                 if self.app.is_some() {
                     let data = self.ooo_bytes(from, r);
@@ -1781,9 +1792,13 @@ impl Conn {
     }
 
     /// Counts `n` bytes that arrived in order.
-    fn deliver(&mut self, out: &mut Out, n: usize) {
+    fn deliver(&mut self, out: &mut Out, n: usize, now: Duration) {
         let b = n as u64;
         out.add(self.role, self.tpl, |s| s.payload_rx += b);
+        if self.rx_total == 0 && n > 0 && self.role == TcpRole::Client {
+            let t = now.saturating_sub(self.opened);
+            out.add(self.role, self.tpl, |s| s.first_byte.record(Some(t)));
+        }
         self.rx_total += n;
         self.unread += n;
     }

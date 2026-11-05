@@ -785,6 +785,12 @@ pub struct TcpCounters {
     /// Most bytes one connection had in flight at once.
     #[serde(default)]
     pub max_in_flight: u64,
+    /// Client: from the first SYN to the end of the handshake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_time: Option<LatencyCounters>,
+    /// Client: from the first SYN to the first byte from the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_byte: Option<LatencyCounters>,
     /// What the application protocol counted, for templates that play one
     /// (`app = "http"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -844,6 +850,34 @@ pub struct MediaCounters {
     /// Streams by codec, e.g. `{"PCMU": 16}`.
     #[serde(default)]
     pub codecs: std::collections::BTreeMap<String, u64>,
+    /// Packets too late for the jitter buffer (lost for the score).
+    #[serde(default)]
+    pub late: u64,
+    /// Runs of lost or late packets, and the longest.
+    #[serde(default)]
+    pub loss_bursts: u64,
+    #[serde(default)]
+    pub max_burst: u64,
+    /// Each stream's mean round trip from RTCP, for those that measured one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt: Option<LatencyCounters>,
+    /// Lost packets the other ends reported (RTCP) about ours.
+    #[serde(default)]
+    pub remote_lost: u64,
+    /// The E-model's R (0 to 100) and estimated MOS (1 to 4.5): mean and
+    /// worst over the scored streams.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r_avg: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r_min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mos_avg: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mos_min: Option<f64>,
+    /// Scored streams by G.109 band of R, best first: 90 and up, 80, 70,
+    /// 60, 50, below 50.
+    #[serde(default)]
+    pub bands: Vec<u64>,
 }
 
 /// TLS handshakes of one side; see `ferotrx_core::AppStats`.
@@ -899,6 +933,20 @@ impl From<&ferotrx_core::AppStats> for AppCounters {
                     rtcp_sent: m.rtcp_sent,
                     rtcp_received: m.rtcp_received,
                     codecs: m.codecs.clone(),
+                    late: m.late,
+                    loss_bursts: m.loss_bursts,
+                    max_burst: m.max_burst,
+                    rtt: (m.rtt.count() > 0).then(|| (&m.rtt).into()),
+                    remote_lost: m.remote_lost,
+                    r_avg: m.r_avg(),
+                    r_min: m.r_min,
+                    mos_avg: m.mos_avg(),
+                    mos_min: m.mos_min,
+                    bands: if m.scored > 0 {
+                        m.bands.to_vec()
+                    } else {
+                        Vec::new()
+                    },
                 }
             }),
         }
@@ -928,6 +976,8 @@ impl From<&TcpSideStats> for TcpCounters {
             timeouts: s.timeouts,
             paws_dropped: s.paws_dropped,
             max_in_flight: s.max_in_flight,
+            connect_time: (s.connect_time.count() > 0).then(|| (&s.connect_time).into()),
+            first_byte: (s.first_byte.count() > 0).then(|| (&s.first_byte).into()),
             app: AppCounters::of(&s.app),
         }
     }

@@ -43,6 +43,8 @@ pub fn tcp_metrics(s: &TcpStats) -> Metrics {
     put(&mut m, "app_errors", a.errors as f64);
     put(&mut m, "protocol_errors", a.protocol_errors as f64);
     latency_metrics(&mut m, "response", &a.response_time);
+    latency_metrics(&mut m, "connect", &c.connect_time);
+    latency_metrics(&mut m, "first_byte", &c.first_byte);
     if a.handshakes > 0 {
         put(&mut m, "tls_handshakes", a.handshakes as f64);
         put(&mut m, "tls_failed", a.handshake_failures as f64);
@@ -128,6 +130,37 @@ pub fn udp_metrics(s: &UdpStats) -> Metrics {
         let mut jitter = cm.jitter.clone();
         jitter.merge(&sm.jitter);
         latency_metrics(&mut m, "jitter", &jitter);
+        put(&mut m, "media_late", cm.late.max(sm.late) as f64);
+        put(
+            &mut m,
+            "media_playout_loss_pct",
+            cm.playout_loss().max(sm.playout_loss()) * 100.0,
+        );
+        put(&mut m, "max_burst", cm.max_burst.max(sm.max_burst) as f64);
+        let mut rtt = cm.rtt.clone();
+        rtt.merge(&sm.rtt);
+        if let Some(v) = rtt.mean() {
+            put(&mut m, "rtt_avg", ms(v));
+        }
+        if let Some(v) = rtt.max() {
+            put(&mut m, "rtt_max", ms(v));
+        }
+        let worse = |a: Option<f64>, b: Option<f64>| match (a, b) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        if let Some(v) = worse(cm.mos_avg(), sm.mos_avg()) {
+            put(&mut m, "mos", v);
+        }
+        if let Some(v) = worse(cm.mos_min, sm.mos_min) {
+            put(&mut m, "mos_min", v);
+        }
+        if let Some(v) = worse(cm.r_avg(), sm.r_avg()) {
+            put(&mut m, "r_factor", v);
+        }
+        if let Some(v) = worse(cm.r_min, sm.r_min) {
+            put(&mut m, "r_factor_min", v);
+        }
     }
     m
 }
