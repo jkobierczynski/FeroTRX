@@ -454,10 +454,13 @@ EOT
     client_pid=$!
     wait_event "^bound" || fail "udhcpc6 got no lease"
     sed 's/^/  /' "$tmp/events"
-    grep "^bound" "$tmp/events" | grep -q " ipv6=fd00:88::1[0-9a-f]* " \
+    # udhcpc6 writes addresses in full: fd00:0088:0000:...:0102.
+    grep "^bound" "$tmp/events" | grep -q " ipv6=fd00:0*88:[0:]*:\?0*1[0-9a-f][0-9a-f] " \
         || fail "udhcpc6 got no address from the pool"
-    grep "^bound" "$tmp/events" | grep -q " dns=fd00:88::53 " \
+    grep "^bound" "$tmp/events" | grep -q " dns=fd00:0*88:[0:]*:\?0*53 " \
         || fail "udhcpc6 did not get the DNS server"
+    grep "^bound" "$tmp/events" | grep -q " search=lab.test " \
+        || fail "udhcpc6 did not get the domain search list"
     if ip netns exec $DNS_NS ping -6 -c 1 -W 2 fe80::dc:ff:fe00:d01%d0 >/dev/null; then
         echo "  the server answers pings at its link-local address"
     else
