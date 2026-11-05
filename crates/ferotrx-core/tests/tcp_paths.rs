@@ -860,3 +860,76 @@ fn resets_outside_the_window_are_ignored() {
     assert!(injected);
     assert_clean(&client, &server, 1);
 }
+
+#[test]
+fn a_reset_after_the_last_ack_completes() {
+    // The client closes first. Its last ACK is lost, and so are the server's
+    // resent FINs until the client has left TIME_WAIT; the client then
+    // answers the next one with a reset, as a host does. The server had sent
+    // everything and had the client's FIN: it completed, and does not count
+    // a reset.
+    let program = TcpProgram::new(
+        80,
+        vec![
+            TcpMessage::new(TcpRole::Client, "hello from FeroTRX\r\n"),
+            TcpMessage::new(TcpRole::Server, "hello from FeroTRX\r\n"),
+        ],
+    )
+    .with_closer(TcpRole::Client);
+    let (mut client, mut server) = engines(
+        program,
+        1,
+        false,
+        TcpOptions::default(),
+        TcpOptions::default(),
+    );
+    let mut link = Link::new(Duration::from_millis(5), 100, 100);
+    let mut server_fin: Option<Duration> = None;
+    let mut client_rst = false;
+    let step = Duration::from_micros(100);
+    let mut now = Duration::ZERO;
+    while now < Duration::from_secs(30) {
+        for f in link.arrived(0, now) {
+            server.handle_frame(0, &f, now);
+        }
+        for f in link.arrived(1, now) {
+            client.handle_frame(0, &f, now);
+        }
+        for (d, e) in [(0, &mut client), (1, &mut server)] {
+            e.poll(now);
+            for (_, f) in e.take_output() {
+                let Some(s) = tcp_of(&f) else {
+                    link.send(d, f, now, Duration::ZERO);
+                    continue;
+                };
+                let drop = match d {
+                    // The client's ACKs once the server has sent its FIN.
+                    0 => {
+                        client_rst |= s.flags & 0x04 != 0;
+                        server_fin.is_some() && s.flags == 0x10
+                    }
+                    // The server's FINs after its first, for 6 s.
+                    _ if s.flags & 0x01 != 0 => match server_fin {
+                        None => {
+                            server_fin = Some(now);
+                            false
+                        }
+                        Some(t) => now < t + Duration::from_secs(6),
+                    },
+                    _ => false,
+                };
+                if !drop {
+                    link.send(d, f, now, Duration::ZERO);
+                }
+            }
+        }
+        if server_fin.is_some() && server.open_connections() == 0 {
+            break;
+        }
+        now += step;
+    }
+    assert!(client_rst, "the client never reset");
+    let (c, s) = (&client.stats().client, &server.stats().server);
+    assert_eq!((c.completed, c.failed()), (1, 0), "{c:?}");
+    assert_eq!((s.completed, s.failed(), s.reset), (1, 0, 0), "{s:?}");
+}

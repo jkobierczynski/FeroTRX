@@ -1425,6 +1425,15 @@ impl Conn {
         }
     }
 
+    /// LAST_ACK: the other end closed first, we have its FIN and it has all
+    /// our data; only our FIN is not acknowledged yet. A reset now comes
+    /// from an end that has seen everything and left TIME_WAIT (its last
+    /// ACK was lost, and our FIN came again too late), so the connection
+    /// completed.
+    fn last_ack(&self) -> bool {
+        self.fin_rcvd && self.fin_queued && !self.closed_first && self.snd_buf.is_empty()
+    }
+
     /// Handles a segment for this connection.
     fn on_segment(&mut self, sh: &Shared, out: &mut Out, seg: &Segment, now: Duration) -> Fate {
         let o = &sh.options;
@@ -1433,9 +1442,9 @@ impl Conn {
             if !self.rst_acceptable(o, seg) {
                 return Fate::Keep;
             }
-            if self.goodbye {
-                // What it reset came after its goodbye: the conversation
-                // was over.
+            if self.goodbye || self.last_ack() {
+                // What it reset came after its goodbye, or after it closed
+                // and we sent all we had: the conversation was over.
                 self.finish(out);
             } else if !self.counted {
                 out.add(self.role, self.tpl, |s| s.reset += 1);
