@@ -106,6 +106,7 @@ mod error;
 mod field_engine;
 mod flows;
 mod host;
+mod impair;
 mod job;
 mod latency;
 mod net;
@@ -149,6 +150,11 @@ pub use host::{
     Dhcpv6ServerConfig, Emulation, EndpointConfig, EndpointHosts, GroupStatus, HostAddress,
     HostConfig, HostCounters, HostEngine, HostOptions, HostState, HostStats, HostStatus, Hosted,
     HostedStats, Ipv4Mode, Ipv6Mode, RouterConfig,
+};
+pub use impair::{
+    impair_port, parse_bit_rate, run_bridge, BridgeConfig, BridgeStats, ImpairMonitor, ImpairPort,
+    ImpairSpec, ImpairStats, Impairer, JitterDist, MtuAction, PortImpair, PortImpairStats,
+    DEFAULT_IMPAIR_LIMIT,
 };
 pub use job::{Job, JobState, RxSettings, JOB_STATS_INTERVAL};
 pub use latency::{

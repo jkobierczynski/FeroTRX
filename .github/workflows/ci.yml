@@ -360,6 +360,16 @@ jobs:
           sudo LOSS=0.03 scripts/latency-netns.sh ./target/debug/ferotrx
           sudo IPV6=1 scripts/latency-netns.sh ./target/debug/ferotrx
 
+      # FeroTRX's own impairments, without netem: the two-port bridge
+      # between hosts in namespaces, a stream's impairments measured by a
+      # receiver, a rate limit; and a TCP run through impaired ports.
+      - name: Built-in impairments (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo scripts/impair-netns.sh ./target/debug/ferotrx
+          sudo scripts/tcp-nat-netns.sh ./target/debug/ferotrx --impair "delay=5ms loss=2% seed=1" --impair-rx "loss=2% seed=2"
+
       # RFC 2544 benchmark of a router whose output a token bucket limits to
       # 20 Mbit/s: throughput, latency, frame loss and back-to-back for a
       # fixed size and IMIX, checked against the limit; JSON and text reports.

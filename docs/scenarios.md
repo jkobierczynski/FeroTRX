@@ -147,8 +147,10 @@ the check), so its counters show in the GUI's statistics and charts as it
 goes.
 
 Other keys of a check: `name`, `description`, `expect`, `require`, `iface`,
-`rx`, `rx_wait`, `duration`, `attempts`. Unknown keys are an error, so a typo
-does not silently turn into a check that tests nothing.
+`rx`, `rx_wait`, `duration`, `attempts`, and `impair` and `impair_rx`: FeroTRX's
+own impairments for this check only (delay, loss and the rest; see
+[Impairments](impairments.md)), over those of its profile. Unknown keys are
+an error, so a typo does not silently turn into a check that tests nothing.
 
 ### Variables
 

@@ -308,6 +308,8 @@ struct RawCheck {
     #[serde(default)]
     require: Vec<String>,
     attempts: Option<u32>,
+    impair: Option<crate::profile::ImpairFile>,
+    impair_rx: Option<crate::profile::ImpairFile>,
 }
 
 /// A profile file, or the profile's tables right in the scenario.
@@ -525,11 +527,40 @@ impl Scenario {
                 "inline".to_string(),
             ),
         };
-        let workload = match kind {
+        let mut workload = match kind {
             CheckKind::Tcp => Workload::Tcp(TcpProfile::from_toml(&text, &dir)?),
             CheckKind::Udp => Workload::Udp(UdpProfile::from_toml(&text, &dir)?),
             CheckKind::Traffic => Workload::Traffic(Profile::from_toml(&text, &dir)?),
         };
+        // The check's impairments, over the profile's: a network made worse
+        // for this check only.
+        let impair = crate::profile::ImpairFile::into_option(c.impair, "impair")?;
+        let impair_rx = crate::profile::ImpairFile::into_option(c.impair_rx, "impair_rx")?;
+        match &mut workload {
+            Workload::Tcp(TcpProfile { impair: p, .. })
+            | Workload::Udp(UdpProfile { impair: p, .. }) => {
+                if impair.is_some() {
+                    p.tx = impair;
+                }
+                if impair_rx.is_some() {
+                    p.rx = impair_rx;
+                }
+            }
+            Workload::Traffic(p) => {
+                if impair_rx.is_some() {
+                    return Err(Error::Profile(
+                        "impair_rx is for tcp and udp checks; a traffic check impairs what it \
+                         sends (impair)"
+                            .into(),
+                    ));
+                }
+                if let Some(spec) = impair {
+                    for s in &mut p.streams {
+                        s.impair = Some(spec.clone());
+                    }
+                }
+            }
+        }
         let expect = c
             .expect
             .as_deref()
@@ -735,6 +766,47 @@ packet = "eth/ipv4(dst=${server})/udp/raw(len=100)"
         assert!(e.contains("needs `rx`"), "{e}");
         let e = err("[[check]]\nname = \"a\"\ncolor = \"red\"\n");
         assert!(e.contains("unknown field `color`"), "{e}");
+    }
+
+    #[test]
+    fn checks_impair_their_own_runs() {
+        let tcp = "[check.tcp]\nport = 80\nimpair = \"delay=1ms\"\n[[check.tcp.message]]\nfrom = \"client\"\ntext = \"x\"\n[check.tcp.client]\nip = \"10.0.0.1\"\n";
+        let text = format!(
+            "[[check]]\nname = \"lossy\"\nimpair = \"loss=5% seed=1\"\nimpair_rx = \"delay=10ms\"\n{tcp}\
+             [[check]]\nname = \"clean\"\n{tcp}"
+        );
+        let s = Scenario::from_toml(&text, Path::new("."), &[]).unwrap();
+        let Workload::Tcp(p) = &s.checks[0].workload else {
+            panic!()
+        };
+        assert_eq!(p.impair.tx.as_ref().unwrap().loss, 0.05);
+        assert_eq!(
+            p.impair.rx.as_ref().unwrap().delay,
+            Duration::from_millis(10)
+        );
+        let Workload::Tcp(p) = &s.checks[1].workload else {
+            panic!()
+        };
+        // The profile's own stays where the check sets none.
+        assert_eq!(
+            p.impair.tx.as_ref().unwrap().delay,
+            Duration::from_millis(1)
+        );
+        assert!(p.impair.rx.is_none());
+        let traffic = "[[check]]\nname = \"t\"\niface = \"a\"\nrx = \"b\"\nrequire = [\"loss_pct < 10%\"]\nimpair = { loss = \"2%\" }\n[check.traffic]\n[[check.traffic.stream]]\npacket = \"eth/ipv4/udp\"\n";
+        let s = Scenario::from_toml(traffic, Path::new("."), &[]).unwrap();
+        let Workload::Traffic(p) = &s.checks[0].workload else {
+            panic!()
+        };
+        assert_eq!(p.streams[0].impair.as_ref().unwrap().loss, 0.02);
+        let e = Scenario::from_toml(
+            &traffic.replace("impair =", "impair_rx ="),
+            Path::new("."),
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("impair_rx is for tcp and udp"), "{e}");
     }
 
     #[test]

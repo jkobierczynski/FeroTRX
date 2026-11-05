@@ -53,6 +53,9 @@ pub struct TcpArgs {
     #[command(flatten)]
     send: crate::SendArgs,
 
+    #[command(flatten)]
+    impair: crate::PortImpairArgs,
+
     /// Where the client connects, IP:PORT ([IPv6]:PORT), or IP for each template's port.
     /// Default: the server's address and port. Needed when this machine runs
     /// only the client.
@@ -450,6 +453,7 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
         profile.duration = args.duration;
     }
     profile.output = args.send.settings()?.or(&profile.output);
+    args.impair.apply(&mut profile.impair);
 
     if args.show {
         let many = profile.templates.len() > 1;
@@ -605,6 +609,9 @@ fn print_summary(s: &TcpStats) {
             String::new()
         }
     );
+    for line in crate::impair_lines(&s.impair) {
+        eprintln!("  {line}");
+    }
     for (what, side) in [("client", &s.client), ("server", &s.server)] {
         if side.started == 0 && side.payload_rx == 0 {
             continue;
@@ -787,6 +794,9 @@ pub fn print_tcp_run(r: &TcpRunInfo) {
     println!("  session: {}", r.program);
     if let Some(e) = &r.error {
         println!("  error: {e}");
+    }
+    for line in crate::port_impair_lines(&r.impair) {
+        println!("  {line}");
     }
     for (what, c) in [("client", &r.client), ("server", &r.server)] {
         if c.started > 0 || c.payload_rx > 0 {

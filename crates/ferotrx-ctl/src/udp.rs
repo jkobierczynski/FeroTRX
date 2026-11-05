@@ -95,7 +95,7 @@ pub fn start_udp_with(
             send: profile.output.clone(),
             macs: engine.port_macs(i),
         };
-        let port = open(name, &settings)?;
+        let port = profile.impair.wrap(open(name, &settings)?, i);
         port_details.extend(port.describe());
         ports.push(port);
     }
@@ -165,6 +165,7 @@ impl UdpRun {
             elapsed_s: 0.0,
             tps: 0.0,
             hosts: Vec::new(),
+            impair: None,
         };
         info.fill(&stats);
         info

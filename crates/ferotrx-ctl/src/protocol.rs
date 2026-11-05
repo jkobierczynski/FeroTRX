@@ -9,8 +9,9 @@ use serde_json::Value;
 
 use ferotrx_core::scenario::{CheckReport, LabSpec, ScenarioReport};
 use ferotrx_core::{
-    DhcpServerStatus, FlowReport, FlowStats, HostAddress, HostStatus, LatencyStats, ReplayStats,
-    RunStats, RxStats, TcpSideStats, TcpStats, UdpSideStats, UdpStats,
+    DhcpServerStatus, FlowReport, FlowStats, HostAddress, HostStatus, ImpairStats, LatencyStats,
+    PortImpairStats, ReplayStats, RunStats, RxStats, TcpSideStats, TcpStats, UdpSideStats,
+    UdpStats,
 };
 
 /// Version of the method set below. Bumped when a method changes incompatibly.
@@ -303,6 +304,9 @@ pub struct StreamInfo {
     /// left out for evenly spaced packets at a flat rate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The stream's impairments (the profile's `impair`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impair: Option<String>,
 }
 
 // ----- run.* -----
@@ -380,6 +384,11 @@ pub struct StartParams {
     /// profile marks none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rx: Option<RxSpec>,
+    /// Impairments for every stream instead of the profile's, as a bad link
+    /// would do them: `delay=20ms jitter=5ms loss=1%` and so on (see
+    /// `ferotrx_core::ImpairSpec`); `none` turns the profile's off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impair: Option<String>,
 }
 
 /// Where a run receives its own packets back, for loss and latency.
@@ -453,6 +462,90 @@ pub struct RunInfo {
     /// What the run's receiver saw, when it has one (`rx` in `run.start`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rx: Option<RxCounters>,
+    /// What the streams' impairments did, all together; left out for a run
+    /// without them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impair: Option<ImpairCounters>,
+}
+
+/// What an impairment did (`ferotrx_core::ImpairStats`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ImpairCounters {
+    /// Frames that came in, and their bytes.
+    pub packets: u64,
+    pub bytes: u64,
+    /// Frames that went out, duplicates included.
+    pub passed: u64,
+    /// Lost by the loss model.
+    pub lost: u64,
+    /// Over the MTU: dropped, or cut.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub mtu_dropped: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub truncated: u64,
+    /// Dropped because the queue was full (`limit`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub queue_dropped: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub duplicated: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub corrupted: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reordered: u64,
+    /// Frames held now, and the most held at once.
+    #[serde(default)]
+    pub held: u64,
+    #[serde(default)]
+    pub max_held: u64,
+    /// How long frames were held: delay and rate queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay: Option<LatencyCounters>,
+}
+
+impl From<&ImpairStats> for ImpairCounters {
+    fn from(s: &ImpairStats) -> Self {
+        Self {
+            packets: s.packets,
+            bytes: s.bytes,
+            passed: s.passed,
+            lost: s.lost,
+            mtu_dropped: s.mtu_dropped,
+            truncated: s.truncated,
+            queue_dropped: s.queue_dropped,
+            duplicated: s.duplicated,
+            corrupted: s.corrupted,
+            reordered: s.reordered,
+            held: s.held,
+            max_held: s.max_held,
+            delay: (s.delay.count() > 0).then(|| (&s.delay).into()),
+        }
+    }
+}
+
+/// What a TCP, UDP or host run's port impairments did, each way; a way
+/// without impairments is left out.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PortImpairCounters {
+    /// Frames the run sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx: Option<ImpairCounters>,
+    /// Frames the run received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rx: Option<ImpairCounters>,
+}
+
+impl PortImpairCounters {
+    /// `None` when neither way was impaired.
+    pub fn of(s: &PortImpairStats) -> Option<Self> {
+        if s.is_empty() {
+            return None;
+        }
+        let way = |w: &ImpairStats| (!w.is_empty()).then(|| w.into());
+        Some(Self {
+            tx: way(&s.tx),
+            rx: way(&s.rx),
+        })
+    }
 }
 
 /// Counters of a run or of one stream.
@@ -496,6 +589,9 @@ pub struct StreamCounters {
     /// Loss and latency, for a stream with a signature in a run with a receiver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency: Option<FlowCounters>,
+    /// What the stream's impairments did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impair: Option<ImpairCounters>,
 }
 
 impl RunInfo {
@@ -507,6 +603,7 @@ impl RunInfo {
                 name: name.clone(),
                 counters: s.into(),
                 latency: None,
+                impair: s.impair.as_ref().map(Into::into),
             })
             .collect();
         ((&stats.total).into(), streams)
@@ -715,6 +812,14 @@ pub struct TcpStartParams {
     /// Engine threads (cores) to spread the run over (default 1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<u16>,
+    /// Impairments of the frames the run sends, as a bad link would do them:
+    /// `delay=20ms jitter=5ms loss=1%` and so on (see
+    /// `ferotrx_core::ImpairSpec`); `none` turns the profile's off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impair: Option<String>,
+    /// Impairments of the frames the run receives, before the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impair_rx: Option<String>,
 }
 
 /// A stateful TCP run, as `tcp.start`, `tcp.stats`, `tcp.stop` and `tcp.list` report it.
@@ -753,6 +858,9 @@ pub struct TcpRunInfo {
     /// addresses by DHCP, SLAAC or DHCPv6, announce them or join groups.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<HostInfo>,
+    /// What the ports' impairments did (`impair`, `impair_rx`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impair: Option<PortImpairCounters>,
 }
 
 /// The counters of one template of a [`TcpRunInfo`].
@@ -1003,6 +1111,7 @@ impl TcpRunInfo {
         self.elapsed_s = s.elapsed.as_secs_f64();
         self.cps = s.cps();
         self.hosts = s.hosts.iter().map(HostInfo::from).collect();
+        self.impair = PortImpairCounters::of(&s.impair);
     }
 }
 
@@ -1054,6 +1163,14 @@ pub struct UdpStartParams {
     /// Engine threads (cores) to spread the run over (default 1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<u16>,
+    /// Impairments of the frames the run sends, as a bad link would do them:
+    /// `delay=20ms jitter=5ms loss=1%` and so on (see
+    /// `ferotrx_core::ImpairSpec`); `none` turns the profile's off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impair: Option<String>,
+    /// Impairments of the frames the run receives, before the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impair_rx: Option<String>,
 }
 
 /// A stateful UDP run, as `udp.start`, `udp.stats`, `udp.stop` and `udp.list` report it.
@@ -1091,6 +1208,9 @@ pub struct UdpRunInfo {
     /// addresses by DHCP, SLAAC or DHCPv6, announce them or join groups.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<HostInfo>,
+    /// What the ports' impairments did (`impair`, `impair_rx`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impair: Option<PortImpairCounters>,
 }
 
 /// The counters of one template of a [`UdpRunInfo`].
@@ -1169,6 +1289,7 @@ impl UdpRunInfo {
         self.elapsed_s = s.elapsed.as_secs_f64();
         self.tps = s.tps();
         self.hosts = s.hosts.iter().map(HostInfo::from).collect();
+        self.impair = PortImpairCounters::of(&s.impair);
     }
 }
 

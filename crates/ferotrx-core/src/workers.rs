@@ -61,6 +61,11 @@ impl MergeStats for ReplayStats {
         self.tagged += o.tagged;
         self.elapsed = self.elapsed.max(o.elapsed);
         self.stopped |= o.stopped;
+        match (&mut self.impair, &o.impair) {
+            (Some(a), Some(b)) => a.merge(b),
+            (None, Some(b)) => self.impair = Some(b.clone()),
+            _ => {}
+        }
     }
 }
 

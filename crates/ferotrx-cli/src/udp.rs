@@ -80,6 +80,9 @@ pub struct UdpArgs {
     #[command(flatten)]
     send: crate::SendArgs,
 
+    #[command(flatten)]
+    impair: crate::PortImpairArgs,
+
     /// Where the client sends, IP:PORT ([IPv6]:PORT), or IP for each
     /// template's port. Default: the server. Needed when this machine runs
     /// only the client.
@@ -301,6 +304,7 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
         profile.duration = args.duration;
     }
     profile.output = args.send.settings()?.or(&profile.output);
+    args.impair.apply(&mut profile.impair);
 
     if args.show {
         let apps = profile.apps()?;
@@ -452,6 +456,9 @@ fn print_summary(s: &UdpStats) {
             String::new()
         }
     );
+    for line in crate::impair_lines(&s.impair) {
+        eprintln!("  {line}");
+    }
     for (what, side) in [("client", &s.client), ("server", &s.server)] {
         if side.sent == 0 && side.datagrams_rx == 0 {
             continue;
@@ -646,6 +653,9 @@ pub fn print_udp_run(r: &UdpRunInfo) {
     println!("  transactions: {}", r.program);
     if let Some(e) = &r.error {
         println!("  error: {e}");
+    }
+    for line in crate::port_impair_lines(&r.impair) {
+        println!("  {line}");
     }
     for (what, c) in [("client", &r.client), ("server", &r.server)] {
         if c.sent > 0 || c.datagrams_rx > 0 {

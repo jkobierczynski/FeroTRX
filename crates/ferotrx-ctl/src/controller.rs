@@ -605,6 +605,12 @@ impl Controller {
         if p.latency {
             profile.enable_latency();
         }
+        if let Some(text) = &p.impair {
+            let spec = parse_impair(text)?;
+            for s in &mut profile.streams {
+                s.impair = spec.clone();
+            }
+        }
         let rx = match &p.rx {
             Some(spec) => {
                 let wait = spec
@@ -1039,6 +1045,7 @@ impl Controller {
         }
         .send_settings()?;
         profile.output = output.or(&profile.output);
+        apply_impair(&mut profile.impair, &p.impair, &p.impair_rx)?;
         let started = start_tcp_with(&profile, p.iface.as_deref(), config, &*self.open_port)
             .map_err(RpcError::failed)?;
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
@@ -1118,6 +1125,7 @@ impl Controller {
         }
         .send_settings()?;
         profile.output = output.or(&profile.output);
+        apply_impair(&mut profile.impair, &p.impair, &p.impair_rx)?;
         let started = start_udp_with(&profile, p.iface.as_deref(), config, &*self.open_port)
             .map_err(RpcError::failed)?;
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
@@ -1250,6 +1258,7 @@ impl Run {
             workers: self.job.workers(),
             state,
             error,
+            impair: stats.total.impair.as_ref().map(Into::into),
             total,
             streams,
             rx,
@@ -1299,6 +1308,7 @@ fn profile_info(name: &str, p: &Profile) -> ProfileInfo {
                 latency: s.latency,
                 sizes: s.sizes.as_ref().map(ToString::to_string),
                 model: (!s.model.is_steady()).then(|| s.model.to_string()),
+                impair: s.impair.as_ref().map(ToString::to_string),
             })
             .collect(),
     }
@@ -1437,6 +1447,29 @@ fn lab_info(l: &ferotrx_io::Lab, unavailable: Option<String>) -> LabInfo {
         },
         unavailable,
     }
+}
+
+/// An impairment spec from a request; `None` for one that does nothing.
+fn parse_impair(text: &str) -> Result<Option<ferotrx_core::ImpairSpec>, RpcError> {
+    let spec: ferotrx_core::ImpairSpec = text
+        .parse()
+        .map_err(|e: ferotrx_core::Error| RpcError::invalid_params(e.to_string()))?;
+    Ok((!spec.is_none()).then_some(spec))
+}
+
+/// A request's `impair` and `impair_rx` over a profile's.
+fn apply_impair(
+    profile: &mut ferotrx_core::PortImpair,
+    tx: &Option<String>,
+    rx: &Option<String>,
+) -> Result<(), RpcError> {
+    if let Some(t) = tx {
+        profile.tx = parse_impair(t)?;
+    }
+    if let Some(t) = rx {
+        profile.rx = parse_impair(t)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

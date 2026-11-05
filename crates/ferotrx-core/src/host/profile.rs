@@ -61,6 +61,9 @@ pub struct HostProfile {
     pub duration: Option<Duration>,
     /// How the interfaces send and receive (the `[output]` table).
     pub output: SendSettings,
+    /// Impairments of the frames the hosts send (`impair`) and receive
+    /// (`impair_rx`).
+    pub impair: crate::PortImpair,
 }
 
 /// One `[[host]]` table: `count` hosts alike but for their MACs, static
@@ -113,6 +116,8 @@ struct RawProfile {
     #[serde(default)]
     host: Vec<RawHost>,
     output: Option<OutputFile>,
+    impair: Option<crate::profile::ImpairFile>,
+    impair_rx: Option<crate::profile::ImpairFile>,
 }
 
 /// The `[options]` of a host profile, also the `[hosts]` table of TCP and
@@ -491,6 +496,10 @@ impl HostProfile {
             output: raw
                 .output
                 .map_or(Ok(SendSettings::default()), OutputFile::settings)?,
+            impair: crate::PortImpair {
+                tx: crate::profile::ImpairFile::into_option(raw.impair, "impair")?,
+                rx: crate::profile::ImpairFile::into_option(raw.impair_rx, "impair_rx")?,
+            },
         };
         // Catch bad settings now, not when the interfaces are open.
         let ifaces = profile.interfaces(Some("-")).unwrap_or_default();

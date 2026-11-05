@@ -355,6 +355,8 @@ pub struct PortConfig {
     /// Receive on this interface of the same server, for loss and latency.
     pub rx_iface: String,
     pub latency: bool,
+    /// Impairments for all streams (`ImpairSpec` text), overriding theirs.
+    pub impair: String,
 }
 
 /// The ports a server offers: its interfaces, and two that need no
@@ -455,6 +457,9 @@ pub fn start_params(
     if !cfg.rx_iface.is_empty() {
         p.insert("rx".into(), serde_json::json!({ "iface": cfg.rx_iface }));
     }
+    if !cfg.impair.trim().is_empty() {
+        p.insert("impair".into(), cfg.impair.trim().into());
+    }
     p.into()
 }
 
@@ -529,6 +534,7 @@ future_key = { a = 1 }
             duration: "10s".into(),
             rx_iface: "veth1".into(),
             workers: Some(4),
+            impair: "delay=5ms loss=1%".into(),
             ..Default::default()
         };
         let p = start_params(
@@ -541,6 +547,7 @@ future_key = { a = 1 }
         assert_eq!(p["output"]["backend"], "af_xdp");
         assert_eq!(p["rx"]["iface"], "veth1");
         assert_eq!(p["output"]["workers"], 4);
+        assert_eq!(p["impair"], "delay=5ms loss=1%");
         let p = start_params(&PortKind::Null, &cfg, "gui-null", "");
         assert_eq!(p["output"]["null"], true);
         assert!(p["output"].get("backend").is_none());

@@ -220,6 +220,8 @@ class StreamInfo(Record):
     sizes: str | None = None
     #: Traffic model, e.g. ``poisson,burst=8``; None for a flat rate.
     model: str | None = None
+    #: The stream's impairments (the profile's ``impair``), e.g. ``delay=20ms loss=1%``.
+    impair: str | None = None
 
 
 @dataclass(kw_only=True)
@@ -270,6 +272,47 @@ class LatencyCounters(Record):
 
 
 @dataclass(kw_only=True)
+class ImpairCounters(Record):
+    """What an impairment did to the frames that went through it."""
+
+    #: Frames that came in, and their bytes.
+    packets: int = 0
+    bytes: int = 0
+    #: Frames that went out, duplicates included.
+    passed: int = 0
+    #: Lost by the loss model.
+    lost: int = 0
+    #: Over the MTU: dropped, or cut.
+    mtu_dropped: int = 0
+    truncated: int = 0
+    #: Dropped because the queue was full (``limit``).
+    queue_dropped: int = 0
+    duplicated: int = 0
+    corrupted: int = 0
+    reordered: int = 0
+    #: Frames held now, and the most held at once.
+    held: int = 0
+    max_held: int = 0
+    #: How long frames were held: delay and rate queue.
+    delay: LatencyCounters | None = None
+
+    @property
+    def dropped(self) -> int:
+        """Frames that did not go out: lost, over the MTU or the queue limit."""
+        return self.lost + self.mtu_dropped + self.queue_dropped
+
+
+@dataclass(kw_only=True)
+class PortImpairCounters(Record):
+    """A TCP or UDP run's port impairments, each way (None if not impaired)."""
+
+    #: Frames the run sent.
+    tx: ImpairCounters | None = None
+    #: Frames the run received.
+    rx: ImpairCounters | None = None
+
+
+@dataclass(kw_only=True)
 class FlowCounters(Record):
     """Loss and latency of one flow.
 
@@ -297,6 +340,8 @@ class StreamCounters(Counters):
     name: str = ""
     #: Loss and latency, for a stream with a signature in a run with a receiver.
     latency: FlowCounters | None = None
+    #: What the stream's impairments did.
+    impair: ImpairCounters | None = None
 
 
 @dataclass(kw_only=True)
@@ -326,6 +371,8 @@ class RunInfo(Record):
     streams: list[StreamCounters] = field(default_factory=list)
     #: What the run's receiver saw, when it has one.
     rx: RxCounters | None = None
+    #: What the streams' impairments did, all together.
+    impair: ImpairCounters | None = None
 
     @property
     def running(self) -> bool:
@@ -589,6 +636,8 @@ class TcpRunInfo(Record):
     #: The emulated hosts, when they get addresses by DHCP, SLAAC or DHCPv6,
     #: announce them or join groups.
     hosts: list[HostInfo] = field(default_factory=list)
+    #: What the ports' impairments did (``impair``, ``impair_rx``).
+    impair: PortImpairCounters | None = None
 
     @property
     def running(self) -> bool:
@@ -662,6 +711,8 @@ class UdpRunInfo(Record):
     tps: float = 0.0
     #: The emulated hosts, as for TCP runs.
     hosts: list[HostInfo] = field(default_factory=list)
+    #: What the ports' impairments did (``impair``, ``impair_rx``).
+    impair: PortImpairCounters | None = None
 
     @property
     def running(self) -> bool:

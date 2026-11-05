@@ -337,6 +337,12 @@ enum CtlCommand {
         /// Engine threads on the server to spread the run over.
         #[arg(long)]
         workers: Option<u16>,
+        /// Impair the frames the run sends (see `ferotrx tcp --help`).
+        #[arg(long, value_name = "SPEC")]
+        impair: Option<String>,
+        /// Impair the frames the run receives.
+        #[arg(long, value_name = "SPEC")]
+        impair_rx: Option<String>,
     },
     /// Show the counters of one TCP run, or of every TCP run.
     TcpStats { id: Option<u64> },
@@ -367,6 +373,12 @@ enum CtlCommand {
         /// Engine threads on the server to spread the run over.
         #[arg(long)]
         workers: Option<u16>,
+        /// Impair the frames the run sends (see `ferotrx tcp --help`).
+        #[arg(long, value_name = "SPEC")]
+        impair: Option<String>,
+        /// Impair the frames the run receives.
+        #[arg(long, value_name = "SPEC")]
+        impair_rx: Option<String>,
     },
     /// Show the counters of one UDP run, or of every UDP run.
     UdpStats { id: Option<u64> },
@@ -427,6 +439,11 @@ struct StartArgs {
     /// Put a latency signature in every stream's packets.
     #[arg(long)]
     latency: bool,
+
+    /// Impairments for every stream instead of the profile's (see `ferotrx
+    /// run --help`).
+    #[arg(long, value_name = "SPEC")]
+    impair: Option<String>,
 
     /// With --rx: how long to keep receiving after the last packet, e.g. 1s.
     #[arg(long, value_name = "TIME", requires = "rx")]
@@ -602,6 +619,7 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                     iface,
                     wait: s.rx_wait,
                 }),
+                impair: s.impair,
             };
             let run = c.start(&params)?;
             if json && !s.watch {
@@ -657,6 +675,8 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
             connections,
             duration,
             workers,
+            impair,
+            impair_rx,
         } => {
             let mut params = TcpStartParams {
                 iface,
@@ -664,6 +684,8 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                 connections,
                 duration,
                 workers,
+                impair,
+                impair_rx,
                 ..Default::default()
             };
             if upload {
@@ -716,6 +738,8 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
             transactions,
             duration,
             workers,
+            impair,
+            impair_rx,
         } => {
             let mut params = UdpStartParams {
                 iface,
@@ -723,6 +747,8 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                 transactions,
                 duration,
                 workers,
+                impair,
+                impair_rx,
                 ..Default::default()
             };
             if upload {
@@ -878,6 +904,15 @@ fn print_run(r: &RunInfo) {
         print_counters(&format!("  {}", s.name), &s.counters);
     }
     print_counters("  total", &r.total);
+    for s in &r.streams {
+        if let Some(i) = &s.impair {
+            println!(
+                "  {} impairments: {}",
+                s.name,
+                crate::impair_counters_line(i)
+            );
+        }
+    }
     if let Some(rx) = &r.rx {
         let rows: Vec<_> = r
             .streams

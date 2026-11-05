@@ -47,6 +47,9 @@ pub struct ReplayStats {
     pub elapsed: Duration,
     /// True when the replay ended because `stop` was set.
     pub stopped: bool,
+    /// What the stream's impairments did to the packets counted above
+    /// ([`Stream::impair`](crate::Stream::impair)); `None` without them.
+    pub impair: Option<crate::ImpairStats>,
 }
 
 impl ReplayStats {

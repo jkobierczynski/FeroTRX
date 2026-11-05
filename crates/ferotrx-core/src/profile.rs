@@ -6,8 +6,9 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::{
-    parse_duration, parse_shape_point, Capture, CaptureSource, Error, FieldEngine, FieldVar, Pacer,
-    Rate, Result, Rewrite, SendSettings, SizeMix, Stream, TrafficModel, LINKTYPE_ETHERNET,
+    parse_duration, parse_shape_point, Capture, CaptureSource, Error, FieldEngine, FieldVar,
+    ImpairSpec, Pacer, Rate, Result, Rewrite, SendSettings, SizeMix, Stream, TrafficModel,
+    LINKTYPE_ETHERNET,
 };
 
 /// A traffic profile: several streams that run together, read from a TOML file.
@@ -40,6 +41,9 @@ use crate::{
 /// # Or the rate over time as points, straight lines between them; 0% at
 /// # the end stops the stream.
 /// shape = ["0s:20%", "30s:100%", "60s:0%"]
+/// # Impairments on the way to the output, as a bad link (see `ImpairSpec`):
+/// # delay, jitter, loss, duplicates, reordering, corruption, rate, MTU.
+/// impair = "delay=20ms jitter=5ms loss=1% loss_burst=3"
 ///
 /// [[stream]]
 /// name = "ping"
@@ -88,6 +92,8 @@ pub struct StreamSpec {
     pub sizes: Option<SizeMix>,
     /// How packets spread around the rate.
     pub model: TrafficModel,
+    /// What a bad link does to the stream's packets ([`Stream::impair`]).
+    pub impair: Option<ImpairSpec>,
 }
 
 /// Where a [`StreamSpec`] gets its packets.
@@ -223,6 +229,59 @@ struct StreamFile {
     model: Option<String>,
     #[serde(default)]
     shape: Vec<String>,
+    impair: Option<ImpairFile>,
+}
+
+/// An impairment in a profile: the text form, or a table of the same keys.
+///
+/// ```toml
+/// impair = "delay=20ms jitter=5ms loss=1%"
+/// # or
+/// [stream.impair]
+/// delay = "20ms"
+/// loss = "1%"
+/// seed = 7
+/// ```
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ImpairFile {
+    Text(String),
+    Table(toml::Table),
+}
+
+impl ImpairFile {
+    pub(crate) fn spec(self) -> Result<ImpairSpec> {
+        match self {
+            ImpairFile::Text(t) => t.parse(),
+            ImpairFile::Table(t) => {
+                let mut spec = ImpairSpec::default();
+                for (k, v) in t {
+                    let v = match v {
+                        toml::Value::String(s) => s,
+                        toml::Value::Integer(i) => i.to_string(),
+                        toml::Value::Float(f) => f.to_string(),
+                        toml::Value::Boolean(b) => b.to_string(),
+                        other => {
+                            return Err(Error::InvalidSpec(format!(
+                                "impairment: {k} = {other} is not a string, number or boolean"
+                            )))
+                        }
+                    };
+                    spec.set(&k, &v)?;
+                }
+                spec.validate()?;
+                Ok(spec)
+            }
+        }
+    }
+
+    /// The spec, `None` when it does nothing, with `what` in errors.
+    pub(crate) fn into_option(file: Option<Self>, what: &str) -> Result<Option<ImpairSpec>> {
+        file.map(Self::spec)
+            .transpose()
+            .map(|s| s.filter(|s| !s.is_none()))
+            .map_err(|e| Error::Profile(format!("{what}: {e}")))
+    }
 }
 
 #[derive(Deserialize)]
@@ -307,9 +366,11 @@ impl Profile {
                     .map_err(ctx)?;
                 let model = parse_model(s.model.as_deref(), &s.shape).map_err(ctx)?;
                 Pacer::check_model(rate, &model).map_err(ctx)?;
+                let impair = ImpairFile::into_option(s.impair, "impair").map_err(ctx)?;
                 Ok(StreamSpec {
                     latency,
                     model,
+                    impair,
                     sizes: s
                         .sizes
                         .as_deref()
@@ -428,6 +489,7 @@ impl Profile {
                     .with_limit(spec.limit)
                     .with_delay(spec.delay)
                     .with_model(spec.model.clone());
+                stream.impair = spec.impair.clone();
                 for r in &spec.rewrite {
                     stream.push_transform(r.clone());
                 }

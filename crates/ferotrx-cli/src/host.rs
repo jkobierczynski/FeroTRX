@@ -143,6 +143,9 @@ pub struct HostArgs {
     #[command(flatten)]
     send: crate::SendArgs,
 
+    #[command(flatten)]
+    impair: crate::PortImpairArgs,
+
     /// Stop once every host has its addresses (or failed).
     #[arg(long)]
     until_ready: bool,
@@ -338,6 +341,7 @@ pub fn cmd_host(args: HostArgs) -> Result<()> {
         profile.duration = args.duration;
     }
     profile.output = args.send.settings()?.or(&profile.output);
+    args.impair.apply(&mut profile.impair);
     if profile.output.workers() > 1 {
         anyhow::bail!("host runs use one worker: leave out --workers (and `workers` in [output])");
     }
@@ -354,6 +358,7 @@ pub fn cmd_host(args: HostArgs) -> Result<()> {
         };
         let port = ferotrx_io::open_port_with(name, &settings)
             .map_err(|e| anyhow::anyhow!("cannot open {name}: {e}"))?;
+        let port = profile.impair.wrap(port, i);
         if !args.quiet {
             if let Some(d) = port.describe() {
                 eprintln!("port: {d}");
@@ -415,6 +420,9 @@ pub fn cmd_host(args: HostArgs) -> Result<()> {
         stats.tx_packets,
         stats.rx_packets
     );
+    for line in crate::impair_lines(&stats.impair) {
+        eprintln!("  {line}");
+    }
     print_hosts(&stats.hosts, "  ");
     if stats.failed() > 0 {
         bail!("{} of {} hosts failed", stats.failed(), stats.hosts.len());

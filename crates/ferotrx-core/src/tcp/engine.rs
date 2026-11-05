@@ -601,6 +601,9 @@ pub struct TcpStats {
     /// Frames the ports dropped before the engine could read them (a full
     /// capture buffer): lost on this machine, not on the network.
     pub rx_dropped: u64,
+    /// What the ports' impairments did ([`PortImpair`](crate::PortImpair)):
+    /// frames sent and frames received; empty without them.
+    pub impair: crate::PortImpairStats,
     pub elapsed: Duration,
     /// True if the run was stopped or hit its duration before the client finished.
     pub stopped: bool,
@@ -2173,6 +2176,11 @@ impl TcpEngine {
     /// Sets the frames the ports dropped before the engine read them.
     pub fn set_rx_dropped(&mut self, frames: u64) {
         self.stats.rx_dropped = frames;
+    }
+
+    /// Puts what the ports' impairments did in the counters.
+    pub fn set_impairments(&mut self, stats: &crate::PortImpairStats) {
+        self.stats.impair = stats.clone();
     }
 
     /// Frames to send, as (port, frame). Empties the queue.

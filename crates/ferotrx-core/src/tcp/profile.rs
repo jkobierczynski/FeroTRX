@@ -150,6 +150,9 @@ pub struct TcpProfile {
     /// AF_XDP or DPDK, and the number of `workers` (engine threads) to
     /// split the run over. The command line's settings win over these.
     pub output: SendSettings,
+    /// Impairments of the frames the ports send (`impair`) and receive
+    /// (`impair_rx`), as a bad link would do them.
+    pub impair: crate::PortImpair,
     /// Settings of the emulated hosts (the `[hosts]` table), for a client
     /// or server that gets its address by DHCP, SLAAC or DHCPv6, announces
     /// it or joins groups.
@@ -426,6 +429,7 @@ impl Default for TcpProfile {
             duration: None,
             options: TcpOptions::default(),
             output: SendSettings::default(),
+            impair: crate::PortImpair::default(),
             host_options: crate::HostOptions::for_endpoints(),
         }
     }
@@ -458,6 +462,8 @@ struct RawProfile {
     tcp: Option<RawOptions>,
     output: Option<OutputFile>,
     hosts: Option<crate::host::RawHostOptions>,
+    impair: Option<crate::profile::ImpairFile>,
+    impair_rx: Option<crate::profile::ImpairFile>,
 }
 
 #[derive(Deserialize)]
@@ -853,6 +859,10 @@ impl TcpProfile {
         p.output = raw
             .output
             .map_or(Ok(SendSettings::default()), OutputFile::settings)?;
+        p.impair = crate::PortImpair {
+            tx: crate::profile::ImpairFile::into_option(raw.impair, "impair")?,
+            rx: crate::profile::ImpairFile::into_option(raw.impair_rx, "impair_rx")?,
+        };
         p.host_options = crate::host::host_options(raw.hosts, crate::HostOptions::for_endpoints())
             .map_err(|e| Error::Profile(format!("[hosts]: {e}")))?;
         if let Some(o) = raw.tcp {

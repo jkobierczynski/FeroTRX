@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use crate::latency::{reserve, reserve_inside, stamp, wall_clock};
 use crate::{
-    Error, Pacer, Packet, PacketSink, PacketSource, Rate, ReplayStats, Result, TrafficModel,
-    Transform,
+    Error, ImpairSpec, ImpairStats, Impairer, MergeStats, Pacer, Packet, PacketSink, PacketSource,
+    Rate, ReplayStats, Result, SinkError, TrafficModel, Transform,
 };
 
 /// One flow of traffic: a source, the transforms applied to it, and its own rate.
@@ -28,6 +28,12 @@ pub struct Stream<'a> {
     /// How packets spread around the rate: Poisson arrivals, bursts, ramps.
     /// Anything but the default needs a pps or Mbit/s rate.
     pub model: TrafficModel,
+    /// What a bad link would do to this stream's packets on their way to the
+    /// sink: delay, jitter, loss and the rest (see [`ImpairSpec`]). Packets
+    /// are counted as sent when they go into the impairment; the impairment's
+    /// own counters are in [`ReplayStats::impair`]. A run waits at its end
+    /// until the held packets are out, unless it is stopped.
+    pub impair: Option<ImpairSpec>,
     /// This stream's part of a stream split over several workers:
     /// (index, count); see [`shard`](Stream::shard).
     shard: (u64, u64),
@@ -46,6 +52,7 @@ impl<'a> Stream<'a> {
             latency: None,
             keep_size: false,
             model: TrafficModel::default(),
+            impair: None,
             shard: (0, 1),
             source: Box::new(source),
             transforms: Vec::new(),
@@ -65,6 +72,12 @@ impl<'a> Stream<'a> {
     /// Spreads the packets around the rate by `model`.
     pub fn with_model(mut self, model: TrafficModel) -> Self {
         self.model = model;
+        self
+    }
+
+    /// Impairs the stream's packets by `spec` (see [`impair`](Self::impair)).
+    pub fn with_impair(mut self, spec: ImpairSpec) -> Self {
+        self.impair = (!spec.is_none()).then_some(spec);
         self
     }
 
@@ -162,6 +175,11 @@ impl<'a> Stream<'a> {
         if let Some(seed) = self.model.seed {
             self.model.seed = Some(crate::worker_seed(seed, index));
         }
+        if let Some(spec) = &mut self.impair {
+            // Each worker's share of the link.
+            *spec = spec.for_lane(index);
+            spec.rate = spec.rate.map(|r| r / n as f64);
+        }
         self
     }
 
@@ -182,6 +200,8 @@ impl std::fmt::Debug for Stream<'_> {
             .field("latency", &self.latency)
             .field("keep_size", &self.keep_size)
             .field("model", &self.model)
+            .field("impair", &self.impair.as_ref().map(ToString::to_string))
+            .field("impair", &self.impair.as_ref().map(ToString::to_string))
             .field("shard", &self.shard)
             .field("transforms", &self.transforms.len())
             .finish_non_exhaustive()
@@ -282,6 +302,12 @@ where
         })
         .collect();
 
+    let mut impairers: Vec<Option<Impairer>> = streams
+        .iter()
+        .map(|s| s.impair.clone().map(Impairer::new))
+        .collect();
+    let impaired = impairers.iter().any(Option::is_some);
+
     let stop_requested = || {
         config
             .stop
@@ -318,6 +344,33 @@ where
             }
         }
         let send_at = start + lane.deadline;
+        if impaired {
+            // Let held packets out as they fall due while we wait for this one.
+            let mut waited = true;
+            loop {
+                if let Err(source) = release(&mut impairers, start.elapsed(), sink) {
+                    if !config.ignore_send_errors {
+                        let index = stats.total.packets + stats.total.send_errors;
+                        let _ = sink.flush();
+                        return Err(Error::Sink { index, source });
+                    }
+                }
+                match next_due(&impairers) {
+                    Some(due) if start + due < send_at => {
+                        let _ = sink.idle();
+                        if !wait_until(start + due, &stop_requested) {
+                            waited = false;
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            if !waited {
+                stats.total.stopped = true;
+                break;
+            }
+        }
         if send_at > Instant::now() {
             // Let batching sinks hand over what they hold before we wait.
             if let Err(source) = sink.idle() {
@@ -339,7 +392,14 @@ where
         }
         let len = lane.packet.data.len() as u64;
         let st = &mut stats.streams[i];
-        match sink.send(&lane.packet.data) {
+        let sent = match &mut impairers[i] {
+            Some(link) => {
+                link.push(&lane.packet.data, start.elapsed());
+                Ok(())
+            }
+            None => sink.send(&lane.packet.data),
+        };
+        match sent {
             Ok(()) => {
                 if lane.signature.is_some() {
                     // Numbers only advance on packets that left, so failed
@@ -371,17 +431,40 @@ where
             let now = Instant::now();
             if now >= at {
                 set_elapsed(&mut stats, now - start);
+                if impaired {
+                    set_impair(&mut stats, &impairers);
+                }
                 progress(&stats);
                 next_report = now.checked_add(interval);
             }
         }
     }
 
+    if impaired && !stats.total.stopped {
+        // The packets still on the link arrive before the run ends.
+        loop {
+            release(&mut impairers, start.elapsed(), sink).map_err(|source| Error::Sink {
+                index: stats.total.packets,
+                source,
+            })?;
+            let Some(due) = next_due(&impairers) else {
+                break;
+            };
+            let _ = sink.idle();
+            if !wait_until(start + due, &stop_requested) {
+                stats.total.stopped = true;
+                break;
+            }
+        }
+    }
     sink.flush().map_err(|source| Error::Sink {
         index: stats.total.packets,
         source,
     })?;
     set_elapsed(&mut stats, start.elapsed());
+    if impaired {
+        set_impair(&mut stats, &impairers);
+    }
     for st in &mut stats.streams {
         st.stopped = stats.total.stopped;
     }
@@ -441,6 +524,39 @@ fn fill(stream: &mut Stream<'_>, lane: &mut Lane, st: &ReplayStats, start: Insta
     lane.passes = stream.source.passes();
     lane.pending = true;
     Ok(())
+}
+
+/// Sends what the impairers hold that is due by `now`.
+fn release(
+    impairers: &mut [Option<Impairer>],
+    now: Duration,
+    sink: &mut dyn PacketSink,
+) -> std::result::Result<(), SinkError> {
+    for link in impairers.iter_mut().flatten() {
+        while let Some(frame) = link.pop_due(now) {
+            sink.send(&frame)?;
+        }
+    }
+    Ok(())
+}
+
+fn next_due(impairers: &[Option<Impairer>]) -> Option<Duration> {
+    impairers
+        .iter()
+        .flatten()
+        .filter_map(Impairer::next_due)
+        .min()
+}
+
+fn set_impair(stats: &mut RunStats, impairers: &[Option<Impairer>]) {
+    let mut total = ImpairStats::default();
+    for (st, link) in stats.streams.iter_mut().zip(impairers) {
+        st.impair = link.as_ref().map(|l| l.stats().clone());
+        if let Some(s) = &st.impair {
+            total.merge(s);
+        }
+    }
+    stats.total.impair = Some(total);
 }
 
 fn set_elapsed(stats: &mut RunStats, elapsed: Duration) {

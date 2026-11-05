@@ -48,6 +48,12 @@ pub trait PacketPort: Send {
     fn rx_dropped(&mut self) -> Option<u64> {
         None
     }
+
+    /// What the port's impairments did ([`ImpairPort`](crate::ImpairPort));
+    /// `None` for a port without them.
+    fn impairments(&mut self) -> Option<crate::PortImpairStats> {
+        None
+    }
 }
 
 impl<P: PacketPort + ?Sized> PacketPort for Box<P> {
@@ -68,6 +74,9 @@ impl<P: PacketPort + ?Sized> PacketPort for Box<P> {
     }
     fn rx_dropped(&mut self) -> Option<u64> {
         (**self).rx_dropped()
+    }
+    fn impairments(&mut self) -> Option<crate::PortImpairStats> {
+        (**self).impairments()
     }
 }
 
@@ -167,6 +176,15 @@ impl PacketPort for SharedLane {
             None
         }
     }
+
+    fn impairments(&mut self) -> Option<crate::PortImpairStats> {
+        // Only the reader counts, as for rx_dropped.
+        if self.reader {
+            lock(&self.port).impairments()
+        } else {
+            None
+        }
+    }
 }
 
 type Queue = Arc<Mutex<VecDeque<Vec<u8>>>>;
@@ -243,6 +261,9 @@ pub trait PortEngine: Send {
     /// Puts the frames the ports dropped before the engine read them
     /// ([`PacketPort::rx_dropped`]) in the counters. Nothing by default.
     fn set_rx_dropped(&mut self, _frames: u64) {}
+    /// Puts what the ports' impairments did ([`PacketPort::impairments`]) in
+    /// the counters. Nothing by default.
+    fn set_impairments(&mut self, _stats: &crate::PortImpairStats) {}
     fn stats(&self) -> &Self::Stats;
     /// Wraps an error message in the engine's kind of [`Error`].
     fn wrap_error(message: String) -> Error;
@@ -271,11 +292,29 @@ impl PortEngine for TcpEngine {
     fn set_rx_dropped(&mut self, frames: u64) {
         TcpEngine::set_rx_dropped(self, frames)
     }
+    fn set_impairments(&mut self, stats: &crate::PortImpairStats) {
+        TcpEngine::set_impairments(self, stats)
+    }
     fn stats(&self) -> &TcpStats {
         TcpEngine::stats(self)
     }
     fn wrap_error(message: String) -> Error {
         Error::Tcp(message)
+    }
+}
+
+/// Puts the ports' own counters (frames dropped before they were read,
+/// impairments) in the engine's.
+fn port_counters<E: PortEngine + ?Sized>(engine: &mut E, ports: &mut [Box<dyn PacketPort>]) {
+    engine.set_rx_dropped(ports.iter_mut().filter_map(|p| p.rx_dropped()).sum());
+    let mut impair = crate::PortImpairStats::default();
+    let mut any = false;
+    for s in ports.iter_mut().filter_map(|p| p.impairments()) {
+        impair.merge(&s);
+        any = true;
+    }
+    if any {
+        engine.set_impairments(&impair);
     }
 }
 
@@ -378,7 +417,7 @@ where
                 let _ = port.flush();
             }
             engine.set_elapsed(start.elapsed(), stopped && !engine.is_done());
-            engine.set_rx_dropped(ports.iter_mut().filter_map(|p| p.rx_dropped()).sum());
+            port_counters(engine, ports);
             let stats = engine.stats().clone();
             progress(&stats);
             return Ok(stats);
@@ -386,7 +425,7 @@ where
         if now >= next_progress {
             next_progress = now + interval;
             engine.set_elapsed(now, false);
-            engine.set_rx_dropped(ports.iter_mut().filter_map(|p| p.rx_dropped()).sum());
+            port_counters(engine, ports);
             progress(engine.stats());
         }
         if !busy {
@@ -802,13 +841,13 @@ where
                 let _ = port.flush();
             }
             engine.set_elapsed(start.elapsed(), stopped && !engine.is_done());
-            engine.set_rx_dropped(ports.iter_mut().filter_map(|p| p.rx_dropped()).sum());
+            port_counters(engine, ports);
             return Ok(engine.stats().clone());
         }
         if now >= next_progress {
             next_progress = now + interval;
             engine.set_elapsed(now, false);
-            engine.set_rx_dropped(ports.iter_mut().filter_map(|p| p.rx_dropped()).sum());
+            port_counters(engine, ports);
             let mut live = lock(&shared.live);
             live.parts[k] = engine.stats().clone();
             live.stats = merge_all(&live.parts);

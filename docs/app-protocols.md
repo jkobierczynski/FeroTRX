@@ -427,7 +427,7 @@ refused, and so are channels other than `session` (port forwarding).
 | `rekey_after` | never | Client: a new key exchange after this many bytes (`1M`). |
 | `window` | `2M` | Client: each channel's receive window. |
 | `ciphers` | all three | Both ends: the ciphers, best first. |
-| `version` | `FeroTRX_0.27.0` | Both ends: the software version after `SSH-2.0-` (`OpenSSH_9.6`). |
+| `version` | `FeroTRX_0.28.0` | Both ends: the software version after `SSH-2.0-` (`OpenSSH_9.6`). |
 | `users` | none | Server: user names and passwords; with none, any password. |
 | `authorized_keys` | none | Server: public key lines (`ssh-ed25519 AAAA...`), or a file of them; with none, any key. |
 | `host_key` | `generate` | Server: an OpenSSH Ed25519 key file. A generated one is new on every run, and the run prints its fingerprint. |

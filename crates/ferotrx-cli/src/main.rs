@@ -1,6 +1,7 @@
 mod bench;
 mod check;
 mod host;
+mod impair;
 mod lab;
 mod latency;
 mod remote;
@@ -17,9 +18,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use ferotrx_core::{
-    parse_duration, Backend, Capture, CaptureSource, FieldEngine, FieldVar, Job, Pacer, PacketSink,
-    Profile, Rate, ReplayStats, Rewrite, RunConfig, RunStats, SendSettings, SizeMix, Stream,
-    TrafficModel, Transform, XdpMode, LINKTYPE_ETHERNET,
+    parse_duration, Backend, Capture, CaptureSource, FieldEngine, FieldVar, ImpairSpec, Job, Pacer,
+    PacketSink, Profile, Rate, ReplayStats, Rewrite, RunConfig, RunStats, SendSettings, SizeMix,
+    Stream, TrafficModel, Transform, XdpMode, LINKTYPE_ETHERNET,
 };
 
 /// FeroTRX: replay captured traffic at a controlled rate.
@@ -68,6 +69,11 @@ enum Command {
     /// captures, builds the packets and sets the engines up as a run would,
     /// and prints a summary and warnings. Exits with 1 if any file has errors.
     Check(check::CheckArgs),
+    /// A bridge between two interfaces that impairs what it passes on, as a
+    /// bad link or WAN would, without netem: delay and jitter, random or
+    /// bursty loss, duplicates, reordering, corruption, a rate limit and an
+    /// MTU, each way on its own.
+    Impair(impair::ImpairArgs),
     /// Show what a capture contains.
     Info {
         /// The pcap or pcapng file.
@@ -140,6 +146,13 @@ struct ReplayArgs {
     /// With latency signatures the frames keep these sizes.
     #[arg(long, value_name = "MIX")]
     sizes: Option<SizeMix>,
+
+    /// Impair the packets on their way out, as a bad link would, without
+    /// netem: space or comma separated KEY=VALUE, e.g. 'delay=20ms jitter=5ms
+    /// loss=1% loss_burst=3 duplicate=0.1% reorder=0.5% corrupt=0.01%
+    /// rate=10mbit mtu=1400 seed=1'. See docs/impairments.md.
+    #[arg(long, value_name = "SPEC")]
+    impair: Option<ImpairSpec>,
 
     #[command(flatten)]
     rx: latency::RxArgs,
@@ -301,6 +314,11 @@ struct RunArgs {
     #[arg(long, value_name = "MODEL")]
     model: Option<TrafficModel>,
 
+    /// Impairments for every stream instead of the profile's (see
+    /// `ferotrx replay --help`); `none` turns the profile's off.
+    #[arg(long, value_name = "SPEC")]
+    impair: Option<ImpairSpec>,
+
     #[command(flatten)]
     rx: latency::RxArgs,
 
@@ -343,6 +361,96 @@ struct Output {
     /// Discard packets; measures the engine's own speed.
     #[arg(long)]
     null: bool,
+}
+
+/// Impairments of a TCP, UDP or host run's ports, over the profile's
+/// `impair` and `impair_rx`.
+#[derive(Args, Clone, Default)]
+pub struct PortImpairArgs {
+    /// Impair the frames this run sends, as a bad link would, without netem:
+    /// KEY=VALUE pairs such as 'delay=20ms jitter=5ms loss=1% loss_burst=3
+    /// duplicate=0.1% reorder=0.5% corrupt=0.01% rate=10mbit mtu=1400 seed=1'
+    /// (see docs/impairments.md); `none` turns the profile's off.
+    #[arg(long, value_name = "SPEC")]
+    pub impair: Option<ImpairSpec>,
+
+    /// Impair the frames this run receives, before the engine sees them.
+    #[arg(long, value_name = "SPEC")]
+    pub impair_rx: Option<ImpairSpec>,
+}
+
+impl PortImpairArgs {
+    /// The profile's impairments with the command line's over them.
+    pub fn apply(&self, profile: &mut ferotrx_core::PortImpair) {
+        if let Some(s) = &self.impair {
+            profile.tx = (!s.is_none()).then(|| s.clone());
+        }
+        if let Some(s) = &self.impair_rx {
+            profile.rx = (!s.is_none()).then(|| s.clone());
+        }
+    }
+}
+
+/// What an impairment did, from the control API's counters, on one line
+/// as [`ImpairStats`](ferotrx_core::ImpairStats) prints it.
+pub fn impair_counters_line(c: &ferotrx_ctl::protocol::ImpairCounters) -> String {
+    let mut line = format!("{} in, {} out", c.packets, c.passed);
+    for (n, what) in [
+        (c.lost, "lost"),
+        (c.mtu_dropped, "over the MTU"),
+        (c.truncated, "cut to the MTU"),
+        (c.queue_dropped, "over the queue limit"),
+        (c.duplicated, "duplicated"),
+        (c.reordered, "reordered"),
+        (c.corrupted, "corrupted"),
+        (c.held, "still held"),
+    ] {
+        if n > 0 {
+            line.push_str(&format!(", {n} {what}"));
+        }
+    }
+    if let Some(d) = &c.delay {
+        if let (Some(avg), Some(max)) = (d.avg_us, d.max_us) {
+            line.push_str(&format!(
+                ", held ms avg {:.2} max {:.2}",
+                avg / 1000.0,
+                max / 1000.0
+            ));
+        }
+    }
+    line
+}
+
+/// Lines for a TCP or UDP run's port impairments, from the control API.
+pub fn port_impair_lines(c: &Option<ferotrx_ctl::protocol::PortImpairCounters>) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(c) = c {
+        if let Some(tx) = &c.tx {
+            lines.push(format!(
+                "impaired sent frames: {}",
+                impair_counters_line(tx)
+            ));
+        }
+        if let Some(rx) = &c.rx {
+            lines.push(format!(
+                "impaired received frames: {}",
+                impair_counters_line(rx)
+            ));
+        }
+    }
+    lines
+}
+
+/// One line of what a run's port impairments did, if they did anything.
+pub fn impair_lines(stats: &ferotrx_core::PortImpairStats) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !stats.tx.is_empty() {
+        lines.push(format!("impaired sent frames: {}", stats.tx));
+    }
+    if !stats.rx.is_empty() {
+        lines.push(format!("impaired received frames: {}", stats.rx));
+    }
+    lines
 }
 
 /// How to send on `--iface`. Values left out come from the profile's
@@ -461,6 +569,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Bench(args) => bench::cmd_bench(args),
         Command::Scenario(args) => scenario::cmd_scenario(args),
         Command::Check(args) => check::cmd_check(args),
+        Command::Impair(args) => impair::cmd_impair(args),
         #[cfg(feature = "pcap")]
         Command::Interfaces => cmd_interfaces(),
         Command::Backends => cmd_backends(),
@@ -902,6 +1011,9 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
         if args.rx.tags() {
             stream = stream.with_latency(1);
         }
+        if let Some(spec) = &args.impair {
+            stream = stream.with_impair(spec.clone());
+        }
         stream
     };
     let rx = args.rx.open()?;
@@ -936,6 +1048,11 @@ fn cmd_run(args: RunArgs) -> Result<()> {
                 .with_context(|| format!("stream {}", spec.name))?;
         }
     }
+    if let Some(impair) = &args.impair {
+        for spec in &mut profile.streams {
+            spec.impair = (!impair.is_none()).then(|| impair.clone());
+        }
+    }
     if !args.common.quiet {
         for spec in &profile.streams {
             let mut line = format!("stream {}: {} at {}", spec.name, spec.source, spec.rate);
@@ -952,6 +1069,9 @@ fn cmd_run(args: RunArgs) -> Result<()> {
             }
             if !spec.model.is_steady() {
                 line.push_str(&format!(", model {}", spec.model));
+            }
+            if let Some(impair) = &spec.impair {
+                line.push_str(&format!(", impaired {impair}"));
             }
             eprintln!("{line}");
         }
@@ -1037,6 +1157,9 @@ fn done_label(s: &ReplayStats) -> &'static str {
 
 fn print_line(label: &str, s: &ReplayStats) {
     eprintln!("{}", stats_line(label, s));
+    if let Some(impair) = &s.impair {
+        eprintln!("{label} impairments: {impair}");
+    }
 }
 
 fn stats_line(label: &str, s: &ReplayStats) -> String {
