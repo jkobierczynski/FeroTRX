@@ -314,16 +314,21 @@ if [ -z "${LOSS:-}" ] && [ "${IPV6:-}" != 1 ] &&
     "$BIN" udp -p "$tmp/impaired.toml" $links $hosts "$@" >"$log" 2>&1 || status=$?
     cat "$log"
     r tc qdisc del dev $out root
-    all_answered office
-    rtt=$(line office client | rtt_ms)
+    # One template: no per-template lines, the sides' totals.
+    side() { grep -E "^  $1: " "$log" | head -1; }
+    if ! side client | grep -Eq "^  client: ([1-9][0-9]*) transactions, \1 answered" ||
+        side client | grep -Eq "timed out|other answers than expected"; then
+        fail "with delay and loss, not every call ended well: $(side client)"
+    fi
+    rtt=$(side client | rtt_ms)
     if [ "${rtt:-0}" -lt 190 ]; then
         fail "with 200 ms more delay, the client's RTCP round trip is ${rtt:-none} ms"
     fi
-    q=$(line office server | mos100)
+    q=$(side server | mos100)
     if [ -z "$q" ] || [ "$q" -ge 400 ] || [ "$q" -lt 330 ]; then
         fail "with 5% loss and 200 ms, the server's MOS is ${q:-none} (x100), not about 370"
     fi
-    if ! line office server | grep -Eq " [1-9][0-9]* lost"; then
+    if ! side server | grep -Eq " [1-9][0-9]* lost"; then
         fail "with 5% loss, the server lost no RTP"
     fi
 else
