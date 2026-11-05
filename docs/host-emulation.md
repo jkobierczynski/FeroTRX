@@ -3,11 +3,14 @@
 FeroTRX 0.12.0 (M19) makes its emulated hosts behave on the link like real
 ones: they can get their addresses from the lab's DHCP server or router,
 announce them, join multicast groups and keep the memberships alive, and one
-can act as an IPv6 router for others. It works in two places:
+can act as an IPv6 router for others. Since 0.25.0 (M29) a host can also be
+the [DHCP or DHCPv6 server](#dhcp-servers) of its link. It works in two
+places:
 
 * **`ferotrx host`** runs hosts on their own, as many as you like, until
   Ctrl-C or a duration: DHCP clients for a DHCP server, group members for a
-  snooping switch, a router for devices that autoconfigure.
+  snooping switch, a router for devices that autoconfigure, a DHCP server
+  for devices that need addresses.
 * **`ferotrx tcp` and `ferotrx udp`**: the client or the server of a run can
   get its address by DHCP, SLAAC or DHCPv6 (`ip = "dhcp"`), announce it and
   join groups. The run starts once the address is there.
@@ -23,6 +26,9 @@ sudo ferotrx host -i enp0s3 --vlan 10 -n 20 --ipv4 dhcp --join 239.1.2.3 -d 1m
 sudo ferotrx host examples/lab-hosts.toml -i enp0s3
 # a router that advertises fd00:99::/64 every 5 s
 sudo ferotrx host -i enp0s3 --ra fd00:99::/64 --ra-interval 5s
+# a DHCP server for a segment, 10 minute leases
+sudo ferotrx host -i enp0s3 --ipv4 10.88.0.1/24 --dhcp-pool 10.88.0.100-10.88.0.199 \
+     --dhcp-router 10.88.0.1 --dhcp-dns 10.88.0.1 --dhcp-lease 10m
 # a TCP client with a DHCP address, a static server
 sudo ferotrx tcp examples/http.pcap -n 100 --cps 20 \
      --client-iface eth1 --client-ip dhcp --server-iface eth2 --server-ip 10.77.0.20/24
@@ -142,6 +148,80 @@ advertisement with router lifetime 0, so hosts drop it as their default
 router. It answers neighbor solicitations for its link-local address, so
 hosts can reach it. It does not route.
 
+## DHCP servers
+
+A host with a static IPv4 address and a `[host.dhcp_server]` table
+(`--dhcp-pool FIRST-LAST`) is a DHCP server (RFC 2131, 2132) for its link
+and VLAN; a host with a `[host.dhcpv6_server]` table (an IPv6
+`--dhcp-pool`) is a DHCPv6 server (RFC 8415, addresses in IA_NA)
+([`examples/lab-dhcp-server.toml`](../examples/lab-dhcp-server.toml)):
+
+```toml
+[[host]]
+mac = "02:dc:00:00:0d:01"
+ipv4 = "10.88.0.1/24"         # the server identifier
+[host.dhcp_server]
+pool = "10.88.0.100-10.88.0.199"
+lease = "10m"                 # default 1h; renewal at 1/2, rebinding at 7/8
+router = "10.88.0.1"          # default: the host's `gateway`, else none
+dns = ["10.88.0.1"]
+domain = "lab.test"
+reservations = { "02:dc:00:00:0e:07" = "10.88.0.7" }   # inside or outside the pool
+# prefix = 24                 # the subnet mask given out; default the host's
+[host.dhcpv6_server]
+pool = "fd00:88::100-fd00:88::1ff"
+lease = "10m"                 # valid and preferred lifetime; T1 1/2, T2 4/5
+dns = ["fd00:88::1"]
+domain = "lab.test"           # the domain search list
+reservations = { "02:dc:00:00:0e:07" = "fd00:88::7" }
+rapid_commit = true           # answer a solicit that asks for it at once
+prefix = 64                   # the on-link prefix, for confirm messages
+[host.router]                 # DHCPv6 clients take the gateway from adverts
+prefixes = ["fd00:88::/64"]
+managed = true
+```
+
+The DHCPv4 server:
+
+* offers a client its reservation, else the address it had (by client
+  identifier, else MAC), else the one it asks for if free, else the next
+  never leased one, else an expired one; an offer is held for 30 s. The
+  server's own address and the router's are never leased. A full pool
+  leaves the discover unanswered (counted as `exhausted`).
+* acknowledges requests for its offer, init-reboot requests and renewals
+  or rebinds of a free or own address, and NAKs the rest (also an address
+  of another subnet: it is authoritative). A request for another server's
+  offer frees the offer.
+* takes releases and declines (a declined address is not leased for 10
+  minutes) and answers informs (configuration without a lease).
+* answers as RFC 2131 says: to a relay's `giaddr` (port 67), NAKs and
+  answers with the broadcast flag to everyone, renewals to `ciaddr`, else
+  unicast to the offered address at the client's MAC. Relay agent
+  information (option 82) is sent back as it came. All relayed clients get
+  the one pool.
+
+The DHCPv6 server answers on its link-local address: solicits with an
+advertise (or, with rapid commit, a reply), requests, renews and rebinds
+with a reply (an address the client may not keep with lifetimes 0),
+releases and declines, confirms (on link or not) and information requests
+(DNS and domain only). A full pool gives `NoAddrsAvail`. It joins
+ff02::1:2 (all DHCP servers) over MLD, so snooping switches send the
+clients' messages its way.
+
+Leases are kept in memory for the run. The clients can be real devices or
+the run's own emulated hosts: the engine hands frames between a server and
+the other hosts on its port and VLAN itself, since a port does not deliver
+what it sends. `ferotrx host` prints the server with its counters, and
+each lease, at the end:
+
+```text
+  host 02:dc:00:00:0d:01 ready after 0.00 s: ipv4 10.88.0.1/24 (static); dhcp server 10.88.0.100-10.88.0.104 (3 of 5 leased; 3 discovers, 3 offers, 4 acks, 0 naks, 0 releases)
+    lease 10.88.0.7 to 02:dc:00:00:0f:01 (kernel-client), 24 s left
+```
+
+The same is in `hosts` of the control server's run info (`dhcp_server`,
+`dhcpv6_server`) and the Python client's `HostInfo`.
+
 ## Answering
 
 On its own, `ferotrx host` answers ARP requests, neighbor solicitations and
@@ -239,10 +319,12 @@ managed = false
 other = false
 ```
 
-A host needs at least an address, a group or a router table. The `ferotrx
+A host needs at least an address, a group, a router table or a DHCPv6
+server table; a host with a DHCP server table is one host (no `count`). The `ferotrx
 host` options (`-n`, `--mac`, `--vlan`, `--ipv4`, `--gateway`, `--ipv6`,
 `--gateway6`, `--join`, `--announce`, `--hostname`, `--ra` and the `--ra-*`
-options) make one table instead of a profile; `--rate`, `--igmp-version`,
+options, `--dhcp-pool` and the `--dhcp-*` options) make one table instead
+of a profile; `--rate`, `--igmp-version`,
 `--mld-version`, `--setup-timeout`, `--no-release`, `--no-dad`, `--broadcast`
 and `-B` etc. go with either.
 
@@ -264,7 +346,12 @@ router advertisements). It checks that:
   answer pings, the MLD group is in the snooping table and stays, a FeroTRX
   router's advertisements give a kernel host in another namespace an
   address and a default route through it, and a TCP client with
-  `--client-ip slaac` plays 20 connections.
+  `--client-ip slaac` plays 20 connections;
+* a FeroTRX DHCP server on a direct link to another namespace gives busybox
+  `udhcpc` its reserved address with subnet, router, DNS, domain and lease
+  time, answers its ping, renews and takes its release, and leases to two
+  emulated clients of the same run; with `IPV6=1` the same with a DHCPv6
+  server, router advertisements and `udhcpc6`.
 
 Extra arguments go to each `ferotrx` command (`-B af_xdp`). CI runs it over
 IPv4 and IPv6, with libpcap and AF_XDP.
@@ -272,8 +359,11 @@ IPv4 and IPv6, with libpcap and AF_XDP.
 ## Not done yet
 
 ARP probes before using a DHCP address (RFC 5227, DHCPDECLINE), DHCP relay
-agent options, DHCPv6 prefix delegation, rapid commit and stateless DHCPv6
-(information-request), source-specific multicast (IGMPv3/MLDv2 include
+agent options in the clients, DHCPv6 prefix delegation, rapid commit and
+stateless DHCPv6 (information-request) in the clients; for the servers,
+pools per relay or subnet, DHCPv6 relay messages, prefix delegation, ping
+or ARP checks before an offer, leases that outlive the run, and static
+options beyond router, DNS and domain; source-specific multicast (IGMPv3/MLDv2 include
 lists), more than one address per dynamic TCP/UDP end, `host.*` methods on
 the control server (`tcp.*` and `udp.*` report hosts), and the RFC timers
 for leaving a compatibility mode.

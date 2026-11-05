@@ -24,6 +24,8 @@ from .errors import (
 from .types import (
     AppCounters,
     Counters,
+    DhcpLeaseInfo,
+    DhcpServerInfo,
     FlowCounters,
     HandshakeCounters,
     HostAddressInfo,
@@ -86,6 +88,8 @@ __all__ = [
     "RunInfo",
     "RxRunInfo",
     "HostInfo",
+    "DhcpLeaseInfo",
+    "DhcpServerInfo",
     "HostAddressInfo",
     "HostGroupInfo",
     "AppCounters",

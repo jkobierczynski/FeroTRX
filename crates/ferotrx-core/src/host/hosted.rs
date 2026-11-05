@@ -318,6 +318,8 @@ impl EndpointHosts {
                     }),
                     link_local: None,
                     groups: Vec::new(),
+                    dhcp_server: None,
+                    dhcpv6_server: None,
                     counters: Default::default(),
                 }
             })

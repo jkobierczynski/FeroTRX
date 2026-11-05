@@ -9,7 +9,7 @@ macOS and Windows. Its engine is a library you can use from your own
 programs, and a control server lets scripts and the Python client drive it
 remotely.
 
-The current version is 0.24.0; see [DEVELOPMENT.md](DEVELOPMENT.md) for what
+The current version is 0.25.0; see [DEVELOPMENT.md](DEVELOPMENT.md) for what
 each milestone added and what comes next.
 
 ## Features
@@ -46,12 +46,11 @@ each milestone added and what comes next.
   SIP server (registration with digest authentication, calls) with RTP
   audio at codec rates and its loss and jitter, which work with SIPp; SMB 2 and 3
   file clients and a file server (NTLMv2 logins, signing, files and
-  directories) that work with smbclient and Samba; HTTP/3 over QUIC
-  clients and servers (loss recovery, congestion control, key updates,
-  Retry) that work with aioquic; an interface for protocols of your own.
+  directories) that work with smbclient and Samba; an interface for protocols of your own.
   [Guide](docs/app-protocols.md)
 * **Host emulation**: emulated hosts get addresses by DHCP, SLAAC or DHCPv6,
-  announce them, join multicast groups and act as IPv6 routers.
+  announce them, join multicast groups and act as IPv6 routers and DHCP or
+  DHCPv6 servers.
   [Guide](docs/host-emulation.md)
 * **Loss and latency** per stream, from a signature in each packet.
   [Guide](docs/loss-latency.md)
@@ -131,7 +130,7 @@ The manual is in [docs/](docs/README.md):
 | [Fast send backends](docs/backends.md) | AF_XDP and DPDK |
 | [Stateful TCP](docs/stateful-tcp.md) and [the engine](docs/tcp-engine.md) | `tcp`, TCP profiles, templates |
 | [Stateful UDP and DNS](docs/stateful-udp.md) and [the engine](docs/udp-engine.md) | `udp`, DNS, NTP |
-| [Application protocols](docs/app-protocols.md) | HTTP/1.1 and HTTP/2, HTTPS and TLS, DNS over UDP, TCP and TLS, MQTT, SSH, SIP and RTP, SMB, HTTP/3 and QUIC, NTP, your own |
+| [Application protocols](docs/app-protocols.md) | HTTP/1.1 and HTTP/2, HTTPS and TLS, DNS over UDP, TCP and TLS, MQTT, SSH, SIP and RTP, SMB, NTP, your own |
 | [Host emulation](docs/host-emulation.md) | `host`, DHCP, SLAAC, IGMP/MLD |
 | [TCP and UDP over AF_XDP and DPDK](docs/fast-ports.md) | fast ports for stateful runs |
 | [One run on several cores](docs/multi-core.md) | `--workers`, splitting streams and flows |

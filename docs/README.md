@@ -31,7 +31,7 @@ The [README](../README.md) has the overview and a quickstart.
   and servers, DNS over UDP and TCP, MQTT, SSH, SIP with RTP, SMB, HTTP/3 over QUIC, NTP, as `app = "..."` in TCP and UDP profiles; TLS
   under them (HTTPS, DNS over TLS): versions, cipher suites, certificates,
   handshake counters; writing your own.
-* [Host emulation](host-emulation.md): `ferotrx host`, DHCP, SLAAC, DHCPv6,
+* [Host emulation](host-emulation.md): `ferotrx host`, DHCP, SLAAC, DHCPv6, DHCP servers,
   IGMP/MLD, router advertisements.
 * [TCP and UDP over AF_XDP and DPDK](fast-ports.md).
 * [One run on several cores](multi-core.md): `--workers`, for streams and
