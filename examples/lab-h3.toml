@@ -1,0 +1,129 @@
+# FeroTRX stateful UDP profile: HTTP/3 over QUIC clients and a server,
+# through a NAT router between two VLANs.
+#
+#   FeroTRX host --- switch (trunk) --- router --- VLAN 10: 192.168.10.0/24 (clients)
+#                                              \-- VLAN 20: 192.168.20.0/24 (server)
+#
+# Run it with:
+#   sudo ferotrx udp -p examples/lab-h3.toml -i <interface>
+#
+# Each client opens a QUIC connection (TLS 1.3 with ALPN h3), sends its
+# requests on streams up to `concurrent` at once, checks each status, and
+# closes the connection. The server answers from the routes. The run
+# reports the handshakes (cipher suite, ALPN, resumed), the requests by
+# status and how long they took, and QUIC packets sent again ("sent
+# again") after losses.
+#
+# Either end works against other HTTP/3 software, such as aioquic's
+# examples (scripts/h3-peer.py does the same with the aioquic library):
+#   only the server (leave out [client]):
+#     python3 scripts/h3-peer.py client https://192.168.20.80/ -n 10
+#   only the clients (leave out [server]), against another server:
+#     sudo ferotrx udp -p examples/lab-h3.toml -i eth0 --connect 192.168.20.10
+#
+# As in examples/lab-tcp.toml, the `ip`s must be free addresses in each VLAN,
+# not addresses of the FeroTRX machine, and `gateway` the router's address.
+format = 1
+rate = 10                   # connections per second, all templates together
+transactions = 50
+concurrency = 20
+
+# A page and what it loads, as a browser would: six streams at once.
+[[template]]
+name = "browser"
+app = "h3"                  # HTTP/3 over QUIC, UDP port 443
+weight = 4
+
+[template.h3]
+host = "www.lab.local"
+requests = [
+  "GET /",
+  "GET /style.css",
+  "GET /app.js",
+  "GET /big",
+  "GET /missing 404",
+  "POST /api 201",
+]
+per_connection = 12         # requests per connection
+concurrent = 6              # streams in flight at once
+idle_timeout = "10s"
+
+[[template.h3.route]]
+path = "/"
+body = "<html><head><link rel=stylesheet href=/style.css></head></html>\n"
+content_type = "text/html"
+
+[[template.h3.route]]
+path = "/style.css"
+body = "body { color: teal }\n"
+content_type = "text/css"
+
+[[template.h3.route]]
+path = "/app.js"
+body_size = "20K"
+content_type = "text/javascript"
+
+[[template.h3.route]]
+path = "/big"
+body_size = "300K"
+
+[[template.h3.route]]
+method = "POST"
+path = "/api"
+status = 201
+delay = "2ms"
+
+[template.tls]
+server_name = "www.lab.local"
+names = ["www.lab.local"]
+verify = true
+
+# A server that answers the first Initial with a Retry (address
+# validation), and connections that update their keys.
+[[template]]
+name = "retry"
+app = "h3"
+port = 4433
+weight = 1
+
+[template.h3]
+requests = ["GET /", "GET /big"]
+per_connection = 10
+retry = true
+key_update_after = 50       # packets per key phase
+
+[[template.h3.route]]
+path = "/"
+body = "hello\n"
+
+[[template.h3.route]]
+path = "/big"
+body_size = "100K"
+
+# A client that offers only an old draft's ALPN, which the server must
+# refuse during the handshake.
+[[template]]
+name = "draft"
+app = "h3"
+port = 4434
+weight = 1
+
+[template.h3]
+requests = ["GET /"]
+
+[template.tls]
+expect = "failure"          # both ends
+
+[template.tls.client]
+alpn = ["h3-29"]
+
+[client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20
