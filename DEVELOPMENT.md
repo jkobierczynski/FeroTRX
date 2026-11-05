@@ -147,6 +147,10 @@ checked against 0.4.0. Each issue has the full checklist.
       a controller trait, CUBIC with HyStart++, ECN
 - [ ] **M35, Y.1564 service activation (0.28.0)**, [#52](https://github.com/jkobierczynski/FeroTRX/issues/52):
       CIR/EIR services, configuration and performance tests, FLR/FTD/FDV
+- [ ] **M36, finish the GUI's application-level workflow (0.29.0)**, [#54](https://github.com/jkobierczynski/FeroTRX/issues/54):
+      editors for application protocol profiles, workspace save/open, hex
+      editing, receive-side loss/latency charts over time, benchmarking,
+      scenario comparison, runs across several servers at once
 
 **P3: when the engine is stable**
 
