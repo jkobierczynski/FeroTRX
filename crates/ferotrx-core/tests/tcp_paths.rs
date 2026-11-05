@@ -363,6 +363,14 @@ fn window_scaling_keeps_more_than_64k_in_flight() {
         // 4 MiB at 50 Mbit/s is 0.67 s; slow start takes a few round trips more.
         assert!(took < Duration::from_millis(1500), "{v6}: {took:?}");
         assert_eq!(s.timeouts, 0, "{s:?}");
+        // The handshake takes one round trip, the first byte another (the
+        // client asks first, the server answers).
+        let c = &client.stats().client;
+        let ms = |d: Option<Duration>| d.unwrap().as_millis();
+        assert_eq!(c.connect_time.count(), 1);
+        assert!((80..=85).contains(&ms(c.connect_time.mean())), "{c:?}");
+        assert!((160..=170).contains(&ms(c.first_byte.mean())), "{c:?}");
+        assert_eq!(server.stats().server.connect_time.count(), 0);
     }
 }
 

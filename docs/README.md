@@ -40,6 +40,9 @@ The [README](../README.md) has the overview and a quickstart.
 ## Measuring and testing
 
 * [Loss and latency](loss-latency.md): signatures, `--rx`, `ferotrx rx`.
+* [Call quality, jitter and latency](call-quality.md): RTP loss, jitter,
+  late packets and RTCP round trips per call, E-model R and MOS, TCP
+  connect and first-byte times.
 * [Benchmarking](benchmarking.md): `ferotrx bench`, RFC 2544, IMIX.
 * [Scenarios and regression tests](scenarios.md): `ferotrx scenario`,
   expected outcomes, JUnit reports, comparing runs.

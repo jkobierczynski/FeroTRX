@@ -57,6 +57,30 @@ fn latency_rows(prefix: &str, f: &FlowCounters, rows: &mut Vec<(String, String)>
     lat_rows(prefix, &f.latency, rows);
 }
 
+/// A SIP run's calls: loss, jitter, round trip and the scores.
+fn media_rows(m: &ferotrx_ctl::protocol::MediaCounters, rows: &mut Vec<(String, String)>) {
+    rows.push(("calls' media streams".into(), n(m.streams)));
+    rows.push((
+        "RTP lost / late".into(),
+        format!("{} ({:.2}%) / {}", n(m.lost), m.loss_pct, n(m.late)),
+    ));
+    if let Some(j) = &m.jitter {
+        rows.push((
+            "RTP jitter avg / max".into(),
+            format!("{} / {}", us(j.avg_us), us(j.max_us)),
+        ));
+    }
+    if let Some(r) = &m.rtt {
+        rows.push(("RTP round trip".into(), us(r.avg_us)));
+    }
+    if let (Some(avg), Some(min)) = (m.mos_avg, m.mos_min) {
+        rows.push(("MOS avg / worst".into(), format!("{avg:.2} / {min:.2}")));
+    }
+    if let (Some(avg), Some(min)) = (m.r_avg, m.r_min) {
+        rows.push(("R avg / worst".into(), format!("{avg:.1} / {min:.1}")));
+    }
+}
+
 fn lat_rows(prefix: &str, l: &LatencyCounters, rows: &mut Vec<(String, String)>) {
     rows.push((
         format!("{prefix}latency min/avg/max"),
@@ -125,6 +149,12 @@ impl RunColumn {
             ),
             ("elapsed".into(), format!("{:.1} s", r.elapsed_s)),
         ];
+        if let Some(l) = &c.connect_time {
+            lat_rows("connect ", l, &mut rows);
+        }
+        if let Some(l) = &c.first_byte {
+            lat_rows("first byte ", l, &mut rows);
+        }
         for t in &r.templates {
             rows.push((
                 format!("{}: completed", t.name),
@@ -167,6 +197,9 @@ impl RunColumn {
         ];
         if let Some(l) = &c.response_time {
             lat_rows("response ", l, &mut rows);
+        }
+        if let Some(m) = c.app.as_ref().and_then(|a| a.media.as_ref()) {
+            media_rows(m, &mut rows);
         }
         for t in &r.templates {
             rows.push((

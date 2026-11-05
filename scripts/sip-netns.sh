@@ -28,6 +28,10 @@
 # 3. If sipp and ethtool are installed: SIPp's built-in answering end on the
 #    router (echoing RTP), and the emulated phones call it.
 #
+# 1b. If netem is there (and neither LOSS nor IPV6): the office calls
+#    again with 200 ms delay and 5% loss towards the server; the RTCP round
+#    trip, the loss and the calls' scores (MOS) must show it.
+#
 # LOSS=0.03 makes the router drop 3% of the packets it forwards: SIP must
 # send again, and RTP loss shows in the counters.
 # IPV6=1 plays run 1 over IPv6 (fd00:10::/64 and fd00:20::/64); 2 and 3 are
@@ -199,6 +203,7 @@ duration = "3s"
 codecs = ["PCMU", "PCMA"]
 users = { alice = "lab", bob = "lab" }
 ring = "200ms"
+rtcp_interval = "1s"
 
 [[template]]
 name = "open"
@@ -256,6 +261,14 @@ media_both_ways() { # template
 loss_pct() {
     sed -n 's/.* lost (\([0-9]*\)\.[0-9]*%).*/\1/p'
 }
+# The mean MOS a line reports, times 100 (4.38 is 438).
+mos100() {
+    sed -n 's/.*; MOS \([0-9]\)\.\([0-9][0-9]\) .*/\1\2/p'
+}
+# The mean RTCP round trip a line reports, in whole ms.
+rtt_ms() {
+    sed -n 's/.* round trip ms avg \([0-9]*\).*/\1/p'
+}
 
 echo "== 1. SIP calls between emulated ends"
 # shellcheck disable=SC2086
@@ -275,8 +288,58 @@ if [ -z "${LOSS:-}" ]; then
             fi
         done
     done
+    # Clean calls score as G.711 does: MOS 4.3 to 4.4 (4.1 or so on a VM
+    # whose stalls make packets late for the jitter buffer).
+    for side in client server; do
+        q=$(line office $side | mos100)
+        if [ "${q:-0}" -lt 380 ]; then
+            fail "template office: MOS ${q:-none} (x100) on the $side without loss or delay"
+        fi
+    done
+    clean_mos=$(line office server | mos100)
+    [ -n "$(line office client | rtt_ms)" ] || fail "template office: no RTCP round trip"
 elif ! grep -Eq "^  client: .* [1-9][0-9]* lost" "$log"; then
     fail "with loss, no RTP packet was lost"
+fi
+
+# 1b. Delay and loss on the way to the server (netem on the router): the
+# round trip and the server's view of the calls must show them, and the
+# score must fall as the E-model says (G.711 with 5% random loss and 200 ms
+# more round trip: R about 73, MOS about 3.7; lower where packets also come
+# too late for the jitter buffer).
+if [ -z "${LOSS:-}" ] && [ "${IPV6:-}" != 1 ] &&
+    r tc qdisc add dev $out root netem delay 200ms loss 5% 2>/dev/null; then
+    echo "== 1b. SIP calls with 200 ms delay and 5% loss towards the server"
+    sed -e 's/^transactions = .*/transactions = 20/' "$tmp/sip.toml" |
+        awk '/^\[\[template\]\]/ { n++ } /^\[[a-z]/ && !/^\[template/ { n = 0 } n < 2' \
+            >"$tmp/impaired.toml"
+    # shellcheck disable=SC2086
+    "$BIN" udp -p "$tmp/impaired.toml" $links $hosts "$@" >"$log" 2>&1 || status=$?
+    cat "$log"
+    r tc qdisc del dev $out root
+    # One template: no per-template lines, the sides' totals.
+    side() { grep -E "^  $1: " "$log" | head -1; }
+    if ! side client | grep -Eq "^  client: ([1-9][0-9]*) transactions, \1 answered" ||
+        side client | grep -Eq "timed out|other answers than expected"; then
+        fail "with delay and loss, not every call ended well: $(side client)"
+    fi
+    rtt=$(side client | rtt_ms)
+    if [ "${rtt:-0}" -lt 190 ]; then
+        fail "with 200 ms more delay, the client's RTCP round trip is ${rtt:-none} ms"
+    fi
+    # About 3.7 on a quiet machine; a jittery VM adds late packets on top
+    # of the loss and scores lower, so: below 4.0, well below the clean
+    # calls, and not absurd.
+    q=$(side server | mos100)
+    if [ -z "$q" ] || [ "$q" -ge 400 ] || [ "$q" -lt 250 ] ||
+        [ "$q" -gt $((${clean_mos:-440} - 30)) ]; then
+        fail "with 5% loss and 200 ms, the server's MOS is ${q:-none} (x100), clean ${clean_mos:-none}; expected about 370"
+    fi
+    if ! side server | grep -Eq " [1-9][0-9]* lost"; then
+        fail "with 5% loss, the server lost no RTP"
+    fi
+else
+    echo "1b skipped (LOSS, IPV6 or no netem)"
 fi
 
 if [ "${IPV6:-}" = 1 ]; then

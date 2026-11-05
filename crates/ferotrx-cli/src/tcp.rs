@@ -675,6 +675,16 @@ fn side_line(c: &TcpCounters) -> String {
     if c.max_in_flight > 0 {
         line.push_str(&format!("; at most {} bytes in flight", c.max_in_flight));
     }
+    for (l, what) in [(&c.connect_time, "connect"), (&c.first_byte, "first byte")] {
+        if let Some(l) = l {
+            line.push_str(&format!(
+                "; {what} ms avg {} p99 {} max {}",
+                crate::udp::ms(l.avg_us),
+                crate::udp::ms(l.p99_us),
+                crate::udp::ms(l.max_us)
+            ));
+        }
+    }
     if let Some(h) = c.app.as_ref().and_then(|a| a.tls.as_ref()) {
         line.push_str(&format!("; {}", tls_line(h)));
     }

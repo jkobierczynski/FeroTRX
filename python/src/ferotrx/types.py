@@ -479,6 +479,24 @@ class MediaCounters(Record):
     rtcp_received: int = 0
     #: Streams by codec, e.g. ``{"PCMU": 16}``.
     codecs: dict[str, int] = field(default_factory=dict)
+    #: Packets too late for the jitter buffer (lost for the score).
+    late: int = 0
+    #: Runs of lost or late packets, and the longest.
+    loss_bursts: int = 0
+    max_burst: int = 0
+    #: Each stream's mean round trip from RTCP.
+    rtt: LatencyCounters | None = None
+    #: Lost packets the other ends reported (RTCP) about ours.
+    remote_lost: int = 0
+    #: The E-model's R (0 to 100) and estimated MOS (1 to 4.5): mean and
+    #: worst over the scored streams.
+    r_avg: float | None = None
+    r_min: float | None = None
+    mos_avg: float | None = None
+    mos_min: float | None = None
+    #: Scored streams by G.109 band of R, best first: 90 and up, 80, 70,
+    #: 60, 50, below 50.
+    bands: list[int] = field(default_factory=list)
 
 
 @dataclass(kw_only=True)
@@ -526,6 +544,10 @@ class TcpCounters(Record):
     paws_dropped: int = 0
     #: Most bytes one connection had in flight at once.
     max_in_flight: int = 0
+    #: Client: from the first SYN to the end of the handshake.
+    connect_time: LatencyCounters | None = None
+    #: Client: from the first SYN to the first byte from the server.
+    first_byte: LatencyCounters | None = None
     #: What the application protocol counted, for templates that play one.
     app: AppCounters | None = None
 
