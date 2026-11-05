@@ -135,6 +135,19 @@ checked against 0.4.0. Each issue has the full checklist.
 - [ ] **Later**, [#20](https://github.com/jkobierczynski/FeroTRX/issues/20):
       session length distributions
 
+**P2, after the protocols of #37: quality and network behaviour**
+
+- [ ] **M32, jitter, latency and call quality (0.25.0)**, [#49](https://github.com/jkobierczynski/FeroTRX/issues/49):
+      per-call RTP loss/jitter/latency, RTCP reports, E-model R-factor and
+      MOS, transaction latency percentiles for TCP/UDP apps
+- [ ] **M33, built-in impairments (0.26.0)**, [#50](https://github.com/jkobierczynski/FeroTRX/issues/50):
+      delay/jitter, loss (incl. bursts), duplication, reordering, corruption
+      and rate limits in the pipeline and on ports, a two-port bridge mode
+- [ ] **M34, TCP congestion control choices (0.27.0)**, [#51](https://github.com/jkobierczynski/FeroTRX/issues/51):
+      a controller trait, CUBIC with HyStart++, ECN
+- [ ] **M35, Y.1564 service activation (0.28.0)**, [#52](https://github.com/jkobierczynski/FeroTRX/issues/52):
+      CIR/EIR services, configuration and performance tests, FLR/FTD/FDV
+
 **P3: when the engine is stable**
 
 - [x] **M22, desktop GUI (0.15.0)**, from [#21](https://github.com/jkobierczynski/FeroTRX/issues/21):
