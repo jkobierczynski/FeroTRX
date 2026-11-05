@@ -117,11 +117,18 @@ bridge -d 9s --impair "delay=20ms jitter=2ms loss=5% seed=1" --impair-back "dela
 set -- $(ping_stats $A -c 400 -i 0.01 -W 1 10.9.3.2)
 check "ping loss near 5% (one way only)" 'a >= 1.5 && a <= 10' "$1"
 check "round trip at least 28 ms (20 +- 2 there, 10 back)" 'a >= 27.9' "$2"
-check "round trip about 30 ms on average" 'a >= 29 && a <= 34' "$3"
+# The average is not checked on ping: a VM's stalls add tens of ms to some
+# round trips (ping's max). What the bridge held each frame is checked below.
+echo "  round trip avg $3 ms, max $4 ms (a busy VM adds its own delay here)"
 check "jitter shows (mdev over 0.4 ms)" 'a > 0.4' "$5"
 bridge_done
 lost=$(sed -n 's/.*ia -> ib: [0-9]* in, [0-9]* out, \([0-9]*\) lost.*/\1/p' "$WORK/bridge.txt")
 check "the bridge counted what it lost" 'a > 0' "${lost:-0}"
+held() { sed -n "s/.*$1: .* held ms avg \([0-9.]*\) min \([0-9.]*\) max \([0-9.]*\).*/\1 \2 \3/p" "$WORK/bridge.txt"; }
+set -- $(held "ia -> ib")
+check "the bridge held frames 20 ms +- 2 there" 'a >= 19.5 && a <= 20.5 && b >= 17.99 && c <= 22.01' "$1" "$2" "$3"
+set -- $(held "ib -> ia")
+check "and 10 ms back" 'a >= 9.99 && a <= 10.01' "$1"
 
 echo "== 2. MTU and duplicates"
 bridge -d 8s --impair "mtu=1000 duplicate=20% seed=5" --impair-back none
@@ -154,11 +161,13 @@ bridge_done
 sed 's/^/  rx: /' "$WORK/rx.txt"
 loss=$(jq '.flows[0].loss_pct' "$WORK/rx.json")
 min=$(jq '.flows[0].latency.min_us' "$WORK/rx.json")
-avg=$(jq '.flows[0].latency.avg_us' "$WORK/rx.json")
+p50=$(jq '.flows[0].latency.p50_us' "$WORK/rx.json")
 jit=$(jq '.flows[0].latency.jitter_us' "$WORK/rx.json")
 check "receiver sees about 2% loss" 'a >= 1 && a <= 3.5' "$loss"
 check "latency at least 12 ms (15 - 3)" 'a >= 12000' "$min"
-check "latency about 15 ms on average" 'a >= 14500 && a <= 17500' "$avg"
+# The median, not the mean: a VM's stalls make a few packets very late.
+# (Percentiles are to within 12.5%.)
+check "median latency about 15 ms" 'a >= 13000 && a <= 18500' "$p50"
 check "jitter measured" 'a >= 300' "$jit"
 
 echo "== 4. a rate limit"
@@ -182,11 +191,11 @@ wait $RX || { cat "$WORK/rx.txt"; bad "the receiver failed"; }
 bridge_done
 sed 's/^/  rx: /' "$WORK/rx.txt"
 loss=$(jq '.flows[0].loss_pct' "$WORK/rate.json")
-max=$(jq '.flows[0].latency.max_us' "$WORK/rate.json")
-avg=$(jq '.flows[0].latency.avg_us' "$WORK/rate.json")
+p50=$(jq '.flows[0].latency.p50_us' "$WORK/rate.json")
 check "about half lost at twice the rate" 'a >= 40 && a <= 60' "$loss"
-check "the queue delays: about 44 ms when full" 'a >= 30000 && a <= 60000' "$avg"
-check "and no more than the queue holds" 'a <= 70000' "$max"
+check "the queue delays: about 44 ms when full (median)" 'a >= 30000 && a <= 55000' "$p50"
+set -- $(held "ia -> ib")
+check "and the bridge held no frame longer than the queue holds (44 ms)" 'c <= 44.5' "$1" "$2" "$3"
 queue=$(sed -n 's/.*ia -> ib: .* \([0-9]*\) over the queue limit.*/\1/p' "$WORK/bridge.txt")
 check "the bridge counted its tail drops" 'a > 0' "${queue:-0}"
 
