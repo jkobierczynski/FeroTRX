@@ -14,7 +14,7 @@ pub type AppParser = Arc<dyn Fn(&toml::Table, &Path) -> Result<App> + Send + Syn
 
 /// Application protocols by the name profiles give them with `app = "..."`.
 ///
-/// [`AppRegistry::builtin`] has `http`, `http2`, `dns`, `mqtt`, `ntp` and
+/// [`AppRegistry::builtin`] has `http`, `http2`, `dns`, `mqtt`, `ntp`, `sip` and
 /// (feature `ssh`) `ssh`; add your own with
 /// [`register`](Self::register) and read profiles with
 /// [`TcpProfile::from_toml_with`](crate::TcpProfile::from_toml_with).
@@ -39,7 +39,7 @@ impl AppRegistry {
         Self::default()
     }
 
-    /// The built-in protocols: `http`, `http2`, `dns`, `mqtt`, `ntp`, `ssh`.
+    /// The built-in protocols: `http`, `http2`, `dns`, `mqtt`, `ntp`, `sip`, `ssh`.
     pub fn builtin() -> Self {
         let mut r = Self::new();
         r.register("http", |t, base| super::http::parse(t, base).map(App::new));
@@ -49,6 +49,7 @@ impl AppRegistry {
         r.register("dns", |t, base| super::dns::parse(t, base).map(App::new));
         r.register("ntp", |t, _| super::ntp::parse(t).map(App::new));
         r.register("mqtt", |t, _| super::mqtt::parse(t).map(App::new));
+        r.register("sip", |t, _| super::sip::parse(t).map(App::new));
         #[cfg(feature = "ssh")]
         r.register("ssh", |t, base| super::ssh::parse(t, base).map(App::new));
         r

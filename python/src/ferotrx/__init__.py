@@ -31,6 +31,7 @@ from .types import (
     HostInfo,
     InterfaceEntry,
     LatencyCounters,
+    MediaCounters,
     Notification,
     ProfileInfo,
     Role,
@@ -50,7 +51,7 @@ from .types import (
     UdpTemplateCounters,
 )
 
-__version__ = "0.20.0"
+__version__ = "0.21.0"
 
 __all__ = [
     "__version__",
@@ -79,6 +80,7 @@ __all__ = [
     "Counters",
     "StreamCounters",
     "LatencyCounters",
+    "MediaCounters",
     "FlowCounters",
     "RxCounters",
     "RunInfo",

@@ -812,6 +812,38 @@ pub struct AppCounters {
     /// TLS handshakes, for protocols run over TLS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<HandshakeCounters>,
+    /// Media streams (RTP), for protocols that carry them (SIP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<MediaCounters>,
+}
+
+/// Media streams of one side; see `ferotrx_core::MediaStats`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MediaCounters {
+    /// Streams (calls' audio) that ended.
+    pub streams: u64,
+    pub packets_sent: u64,
+    pub packets_received: u64,
+    /// Packets that never came (sequence numbers missing).
+    pub lost: u64,
+    /// Lost, of the packets expected, in percent.
+    #[serde(default)]
+    pub loss_pct: f64,
+    #[serde(default)]
+    pub duplicates: u64,
+    /// Packets that came after a later one.
+    #[serde(default)]
+    pub reordered: u64,
+    /// Each stream's interarrival jitter (RFC 3550) at its end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<LatencyCounters>,
+    #[serde(default)]
+    pub rtcp_sent: u64,
+    #[serde(default)]
+    pub rtcp_received: u64,
+    /// Streams by codec, e.g. `{"PCMU": 16}`.
+    #[serde(default)]
+    pub codecs: std::collections::BTreeMap<String, u64>,
 }
 
 /// TLS handshakes of one side; see `ferotrx_core::AppStats`.
@@ -852,6 +884,22 @@ impl From<&ferotrx_core::AppStats> for AppCounters {
                 resumed: s.resumed,
                 negotiated: s.negotiated.clone(),
                 time: (s.handshake_time.count() > 0).then(|| (&s.handshake_time).into()),
+            }),
+            media: (s.media.streams > 0).then(|| {
+                let m = &s.media;
+                MediaCounters {
+                    streams: m.streams,
+                    packets_sent: m.packets_sent,
+                    packets_received: m.packets_received,
+                    lost: m.lost,
+                    loss_pct: m.loss() * 100.0,
+                    duplicates: m.duplicates,
+                    reordered: m.reordered,
+                    jitter: (m.jitter.count() > 0).then(|| (&m.jitter).into()),
+                    rtcp_sent: m.rtcp_sent,
+                    rtcp_received: m.rtcp_received,
+                    codecs: m.codecs.clone(),
+                }
             }),
         }
     }

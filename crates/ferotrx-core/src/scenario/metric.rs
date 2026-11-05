@@ -350,6 +350,17 @@ pub const UDP_METRICS: &[MetricDef] = &[
     m("response_max", Millis, Lower, "slowest answer"),
     m("tps", PerSecond, Higher, "answered transactions per second"),
     m("server_answered", Count, Higher, "requests the server answered"),
+    m("app_transactions", Count, Higher, "application transactions the client finished (SIP: REGISTER, INVITE, BYE)"),
+    m("app_failed", Count, Lower, "application transactions that did not end as expected"),
+    m("protocol_errors", Count, Lower, "things the server sent that the protocol could not take"),
+    m("media_streams", Count, Higher, "media streams (SIP calls' RTP) that ended"),
+    m("media_received", Count, Higher, "RTP packets the client received"),
+    m("media_lost", Count, Lower, "RTP packets lost, the worse of the two ways"),
+    m("media_loss_pct", Percent, Lower, "RTP packets lost, of those expected, the worse way"),
+    m("jitter_min", Millis, Lower, "lowest stream jitter (RFC 3550), both ways"),
+    m("jitter_avg", Millis, Lower, "average stream jitter"),
+    m("jitter_p99", Millis, Lower, "99th percentile of the stream jitter"),
+    m("jitter_max", Millis, Lower, "highest stream jitter"),
 ];
 
 /// Metrics of a traffic check. Latency figures are of the worst stream.

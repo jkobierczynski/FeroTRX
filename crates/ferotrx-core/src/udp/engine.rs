@@ -264,6 +264,9 @@ pub struct UdpOptions {
     /// Unix time at the start of the run, for NTP timestamps. `ferotrx-ctl`
     /// sets it from the system clock.
     pub clock: Duration,
+    /// The ports sessions get for media (SIP's RTP and RTCP), on each end
+    /// (default 16384-32767).
+    pub media_ports: Range<u16>,
 }
 
 impl Default for UdpOptions {
@@ -278,6 +281,7 @@ impl Default for UdpOptions {
             verify: true,
             seed: 0x5eed_d115,
             clock: Duration::ZERO,
+            media_ports: 16384..32768,
         }
     }
 }
@@ -438,6 +442,9 @@ fn plan(t: &UdpTemplate, o: &UdpOptions) -> Vec<Step> {
 enum Fate {
     Keep,
     Remove,
+    /// A finished server session that the datagram is not for: a new
+    /// session takes it.
+    Replace,
 }
 
 type Key = (SocketAddr, SocketAddr);
@@ -478,6 +485,14 @@ struct Session {
     /// The earliest time the session is queued for in the engine's timers
     /// (`Duration::MAX`: not queued).
     scheduled: Duration,
+    /// The protocol plays a whole dialog (see [`crate::AppProtocol::dialog`]).
+    dialog: bool,
+    /// Dialogs: when the protocol wants its timer.
+    wake: Option<Duration>,
+    /// Dialogs: the first of the session's media ports, and how many.
+    media: Option<(u16, u16)>,
+    /// Dialogs: the protocol took the last datagram.
+    taken: bool,
 }
 
 /// Small, fast, seeded random numbers for DNS ids.
@@ -492,6 +507,42 @@ impl Rng {
     }
 }
 
+/// The media ports sessions hold: (address, port) to the session's key.
+#[derive(Default)]
+struct MediaPorts {
+    held: HashMap<SocketAddr, Key>,
+    cursor: u32,
+}
+
+impl MediaPorts {
+    /// `n` consecutive free ports on `ip` from `range`, the first a
+    /// multiple of `n` from the range's start, held for `key`.
+    fn take(&mut self, range: &Range<u16>, ip: IpAddr, n: u16, key: Key) -> Option<u16> {
+        let n = n.max(1);
+        let slots = u32::from(range.end.saturating_sub(range.start)) / u32::from(n);
+        for _ in 0..slots {
+            let slot = self.cursor % slots;
+            self.cursor = self.cursor.wrapping_add(1);
+            let first = range.start + (slot * u32::from(n)) as u16;
+            if (0..n).all(|i| !self.held.contains_key(&SocketAddr::new(ip, first + i))) {
+                for i in 0..n {
+                    self.held.insert(SocketAddr::new(ip, first + i), key);
+                }
+                return Some(first);
+            }
+        }
+        None
+    }
+
+    fn free(&mut self, s: &Session) {
+        if let Some((first, n)) = s.media {
+            for i in 0..n {
+                self.held.remove(&SocketAddr::new(s.path.src, first + i));
+            }
+        }
+    }
+}
+
 /// What the engine shares with a session while it handles an event.
 struct Ctx<'a> {
     templates: &'a [UdpTemplate],
@@ -500,6 +551,7 @@ struct Ctx<'a> {
     out: &'a mut Vec<(usize, Vec<u8>)>,
     ip_id: &'a mut u16,
     stats: &'a mut UdpStats,
+    media: &'a mut MediaPorts,
 }
 
 impl Ctx<'_> {
@@ -508,10 +560,14 @@ impl Ctx<'_> {
     }
 
     fn send(&mut self, s: &Session, data: &[u8]) {
+        self.send_ports(s, s.lport, s.rport, data);
+    }
+
+    fn send_ports(&mut self, s: &Session, lport: u16, rport: u16, data: &[u8]) {
         *self.ip_id = self.ip_id.wrapping_add(1);
         self.out.push((
             s.port,
-            wire::udp_frame(&s.path, s.lport, s.rport, data, *self.ip_id),
+            wire::udp_frame(&s.path, lport, rport, data, *self.ip_id),
         ));
         let n = data.len() as u64;
         self.add(s.role, s.tpl, |c| {
@@ -605,6 +661,120 @@ impl Session {
         }
     }
 
+    /// Dialogs: calls the protocol's session with `f` and does what it
+    /// asks: sends its datagrams, keeps its timer, counts what it did, ends
+    /// the session or (a server's) opens it again.
+    fn dialog_call(
+        &mut self,
+        cx: &mut Ctx,
+        now: Duration,
+        f: impl FnOnce(&mut dyn AppSession, &mut AppCx) -> Receive,
+    ) -> Fate {
+        let Some(mut app) = self.app.take() else {
+            return Fate::Remove;
+        };
+        let mut ax =
+            AppCx::new(now, cx.options.clock + now).with_media_port(self.media.map(|m| m.0));
+        let r = f(&mut *app, &mut ax);
+        self.app = Some(app);
+        self.taken = r == Receive::Taken;
+        if r == Receive::NotMine {
+            if self.done && self.role == UdpRole::Server {
+                return Fate::Replace;
+            }
+            cx.add(self.role, self.tpl, |s| s.unmatched += 1);
+            return Fate::Keep;
+        }
+        // Media first: a stream's last RTCP before the BYE or its answer.
+        for (from, to, d) in ax.take_media_sends() {
+            if self
+                .media
+                .is_some_and(|(first, n)| (first..first + n).contains(&from))
+            {
+                cx.send_ports(self, from, to, &d);
+            }
+        }
+        for d in ax.take_sends() {
+            cx.send(self, &d);
+        }
+        if let Some(w) = ax.wake() {
+            self.wake = Some(w);
+        }
+        let (role, tpl) = (self.role, self.tpl);
+        cx.add(role, tpl, |s| ax.count_into(&mut s.app));
+        if self.done && self.role == UdpRole::Server && !ax.wants_close() {
+            // Something new on a finished server session.
+            self.done = false;
+            self.mismatched = false;
+            self.error = false;
+            cx.add(role, tpl, |s| {
+                s.sent += 1;
+                s.active += 1;
+            });
+        }
+        self.mismatched |= !ax.all_ok();
+        self.error |= ax.any_error();
+        if ax.wants_close() {
+            return self.finish(cx, now);
+        }
+        Fate::Keep
+    }
+
+    /// Dialogs: a datagram on the session's addresses.
+    fn dialog_datagram(&mut self, cx: &mut Ctx, data: &[u8], now: Duration) -> Fate {
+        let n = data.len() as u64;
+        cx.add(self.role, self.tpl, |s| {
+            s.datagrams_rx += 1;
+            s.payload_rx += n;
+        });
+        self.last_rx = now;
+        self.dialog_call(cx, now, |a, ax| a.receive(data, ax))
+    }
+
+    /// Dialogs: a datagram on one of the session's media ports.
+    fn on_media(
+        &mut self,
+        cx: &mut Ctx,
+        port: u16,
+        from: SocketAddr,
+        data: &[u8],
+        now: Duration,
+    ) -> Fate {
+        let n = data.len() as u64;
+        cx.add(self.role, self.tpl, |s| {
+            s.datagrams_rx += 1;
+            s.payload_rx += n;
+        });
+        self.last_rx = now;
+        self.dialog_call(cx, now, |a, ax| {
+            a.media(port, from, data, ax);
+            Receive::Taken
+        })
+    }
+
+    fn dialog_timer(&mut self, cx: &mut Ctx, now: Duration) -> Fate {
+        if self.wake.is_some_and(|w| now >= w) {
+            self.wake = None;
+            let f = self.dialog_call(cx, now, |a, ax| {
+                a.timer(ax);
+                Receive::Taken
+            });
+            if f != Fate::Keep {
+                return f;
+            }
+        }
+        if self.wake.is_some() || now.saturating_sub(self.last_rx) < cx.options.session_timeout {
+            return Fate::Keep;
+        }
+        if !self.done {
+            cx.add(self.role, self.tpl, |s| {
+                s.timed_out += 1;
+                s.active = s.active.saturating_sub(1);
+            });
+        }
+        Fate::Remove
+    }
+
     /// Plays the session as far as it can go now.
     fn advance(&mut self, cx: &mut Ctx, now: Duration) -> Fate {
         loop {
@@ -654,6 +824,17 @@ impl Session {
         }
         self.deadline = None;
         match self.role {
+            // A dialog client lingers, to answer what the server sends
+            // again (a refusal whose ACK was lost), until it is quiet for
+            // the session timeout; it no longer holds the run open.
+            UdpRole::Client if self.dialog => {
+                // Its media ports go back now: the call is over.
+                cx.media.free(self);
+                self.media = None;
+                self.wake = None;
+                self.last_rx = self.last_rx.max(now);
+                Fate::Keep
+            }
             UdpRole::Client => Fate::Remove,
             UdpRole::Server => {
                 self.last_rx = self.last_rx.max(now);
@@ -663,6 +844,9 @@ impl Session {
     }
 
     fn on_datagram(&mut self, cx: &mut Ctx, data: &[u8], now: Duration) -> Fate {
+        if self.dialog {
+            return self.dialog_datagram(cx, data, now);
+        }
         let n = data.len() as u64;
         cx.add(self.role, self.tpl, |s| {
             s.datagrams_rx += 1;
@@ -726,6 +910,11 @@ impl Session {
 
     /// When [`on_timer`](Self::on_timer) next has something to do.
     fn next_wake(&self, o: &UdpOptions) -> Duration {
+        if self.dialog {
+            return self
+                .wake
+                .unwrap_or_else(|| self.last_rx.saturating_add(o.session_timeout));
+        }
         let mut at = self.hold.unwrap_or(Duration::MAX);
         match self.role {
             UdpRole::Server => at = at.min(self.last_rx.saturating_add(o.session_timeout)),
@@ -739,6 +928,9 @@ impl Session {
     }
 
     fn on_timer(&mut self, cx: &mut Ctx, now: Duration) -> Fate {
+        if self.dialog {
+            return self.dialog_timer(cx, now);
+        }
         if self.hold.is_some_and(|t| now >= t) && self.advance(cx, now) == Fate::Remove {
             return Fate::Remove;
         }
@@ -821,6 +1013,7 @@ pub struct UdpEngine {
     client: Option<UdpClientConfig>,
     hosts: Vec<Host>,
     sessions: HashMap<Key, Session>,
+    media: MediaPorts,
     /// When sessions need their timers looked at; only the entry at a
     /// session's `scheduled` time counts.
     timers: BinaryHeap<Reverse<(Duration, Key)>>,
@@ -1030,6 +1223,7 @@ impl UdpEngine {
             client,
             hosts,
             sessions: HashMap::new(),
+            media: MediaPorts::default(),
             timers: BinaryHeap::new(),
             out: Vec::new(),
             ip_id: 0,
@@ -1112,7 +1306,7 @@ impl UdpEngine {
             && self
                 .sessions
                 .values()
-                .all(|s| s.role == UdpRole::Server && s.done)
+                .all(|s| s.done && (s.role == UdpRole::Server || s.dialog))
     }
 
     /// Transactions open now, both sides.
@@ -1129,6 +1323,7 @@ impl UdpEngine {
                 out: &mut self.out,
                 ip_id: &mut self.ip_id,
                 stats: &mut self.stats,
+                media: &mut self.media,
             },
             &mut self.sessions,
         )
@@ -1213,16 +1408,39 @@ impl UdpEngine {
         if let Some(s) = sessions.get_mut(&key) {
             // A finished server session that gets another request starts a
             // new transaction on the same ports.
-            let fresh = s.role == UdpRole::Server && s.done && d.data != s.last_req.as_slice();
+            let fresh =
+                !s.dialog && s.role == UdpRole::Server && s.done && d.data != s.last_req.as_slice();
             if !fresh {
-                if s.on_datagram(&mut cx, d.data, now) == Fate::Remove {
-                    sessions.remove(&key);
-                } else {
-                    self.schedule(key);
+                match s.on_datagram(&mut cx, d.data, now) {
+                    Fate::Keep => {
+                        self.schedule(key);
+                        return;
+                    }
+                    Fate::Remove => {
+                        if let Some(s) = sessions.remove(&key) {
+                            cx.media.free(&s);
+                        }
+                        return;
+                    }
+                    Fate::Replace => {}
                 }
-                return;
             }
-            sessions.remove(&key);
+            if let Some(s) = sessions.remove(&key) {
+                cx.media.free(&s);
+            }
+        } else if let Some(&owner) = cx.media.held.get(&key.0) {
+            // On a session's media port.
+            if let Some(s) = sessions.get_mut(&owner) {
+                let fate = s.on_media(&mut cx, d.dport, key.1, d.data, now);
+                if fate == Fate::Remove {
+                    if let Some(s) = sessions.remove(&owner) {
+                        cx.media.free(&s);
+                    }
+                } else {
+                    self.schedule(owner);
+                }
+            }
+            return;
         }
         let Some(tpl) = listening else {
             let n = d.data.len() as u64;
@@ -1266,7 +1484,45 @@ impl UdpEngine {
             error: false,
             done: false,
             scheduled: Duration::MAX,
+            dialog: false,
+            wake: None,
+            media: None,
+            taken: false,
         };
+        if let UdpApp::App(a) = &cx.templates[tpl].app {
+            if a.protocol().dialog() {
+                s.dialog = true;
+                let n = a.protocol().media_ports();
+                if n > 0 {
+                    let Some(first) = cx.media.take(&cx.options.media_ports, key.0.ip(), n, key)
+                    else {
+                        cx.add(role, tpl, |c| c.unmatched += 1);
+                        return;
+                    };
+                    s.media = Some((first, n));
+                }
+                cx.add(role, tpl, |c| {
+                    c.sent += 1;
+                    c.active += 1;
+                });
+                match s.on_datagram(&mut cx, d.data, now) {
+                    Fate::Keep if s.taken => {
+                        sessions.insert(key, s);
+                        self.schedule(key);
+                    }
+                    Fate::Keep => {
+                        // Not for us after all.
+                        cx.media.free(&s);
+                        cx.add(role, tpl, |c| {
+                            c.sent -= 1;
+                            c.active -= 1;
+                        });
+                    }
+                    _ => cx.media.free(&s),
+                }
+                return;
+            }
+        }
         // Only a datagram that can start the transaction opens a session.
         match s.fits(&mut cx, d.data, now) {
             Fit::No => {
@@ -1323,8 +1579,8 @@ impl UdpEngine {
                 let wake = s.next_wake(cx.options).max(now + TIMER_TICK);
                 s.scheduled = wake;
                 self.timers.push(Reverse((wake, key)));
-            } else {
-                sessions.remove(&key);
+            } else if let Some(s) = sessions.remove(&key) {
+                cx.media.free(&s);
             }
         }
     }
@@ -1528,15 +1784,42 @@ impl UdpEngine {
             error: false,
             done: false,
             scheduled: Duration::MAX,
+            dialog: false,
+            wake: None,
+            media: None,
+            taken: false,
         };
         let (mut cx, sessions) = self.ctx();
+        if let UdpApp::App(a) = &cx.templates[tpl].app {
+            if a.protocol().dialog() {
+                s.dialog = true;
+                let n = a.protocol().media_ports();
+                if n > 0 {
+                    let Some(first) = cx.media.take(&cx.options.media_ports, key.0.ip(), n, key)
+                    else {
+                        return false;
+                    };
+                    s.media = Some((first, n));
+                }
+            }
+        }
         cx.add(UdpRole::Client, tpl, |c| {
             c.sent += 1;
             c.active += 1;
         });
-        if s.advance(&mut cx, now) == Fate::Keep {
+        let fate = if s.dialog {
+            s.dialog_call(&mut cx, now, |a, ax| {
+                a.start(ax);
+                Receive::Taken
+            })
+        } else {
+            s.advance(&mut cx, now)
+        };
+        if fate == Fate::Keep {
             sessions.insert(key, s);
             self.schedule(key);
+        } else {
+            cx.media.free(&s);
         }
         true
     }

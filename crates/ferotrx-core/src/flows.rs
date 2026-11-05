@@ -329,6 +329,16 @@ impl UdpConfig {
         if n == 1 {
             return Ok((vec![self.clone()], router));
         }
+        if let Some(t) = self.templates.iter().find(|t| match &t.app {
+            crate::UdpApp::App(a) => a.protocol().media_ports() > 0,
+            crate::UdpApp::Replay(_) => false,
+        }) {
+            return Err(crate::Error::Udp(format!(
+                "template {}: {} carries media on ports of its own, which cannot be split over several workers yet; use workers = 1",
+                t.name,
+                t.app.kind()
+            )));
+        }
         if let Some(c) = &self.client {
             check_ports(
                 "udp",

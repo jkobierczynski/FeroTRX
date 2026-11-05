@@ -57,6 +57,7 @@ use crate::{
 /// keep_timing = false         # wait the capture's gaps between datagrams
 /// think_time = "0s"           # pause before answering the other end
 /// verify = true               # check replayed datagrams byte for byte
+/// media_ports = "16384-32767" # where SIP sessions send and receive RTP and RTCP
 /// ```
 ///
 /// A replay takes a UDP session from a capture (`pcap`, `flow`) or written
@@ -321,6 +322,7 @@ struct RawOptions {
     think_time: Option<String>,
     verify: Option<bool>,
     seed: Option<u64>,
+    media_ports: Option<String>,
 }
 
 impl RawWhat {
@@ -585,6 +587,18 @@ impl UdpProfile {
                 verify: o.verify.unwrap_or(defaults.verify),
                 seed: o.seed.unwrap_or(defaults.seed),
                 clock: defaults.clock,
+                media_ports: match o.media_ports {
+                    Some(r) => {
+                        let r = parse_port_range(&r)?;
+                        if r.len() < 2 {
+                            return Err(Error::Profile(
+                                "[udp] media_ports needs at least two ports".into(),
+                            ));
+                        }
+                        r
+                    }
+                    None => defaults.media_ports,
+                },
             };
         }
         if p.client.is_none() && p.server.is_none() {

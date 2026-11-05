@@ -16,9 +16,11 @@ The protocols plug into the engines through a small interface
 can add its own. [TLS](#tls-and-https) runs under any of the stream
 protocols, with real handshakes: HTTPS, DNS over TLS (0.17.0, M24).
 [MQTT](#mqtt) 3.1.1 and 5.0 clients and a broker came in 0.18.0 (M25), and
-[HTTP/2](#http2) over TLS and without in 0.19.0 (M26), and [SSH](#ssh)
-clients and servers that work with OpenSSH in 0.20.0 (M27). The plan for
-the other protocols is [at the end](#what-comes-next).
+[HTTP/2](#http2) over TLS and without in 0.19.0 (M26), [SSH](#ssh)
+clients and servers that work with OpenSSH in 0.20.0 (M27), and
+[SIP](#sip-and-rtp) phones and a SIP server with RTP audio, which work with
+SIPp, in 0.21.0 (M28). The plan for the other protocols is
+[at the end](#what-comes-next).
 
 ## Quick start
 
@@ -422,7 +424,7 @@ refused, and so are channels other than `session` (port forwarding).
 | `rekey_after` | never | Client: a new key exchange after this many bytes (`1M`). |
 | `window` | `2M` | Client: each channel's receive window. |
 | `ciphers` | all three | Both ends: the ciphers, best first. |
-| `version` | `FeroTRX_0.20.0` | Both ends: the software version after `SSH-2.0-` (`OpenSSH_9.6`). |
+| `version` | `FeroTRX_0.21.0` | Both ends: the software version after `SSH-2.0-` (`OpenSSH_9.6`). |
 | `users` | none | Server: user names and passwords; with none, any password. |
 | `authorized_keys` | none | Server: public key lines (`ssh-ed25519 AAAA...`), or a file of them; with none, any key. |
 | `host_key` | `generate` | Server: an OpenSSH Ed25519 key file. A generated one is new on every run, and the run prints its fingerprint. |
@@ -453,6 +455,116 @@ ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no admin@192.168.20
 with a password, backups with a key, an upload, a download, a route's exit
 status and re-keying, and a wrong password that the server refuses.
 
+## SIP and RTP
+
+`app = "sip"` (port 5060) in UDP profiles plays SIP phones and a SIP
+server (RFC 3261), with the RTP audio of each call (RFC 3550). Run it with
+`ferotrx udp`:
+
+```toml
+[[template]]
+name = "office"
+app = "sip"
+[template.sip]
+user = "alice"
+password = "lab"
+domain = "lab.local"
+call = "bob"
+duration = "10s"
+codecs = ["PCMU", "PCMA"]
+users = { alice = "lab", bob = "lab" }   # the server's
+ring = "200ms"
+
+[[template]]
+name = "busy"
+app = "sip"
+port = 5080
+[template.sip]
+register = false
+call = "carol"
+answer = 486            # the server refuses
+expect = 486            # as the client expects
+```
+
+Each client session is a phone: it registers (REGISTER, and again with its
+password when the server answers with a digest challenge, 401), calls
+(INVITE with an SDP offer, answering a 407 challenge the same way, then the
+ACK), sends and receives RTP for `duration`, and hangs up (BYE). Requests go
+again on SIP's timers until answered: every T1 (500 ms), doubling, an INVITE
+until its first provisional answer and the others up to every 4 s, and they
+give up after 64 T1 (32 s). The phone also answers the server's BYE (when the
+server hangs up) and OPTIONS. Each session has its own address and port, so
+a NAT router or firewall sees each phone as a flow of its own.
+
+The server registers users (with `users`, digest authentication with MD5
+or SHA-256 and `qop=auth`; a wrong password gets 403), and answers INVITEs
+with 100 Trying, 180 Ringing and, after `ring`, its `answer`: 200 with an
+SDP answer for the first offered codec it has, or a refusal (486, 603; 488
+when no codec fits). It sends its final answer again until the ACK, plays
+RTP back during the call, answers BYE, CANCEL (487 for the INVITE) and
+OPTIONS, and answers a request that comes again with its last answer.
+Several calls can share one client address and port (SIPp's default), told
+apart by Call-ID. It hangs up calls that last longer than `max_call`.
+
+The audio is RTP at the codec's rate, a packet every `ptime`: PCMU and PCMA
+(G.711, 160 bytes per 20 ms, a 1 kHz tone, so a capture plays in
+Wireshark), G.722, G.729 (20 bytes) and Opus (payload type 111, 80 bytes at
+32 kbit/s). RTCP goes on the next port: a sender report with a reception
+report and the CNAME after 2.5 s and every 5 s, and BYE at the end. Media
+follows the signaling: it goes to the other end's signaling address, at the
+port its SDP gives, and then to wherever its RTP comes from (symmetric RTP).
+So it works through NAT: the server sees that the caller's SDP address is
+not where its SIP came from and waits for the caller's first packet before
+it sends. The receiving end counts the packets, the ones lost (sequence
+numbers missing between the first and the last), duplicates, reordered
+ones, and the interarrival jitter (RFC 3550). Each session gets two ports
+for this from `media_ports` in `[udp]` (default `16384-32767`).
+
+| Key | Default | What |
+|---|---|---|
+| `user` | `ferotrx` | Client: the user name. |
+| `password` | none | Client: for digest challenges; without one a challenge ends the session. |
+| `register` | `true` | Client: REGISTER before calling. |
+| `expires` | 3600 | Client: the registration's lifetime in seconds. |
+| `call` | `echo` | Client: whom to call, a user at the domain or a `sip:` URI; `""` only registers. |
+| `duration` | `5s` | Client: how long a call lasts once answered, then BYE. |
+| `expect` | `success` | Client: `failure` when the call (or the registration, without a call) must be refused, or the status it must be refused with (`486`, `403`). |
+| `domain` | the server's address | Both ends: the domain in URIs and the digest realm. |
+| `codecs` | `["PCMU", "PCMA"]` | Both ends: offered (client) or accepted (server), best first: `PCMU`, `PCMA`, `G722`, `G729`, `opus`. |
+| `ptime` | `20ms` | Both ends: audio per packet. |
+| `media` | `true` | Both ends: RTP and RTCP during calls; `false` calls without SDP. |
+| `t1` | `500ms` | Both ends: SIP's first retransmission interval. |
+| `users` | none | Server: user names and passwords; with none, no authentication. |
+| `algorithm` | `MD5` | Server: the digest algorithm it asks for, `MD5` or `SHA-256` (RFC 8760). |
+| `answer` | 200 | Server: its final answer to INVITEs. |
+| `ring` | `0s` | Server: how long it rings (180) before it answers. |
+| `max_call` | `1h` | Server: it hangs up (BYE) calls that last longer. |
+
+The transactions are the exchanges by method and status: `REGISTER 200`,
+`INVITE 200`, `INVITE 486`, `BYE 200`, on the client with the time to the
+final answer (for INVITE from the first INVITE, so through ringing and the
+challenge). The server counts its challenges (`REGISTER 401`, `INVITE
+407`) too, `BYE received` and `BYE sent 200` are hang-ups by the other end
+and by the server, and `REGISTER timeout` or `INVITE timeout` a request
+that never got an answer. Each call's audio is a media stream (see
+[Counters](#counters)). A client session is answered when its last request
+got its answer; it is mismatched when an answer was not the expected one.
+
+Against SIPp, which neither registers nor knows passwords in its built-in
+scenarios, use a template without `register` and `users`:
+
+```sh
+# SIPp calls the emulated server and echoes its RTP back:
+sipp -sn uac -s echo -m 10 -r 2 -d 3000 -rtp_echo -t un 192.168.20.80:5060
+# The emulated phones call SIPp's answering end (leave [server] out):
+sipp -sn uas -rtp_echo -i 192.168.20.10 -p 5060
+sudo ferotrx udp -p examples/lab-sip.toml -i eth0 --connect 192.168.20.10
+```
+
+[examples/lab-sip.toml](../examples/lab-sip.toml) has office phones that
+register and call with G.711, calls without registering with Opus, and a
+busy line.
+
 ## NTP
 
 `app = "ntp"` in UDP profiles: client requests, matched by their transmit
@@ -466,8 +578,10 @@ the TCP or UDP ones: transactions (requests answered, answers sent), the
 ones that failed, error answers (HTTP 4xx and 5xx, DNS response codes other
 than NOERROR, NTP kiss-o'-death), protocol errors, the transactions by
 status or response code, and the client's response times (from the request
-to the whole answer). `ferotrx tcp` prints them at the end of each side's
-line:
+to the whole answer). Protocols that carry media (SIP) add their media
+streams: packets sent and received, lost, duplicates and reordered, each
+stream's jitter, RTCP, and the codecs. `ferotrx tcp` prints them at the end
+of each side's line:
 
 ```text
   client: 200 connections, 200 established, 200 completed; ...; 550 transactions
@@ -504,8 +618,26 @@ and over TLS `tls` in it:
         "time": {"avg_us": 1330.0, "p99_us": 2030.0, ...}}
 ```
 
+and for SIP calls `media`:
+
+```json
+"media": {"streams": 40, "packets_sent": 6040, "packets_received": 5961,
+          "lost": 18, "loss_pct": 0.3, "duplicates": 0, "reordered": 0,
+          "jitter": {"avg_us": 390.0, "max_us": 560.0, ...},
+          "rtcp_sent": 80, "rtcp_received": 40, "codecs": {"PCMU": 40}}
+```
+
+which `ferotrx udp` prints as
+
+```text
+    office client: 40 transactions, 40 answered; ...; BYE 200 x40, INVITE 200 x40,
+    REGISTER 200 x40; 40 media streams (PCMU x40): 6040 packets sent, 5961
+    received, 18 lost (0.30%), jitter ms avg 0.39 max 0.56, RTCP 80 sent 40 received
+```
+
 The Python client reads them as `TcpCounters.app` and `UdpCounters.app`
-(`ferotrx.AppCounters`, with `tls` a `ferotrx.HandshakeCounters`).
+(`ferotrx.AppCounters`, with `tls` a `ferotrx.HandshakeCounters` and `media`
+a `ferotrx.MediaCounters`).
 
 [Scenario](scenarios.md) checks of kind `tcp` have the metrics
 `app_transactions`, `app_failed`, `app_failed_pct`, `app_errors`,
@@ -513,6 +645,11 @@ The Python client reads them as `TcpCounters.app` and `UdpCounters.app`
 `tls_handshakes`, `tls_failed`, `tls_unexpected`, `tls_resumed` and
 `handshake_min`/`_avg`/`_p99`/`_max`, so a check can say
 `require = ["app_failed == 0", "tls_unexpected == 0", "handshake_p99 < 20ms"]`.
+Checks of kind `udp` have `app_transactions`, `app_failed` and
+`protocol_errors`, and with SIP calls `media_streams`, `media_received`,
+`media_lost`, `media_loss_pct` (the worse of the two ways) and
+`jitter_min`/`_avg`/`_p99`/`_max`: `require = ["media_loss_pct < 1",
+"jitter_p99 < 30ms"]`.
 
 ## Lab script
 
@@ -574,6 +711,29 @@ cargo build -p ferotrx-cli
 sudo scripts/app-netns.sh
 ```
 
+SIP runs over UDP and has a script of its own,
+[`scripts/sip-netns.sh`](../scripts/sip-netns.sh), with the same router:
+
+1. the templates of `examples/lab-sip.toml` with shorter calls (phones that
+   register and call with digest authentication, calls with Opus, a busy
+   line), checking that every call ended as expected and that RTP flowed
+   both ways through the NAT, without loss unless `LOSS` is set;
+2. the emulated server alone, and SIPp on the router: its built-in caller
+   (10 calls, echoing the server's RTP back), a REGISTER scenario that
+   answers the digest challenge, and one with a wrong password that must
+   get 403;
+3. SIPp's built-in answering end on the router, echoing RTP, and the
+   emulated phones calling it.
+
+CI runs it plain, with loss, over IPv6 (run 1 only) and over AF_XDP. It
+needs `sipp` (Debian and Ubuntu: `sip-tester`) and `ethtool` for runs 2
+and 3.
+
+```sh
+sudo apt-get install sip-tester ethtool
+sudo scripts/sip-netns.sh
+```
+
 ## Writing a protocol
 
 A protocol is two traits in `ferotrx_core::app`:
@@ -596,8 +756,15 @@ Over TCP the engine does the rest: handshakes, retransmits, reordering
 client's request again when the answer is late, matches datagrams to
 sessions by addresses and ports (a session says `Receive::NotMine` for a
 datagram of another transaction, such as an old DNS id), and answers a
-repeated request with the last answer. A UDP transaction is one request and
-its answer for now.
+repeated request with the last answer. That is one request and its answer
+per transaction. A protocol with longer dialogs (SIP) says so with
+`AppProtocol::dialog`: the engine then hands its sessions every datagram of
+their addresses and leaves retransmissions to them; a session ends when it
+calls `close` (a server's when nothing is open; it stays for repeats), or
+when nothing arrives for the session timeout while it has no timer. With
+`AppProtocol::media_ports` each session also gets ports of its own for
+media (`AppCx::media_port`, `send_media`, `AppSession::media`) and counts
+what they carried with `AppCx::media`.
 
 Wrap the protocol in an `App` and put it in a template
 (`TcpTemplate::with_app_protocol`, `UdpApp::App`), or register it so
@@ -631,8 +798,11 @@ and TCP), and the built-in ones are in `crates/ferotrx-core/src/app/`.
   exchange (`kex-strict-*`), no keyboard-interactive logins, no sftp/scp,
   forwarding or agent; one channel at a time per client connection; the
   server's shell ignores route delays and runs no commands that read input.
-* A UDP transaction is one request and its answer; protocols with longer
-  dialogs over UDP (SIP) need the engine to take several.
+* SIP: UDP only (no TCP or TLS, so no SIPS or SRTP), no proxying or
+  forking: the server is a registrar and the called party in one; no
+  re-INVITEs from our end, no session timers, PRACK, SUBSCRIBE/NOTIFY,
+  MESSAGE or DTMF (RFC 4733); a phone's media goes to the other end's
+  signaling address; calls with media do not run on several workers yet.
 * The control API and the GUI do not have editors for the protocol tables
   yet; profiles carry them as TOML.
 
@@ -646,7 +816,7 @@ Tracked in [#37](https://github.com/jkobierczynski/FeroTRX/issues/37) and in
 | HTTPS/TLS | very high | done (M24); later maybe hello-only emulation of old versions (TLS 1.0/1.1) for middlebox tests |
 | SSH | high | done (M27): real key exchange, ciphers, logins and command channels, OpenSSH both ways; later sftp/scp, port forwarding, RSA/ECDSA keys |
 | DHCP | high | done as [host emulation](host-emulation.md) (M19); a DHCP server role later |
-| SIP/RTP | high | SIP dialogs over UDP (needs multi-message UDP transactions), RTP media streams at codec rates |
+| SIP/RTP | high | done (M28): registration with digest, calls, RTP/RTCP at codec rates with loss and jitter, SIPp both ways; later SIP over TCP/TLS, SRTP, DTMF, a proxy role |
 | HTTP/2 | high | done (M26): frames, HPACK, streams, flow control; h2 over TLS with ALPN and h2c; later server push and priorities |
 | MQTT | high | done (M25): 3.1.1 and 5.0, QoS 0-2, retained messages, logins; later a broker that routes between connections |
 | SMB | medium | negotiate, session setup, tree connect, reads and writes |

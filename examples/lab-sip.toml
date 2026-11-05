@@ -1,0 +1,89 @@
+# FeroTRX stateful UDP profile: SIP calls with RTP audio, through a NAT
+# router between two VLANs.
+#
+#   FeroTRX host --- switch (trunk) --- router --- VLAN 10: 192.168.10.0/24 (phones)
+#                                              \-- VLAN 20: 192.168.20.0/24 (SIP server)
+#
+# Run it with:
+#   sudo ferotrx udp -p examples/lab-sip.toml -i <interface>
+#
+# Each client session registers (answering the server's digest challenge),
+# calls, sends and receives RTP and RTCP for the call, and hangs up. The
+# server registers its users, rings, answers with SDP and plays RTP back.
+# The run reports each exchange by method and status (REGISTER 200, INVITE
+# 486), how long the answers took, and each way's media: packets, loss,
+# reordering and jitter.
+#
+# Either end works against other SIP software:
+#   only the server (leave out [client]), and SIPp as the caller:
+#     sipp -sn uac -s echo -m 10 -r 2 -d 3000 -rtp_echo 192.168.20.80:5060
+#   only the clients (leave out [server]), against SIPp's answering end:
+#     sipp -sn uas -rtp_echo -i 192.168.20.80 -p 5060
+#   (use the "open" template there, as SIPp neither registers nor asks for
+#   passwords; "office" needs a registrar with the users below, such as
+#   Asterisk or Kamailio).
+#
+# As in examples/lab-tcp.toml, the `ip`s must be free addresses in each VLAN,
+# not addresses of the FeroTRX machine, and `gateway` the router's address.
+format = 1
+rate = 10                   # calls per second, all templates together
+transactions = 100
+concurrency = 50
+
+# Office phones: register, call for 10 s with G.711, hang up.
+[[template]]
+name = "office"
+app = "sip"                 # port 5060
+weight = 4
+
+[template.sip]
+user = "alice"
+password = "lab"
+domain = "lab.local"
+call = "bob"
+duration = "10s"
+codecs = ["PCMU", "PCMA"]   # offered (client) or accepted (server), best first
+ptime = "20ms"
+users = { alice = "lab", bob = "lab" }   # the server's; none: no passwords
+ring = "200ms"              # 180 Ringing this long before the 200
+
+# Calls without registering or passwords, with Opus (what SIPp can play).
+[[template]]
+name = "open"
+app = "sip"
+port = 5070
+weight = 1
+
+[template.sip]
+register = false
+call = "echo"
+duration = "5s"
+codecs = ["opus", "PCMU"]
+
+# A busy line: the server refuses with 486, as the client expects.
+[[template]]
+name = "busy"
+app = "sip"
+port = 5080
+weight = 1
+
+[template.sip]
+register = false
+call = "carol"
+answer = 486                # the server's answer to INVITEs
+expect = 486                # "success" (default), "failure" or a status
+
+[client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20
+
+[udp]
+session_timeout = "10s"
+media_ports = "16384-32767" # where calls send and receive RTP (and RTCP on +1)
