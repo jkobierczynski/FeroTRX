@@ -24,12 +24,29 @@ ferotrx-gui --connect 192.168.56.10 --ca ca.pem --cert alice.pem --key alice-key
 # Open on a port with a profile's streams, or with a capture:
 ferotrx-gui --port enp0s3 --profile examples/lab-two-vlans.toml
 ferotrx-gui examples/web.pcap
+
+# Open a workspace saved earlier:
+ferotrx-gui --workspace lab.ferotrx
 ```
 
 `FEROTRX_CTL`, `FEROTRX_CA`, `FEROTRX_CERT`, `FEROTRX_KEY` and
 `FEROTRX_TOKEN` work as for `ferotrx ctl`. Tokens are never saved; the rest
-(servers, every port's streams and settings, the last port open) is kept
-between sessions.
+(servers, every port's streams and settings, the forms of every tab, the
+last port open) is kept between sessions.
+
+## Workspaces
+
+**Workspace** in the top bar saves the whole session to a `.ferotrx` file
+and opens it again: the servers and which of them were connected, every
+port's streams and settings, the profiles being edited in the Stateful,
+Applications, Scenario and Benchmark tabs, the multi-server group, the
+capture that was open with its ticked packets, the tab on show and the
+window's layout (panel sizes, open sections). **New** starts an empty one,
+**Save** writes back to the file it came from. Tokens and passwords are
+never written; certificates are kept as paths. Opening a workspace connects
+to the servers that were connected when it was saved. The file is JSON
+(`"format": "ferotrx-workspace-1"`), so it can be kept in version control
+next to the profiles it uses.
 
 ## The window
 
@@ -38,8 +55,12 @@ between sessions.
 | **Servers and ports** (left) | Each server with its state, version and backends, and its ports: the interfaces it can send on, plus `file` (a pcap written on the server) and `null` (count and drop), which need no root and are good for trying a profile. ▶ marks a port that is sending. Right-click a server to connect, disconnect, edit or remove it; **Add server…** adds one. |
 | **Streams** tab | The selected port: Start, Stop and Check (load on the server without sending), Open…/Save… of profile files on this computer, the port settings, the stream table and the stream editor. |
 | **Stateful** tab | Start a TCP or UDP run from a profile, on the server or uploaded from here, with the usual overrides (rate, count, concurrency, duration, workers, backend). **Check** runs `ferotrx check` on a local file. |
+| **Applications** tab | Edit TCP and UDP profiles with forms for their application protocols (HTTP, HTTP/2, HTTP/3, DNS, NTP, MQTT, SSH, SIP/RTP, SMB, TLS), check and run them. See [application profiles](#application-profiles). |
 | **Capture** tab | Open a pcap or pcapng file on this computer: packet list, decode tree and hex. Tick packets (or select one) and **Make a stream** to edit them in the Streams tab. |
-| **Charts** tab | Packets/s or Mbit/s of every run of the selected server over time. |
+| **Scenario** tab | Write, check and run [scenarios](#scenarios), read their verdicts and compare two runs. |
+| **Benchmark** tab | RFC 2544 benchmarks run by the server, every trial as it ends. See [benchmarks](#benchmarks). |
+| **Multi-server** tab | Runs on several servers started and stopped together, with combined counters. See [several servers at once](#several-servers-at-once). |
+| **Charts** tab | Packets/s or Mbit/s of every run of the selected server over time, or loss, reordering and latency per flow of what is received. |
 | **Statistics** (bottom) | A column per run, a row per counter: stream runs (totals, per stream, loss and latency with a receiver), TCP runs (connections started, established, completed, reset, timed out, retransmits, per template), UDP runs (sent, answered, timed out, retries, response times) and receivers. Stop and remove runs from their column. |
 | **Log** (bottom) | What the servers answered, errors in red. |
 
@@ -105,6 +126,67 @@ lab scenario does) gets it built by the server before the run (a server
 started with `--lab`); untick "Build the lab it names" to run on the lab as
 it is, after you changed it in "Lab router…" on purpose.
 
+**Compare…** sets two runs side by side, as `ferotrx scenario compare`
+does: pick each side from the scenario runs of any connected server or from
+a saved report file (it starts on the run shown and the previous run of the
+same scenario). Checks are matched by name and every metric that moved by
+more than the tolerance is listed, worse ones in red; with "strict" a
+worse metric counts as a regression. Save… writes the comparison as text,
+or as JSON when the name ends in `.json`.
+
+## Application profiles
+
+The Applications tab edits the TCP and UDP profiles of the
+[application protocols](app-protocols.md) without writing TOML by hand.
+New starts a TCP profile (HTTP) or a UDP one (DNS); Open and Browse read one (the
+`examples/lab-*.toml` files open as they are). The tree on the left has
+the run settings, each template (`[[template]]`; + Template adds one with the
+protocol picked, copy duplicates one), the client and server ends, the TCP or UDP options and
+the profile text. A template's page picks its protocol from those its
+transport carries and shows that protocol's own form: HTTP requests and
+routes, HTTP/2 streams, HTTP/3 over QUIC, DNS queries and zones, NTP, MQTT topics, SSH users,
+keys and commands, SIP calls with their media, SMB shares and files. "Over
+TLS" adds the TLS form ([TLS](app-protocols.md#tls-and-https)): versions,
+ciphers, ALPN, SNI, certificates or the generated lab CA, and failures
+expected on purpose. Each form shows the profile's value or the engine's
+default in grey, checks values as you type, and keeps keys it has no field
+for. Check reads the profile as `ferotrx check` does; "▶ Run" starts it on the
+selected server, uploaded from here. Comments in the file are lost when a
+form rewrites it; the Text page edits the text itself.
+
+## Benchmarks
+
+The Benchmark tab runs [RFC 2544 benchmarks](benchmarking.md) on the
+server: throughput (a binary search for the highest load without loss),
+latency, frame loss and back-to-back, through a device between two of the
+server's interfaces. Pick the profile (edited here, New for a short one
+through the lab router, or a file on the server), the interface to send on
+and the one to receive on, and optionally other tests, sizes (`rfc2544`,
+`imix`, `124 1514`), line rate, trial length, repetitions, workers and
+backend than the profile's. "▶ Run on the server" starts it
+(`bench.start`); every trial shows as it ends, with a chart of the offered
+load of each trial of a size (green without loss, red with), so the search
+can be watched closing in. When it ends, the results per size (throughput
+in % of the line rate, Mbit/s and frames/s, latency, back-to-back burst,
+frame loss) and a throughput chart appear, with the text report. Stop
+ends it after the trial under way, with a partial report. Save report…
+writes the JSON report and the text report next to it, as
+`ferotrx bench --report` does. Throughput in orange means the sender did
+not reach the offered rate: it measured the sender, not the device.
+
+## Several servers at once
+
+The Multi-server tab starts runs on several servers together, for traffic
+from more than one machine or more than one port of a machine. Each member
+is a server, what it runs (a port's streams as built in the Streams tab, or
+a TCP or UDP profile) and its own settings; "+ Every connected server"
+adds one per server with the streams of the port selected on the left.
+**▶ Start all** loads every member's streams first and starts them all only
+when every server has accepted them, so they begin within a poll of each
+other; **■ Stop all** stops them together. The table shows each member's
+state and counters with a total row, and the chart each member's rate and
+their sum over time. The group is saved in the workspace.
+
 ## Ports and their settings
 
 A port's streams are sent together, as one profile named `gui-<port>`
@@ -131,7 +213,13 @@ Each stream has four pages:
   text form and the layers stay in step, so either can be edited. The
   **packet view** on the right is the packet as built, decoded again: the
   layer tree with every field, and the hex and ASCII bytes. Select a field
-  to see its bytes; click a byte to find its field.
+  to see its bytes; click a byte to find its field. **✏ Edit bytes** makes
+  the hex view editable: click a byte and type hex digits, move with the
+  arrow keys, Home and End, Delete or Backspace removes a byte and Insert
+  adds one. Every change is decoded again into layers and fields (lengths
+  and checksums left to the builder, as when importing a capture), so the
+  layers, the text form and the bytes stay in step; what cannot be carried
+  over into fields is listed under the bytes.
 * **Stream control**: rate (`1000pps`, `20mbps`, `2x`, `topspeed`) or
   interval, loops (0 is until the run ends), packet limit, start delay,
   traffic model and rate shape ([traffic models](traffic-models.md)), frame
@@ -166,7 +254,17 @@ in the text form, a title, a category (link, network, transport,
 application, payload), its fields (`FieldDef`: key, label, kind, default,
 help, repeatable), the layers that usually follow it, and the form it draws.
 Most editors are a table of fields and use the generic form; the payload
-editor draws its own (text, hex or fill). A new protocol, such as an
+editor draws its own (text, hex or fill).
+
+Application protocols have their own registry in the same `Registry`: an
+`AppEditor` names a protocol as profiles do (`app = "mqtt"`, with aliases
+such as `https` = HTTP over TLS), the transports that carry it, its default
+port, its settings (`Setting`: key, label, kind, default, help), its lists
+of tables (`[[http.request]]`) and sub-tables, and an example. Most are a
+`TableEditor` with the generic form; `register_app` adds or replaces one,
+so a protocol the engine learns gets its form with one call, and the
+Applications tab offers it. Tests check every form's keys against the
+engine, so a key the engine does not know is caught in CI. A new protocol, such as an
 application layer the builder learns, is one more `register` call; a
 registered editor with the name of a built-in one replaces it. A layer that
 no editor knows still opens, as key and value pairs, so files written for a
@@ -189,9 +287,9 @@ GUI can drive a server across the lab as easily as the local one.
 
 ## Not done yet
 
-* Saving and opening whole workspaces (all ports and servers) as a file.
-* Editing the bytes of a packet in the hex view directly.
-* Charts of receive-side loss and latency over time.
-* Benchmarks from the GUI (`ferotrx bench` on the command line), and
-  comparing scenario runs (`ferotrx scenario compare` on saved reports).
-* Several servers' runs started together (distributed agents, issue #21).
+* Call quality (jitter, MOS) charts, once the engine measures them (#49).
+* ITU-T Y.1564 service tests in the Benchmark tab, once the engine has them
+  (#52).
+* Forms keep the profile's values but not its comments.
+* Groups start within one poll of each other, not at one instant; agents
+  that start on a shared clock are issue #21.

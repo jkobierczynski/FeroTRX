@@ -75,6 +75,10 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 | `scenario.get`, `scenario.remove` | `id` | the scenario run: `state`, each check's `state` (`waiting`, `running`, `pass`, `fail`, `error`, `skipped`), live `progress` and `report`, and the whole report once it has ended |
 | `scenario.stop` | `id`, `wait` (default true) | the scenario run: the running check ends, the rest are skipped |
 | `scenario.list` | | every scenario run |
+| `bench.start` | a [benchmark profile](benchmarking.md) as `path` (on the server) or `toml`; `iface` (send) and `rx` (receive); optional `tests`, `sizes` (`"rfc2544"`, `"imix"`, `"124"`, …), `line_rate`, `trial_duration`, `repetitions`, `backend`, `xdp_mode`, `queue`, `workers` | the benchmark run, started on a thread of the server |
+| `bench.get`, `bench.remove` | `id` | the benchmark run: `state`, `elapsed_s`, `tests`, `sizes`, every finished `trial` with its `size`, the run `info` (host, interfaces, backend), and once it has ended the `report` (as in `ferotrx bench --report`) and its `text` |
+| `bench.stop` | `id`, `wait` (default true) | the benchmark run: it ends after the trial under way, with a partial report |
+| `bench.list` | | every benchmark run |
 | `lab.start` | optional `ipv6`, `nat`, `loss`, `delay`, `block_tcp`, `block_udp`, `dhcp`, `queues` | the lab router, built (server started with `--lab`; see [lab scripts](lab-scripts.md#a-standing-lab-router)) |
 | `lab.stop` | | the lab router, removed |
 | `lab.get` | | the lab router, or why there can be none |

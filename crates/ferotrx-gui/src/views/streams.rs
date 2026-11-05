@@ -34,6 +34,11 @@ pub struct EditorState {
     pub server_local: bool,
     /// "Browse…" was pressed for the stream's capture.
     pub browse_pcap: bool,
+    /// The bytes of the packet view take typing.
+    pub hex_edit: bool,
+    pub cursor: crate::packet_view::HexCursor,
+    /// What the last byte edit could not carry over into the layers.
+    pub hex_notes: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -49,14 +54,32 @@ pub enum Page {
 pub struct Built {
     pub bytes: Vec<u8>,
     pub decoded: Decoded,
+    pub linktype: u32,
 }
 
 /// Builds and decodes a packet in the text form.
 pub fn build(spec: &str) -> Result<Built, String> {
     let p: PacketSpec = spec.parse().map_err(|e: ferotrx_packet::BuildError| e.0)?;
     let bytes = p.build().map_err(|e| e.0)?;
-    let decoded = decode(p.linktype().map_err(|e| e.0)?, &bytes);
-    Ok(Built { bytes, decoded })
+    let linktype = p.linktype().map_err(|e| e.0)?;
+    let decoded = decode(linktype, &bytes);
+    Ok(Built {
+        bytes,
+        decoded,
+        linktype,
+    })
+}
+
+/// The text form of edited bytes: the layers they decode to, with lengths
+/// and checksums left to the builder. Returns the text and what could not
+/// be carried over.
+pub fn bytes_to_spec(linktype: u32, bytes: &[u8]) -> Result<(String, Vec<String>), String> {
+    if bytes.is_empty() {
+        return Err("a packet needs at least one byte".into());
+    }
+    let im = ferotrx_packet::import(linktype, bytes)
+        .ok_or_else(|| format!("bytes of link type {linktype} cannot be edited"))?;
+    Ok((format_layers(&im.layers), im.notes))
 }
 
 /// Checks one stream as `ferotrx run` would read it.
@@ -370,6 +393,18 @@ impl FeroApp {
                 }
             }
             Target::FileOut => self.work.file_out = shown,
+            Target::OpenWorkspace => self.open_workspace(&path),
+            Target::OpenAppProfile | Target::SaveAppProfile => self.apps_file(target, &path),
+            Target::OpenBench | Target::SaveBench | Target::BenchReport => {
+                self.bench_file(target, &path)
+            }
+            Target::CompareReport { .. } | Target::SaveComparison => {
+                self.compare_file(target, &path)
+            }
+            Target::SaveWorkspace => {
+                let ctx = ctx.clone();
+                self.save_workspace(&path, &ctx);
+            }
             Target::OpenScenario | Target::SaveScenario | Target::ScenarioReport { .. } => {
                 self.scenario_file(target, &path)
             }
@@ -894,14 +929,15 @@ fn layer_editor(ui: &mut egui::Ui, registry: &Registry, ed: &mut EditorState, sp
     }
 }
 
-fn packet_pane(ui: &mut egui::Ui, ed: &mut EditorState, spec: &str) {
+fn packet_pane(ui: &mut egui::Ui, ed: &mut EditorState, spec: &mut String) {
     let fresh = !matches!(&ed.cache, Some((t, _)) if t == spec);
     if fresh {
-        ed.cache = Some((spec.to_string(), build(spec)));
+        ed.cache = Some((spec.clone(), build(spec)));
     }
     let Some((_, result)) = &ed.cache else {
         return;
     };
+    let mut edited = None;
     match result {
         Err(e) => {
             ui.strong("Packet view");
@@ -919,7 +955,22 @@ fn packet_pane(ui: &mut egui::Ui, ed: &mut EditorState, spec: &str) {
                     let h: String = b.bytes.iter().map(|x| format!("{x:02x}")).collect();
                     ui.ctx().copy_text(h);
                 }
+                ui.toggle_value(&mut ed.hex_edit, "✏ Edit bytes")
+                    .on_hover_text(
+                        "Click a byte and type hex digits over it. Arrows move; Delete, Backspace \
+                     and Insert remove and add bytes; Esc stops. The layers follow the bytes, \
+                     and lengths and checksums are computed again.",
+                    );
             });
+            if ed.hex_edit && !ed.hex_notes.is_empty() {
+                for n in &ed.hex_notes {
+                    ui.label(
+                        RichText::new(format!("⚠ {n}"))
+                            .small()
+                            .color(ui.visuals().warn_fg_color),
+                    );
+                }
+            }
             // The tree above the bytes; the line between them drags.
             let h = ui.available_height();
             egui::TopBottomPanel::top("packet-tree")
@@ -934,8 +985,21 @@ fn packet_pane(ui: &mut egui::Ui, ed: &mut EditorState, spec: &str) {
                         .show(ui, |ui| packet_view::tree(ui, &b.decoded, &mut ed.sel));
                 });
             ui.add_space(2.0);
-            packet_view::hex(ui, &b.decoded, &b.bytes, &mut ed.sel);
+            let cursor = ed.hex_edit.then_some(&mut ed.cursor);
+            if let Some(bytes) =
+                packet_view::hex_view(ui, &b.decoded, &b.bytes, &mut ed.sel, cursor)
+            {
+                edited = Some(bytes_to_spec(b.linktype, &bytes));
+            }
         }
+    }
+    match edited {
+        Some(Ok((text, notes))) => {
+            *spec = text;
+            ed.hex_notes = notes;
+        }
+        Some(Err(e)) => ed.hex_notes = vec![e],
+        None => {}
     }
 }
 
@@ -1134,6 +1198,31 @@ pub fn string_list(ui: &mut egui::Ui, id: &str, v: &mut Vec<String>, hint: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edited_bytes_become_layers() {
+        let b = build("eth/ipv4(src=10.0.0.1,dst=10.0.0.2)/udp(sport=1000,dport=2000)/raw(text=hello-from-ferotrx-gui-x)")
+            .unwrap();
+        let mut bytes = b.bytes.clone();
+        // The last payload byte: "x" -> "y" (no padding: over 60 bytes).
+        *bytes.last_mut().unwrap() = b'y';
+        // The IPv4 TTL (byte 14 + 8).
+        bytes[22] = 7;
+        let (spec, notes) = bytes_to_spec(b.linktype, &bytes).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        assert!(spec.contains("ttl=7"), "{spec}");
+        let again = build(&spec).unwrap();
+        // The same bytes, with the UDP and IPv4 checksums computed again.
+        assert_eq!(again.bytes.len(), bytes.len());
+        assert_eq!(again.bytes[22], 7);
+        assert_eq!(*again.bytes.last().unwrap(), b'y');
+        assert_ne!(
+            again.bytes[24..26],
+            b.bytes[24..26],
+            "IPv4 checksum follows the TTL"
+        );
+        assert!(bytes_to_spec(b.linktype, &[]).is_err());
+    }
 
     #[test]
     fn the_default_stream_builds_and_checks() {

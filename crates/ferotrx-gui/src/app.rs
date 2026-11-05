@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use ferotrx_ctl::protocol::{InterfaceEntry, LabInfo, ProfileInfo, RunInfo, ServerInfo};
+use ferotrx_ctl::protocol::{
+    FlowCounters, InterfaceEntry, LabInfo, ProfileInfo, RunInfo, ServerInfo,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -16,6 +18,9 @@ use crate::protocols::Registry;
 use crate::views::{CaptureState, EditorState, ScenarioState, StatefulState};
 
 const STORAGE_KEY: &str = "ferotrx-gui";
+/// The forms of the last session (a workspace without servers and ports).
+const FORMS_KEY: &str = "ferotrx-gui-forms";
+const WORKSPACE_KEY: &str = "ferotrx-gui-workspace";
 /// Points kept per run in the rate charts.
 const HISTORY: usize = 600;
 
@@ -78,6 +83,12 @@ pub enum Pending {
     ScenarioChecked,
     /// `scenario.start`: show the run.
     ScenarioStarted,
+    /// `bench.start`: show the run.
+    BenchStarted,
+    /// `profile.load` of a multi-server group's member.
+    GroupLoaded { member: usize },
+    /// A start of a group's member.
+    GroupStarted { member: usize },
     /// Any other call: log this on success.
     Done(String),
 }
@@ -108,6 +119,95 @@ impl RateHistory {
     }
 }
 
+/// One sample of a flow's loss and latency, for the receive charts.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FlowPoint {
+    /// Seconds since the GUI started.
+    pub t: f64,
+    /// Packets lost in this interval, as a percentage of those expected in it.
+    pub loss_pct: f64,
+    /// Lost so far, as a percentage of all expected.
+    pub total_loss_pct: f64,
+    /// Packets out of order and duplicates per second in this interval.
+    pub reordered_ps: f64,
+    pub duplicates_ps: f64,
+    /// Received per second in this interval.
+    pub rx_ps: f64,
+    /// Latency of the packets of this interval: their average (µs).
+    pub avg_us: Option<f64>,
+    /// Since the start: percentiles, maximum, and the smoothed jitter (µs).
+    pub p50_us: Option<f64>,
+    pub p99_us: Option<f64>,
+    pub p999_us: Option<f64>,
+    pub max_us: Option<f64>,
+    pub jitter_us: Option<f64>,
+}
+
+/// Loss and latency of one flow over time: a stream of a run with a
+/// receiver, or a flow a receiver (`rx.start`) sees.
+#[derive(Debug, Default)]
+pub struct FlowHistory {
+    pub label: String,
+    pub points: VecDeque<FlowPoint>,
+    last: Option<(f64, FlowCounters)>,
+}
+
+impl FlowHistory {
+    pub fn add(&mut self, t: f64, f: &FlowCounters) {
+        if let Some((t0, f0)) = &self.last {
+            let dt = t - t0;
+            if dt <= 0.05 {
+                return;
+            }
+            if f.rx < f0.rx || f.lost + f.rx < f0.lost + f0.rx {
+                // A new run under the same name: start again.
+                self.points.clear();
+            } else {
+                self.points.push_back(flow_point(t, dt, f0, f));
+                if self.points.len() > HISTORY {
+                    self.points.pop_front();
+                }
+            }
+        }
+        self.last = Some((t, f.clone()));
+    }
+}
+
+/// The figures of the interval between two samples of a flow's counters.
+pub fn flow_point(t: f64, dt: f64, a: &FlowCounters, b: &FlowCounters) -> FlowPoint {
+    let expected = |f: &FlowCounters| f.tx.unwrap_or(f.rx + f.lost);
+    let d_exp = expected(b).saturating_sub(expected(a));
+    let d_rx = b.rx.saturating_sub(a.rx);
+    let d_lost = b.lost.saturating_sub(a.lost);
+    let loss_pct = if d_exp > 0 {
+        (d_lost as f64 * 100.0 / d_exp as f64).min(100.0)
+    } else {
+        0.0
+    };
+    // The average of this interval's packets, from the two running averages.
+    let avg_us = match (a.latency.avg_us, b.latency.avg_us) {
+        (Some(x), Some(y)) if d_rx > 0 => {
+            Some(((y * b.rx as f64 - x * a.rx as f64) / d_rx as f64).max(0.0))
+        }
+        (None, Some(y)) if d_rx > 0 => Some(y),
+        _ => None,
+    };
+    FlowPoint {
+        t,
+        loss_pct,
+        total_loss_pct: b.loss_pct,
+        reordered_ps: b.out_of_order.saturating_sub(a.out_of_order) as f64 / dt,
+        duplicates_ps: b.duplicates.saturating_sub(a.duplicates) as f64 / dt,
+        rx_ps: d_rx as f64 / dt,
+        avg_us,
+        p50_us: b.latency.p50_us,
+        p99_us: b.latency.p99_us,
+        p999_us: b.latency.p999_us,
+        max_us: b.latency.max_us,
+        jitter_us: b.latency.jitter_us,
+    }
+}
+
 pub struct ServerState {
     pub settings: ConnSettings,
     pub conn: Option<Connection>,
@@ -117,6 +217,8 @@ pub struct ServerState {
     pub snap: Snapshot,
     /// Rate history per run (`run:3`, `tcp:1`, ...).
     pub history: BTreeMap<String, RateHistory>,
+    /// Loss and latency history per flow (`run:3/stream`, `rx:4/7`).
+    pub flows: BTreeMap<String, FlowHistory>,
     pub pending: HashMap<u64, Pending>,
     /// The stream run each port started last.
     pub port_runs: BTreeMap<String, u64>,
@@ -136,6 +238,7 @@ impl ServerState {
             interfaces: Vec::new(),
             snap: Snapshot::default(),
             history: BTreeMap::new(),
+            flows: BTreeMap::new(),
             pending: HashMap::new(),
             port_runs: BTreeMap::new(),
             lab: None,
@@ -179,17 +282,20 @@ pub fn pseudo_interface(name: &str) -> bool {
             .any(|p| name.starts_with(p))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Tab {
     #[default]
     Streams,
     Stateful,
+    Apps,
     Capture,
     Scenario,
+    Bench,
+    Group,
     Charts,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BottomTab {
     #[default]
     Stats,
@@ -216,6 +322,9 @@ pub struct FeroApp {
     pub capture: CaptureState,
     pub stateful: StatefulState,
     pub scenario: ScenarioState,
+    pub groups: crate::views::GroupsState,
+    pub apps: crate::views::AppsState,
+    pub bench: crate::views::BenchState,
     pub log: Vec<LogLine>,
     pub next_tag: u64,
     pub started: Instant,
@@ -225,6 +334,10 @@ pub struct FeroApp {
     pub files: crate::files::Dialogs,
     /// The lab router window, while open.
     pub lab_form: Option<crate::views::LabForm>,
+    /// The workspace file last opened or saved.
+    pub workspace_path: Option<String>,
+    /// A layout from a workspace file, applied at the start of the next frame.
+    pub pending_layout: Option<String>,
     pub ctx: egui::Context,
 }
 
@@ -241,6 +354,8 @@ pub struct Options {
     pub profile: Option<String>,
     /// A scenario to open in the Scenario tab.
     pub scenario: Option<String>,
+    /// A workspace file to open (before the other options).
+    pub workspace: Option<String>,
 }
 
 impl FeroApp {
@@ -250,7 +365,21 @@ impl FeroApp {
             .and_then(|s| eframe::get_value(s, STORAGE_KEY))
             .unwrap_or_default();
         crate::fonts::install(&cc.egui_ctx);
-        Self::with_workspace(cc.egui_ctx.clone(), work, opts)
+        let forms: Option<crate::workspace::WorkspaceFile> =
+            cc.storage.and_then(|s| eframe::get_value(s, FORMS_KEY));
+        let path: Option<String> = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, WORKSPACE_KEY))
+            .flatten();
+        let mut app = Self::with_workspace(cc.egui_ctx.clone(), work, Options::default());
+        if let Some(f) = forms {
+            app.restore_forms(f);
+        }
+        if app.workspace_path.is_none() {
+            app.workspace_path = path;
+        }
+        app.apply_options(opts);
+        app
     }
 
     pub fn with_workspace(ctx: egui::Context, work: Workspace, opts: Options) -> Self {
@@ -266,12 +395,17 @@ impl FeroApp {
             capture: CaptureState::default(),
             stateful: StatefulState::default(),
             scenario: ScenarioState::default(),
+            groups: Default::default(),
+            apps: Default::default(),
+            bench: Default::default(),
             log: Vec::new(),
             next_tag: 1,
             started: Instant::now(),
             add_server: None,
             files: Default::default(),
             lab_form: None,
+            workspace_path: None,
+            pending_layout: None,
             ctx,
         };
         if let Some(last) = app.work.last.clone() {
@@ -284,6 +418,17 @@ impl FeroApp {
                 app.sel_port = last.port;
                 app.editor.stream = last.stream;
             }
+        }
+        app.apply_options(opts);
+        app
+    }
+
+    /// Does what the command line asked for: a workspace, servers to
+    /// connect, a port and profile, a scenario, a capture.
+    pub fn apply_options(&mut self, opts: Options) {
+        let app = self;
+        if let Some(path) = &opts.workspace {
+            app.open_workspace(std::path::Path::new(path));
         }
         if app.servers.is_empty() && opts.connect.is_empty() {
             app.servers.push(ServerState::new(ConnSettings::default()));
@@ -348,7 +493,20 @@ impl FeroApp {
             app.capture.open();
             app.tab = Tab::Capture;
         }
-        app
+    }
+
+    /// The forms of the last session, without its servers and ports.
+    fn restore_forms(&mut self, f: crate::workspace::WorkspaceFile) {
+        self.stateful = f.stateful;
+        self.scenario = f.scenario;
+        self.groups = f.groups;
+        self.apps = f.apps;
+        self.bench = f.bench;
+        self.tab = f.view.tab;
+        self.bottom = f.view.bottom;
+        if !f.capture.path.is_empty() {
+            self.capture.path = f.capture.path;
+        }
     }
 
     // ----- connections -----
@@ -422,6 +580,7 @@ impl FeroApp {
                 self.handle(i, e, now);
             }
         }
+        self.sample_group();
     }
 
     fn handle(&mut self, i: usize, e: Event, now: f64) {
@@ -460,6 +619,18 @@ impl FeroApp {
                     if r.state.is_running() || h.points.is_empty() {
                         h.add(now, r.total.packets, r.total.bytes);
                     }
+                    for st in &r.streams {
+                        if let Some(f) = &st.latency {
+                            let h = s
+                                .flows
+                                .entry(format!("run:{}/{}", r.id, st.name))
+                                .or_default();
+                            h.label = format!("run {} {}", r.id, st.name);
+                            if r.state.is_running() || h.points.is_empty() {
+                                h.add(now, f);
+                            }
+                        }
+                    }
                 }
                 for r in &snap.tcp {
                     let h = s.history.entry(format!("tcp:{}", r.id)).or_default();
@@ -481,6 +652,16 @@ impl FeroApp {
                     if r.state.is_running() || h.points.is_empty() {
                         h.add(now, r.counters.packets, r.counters.bytes);
                     }
+                    for f in &r.flows {
+                        let h = s
+                            .flows
+                            .entry(format!("rx:{}/{}", r.id, f.flow))
+                            .or_default();
+                        h.label = format!("rx {} flow {}", r.id, f.flow);
+                        if r.state.is_running() || h.points.is_empty() {
+                            h.add(now, f);
+                        }
+                    }
                 }
                 // Forget runs the server no longer has.
                 let alive: Vec<String> = snap
@@ -492,6 +673,10 @@ impl FeroApp {
                     .chain(snap.rx.iter().map(|r| format!("rx:{}", r.id)))
                     .collect();
                 s.history.retain(|k, _| alive.contains(k));
+                s.flows.retain(|k, _| {
+                    k.split_once('/')
+                        .is_some_and(|(run, _)| alive.iter().any(|a| a == run))
+                });
                 s.snap = *snap;
             }
             Event::Reply { tag, result } => {
@@ -573,11 +758,32 @@ impl FeroApp {
                         self.error(&name, format!("{what} failed: {e}"));
                     }
                     (Pending::Done(what), Ok(_)) => self.info(&name, what),
+                    (Pending::GroupLoaded { member }, r) => {
+                        self.group_loaded(member, r.map(drop).map_err(|e| e.to_string()))
+                    }
+                    (Pending::GroupStarted { member }, r) => {
+                        self.group_started(member, r.map_err(|e| e.to_string()))
+                    }
                     (Pending::ScenarioChecked, Ok(v)) => {
                         self.scenario.checked = Some(
                             serde_json::from_value::<ferotrx_ctl::protocol::ScenarioInfo>(v)
                                 .map_err(|e| e.to_string()),
                         );
+                    }
+                    (Pending::BenchStarted, Ok(v)) => {
+                        match serde_json::from_value::<ferotrx_ctl::protocol::BenchRunInfo>(v) {
+                            Ok(r) => {
+                                self.bench.run = Some(r.id);
+                                let s = &mut self.servers[i];
+                                s.snap.bench.retain(|x| x.id != r.id);
+                                s.snap.bench.push(r.clone());
+                                self.info(
+                                    &name,
+                                    format!("benchmark {} started as run {}", r.profile, r.id),
+                                );
+                            }
+                            Err(e) => self.error(&name, format!("bench.start: {e}")),
+                        }
                     }
                     (Pending::ScenarioChecked, Err(e)) => {
                         self.scenario.checked = Some(Err(e.to_string()));
@@ -609,8 +815,12 @@ impl FeroApp {
                                 format!("{what} failed: {e}")
                             }
                             Pending::Interfaces => format!("interfaces.list: {e}"),
+                            Pending::BenchStarted => format!("benchmark: {e}"),
                             Pending::ScenarioChecked | Pending::ScenarioStarted => {
                                 format!("scenario: {e}")
+                            }
+                            Pending::GroupLoaded { .. } | Pending::GroupStarted { .. } => {
+                                unreachable!("handled above")
                             }
                         };
                         self.error(&name, what);
@@ -697,6 +907,7 @@ impl FeroApp {
 
 impl eframe::App for FeroApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.apply_pending_layout(ctx);
         self.poll();
         self.ui(ctx);
         // Keep the charts moving while something runs.
@@ -706,12 +917,12 @@ impl eframe::App for FeroApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        self.work.servers = self.servers.iter().map(|s| s.settings.clone()).collect();
-        self.work.last = self.servers.get(self.sel_server).map(|s| LastView {
-            server: s.settings.address(),
-            port: self.sel_port.clone(),
-            stream: self.editor.stream,
-        });
+        self.remember_view();
         eframe::set_value(storage, STORAGE_KEY, &self.work);
+        // The forms too, as a workspace without a layout (eframe keeps that).
+        let mut w = self.workspace_file(None);
+        w.work = Workspace::default();
+        eframe::set_value(storage, FORMS_KEY, &w);
+        eframe::set_value(storage, WORKSPACE_KEY, &self.workspace_path);
     }
 }

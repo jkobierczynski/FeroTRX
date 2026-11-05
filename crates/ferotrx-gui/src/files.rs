@@ -37,6 +37,24 @@ pub enum Target {
     SaveScenario,
     /// Where to save the report of the scenario run shown: JSON, or JUnit XML.
     ScenarioReport { junit: bool },
+    /// A workspace file to open.
+    OpenWorkspace,
+    /// Where to save the workspace.
+    SaveWorkspace,
+    /// A scenario report for one side of a comparison.
+    CompareReport { before: bool },
+    /// Where to save a comparison.
+    SaveComparison,
+    /// A TCP or UDP profile for the Applications tab.
+    OpenAppProfile,
+    /// Where to save the profile of the Applications tab.
+    SaveAppProfile,
+    /// A benchmark profile for the Benchmark tab.
+    OpenBench,
+    /// Where to save the benchmark profile.
+    SaveBench,
+    /// Where to save the report of the benchmark run shown.
+    BenchReport,
 }
 
 /// The kinds of file a dialog lists first.
@@ -47,6 +65,8 @@ pub enum Kind {
     Pem,
     Report,
     Junit,
+    Workspace,
+    Text,
 }
 
 impl Kind {
@@ -57,6 +77,8 @@ impl Kind {
             Kind::Pem => ("PEM files (*.pem, *.crt, *.key)", &["pem", "crt", "key"]),
             Kind::Report => ("Reports (*.json)", &["json"]),
             Kind::Junit => ("JUnit XML (*.xml)", &["xml"]),
+            Kind::Workspace => ("Workspaces (*.ferotrx)", &["ferotrx"]),
+            Kind::Text => ("Text (*.txt, *.json)", &["txt", "json"]),
         }
     }
 }

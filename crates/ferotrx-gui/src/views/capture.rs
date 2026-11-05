@@ -49,6 +49,11 @@ impl CaptureState {
         self.decoded[n].as_ref()
     }
 
+    /// The marked packets.
+    pub fn picked_marks(&self) -> Vec<usize> {
+        (0..self.marked.len()).filter(|&i| self.marked[i]).collect()
+    }
+
     /// The packets to import: the marked ones, else the selected one.
     pub fn picked(&self) -> Vec<usize> {
         let m: Vec<usize> = (0..self.marked.len()).filter(|&i| self.marked[i]).collect();

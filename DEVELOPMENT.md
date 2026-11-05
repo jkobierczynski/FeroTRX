@@ -52,6 +52,7 @@ the same library.
 | M29, DHCP server role | `ferotrx_core::host` server roles: a DHCPv4 server (`[host.dhcp_server]`, `--dhcp-pool`; RFC 2131/2132: pool, lease time with T1/T2, router, DNS, domain, reservations by MAC, offers held 30 s, addresses kept per client identifier, requested addresses, NAKs as an authoritative server, renew/rebind, release, decline with a 10 min hold, inform, relay answers to `giaddr` with option 82 returned, RFC 2131 4.1 reply addressing) and a DHCPv6 server (`[host.dhcpv6_server]`; RFC 8415 IA_NA: solicit/advertise, rapid commit, request, renew, rebind with zero lifetimes for addresses a client may not keep, release, decline, confirm, information request, DNS and domain search list, reservations; joins ff02::1:2 over MLD); `DhcpServerStatus` leases and counters in `HostStatus`, ctl/Python `HostInfo.dhcp_server`/`dhcpv6_server`, lease lines in `ferotrx host`; the host engine hands frames between a server and its own clients on one port (loopback); `examples/lab-dhcp-server.toml`; `scripts/hosts-netns.sh` check 4: busybox `udhcpc` and `udhcpc6` against the FeroTRX server plus emulated clients | | 0.25.0 |
 | M30, SMB | `ferotrx_core::app::smb`: SMB 2 and 3 over TCP (`app = "smb"`, port 445, an `[smb]` table): dialects 2.0.2, 2.1, 3.0, 3.0.2 and 3.1.1 (`dialects`, the 3.1.1 preauth integrity hash), NTLMv2 logins in SPNEGO (`user`, `password`, `domain`; guests and anonymous; `expect` a status such as `LOGON_FAILURE`), signing with HMAC-SHA256 (2.x) and AES-CMAC (3.x, keys from the SP800-108 KDF; `signing` auto, required or off), credits and compounds; client `ops` (write, read with every byte checked, list, delete, mkdir, rmdir, each with an expected status) in `chunk`s with `window` in flight; a server with shares in memory shared by all its connections (`users`, `shares`, `read_only`, `files`), create dispositions, delete on close, rename, directory listings in the classes Windows and Samba use, file and file system information, VALIDATE_NEGOTIATE; own MD4, SHA-512, HMAC, RC4, AES-128 and AES-CMAC; transactions per operation, logins as handshakes (`SMB logins` in the summary); `examples/lab-smb.toml`; `scripts/smb-netns.sh` runs the emulated ends, smbclient against the emulated server and the emulated clients against Samba's `smbd` | | 0.23.0 |
 | M31, QUIC and HTTP/3 | `ferotrx_core::app::quic` (feature `quic`): QUIC version 1 (RFC 9000, 9001, 9002) sans-IO, with rustls for the TLS 1.3 handshake and keys: three packet number spaces, header and packet protection, coalesced packets, padded Initials, CRYPTO streams, delayed ACKs, loss detection by packet and time thresholds and probe timeouts, NewReno with pacing, the 3x anti-amplification limit, bidirectional and unidirectional streams with stream and connection flow control and growing stream limits, key updates (`key_update_after`), Retry (`retry`) and Version Negotiation, idle timeouts, CONNECTION_CLOSE with closing and draining; HTTP/3 (RFC 9114) on it with control and QPACK streams, SETTINGS, HEADERS and DATA, GOAWAY (`route.close`), QPACK (RFC 9204) with the static table and Huffman literals; `app = "h3"` in UDP profiles with an `[h3]` table (the HTTP requests and routes, `concurrent`, windows, `idle_timeout`) and `[tls]` (TLS 1.3, ALPN `h3`); handshakes as `QUIC v1 ...`, lost packets as "sent again" (`AppCx::resent`); `examples/lab-h3.toml`; `scripts/h3-netns.sh` with `scripts/h3-peer.py` runs the emulated ends, aioquic's client against the emulated server and the emulated clients against aioquic's server | | 0.24.0 |
+| M36, the GUI's application-level workflow | `ferotrx-gui`: an Applications tab with forms for application protocol profiles (HTTP, HTTP/2, HTTP/3, DNS, NTP, MQTT, SSH, SIP/RTP, SMB, TLS) from an `AppEditor` registry next to the packet `ProtocolEditor`s, checked against the engine's keys; workspaces saved and opened as `.ferotrx` files (`--workspace`; servers, ports, every tab's forms, the window layout; no tokens); editable hex view kept in step with the layers; loss, reordering and latency per flow over time in Charts; scenario comparison of runs or report files; a Multi-server tab that starts and stops runs on several servers together with combined counters; a Benchmark tab on the new `bench.*` control methods (RFC 2544 runs on the server, every trial as it ends, results and throughput charts, reports as `ferotrx bench --report`); `check_text` in core | | 0.26.0 |
 
 The lab scripts (`scripts/*.sh`) build a NAT router (or, for host
 emulation, a bridged LAN with a DHCP server) in network namespaces
@@ -153,20 +154,21 @@ checked against 0.4.0. Each issue has the full checklist.
 
 **P2, after the protocols of #37: quality and network behaviour**
 
-- [ ] **M32, jitter, latency and call quality (0.26.0)**, [#49](https://github.com/jkobierczynski/FeroTRX/issues/49):
+- [ ] **M32, jitter, latency and call quality (0.27.0)**, [#49](https://github.com/jkobierczynski/FeroTRX/issues/49):
       per-call RTP loss/jitter/latency, RTCP reports, E-model R-factor and
       MOS, transaction latency percentiles for TCP/UDP apps
-- [ ] **M33, built-in impairments (0.27.0)**, [#50](https://github.com/jkobierczynski/FeroTRX/issues/50):
+- [ ] **M33, built-in impairments (0.28.0)**, [#50](https://github.com/jkobierczynski/FeroTRX/issues/50):
       delay/jitter, loss (incl. bursts), duplication, reordering, corruption
       and rate limits in the pipeline and on ports, a two-port bridge mode
-- [ ] **M34, TCP congestion control choices (0.28.0)**, [#51](https://github.com/jkobierczynski/FeroTRX/issues/51):
+- [ ] **M34, TCP congestion control choices (0.29.0)**, [#51](https://github.com/jkobierczynski/FeroTRX/issues/51):
       a controller trait, CUBIC with HyStart++, ECN
-- [ ] **M35, Y.1564 service activation (0.29.0)**, [#52](https://github.com/jkobierczynski/FeroTRX/issues/52):
+- [ ] **M35, Y.1564 service activation (0.30.0)**, [#52](https://github.com/jkobierczynski/FeroTRX/issues/52):
       CIR/EIR services, configuration and performance tests, FLR/FTD/FDV
-- [ ] **M36, finish the GUI's application-level workflow (0.30.0)**, [#54](https://github.com/jkobierczynski/FeroTRX/issues/54):
+- [x] **M36, finish the GUI's application-level workflow (0.26.0)**, [#54](https://github.com/jkobierczynski/FeroTRX/issues/54):
       editors for application protocol profiles, workspace save/open, hex
-      editing, receive-side loss/latency charts over time, benchmarking,
-      scenario comparison, runs across several servers at once
+      editing, receive-side loss/latency charts over time, benchmarking
+      (`bench.*`), scenario comparison, runs across several servers at once
+      (not done: MOS charts after M32, Y.1564 after M35)
 
 **P3: when the engine is stable**
 

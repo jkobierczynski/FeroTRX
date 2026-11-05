@@ -121,6 +121,7 @@
 
 mod audit;
 mod auth;
+mod bench;
 mod client;
 mod controller;
 mod files;
@@ -133,6 +134,7 @@ mod udp;
 
 pub use audit::AuditLog;
 pub use auth::{Token, TokenError};
+pub use bench::{open_bench_sinks, BenchSinkOpener};
 pub use client::{Client, ClientError};
 pub use controller::{
     start_run, start_run_detailed, start_run_with_rx, Controller, ReceiverOpener, StartError,

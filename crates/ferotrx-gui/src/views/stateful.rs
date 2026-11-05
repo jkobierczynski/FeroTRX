@@ -4,12 +4,14 @@
 use std::path::Path;
 
 use eframe::egui::{self, RichText};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::app::{FeroApp, Pending, Status};
 use crate::model::PortKind;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Kind {
     #[default]
     Tcp,
@@ -25,7 +27,8 @@ impl Kind {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StatefulState {
     pub kind: Kind,
     /// Upload a file from this computer, or name one on the server.
@@ -40,6 +43,7 @@ pub struct StatefulState {
     pub concurrency: String,
     pub duration: String,
     pub workers: String,
+    #[serde(skip)]
     pub check: Option<Result<String, String>>,
 }
 

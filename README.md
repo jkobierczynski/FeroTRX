@@ -70,8 +70,10 @@ each milestone added and what comes next.
   [Python](docs/python-client.md)
 * **Desktop GUI**: `ferotrx-gui` drives local and remote servers: ports,
   streams built layer by layer with a live packet view, captures turned into
-  editable streams, TCP and UDP runs, counters in a grid and rate charts.
-  [Guide](docs/gui.md)
+  editable streams and bytes edited in hex, forms for application protocol
+  profiles, benchmarks, scenarios and their comparison, runs on several
+  servers at once, counters, rate, loss and latency charts, all saved as a
+  workspace. [Guide](docs/gui.md)
 * **IPv4 and IPv6** throughout.
 
 ## Install
@@ -137,7 +139,7 @@ The manual is in [docs/](docs/README.md):
 | [Scenarios and regression tests](docs/scenarios.md) | `scenario` |
 | [Remote control](docs/remote-control.md) | `serve`, `ctl`, the protocol, security |
 | [The Python client](docs/python-client.md) | the `ferotrx` Python package |
-| [The desktop GUI](docs/gui.md) | `ferotrx-gui`: ports, stream and packet editor, statistics |
+| [The desktop GUI](docs/gui.md) | `ferotrx-gui`: ports, stream and packet editor, application profiles, benchmarks, workspaces |
 | [Using FeroTRX as a library](docs/library.md) | the Rust API |
 | [Lab scripts](docs/lab-scripts.md) | network namespace labs, as run in CI |
 

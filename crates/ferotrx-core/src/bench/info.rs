@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// profile used. `ferotrx-io` fills in what the system tells about the host
 /// and the interfaces; fields it cannot find stay `None`.
 #[derive(Clone, Debug, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RunInfo {
     pub ferotrx_version: String,
     /// When the run started, in UTC (RFC 3339).
@@ -43,7 +43,7 @@ pub struct RunInfo {
 
 /// A network interface as the report describes it.
 #[derive(Clone, Debug, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InterfaceDetails {
     pub name: String,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]

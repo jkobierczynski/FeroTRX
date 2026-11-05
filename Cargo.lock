@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-cli"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1348,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-core"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "ferotrx-packet",
  "pcap-file",
@@ -1363,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-ctl"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "ferotrx-core",
  "ferotrx-io",
@@ -1379,7 +1379,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-gui"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "clap",
  "eframe",
@@ -1389,6 +1389,7 @@ dependencies = [
  "ferotrx-core",
  "ferotrx-ctl",
  "ferotrx-packet",
+ "ron",
  "serde",
  "serde_json",
  "toml",
@@ -1396,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-io"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "cc",
  "ferotrx-core",
@@ -1407,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-packet"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "ferotrx-core",
 ]
@@ -3551,6 +3552,7 @@ version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
 dependencies = [
+ "indexmap",
  "serde",
  "serde_spanned",
  "toml_datetime 0.6.11",

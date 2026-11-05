@@ -1,19 +1,27 @@
 //! The panels of the window, each an `impl FeroApp` block.
 
+mod apps;
+mod bench;
 mod capture;
+mod compare;
+mod groups;
 mod lab;
 mod scenario;
-mod stateful;
+pub(crate) mod stateful;
 mod stats;
 mod streams;
 
 use eframe::egui::{self, RichText};
 
+pub use apps::{app_section, AppsState, ProfileKind};
+pub use bench::BenchState;
 pub use capture::CaptureState;
+pub use compare::{CompareForm, Side as CompareSide};
+pub use groups::{GroupsState, Member, MemberKind};
 pub use lab::LabForm;
 pub use scenario::ScenarioState;
 pub use stateful::StatefulState;
-pub use streams::EditorState;
+pub use streams::{string_list, EditorState};
 
 use crate::app::{BottomTab, FeroApp, ServerState, Status, Tab};
 use crate::conn::ConnSettings;
@@ -35,8 +43,11 @@ impl FeroApp {
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
             Tab::Streams => self.streams_tab(ui),
             Tab::Stateful => self.stateful_tab(ui),
+            Tab::Apps => self.apps_tab(ui),
             Tab::Capture => self.capture_tab(ui),
             Tab::Scenario => self.scenario_tab(ui),
+            Tab::Bench => self.bench_tab(ui),
+            Tab::Group => self.groups_tab(ui),
             Tab::Charts => self.charts_tab(ui),
         });
         self.dialogs(ctx);
@@ -45,6 +56,8 @@ impl FeroApp {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading(RichText::new("FeroTRX").strong());
+            ui.separator();
+            self.workspace_menu(ui);
             ui.separator();
             for (tab, label, hover) in [
                 (
@@ -58,6 +71,11 @@ impl FeroApp {
                     "TCP sessions and UDP transactions from profiles",
                 ),
                 (
+                    Tab::Apps,
+                    "Applications",
+                    "Edit TCP and UDP profiles with their protocols (HTTP, DNS, MQTT, SSH, SIP, SMB, TLS) and run them",
+                ),
+                (
                     Tab::Capture,
                     "Capture",
                     "Open a capture, look at its packets, edit them",
@@ -67,7 +85,17 @@ impl FeroApp {
                     "Scenario",
                     "Checks with expected outcomes, run on the server",
                 ),
-                (Tab::Charts, "Charts", "Rates of the runs over time"),
+                (
+                    Tab::Bench,
+                    "Benchmark",
+                    "RFC 2544 throughput, latency, frame loss and back-to-back, run on the server",
+                ),
+                (
+                    Tab::Group,
+                    "Multi-server",
+                    "Runs on several servers, started and stopped together",
+                ),
+                (Tab::Charts, "Charts", "Rates, loss and latency over time"),
             ] {
                 ui.selectable_value(&mut self.tab, tab, label)
                     .on_hover_text(hover);
@@ -409,6 +437,7 @@ impl FeroApp {
             self.connect(i);
         }
         self.lab_window(ctx);
+        self.compare_window(ctx);
         self.file_dialog(ctx);
     }
 }
