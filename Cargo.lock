@@ -1389,6 +1389,7 @@ dependencies = [
  "ferotrx-core",
  "ferotrx-ctl",
  "ferotrx-packet",
+ "ron",
  "serde",
  "serde_json",
  "toml",

@@ -39,6 +39,9 @@ struct Args {
     scenario: Option<String>,
     /// A capture to open in the Capture tab.
     capture: Option<String>,
+    /// A workspace file (*.ferotrx) to open: servers, streams, forms, layout.
+    #[arg(short, long, value_name = "FILE")]
+    workspace: Option<String>,
 }
 
 fn main() -> eframe::Result {
@@ -71,6 +74,7 @@ fn main() -> eframe::Result {
         port: args.port,
         profile: args.profile,
         scenario: args.scenario,
+        workspace: args.workspace,
     };
     let native = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

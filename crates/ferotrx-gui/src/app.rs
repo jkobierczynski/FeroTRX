@@ -16,6 +16,9 @@ use crate::protocols::Registry;
 use crate::views::{CaptureState, EditorState, ScenarioState, StatefulState};
 
 const STORAGE_KEY: &str = "ferotrx-gui";
+/// The forms of the last session (a workspace without servers and ports).
+const FORMS_KEY: &str = "ferotrx-gui-forms";
+const WORKSPACE_KEY: &str = "ferotrx-gui-workspace";
 /// Points kept per run in the rate charts.
 const HISTORY: usize = 600;
 
@@ -179,7 +182,7 @@ pub fn pseudo_interface(name: &str) -> bool {
             .any(|p| name.starts_with(p))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Tab {
     #[default]
     Streams,
@@ -189,7 +192,7 @@ pub enum Tab {
     Charts,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BottomTab {
     #[default]
     Stats,
@@ -225,6 +228,10 @@ pub struct FeroApp {
     pub files: crate::files::Dialogs,
     /// The lab router window, while open.
     pub lab_form: Option<crate::views::LabForm>,
+    /// The workspace file last opened or saved.
+    pub workspace_path: Option<String>,
+    /// A layout from a workspace file, applied at the start of the next frame.
+    pub pending_layout: Option<String>,
     pub ctx: egui::Context,
 }
 
@@ -241,6 +248,8 @@ pub struct Options {
     pub profile: Option<String>,
     /// A scenario to open in the Scenario tab.
     pub scenario: Option<String>,
+    /// A workspace file to open (before the other options).
+    pub workspace: Option<String>,
 }
 
 impl FeroApp {
@@ -250,7 +259,21 @@ impl FeroApp {
             .and_then(|s| eframe::get_value(s, STORAGE_KEY))
             .unwrap_or_default();
         crate::fonts::install(&cc.egui_ctx);
-        Self::with_workspace(cc.egui_ctx.clone(), work, opts)
+        let forms: Option<crate::workspace::WorkspaceFile> =
+            cc.storage.and_then(|s| eframe::get_value(s, FORMS_KEY));
+        let path: Option<String> = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, WORKSPACE_KEY))
+            .flatten();
+        let mut app = Self::with_workspace(cc.egui_ctx.clone(), work, Options::default());
+        if let Some(f) = forms {
+            app.restore_forms(f);
+        }
+        if app.workspace_path.is_none() {
+            app.workspace_path = path;
+        }
+        app.apply_options(opts);
+        app
     }
 
     pub fn with_workspace(ctx: egui::Context, work: Workspace, opts: Options) -> Self {
@@ -272,6 +295,8 @@ impl FeroApp {
             add_server: None,
             files: Default::default(),
             lab_form: None,
+            workspace_path: None,
+            pending_layout: None,
             ctx,
         };
         if let Some(last) = app.work.last.clone() {
@@ -284,6 +309,17 @@ impl FeroApp {
                 app.sel_port = last.port;
                 app.editor.stream = last.stream;
             }
+        }
+        app.apply_options(opts);
+        app
+    }
+
+    /// Does what the command line asked for: a workspace, servers to
+    /// connect, a port and profile, a scenario, a capture.
+    pub fn apply_options(&mut self, opts: Options) {
+        let app = self;
+        if let Some(path) = &opts.workspace {
+            app.open_workspace(std::path::Path::new(path));
         }
         if app.servers.is_empty() && opts.connect.is_empty() {
             app.servers.push(ServerState::new(ConnSettings::default()));
@@ -348,7 +384,17 @@ impl FeroApp {
             app.capture.open();
             app.tab = Tab::Capture;
         }
-        app
+    }
+
+    /// The forms of the last session, without its servers and ports.
+    fn restore_forms(&mut self, f: crate::workspace::WorkspaceFile) {
+        self.stateful = f.stateful;
+        self.scenario = f.scenario;
+        self.tab = f.view.tab;
+        self.bottom = f.view.bottom;
+        if !f.capture.path.is_empty() {
+            self.capture.path = f.capture.path;
+        }
     }
 
     // ----- connections -----
@@ -697,6 +743,7 @@ impl FeroApp {
 
 impl eframe::App for FeroApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.apply_pending_layout(ctx);
         self.poll();
         self.ui(ctx);
         // Keep the charts moving while something runs.
@@ -706,12 +753,12 @@ impl eframe::App for FeroApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        self.work.servers = self.servers.iter().map(|s| s.settings.clone()).collect();
-        self.work.last = self.servers.get(self.sel_server).map(|s| LastView {
-            server: s.settings.address(),
-            port: self.sel_port.clone(),
-            stream: self.editor.stream,
-        });
+        self.remember_view();
         eframe::set_value(storage, STORAGE_KEY, &self.work);
+        // The forms too, as a workspace without a layout (eframe keeps that).
+        let mut w = self.workspace_file(None);
+        w.work = Workspace::default();
+        eframe::set_value(storage, FORMS_KEY, &w);
+        eframe::set_value(storage, WORKSPACE_KEY, &self.workspace_path);
     }
 }

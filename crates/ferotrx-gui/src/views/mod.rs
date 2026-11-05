@@ -46,6 +46,8 @@ impl FeroApp {
         ui.horizontal(|ui| {
             ui.heading(RichText::new("FeroTRX").strong());
             ui.separator();
+            self.workspace_menu(ui);
+            ui.separator();
             for (tab, label, hover) in [
                 (
                     Tab::Streams,

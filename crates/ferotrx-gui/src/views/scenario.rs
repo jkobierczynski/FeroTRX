@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui::{self, Color32, RichText};
 use ferotrx_core::scenario::{CheckReport, Scenario, ScenarioReport};
 use ferotrx_ctl::protocol::{ScenarioCheckInfo, ScenarioInfo, ScenarioRunInfo};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::app::{FeroApp, Pending, Status};
@@ -60,6 +61,8 @@ vlan = 10
 syn_retries = 1
 "#;
 
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
 pub struct ScenarioState {
     /// The scenario file: on this computer when `upload`, else on the server.
     pub path: String,
@@ -76,14 +79,17 @@ pub struct ScenarioState {
     /// the profiles are read from (its data directory when empty).
     pub server_dir: String,
     /// The last check: the checks of the scenario, or what is wrong with it.
+    #[serde(skip)]
     pub checked: Option<Result<ScenarioInfo, String>>,
     /// Checks not to run.
     pub skip: BTreeSet<String>,
     /// Build the lab router a scenario names in `[lab]` before the run.
     pub build_lab: bool,
     /// The run shown.
+    #[serde(skip)]
     pub run: Option<u64>,
     /// The check whose details are shown.
+    #[serde(skip)]
     pub sel_check: Option<String>,
 }
 

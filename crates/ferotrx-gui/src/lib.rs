@@ -23,5 +23,6 @@ pub mod model;
 pub mod packet_view;
 pub mod protocols;
 pub mod views;
+pub mod workspace;
 
 pub use app::{FeroApp, Options};

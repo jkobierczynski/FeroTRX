@@ -37,6 +37,10 @@ pub enum Target {
     SaveScenario,
     /// Where to save the report of the scenario run shown: JSON, or JUnit XML.
     ScenarioReport { junit: bool },
+    /// A workspace file to open.
+    OpenWorkspace,
+    /// Where to save the workspace.
+    SaveWorkspace,
 }
 
 /// The kinds of file a dialog lists first.
@@ -47,6 +51,7 @@ pub enum Kind {
     Pem,
     Report,
     Junit,
+    Workspace,
 }
 
 impl Kind {
@@ -57,6 +62,7 @@ impl Kind {
             Kind::Pem => ("PEM files (*.pem, *.crt, *.key)", &["pem", "crt", "key"]),
             Kind::Report => ("Reports (*.json)", &["json"]),
             Kind::Junit => ("JUnit XML (*.xml)", &["xml"]),
+            Kind::Workspace => ("Workspaces (*.ferotrx)", &["ferotrx"]),
         }
     }
 }

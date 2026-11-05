@@ -370,6 +370,11 @@ impl FeroApp {
                 }
             }
             Target::FileOut => self.work.file_out = shown,
+            Target::OpenWorkspace => self.open_workspace(&path),
+            Target::SaveWorkspace => {
+                let ctx = ctx.clone();
+                self.save_workspace(&path, &ctx);
+            }
             Target::OpenScenario | Target::SaveScenario | Target::ScenarioReport { .. } => {
                 self.scenario_file(target, &path)
             }
