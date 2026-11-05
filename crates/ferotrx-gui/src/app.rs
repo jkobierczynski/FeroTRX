@@ -83,6 +83,8 @@ pub enum Pending {
     ScenarioChecked,
     /// `scenario.start`: show the run.
     ScenarioStarted,
+    /// `bench.start`: show the run.
+    BenchStarted,
     /// `profile.load` of a multi-server group's member.
     GroupLoaded { member: usize },
     /// A start of a group's member.
@@ -288,6 +290,7 @@ pub enum Tab {
     Apps,
     Capture,
     Scenario,
+    Bench,
     Group,
     Charts,
 }
@@ -321,6 +324,7 @@ pub struct FeroApp {
     pub scenario: ScenarioState,
     pub groups: crate::views::GroupsState,
     pub apps: crate::views::AppsState,
+    pub bench: crate::views::BenchState,
     pub log: Vec<LogLine>,
     pub next_tag: u64,
     pub started: Instant,
@@ -393,6 +397,7 @@ impl FeroApp {
             scenario: ScenarioState::default(),
             groups: Default::default(),
             apps: Default::default(),
+            bench: Default::default(),
             log: Vec::new(),
             next_tag: 1,
             started: Instant::now(),
@@ -496,6 +501,7 @@ impl FeroApp {
         self.scenario = f.scenario;
         self.groups = f.groups;
         self.apps = f.apps;
+        self.bench = f.bench;
         self.tab = f.view.tab;
         self.bottom = f.view.bottom;
         if !f.capture.path.is_empty() {
@@ -764,6 +770,21 @@ impl FeroApp {
                                 .map_err(|e| e.to_string()),
                         );
                     }
+                    (Pending::BenchStarted, Ok(v)) => {
+                        match serde_json::from_value::<ferotrx_ctl::protocol::BenchRunInfo>(v) {
+                            Ok(r) => {
+                                self.bench.run = Some(r.id);
+                                let s = &mut self.servers[i];
+                                s.snap.bench.retain(|x| x.id != r.id);
+                                s.snap.bench.push(r.clone());
+                                self.info(
+                                    &name,
+                                    format!("benchmark {} started as run {}", r.profile, r.id),
+                                );
+                            }
+                            Err(e) => self.error(&name, format!("bench.start: {e}")),
+                        }
+                    }
                     (Pending::ScenarioChecked, Err(e)) => {
                         self.scenario.checked = Some(Err(e.to_string()));
                     }
@@ -794,6 +815,7 @@ impl FeroApp {
                                 format!("{what} failed: {e}")
                             }
                             Pending::Interfaces => format!("interfaces.list: {e}"),
+                            Pending::BenchStarted => format!("benchmark: {e}"),
                             Pending::ScenarioChecked | Pending::ScenarioStarted => {
                                 format!("scenario: {e}")
                             }

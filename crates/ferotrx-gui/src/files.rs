@@ -49,6 +49,12 @@ pub enum Target {
     OpenAppProfile,
     /// Where to save the profile of the Applications tab.
     SaveAppProfile,
+    /// A benchmark profile for the Benchmark tab.
+    OpenBench,
+    /// Where to save the benchmark profile.
+    SaveBench,
+    /// Where to save the report of the benchmark run shown.
+    BenchReport,
 }
 
 /// The kinds of file a dialog lists first.

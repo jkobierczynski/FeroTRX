@@ -151,6 +151,7 @@ pub struct Snapshot {
     pub udp: Vec<UdpRunInfo>,
     pub rx: Vec<RxRunInfo>,
     pub scenarios: Vec<ScenarioRunInfo>,
+    pub bench: Vec<ferotrx_ctl::protocol::BenchRunInfo>,
 }
 
 /// What a worker tells the GUI.
@@ -318,6 +319,7 @@ fn snapshot(c: &mut Client) -> Result<Snapshot, ClientError> {
         udp: list(c.udp_runs())?,
         rx: list(c.rx_runs())?,
         scenarios: list(c.scenario_runs())?,
+        bench: list(c.bench_runs())?,
     })
 }
 

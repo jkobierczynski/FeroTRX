@@ -179,3 +179,75 @@ fn a_group_starts_on_two_servers_and_adds_up() {
     assert_eq!(total, 800);
     assert!(app.log.iter().all(|l| !l.error), "{:?}", app.log);
 }
+
+#[test]
+fn a_benchmark_runs_on_the_server_and_its_report_is_saved() {
+    use ferotrx_core::{memory_ports, MemoryPort, PacketSink, PortReceiver};
+    use std::sync::{Arc, Mutex};
+
+    // A perfect device: what is sent on wire0 arrives on wire1.
+    let other_end: Arc<Mutex<Option<MemoryPort>>> = Default::default();
+    let tx_end = other_end.clone();
+    let controller = Controller::new()
+        .with_bench_sink_opener(move |_name, _send, _linktype, _workers| {
+            let (a, b) = memory_ports();
+            *tx_end.lock().unwrap() = Some(b);
+            Ok((
+                vec![Box::new(a) as Box<dyn PacketSink + Send>],
+                "memory".into(),
+            ))
+        })
+        .with_receiver_opener(move |_name| {
+            Ok(Box::new(PortReceiver(
+                other_end.lock().unwrap().take().unwrap(),
+            )))
+        });
+    let addr = Server::bind("127.0.0.1:0", controller, None)
+        .unwrap()
+        .spawn()
+        .unwrap()
+        .to_string();
+    let mut app = app(&addr, "");
+    let i = app.servers.len() - 1;
+    until(&mut app, "connect", |a| {
+        a.servers[i].status == Status::Connected
+    });
+    app.sel_server = i;
+    app.bench.new_bench();
+    app.bench.iface = "wire0".into();
+    app.bench.rx = "wire1".into();
+    app.bench.sizes = "252".into();
+    app.bench.line_rate = "10mbps".into();
+    app.bench.trial_duration = "100ms".into();
+    app.bench.tests = vec!["throughput".into()];
+    app.start_bench();
+    until(&mut app, "the benchmark to finish", |a| {
+        a.servers[i]
+            .snap
+            .bench
+            .iter()
+            .any(|r| !r.state.is_running() && r.report.is_some())
+    });
+    assert!(app.log.iter().all(|l| !l.error), "{:?}", app.log);
+    let run = app.servers[i].snap.bench[0].clone();
+    assert_eq!(app.bench.run, Some(run.id));
+    let t = run.report.as_ref().unwrap().sizes[0]
+        .throughput
+        .as_ref()
+        .unwrap();
+    assert!(t.load_pct > 90.0, "{t:?}");
+
+    // Saved as ferotrx bench --report writes it, with the text next to it.
+    let dir = std::env::temp_dir().join(format!("ferotrx-gui-bench-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let json = dir.join("bench.json");
+    app.bench_file(ferotrx_gui::files::Target::BenchReport, &json);
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+    assert_eq!(v["format"], "ferotrx-bench-1");
+    assert_eq!(v["report"]["sizes"][0]["size"], "252");
+    assert!(std::fs::read_to_string(dir.join("bench.txt"))
+        .unwrap()
+        .contains("Throughput"));
+    std::fs::remove_dir_all(&dir).ok();
+}

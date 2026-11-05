@@ -395,6 +395,9 @@ impl FeroApp {
             Target::FileOut => self.work.file_out = shown,
             Target::OpenWorkspace => self.open_workspace(&path),
             Target::OpenAppProfile | Target::SaveAppProfile => self.apps_file(target, &path),
+            Target::OpenBench | Target::SaveBench | Target::BenchReport => {
+                self.bench_file(target, &path)
+            }
             Target::CompareReport { .. } | Target::SaveComparison => {
                 self.compare_file(target, &path)
             }

@@ -1,6 +1,7 @@
 //! The panels of the window, each an `impl FeroApp` block.
 
 mod apps;
+mod bench;
 mod capture;
 mod compare;
 mod groups;
@@ -13,6 +14,7 @@ mod streams;
 use eframe::egui::{self, RichText};
 
 pub use apps::{app_section, AppsState, ProfileKind};
+pub use bench::BenchState;
 pub use capture::CaptureState;
 pub use compare::{CompareForm, Side as CompareSide};
 pub use groups::{GroupsState, Member, MemberKind};
@@ -44,6 +46,7 @@ impl FeroApp {
             Tab::Apps => self.apps_tab(ui),
             Tab::Capture => self.capture_tab(ui),
             Tab::Scenario => self.scenario_tab(ui),
+            Tab::Bench => self.bench_tab(ui),
             Tab::Group => self.groups_tab(ui),
             Tab::Charts => self.charts_tab(ui),
         });
@@ -81,6 +84,11 @@ impl FeroApp {
                     Tab::Scenario,
                     "Scenario",
                     "Checks with expected outcomes, run on the server",
+                ),
+                (
+                    Tab::Bench,
+                    "Benchmark",
+                    "RFC 2544 throughput, latency, frame loss and back-to-back, run on the server",
                 ),
                 (
                     Tab::Group,
