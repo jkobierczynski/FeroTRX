@@ -9,7 +9,7 @@ macOS and Windows. Its engine is a library you can use from your own
 programs, and a control server lets scripts and the Python client drive it
 remotely.
 
-The current version is 0.23.0; see [DEVELOPMENT.md](DEVELOPMENT.md) for what
+The current version is 0.25.0; see [DEVELOPMENT.md](DEVELOPMENT.md) for what
 each milestone added and what comes next.
 
 ## Features
@@ -49,7 +49,8 @@ each milestone added and what comes next.
   directories) that work with smbclient and Samba; an interface for protocols of your own.
   [Guide](docs/app-protocols.md)
 * **Host emulation**: emulated hosts get addresses by DHCP, SLAAC or DHCPv6,
-  announce them, join multicast groups and act as IPv6 routers.
+  announce them, join multicast groups and act as IPv6 routers and DHCP or
+  DHCPv6 servers.
   [Guide](docs/host-emulation.md)
 * **Loss and latency** per stream, from a signature in each packet.
   [Guide](docs/loss-latency.md)

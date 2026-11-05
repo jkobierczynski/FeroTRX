@@ -37,6 +37,8 @@ __all__ = [
     "HostAddressInfo",
     "HostGroupInfo",
     "HostInfo",
+    "DhcpServerInfo",
+    "DhcpLeaseInfo",
     "TcpCounters",
     "TcpTemplateCounters",
     "TcpRunInfo",
@@ -380,6 +382,42 @@ class HostGroupInfo(Record):
 
 
 @dataclass(kw_only=True)
+class DhcpLeaseInfo(Record):
+    """A lease of an emulated DHCP or DHCPv6 server."""
+
+    address: str = ""
+    mac: str | None = None
+    #: Client identifier (DHCPv6: DUID and IAID), hex.
+    client: str = ""
+    hostname: str | None = None
+    #: Seconds left.
+    remaining_s: float = 0.0
+
+
+@dataclass(kw_only=True)
+class DhcpServerInfo(Record):
+    """The DHCP or DHCPv6 server role of an emulated host."""
+
+    #: ``FIRST-LAST``.
+    pool: str = ""
+    pool_size: int = 0
+    leases: list[DhcpLeaseInfo] = field(default_factory=list)
+    received: int = 0
+    #: Discovers (DHCPv6: solicits).
+    discovers: int = 0
+    #: Offers (DHCPv6: advertises).
+    offers: int = 0
+    requests: int = 0
+    acks: int = 0
+    naks: int = 0
+    releases: int = 0
+    declines: int = 0
+    informs: int = 0
+    #: Discovers and solicits left unanswered: no free address.
+    exhausted: int = 0
+
+
+@dataclass(kw_only=True)
 class HostInfo(Record):
     """An emulated host of a TCP or UDP run: state, addresses and groups."""
 
@@ -394,6 +432,8 @@ class HostInfo(Record):
     ipv6: HostAddressInfo | None = None
     link_local: str | None = None
     groups: list[HostGroupInfo] = field(default_factory=list)
+    dhcp_server: DhcpServerInfo | None = None
+    dhcpv6_server: DhcpServerInfo | None = None
 
 
 # ----- application protocols -----

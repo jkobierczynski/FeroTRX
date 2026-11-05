@@ -1,0 +1,55 @@
+# FeroTRX host emulation profile: a DHCP and DHCPv6 server (with router
+# advertisements) for a lab segment, and a few emulated clients that take
+# their addresses from it in the same run.
+#
+# Run it with:
+#   sudo ferotrx host examples/lab-dhcp-server.toml -i <interface>
+#
+# Uses: give devices under test (phones, IoT boxes, a router's WAN port)
+# addresses on a segment without a DHCP server; check that a switch's DHCP
+# snooping or a relay passes the exchange; see how a client behaves on a
+# NAK, a short lease or a full pool (make `pool` small). `ferotrx host`
+# prints the server's leases and counters at the end; the clients below are
+# optional and only show that the server works.
+#
+# Keep the segment free of other DHCP servers (clients take the first
+# offer). The server answers ARP and pings at its own address.
+
+format = 1
+# duration = "1h"          # default: until Ctrl-C
+
+[[host]]
+mac = "02:dc:00:00:0d:01"
+ipv4 = "10.88.0.1/24"
+ipv6 = "fd00:88::1/64"
+# vlan = 10
+
+[host.dhcp_server]
+pool = "10.88.0.100-10.88.0.199"
+lease = "10m"              # renewal at half, rebinding at 7/8
+router = "10.88.0.1"       # default: the host's `gateway`, else none
+dns = ["10.88.0.1"]
+domain = "lab.test"
+# A fixed address for a device, inside or outside the pool.
+reservations = { "02:dc:00:00:0e:07" = "10.88.0.7" }
+
+[host.dhcpv6_server]
+pool = "fd00:88::100-fd00:88::1ff"
+lease = "10m"
+dns = ["fd00:88::1"]
+domain = "lab.test"
+# rapid_commit = true      # answer a solicit with rapid commit at once
+
+# DHCPv6 clients learn their gateway and prefix from router advertisements;
+# the M flag tells them to ask the DHCPv6 server.
+[host.router]
+prefixes = ["fd00:88::/64"]
+managed = true
+
+# Emulated clients of the server above (they need no other server).
+[[host]]
+count = 3
+mac = "02:dc:00:00:0e:01"
+ipv4 = "dhcp"
+ipv6 = "dhcpv6"
+hostname = "client-{n}"

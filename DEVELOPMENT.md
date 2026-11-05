@@ -49,6 +49,7 @@ the same library.
 | M26, HTTP/2 | `ferotrx_core::app::http2`: HTTP/2 client and server (`app = "h2"` over TLS with ALPN `h2`, `app = "h2c"` or `"http2"` with prior knowledge; port 443/80), an `[http2]` table with the `[http]` keys and `concurrent`, `max_concurrent_streams`, `window`, `frame_size`, `header_table_size`, `huffman`, `scheme`; frames (SETTINGS/ACK, HEADERS+CONTINUATION, DATA, PING, RST_STREAM, GOAWAY, WINDOW_UPDATE, padding, priorities ignored), HPACK written in-house (`http2::hpack`: static and dynamic tables, size updates, Huffman, never-indexed `authorization`/`cookie`; RFC 7541 examples as tests), stream and connection flow control, multiplexed requests up to `concurrent`, `REFUSED_STREAM` asked again, resets and GOAWAY counted; the server answers HTTP/1.1 on the same port (no preface, or ALPN `http/1.1`); `examples/lab-h2.toml`; `scripts/app-netns.sh` runs HTTP/2 between emulated ends, `curl --http2`/`--http1.1`/`--http2-prior-knowledge` and `h2load` against the emulated server, and the emulated client against `nghttpd` over TLS and without | | 0.19.0 |
 | M27, SSH | `ferotrx_core::app::ssh` (feature `ssh`, ring): SSH-2 client and server (`app = "ssh"`, port 22): version exchange, curve25519-sha256 key exchange with an ssh-ed25519 host key (generated or an OpenSSH key file) and its signature checked (and `fingerprint`), chacha20-poly1305@openssh.com, aes256-gcm@openssh.com and aes128-gcm@openssh.com (`ciphers`), re-keying both ways (`rekey_after`), DISCONNECT; logins by Ed25519 key (`key`, `authorized_keys`) and password (`users`), `expect = "failure"`, `max_auth_tries`, `banner`; session channels with flow control: `exec` with input, exit status and output size checks (`commands`, `[[ssh.command]]`), server routes (`[[ssh.route]]` with output, stderr, exit status, delay) and built-ins (`echo`, `cat`, `head -c N /dev/zero`, ...), a small shell with pty echo; transactions `auth ...`, `exit N`, `rekey`, key exchanges as handshakes (`SSH key exchanges` in the summary); `AppCx::goodbye` (a reset after the peer's DISCONNECT completes the connection); `examples/lab-ssh.toml`; `scripts/app-netns.sh` runs SSH between emulated ends, OpenSSH's `ssh` (each cipher, re-keys, a pty shell, `sshpass` passwords) against the emulated server, and the emulated client against `sshd` | | 0.20.0 |
 | M28, SIP and RTP | `ferotrx_core::app::sip`: SIP over UDP (`app = "sip"`, port 5060, a `[sip]` table): phones that REGISTER (digest MD5 or SHA-256 with `qop=auth`, `password`), INVITE with an SDP offer (`codecs` PCMU, PCMA, G722, G729, opus; `ptime`), ACK, talk for `duration` and BYE, `expect` success, failure or a status; a server that registers `users` (401/403), answers 100, 180 and after `ring` its `answer` (200 with an SDP answer, or 486/603/488), sends finals again until the ACK, answers BYE, CANCEL and OPTIONS and repeated requests, several Call-IDs per address, hangs up after `max_call`; SIP's timers (T1 doubling, T2, 64 T1); RTP at codec rates (G.711 as a 1 kHz tone) and RTCP (SR, SDES, BYE), symmetric RTP through NAT, receive counters (lost, duplicates, reordered, RFC 3550 jitter) as `MediaReport`/`MediaStats` (`media` in ctl/Python `AppCounters`, `media_*` and `jitter_*` scenario metrics); UDP engine dialog sessions (`AppProtocol::dialog`) and media ports (`AppProtocol::media_ports`, `[udp] media_ports`); `examples/lab-sip.toml`; `scripts/sip-netns.sh` runs calls between emulated ends, SIPp's caller and digest registrations against the emulated server, and the emulated phones against SIPp's answering end | | 0.21.0 |
+| M29, DHCP server role | `ferotrx_core::host` server roles: a DHCPv4 server (`[host.dhcp_server]`, `--dhcp-pool`; RFC 2131/2132: pool, lease time with T1/T2, router, DNS, domain, reservations by MAC, offers held 30 s, addresses kept per client identifier, requested addresses, NAKs as an authoritative server, renew/rebind, release, decline with a 10 min hold, inform, relay answers to `giaddr` with option 82 returned, RFC 2131 4.1 reply addressing) and a DHCPv6 server (`[host.dhcpv6_server]`; RFC 8415 IA_NA: solicit/advertise, rapid commit, request, renew, rebind with zero lifetimes for addresses a client may not keep, release, decline, confirm, information request, DNS and domain search list, reservations; joins ff02::1:2 over MLD); `DhcpServerStatus` leases and counters in `HostStatus`, ctl/Python `HostInfo.dhcp_server`/`dhcpv6_server`, lease lines in `ferotrx host`; the host engine hands frames between a server and its own clients on one port (loopback); `examples/lab-dhcp-server.toml`; `scripts/hosts-netns.sh` check 4: busybox `udhcpc` and `udhcpc6` against the FeroTRX server plus emulated clients | | 0.25.0 |
 | M30, SMB | `ferotrx_core::app::smb`: SMB 2 and 3 over TCP (`app = "smb"`, port 445, an `[smb]` table): dialects 2.0.2, 2.1, 3.0, 3.0.2 and 3.1.1 (`dialects`, the 3.1.1 preauth integrity hash), NTLMv2 logins in SPNEGO (`user`, `password`, `domain`; guests and anonymous; `expect` a status such as `LOGON_FAILURE`), signing with HMAC-SHA256 (2.x) and AES-CMAC (3.x, keys from the SP800-108 KDF; `signing` auto, required or off), credits and compounds; client `ops` (write, read with every byte checked, list, delete, mkdir, rmdir, each with an expected status) in `chunk`s with `window` in flight; a server with shares in memory shared by all its connections (`users`, `shares`, `read_only`, `files`), create dispositions, delete on close, rename, directory listings in the classes Windows and Samba use, file and file system information, VALIDATE_NEGOTIATE; own MD4, SHA-512, HMAC, RC4, AES-128 and AES-CMAC; transactions per operation, logins as handshakes (`SMB logins` in the summary); `examples/lab-smb.toml`; `scripts/smb-netns.sh` runs the emulated ends, smbclient against the emulated server and the emulated clients against Samba's `smbd` | | 0.23.0 |
 
 The lab scripts (`scripts/*.sh`) build a NAT router (or, for host
@@ -130,30 +131,36 @@ checked against 0.4.0. Each issue has the full checklist.
       hang-ups, SIP's timers), RTP/RTCP audio with loss and jitter, SIPp
       both ways (not done: SIP over TCP/TLS, SRTP, DTMF, a proxy role, media
       on several workers)
+- [x] **M29, DHCP server role (0.25.0)**, from [#37](https://github.com/jkobierczynski/FeroTRX/issues/37):
+      DHCPv4 and DHCPv6 servers as host roles (pools, reservations, lease
+      times, renewals, releases, declines, relays, rapid commit), for real
+      clients and the run's own emulated hosts; busybox udhcpc/udhcpc6 in
+      the lab script (not done: pools per relay, DHCPv6 relay messages and
+      prefix delegation, leases that outlive the run)
 - [x] **M30, SMB (0.23.0)**, from [#37](https://github.com/jkobierczynski/FeroTRX/issues/37):
       SMB 2.0.2 to 3.1.1 clients and an in-memory file server, NTLMv2
       logins, HMAC-SHA256 and AES-CMAC signing, files and directories,
       smbclient and Samba both ways (not done: encryption, Kerberos,
       leases and oplocks, durable handles)
 - [ ] **More application protocols**, [#37](https://github.com/jkobierczynski/FeroTRX/issues/37):
-      QUIC/HTTP/3, a DHCP server role; the order is in
+      QUIC/HTTP/3; the order is in
       [docs/app-protocols.md](docs/app-protocols.md#what-comes-next)
 - [ ] **Later**, [#20](https://github.com/jkobierczynski/FeroTRX/issues/20):
       session length distributions
 
 **P2, after the protocols of #37: quality and network behaviour**
 
-- [ ] **M32, jitter, latency and call quality (0.25.0)**, [#49](https://github.com/jkobierczynski/FeroTRX/issues/49):
+- [ ] **M32, jitter, latency and call quality (0.26.0)**, [#49](https://github.com/jkobierczynski/FeroTRX/issues/49):
       per-call RTP loss/jitter/latency, RTCP reports, E-model R-factor and
       MOS, transaction latency percentiles for TCP/UDP apps
-- [ ] **M33, built-in impairments (0.26.0)**, [#50](https://github.com/jkobierczynski/FeroTRX/issues/50):
+- [ ] **M33, built-in impairments (0.27.0)**, [#50](https://github.com/jkobierczynski/FeroTRX/issues/50):
       delay/jitter, loss (incl. bursts), duplication, reordering, corruption
       and rate limits in the pipeline and on ports, a two-port bridge mode
-- [ ] **M34, TCP congestion control choices (0.27.0)**, [#51](https://github.com/jkobierczynski/FeroTRX/issues/51):
+- [ ] **M34, TCP congestion control choices (0.28.0)**, [#51](https://github.com/jkobierczynski/FeroTRX/issues/51):
       a controller trait, CUBIC with HyStart++, ECN
-- [ ] **M35, Y.1564 service activation (0.28.0)**, [#52](https://github.com/jkobierczynski/FeroTRX/issues/52):
+- [ ] **M35, Y.1564 service activation (0.29.0)**, [#52](https://github.com/jkobierczynski/FeroTRX/issues/52):
       CIR/EIR services, configuration and performance tests, FLR/FTD/FDV
-- [ ] **M36, finish the GUI's application-level workflow (0.29.0)**, [#54](https://github.com/jkobierczynski/FeroTRX/issues/54):
+- [ ] **M36, finish the GUI's application-level workflow (0.30.0)**, [#54](https://github.com/jkobierczynski/FeroTRX/issues/54):
       editors for application protocol profiles, workspace save/open, hex
       editing, receive-side loss/latency charts over time, benchmarking,
       scenario comparison, runs across several servers at once

@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use ferotrx_core::scenario::{CheckReport, LabSpec, ScenarioReport};
 use ferotrx_core::{
-    FlowReport, FlowStats, HostAddress, HostStatus, LatencyStats, ReplayStats, RunStats, RxStats,
-    TcpSideStats, TcpStats, UdpSideStats, UdpStats,
+    DhcpServerStatus, FlowReport, FlowStats, HostAddress, HostStatus, LatencyStats, ReplayStats,
+    RunStats, RxStats, TcpSideStats, TcpStats, UdpSideStats, UdpStats,
 };
 
 /// Version of the method set below. Bumped when a method changes incompatibly.
@@ -1145,6 +1145,93 @@ pub struct HostInfo {
     pub link_local: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<HostGroupInfo>,
+    /// Its DHCP server role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dhcp_server: Option<DhcpServerInfo>,
+    /// Its DHCPv6 server role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dhcpv6_server: Option<DhcpServerInfo>,
+}
+
+/// A DHCP or DHCPv6 server role of a [`HostInfo`] (`ferotrx_core::DhcpServerStatus`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DhcpServerInfo {
+    /// `FIRST-LAST`.
+    pub pool: String,
+    pub pool_size: u64,
+    #[serde(default)]
+    pub leases: Vec<DhcpLeaseInfo>,
+    /// Client messages taken.
+    #[serde(default)]
+    pub received: u64,
+    /// Discovers (DHCPv6: solicits).
+    #[serde(default)]
+    pub discovers: u64,
+    /// Offers (DHCPv6: advertises).
+    #[serde(default)]
+    pub offers: u64,
+    /// Requests, renewals and rebinds.
+    #[serde(default)]
+    pub requests: u64,
+    /// Acks of an address (DHCPv6: replies that bound one).
+    #[serde(default)]
+    pub acks: u64,
+    #[serde(default)]
+    pub naks: u64,
+    #[serde(default)]
+    pub releases: u64,
+    #[serde(default)]
+    pub declines: u64,
+    #[serde(default)]
+    pub informs: u64,
+    /// Discovers and solicits left unanswered: no free address.
+    #[serde(default)]
+    pub exhausted: u64,
+}
+
+/// A lease of a [`DhcpServerInfo`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DhcpLeaseInfo {
+    pub address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+    /// Client identifier (DHCPv6: DUID and IAID), hex.
+    pub client: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    /// Seconds left.
+    pub remaining_s: f64,
+}
+
+impl From<&DhcpServerStatus> for DhcpServerInfo {
+    fn from(s: &DhcpServerStatus) -> Self {
+        let c = &s.counters;
+        Self {
+            pool: s.pool.clone(),
+            pool_size: s.pool_size,
+            leases: s
+                .leases
+                .iter()
+                .map(|l| DhcpLeaseInfo {
+                    address: l.ip.to_string(),
+                    mac: l.mac.map(|m| m.to_string()),
+                    client: l.client.clone(),
+                    hostname: l.hostname.clone(),
+                    remaining_s: l.remaining.as_secs_f64(),
+                })
+                .collect(),
+            received: c.received,
+            discovers: c.discovers,
+            offers: c.offers,
+            requests: c.requests,
+            acks: c.acks,
+            naks: c.naks,
+            releases: c.releases,
+            declines: c.declines,
+            informs: c.informs,
+            exhausted: c.exhausted,
+        }
+    }
 }
 
 /// An address of a [`HostInfo`].
@@ -1210,6 +1297,8 @@ impl From<&HostStatus> for HostInfo {
                     rx_bytes: g.rx_bytes,
                 })
                 .collect(),
+            dhcp_server: h.dhcp_server.as_ref().map(Into::into),
+            dhcpv6_server: h.dhcpv6_server.as_ref().map(Into::into),
         }
     }
 }

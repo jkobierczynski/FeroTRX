@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::engine::{HostConfig, HostOptions, Ipv4Mode, Ipv6Mode, RouterConfig};
+use super::server::{DhcpServerConfig, Dhcpv6ServerConfig};
 use crate::profile::OutputFile;
 use crate::tcp::profile::{parse_groups, parse_ip_prefix};
 use crate::{check_format, parse_duration, Error, MacAddr, Result, SendSettings};
@@ -38,6 +39,20 @@ use crate::{check_format, parse_duration, Error, MacAddr, Result, SendSettings};
 /// [host.router]
 /// prefixes = ["fd00:99::/64"]
 /// interval = "10s"
+///
+/// [[host]]                    # a DHCP and DHCPv6 server for a third link
+/// iface = "eth2"
+/// ipv4 = "10.20.0.1/24"
+/// [host.dhcp_server]
+/// pool = "10.20.0.100-10.20.0.199"
+/// lease = "1h"
+/// router = "10.20.0.1"         # default: the host's gateway
+/// dns = ["10.20.0.53"]
+/// domain = "lab.test"
+/// reservations = { "02:00:00:00:00:07" = "10.20.0.7" }
+/// [host.dhcpv6_server]
+/// pool = "fd00:20::100-fd00:20::1ff"
+/// dns = ["fd00:20::53"]
 /// ```
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HostProfile {
@@ -133,6 +148,22 @@ pub(crate) struct RawHost {
     announce: Option<bool>,
     hostname: Option<String>,
     router: Option<RawRouter>,
+    dhcp_server: Option<RawDhcpServer>,
+    dhcpv6_server: Option<RawDhcpServer>,
+}
+
+/// `[host.dhcp_server]` and `[host.dhcpv6_server]`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDhcpServer {
+    pool: String,
+    lease: Option<String>,
+    router: Option<String>,
+    dns: Option<Vec<String>>,
+    domain: Option<String>,
+    reservations: Option<std::collections::BTreeMap<String, String>>,
+    prefix: Option<u8>,
+    rapid_commit: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -206,6 +237,104 @@ pub fn parse_ipv6_mode(s: &str, gateway: Option<&str>) -> Result<Ipv6Mode> {
                 "ipv6 = '{s}' is not an IPv6 address (use `ipv4` for IPv4)"
             ))),
         },
+    }
+}
+
+/// Parses a DHCP pool, `FIRST-LAST` of one IP version.
+pub fn parse_pool(s: &str) -> Result<(IpAddr, IpAddr)> {
+    let bad = || {
+        Error::InvalidSpec(format!(
+            "pool '{s}' is not FIRST-LAST, e.g. 10.0.0.100-10.0.0.199"
+        ))
+    };
+    let (a, b) = s.split_once('-').ok_or_else(bad)?;
+    let a: IpAddr = a.trim().parse().map_err(|_| bad())?;
+    let b: IpAddr = b.trim().parse().map_err(|_| bad())?;
+    if a.is_ipv4() != b.is_ipv4() {
+        return Err(Error::InvalidSpec(format!(
+            "pool '{s}' mixes IPv4 and IPv6"
+        )));
+    }
+    Ok((a, b))
+}
+
+fn v4(s: &str, what: &str) -> Result<Ipv4Addr> {
+    s.trim()
+        .parse()
+        .map_err(|_| Error::InvalidSpec(format!("{what} '{s}' is not an IPv4 address")))
+}
+
+fn v6(s: &str, what: &str) -> Result<Ipv6Addr> {
+    s.trim()
+        .parse()
+        .map_err(|_| Error::InvalidSpec(format!("{what} '{s}' is not an IPv6 address")))
+}
+
+impl RawDhcpServer {
+    fn v4(self) -> Result<DhcpServerConfig> {
+        let (IpAddr::V4(a), IpAddr::V4(b)) = parse_pool(&self.pool)? else {
+            return Err(Error::InvalidSpec(format!(
+                "dhcp_server pool '{}' is not IPv4 (use [host.dhcpv6_server])",
+                self.pool
+            )));
+        };
+        if self.rapid_commit.is_some() {
+            return Err(Error::InvalidSpec(
+                "rapid_commit is a DHCPv6 setting".into(),
+            ));
+        }
+        let mut c = DhcpServerConfig::new(a, b);
+        if let Some(l) = self.lease {
+            c.lease = parse_duration(&l)?;
+        }
+        c.router = self.router.map(|r| v4(&r, "router")).transpose()?;
+        c.dns = self
+            .dns
+            .unwrap_or_default()
+            .iter()
+            .map(|d| v4(d, "dns server"))
+            .collect::<Result<_>>()?;
+        c.domain = self.domain;
+        c.prefix = self.prefix;
+        for (mac, ip) in self.reservations.unwrap_or_default() {
+            c.reservations.push((mac.parse()?, v4(&ip, "reservation")?));
+        }
+        Ok(c)
+    }
+
+    fn v6(self) -> Result<Dhcpv6ServerConfig> {
+        let (IpAddr::V6(a), IpAddr::V6(b)) = parse_pool(&self.pool)? else {
+            return Err(Error::InvalidSpec(format!(
+                "dhcpv6_server pool '{}' is not IPv6 (use [host.dhcp_server])",
+                self.pool
+            )));
+        };
+        if self.router.is_some() {
+            return Err(Error::InvalidSpec(
+                "DHCPv6 has no router option: clients take the gateway from router advertisements ([host.router])".into(),
+            ));
+        }
+        let mut c = Dhcpv6ServerConfig::new(a, b);
+        if let Some(l) = self.lease {
+            c.lease = parse_duration(&l)?;
+        }
+        c.dns = self
+            .dns
+            .unwrap_or_default()
+            .iter()
+            .map(|d| v6(d, "dns server"))
+            .collect::<Result<_>>()?;
+        c.domain = self.domain;
+        if let Some(p) = self.prefix {
+            c.prefix = p;
+        }
+        if let Some(r) = self.rapid_commit {
+            c.rapid_commit = r;
+        }
+        for (mac, ip) in self.reservations.unwrap_or_default() {
+            c.reservations.push((mac.parse()?, v6(&ip, "reservation")?));
+        }
+        Ok(c)
     }
 }
 
@@ -285,6 +414,21 @@ impl RawHost {
             router.managed = r.managed.unwrap_or(false);
             router.other = r.other.unwrap_or(false);
             host.router = Some(router);
+        }
+        host.dhcp_server = self
+            .dhcp_server
+            .map(RawDhcpServer::v4)
+            .transpose()
+            .map_err(ctx)?;
+        host.dhcpv6_server = self
+            .dhcpv6_server
+            .map(RawDhcpServer::v6)
+            .transpose()
+            .map_err(ctx)?;
+        if count > 1 && (host.dhcp_server.is_some() || host.dhcpv6_server.is_some()) {
+            return Err(ctx(Error::InvalidSpec(
+                "a DHCP server is one host: leave out `count`".into(),
+            )));
         }
         Ok(HostSpec {
             iface: self.iface,
@@ -434,6 +578,74 @@ mod tests {
         let r = configs[51].router.as_ref().unwrap();
         assert_eq!(r.prefixes, vec![("fd00:20::".parse().unwrap(), 64)]);
         assert_eq!(r.lifetime, Duration::from_secs(1800));
+    }
+
+    #[test]
+    fn parses_the_dhcp_server_example() {
+        let p = HostProfile::from_toml(include_str!("../../../../examples/lab-dhcp-server.toml"))
+            .unwrap();
+        assert_eq!(p.host_count(), 4);
+        let c = p.configs(&["eth0".into()], Some("eth0")).unwrap();
+        let s = c[0].dhcp_server.as_ref().unwrap();
+        assert_eq!(
+            s.pool,
+            (Ipv4Addr::new(10, 88, 0, 100), Ipv4Addr::new(10, 88, 0, 199))
+        );
+        assert_eq!(s.lease, Duration::from_secs(600));
+        assert_eq!(s.router, Some(Ipv4Addr::new(10, 88, 0, 1)));
+        assert_eq!(s.domain.as_deref(), Some("lab.test"));
+        assert_eq!(
+            s.reservations,
+            vec![(
+                MacAddr([2, 0xdc, 0, 0, 0x0e, 7]),
+                Ipv4Addr::new(10, 88, 0, 7)
+            )]
+        );
+        let s6 = c[0].dhcpv6_server.as_ref().unwrap();
+        assert_eq!(s6.pool.0, "fd00:88::100".parse::<Ipv6Addr>().unwrap());
+        assert!(s6.rapid_commit);
+        assert!(c[0].router.as_ref().unwrap().managed);
+        assert_eq!(c[3].hostname.as_deref(), Some("client-3"));
+    }
+
+    #[test]
+    fn rejects_bad_dhcp_servers() {
+        for (text, want) in [
+            (
+                "[[host]]\nipv4 = \"dhcp\"\n[host.dhcp_server]\npool = \"10.0.0.10-10.0.0.20\"",
+                "static IPv4",
+            ),
+            (
+                "[[host]]\nipv4 = \"10.0.0.1/24\"\n[host.dhcp_server]\npool = \"10.0.0.10\"",
+                "FIRST-LAST",
+            ),
+            (
+                "[[host]]\nipv4 = \"10.0.0.1/24\"\n[host.dhcp_server]\npool = \"fd00::1-fd00::9\"",
+                "not IPv4",
+            ),
+            (
+                "[[host]]\nipv4 = \"10.0.0.1/24\"\n[host.dhcp_server]\npool = \"10.0.1.10-10.0.1.20\"",
+                "subnet",
+            ),
+            (
+                "[[host]]\ncount = 2\nipv4 = \"10.0.0.1/24\"\n[host.dhcp_server]\npool = \"10.0.0.10-10.0.0.20\"",
+                "count",
+            ),
+            (
+                "[[host]]\n[host.dhcpv6_server]\npool = \"fd00::10-fd00:1::20\"",
+                "more than one",
+            ),
+            (
+                "[[host]]\n[host.dhcpv6_server]\npool = \"fd00::10-fd00::20\"\nrouter = \"fd00::1\"",
+                "router advertisements",
+            ),
+        ] {
+            let e = HostProfile::from_toml(text).unwrap_err().to_string();
+            assert!(e.contains(want), "{text}: {e}");
+        }
+        // A DHCPv6 server alone needs no address of its own.
+        HostProfile::from_toml("[[host]]\n[host.dhcpv6_server]\npool = \"fd00::10-fd00::20\"")
+            .unwrap();
     }
 
     #[test]
