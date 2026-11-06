@@ -423,13 +423,16 @@ class Client:
         workers: int | None = None,
         impair: str | None = None,
         impair_rx: str | None = None,
+        congestion: str | None = None,
+        ecn: bool | None = None,
     ) -> TcpRunInfo:
         """Starts a stateful TCP run of a TCP profile: ``path`` on the server,
         this machine's file with ``upload=True``, or ``toml`` text. ``iface``
         is for hosts whose table names none; the rest replace the profile's
         values (``connections=0`` runs until stopped). ``impair`` and
         ``impair_rx`` impair the frames the run sends and receives (see
-        :meth:`start`)."""
+        :meth:`start`). ``congestion`` (``"newreno"`` or ``"cubic"``) and
+        ``ecn`` replace the profile's ``[tcp]`` ones."""
         return self._run(
             _wire.tcp_start(
                 path,
@@ -449,6 +452,8 @@ class Client:
                 workers=workers,
                 impair=impair,
                 impair_rx=impair_rx,
+                congestion=congestion,
+                ecn=ecn,
             )
         )
 

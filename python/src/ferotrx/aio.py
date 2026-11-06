@@ -417,6 +417,8 @@ class AsyncClient:
         workers: int | None = None,
         impair: str | None = None,
         impair_rx: str | None = None,
+        congestion: str | None = None,
+        ecn: bool | None = None,
     ) -> TcpRunInfo:
         return await self._run(
             _wire.tcp_start(
@@ -437,6 +439,8 @@ class AsyncClient:
                 workers=workers,
                 impair=impair,
                 impair_rx=impair_rx,
+                congestion=congestion,
+                ecn=ecn,
             )
         )
 

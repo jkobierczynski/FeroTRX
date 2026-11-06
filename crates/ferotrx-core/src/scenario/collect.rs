@@ -30,6 +30,13 @@ pub fn tcp_metrics(s: &TcpStats) -> Metrics {
     put(&mut m, "open", c.active as f64);
     put(&mut m, "retransmits", c.retransmits as f64);
     put(&mut m, "timeouts", c.timeouts as f64);
+    put(&mut m, "ecn_connections", c.ecn_connections as f64);
+    put(&mut m, "ce_marks", (c.ce_marks + s.server.ce_marks) as f64);
+    put(
+        &mut m,
+        "ecn_reductions",
+        (c.ecn_reductions + s.server.ecn_reductions) as f64,
+    );
     put(&mut m, "cps", s.cps());
     put(
         &mut m,

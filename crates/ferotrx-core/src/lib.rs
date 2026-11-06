@@ -174,10 +174,11 @@ pub use size_mix::{SizeMix, FCS_LEN, L1_OVERHEAD, RFC2544_SIZES};
 pub use source::{CaptureSource, PacketSource};
 pub use stream::{run, run_with_progress, RunConfig, RunStats, Stream};
 pub use tcp::{
-    memory_ports, parse_size, run_engine, run_tcp, split_port, split_ports, MemoryPort, PacketPort,
-    PortEngine, PortJob, TcpClientConfig, TcpConfig, TcpEndpoint, TcpEngine, TcpFlow, TcpJob,
-    TcpMessage, TcpOptions, TcpProgram, TcpRole, TcpRunConfig, TcpServerConfig, TcpSideStats,
-    TcpStats, TcpTemplate, TcpTemplateStats,
+    memory_ports, parse_size, run_engine, run_tcp, split_port, split_ports, CcAck, CcWindow,
+    Congestion, CongestionController, Cubic, MemoryPort, NewReno, PacketPort, PortEngine, PortJob,
+    TcpClientConfig, TcpConfig, TcpEndpoint, TcpEngine, TcpFlow, TcpJob, TcpMessage, TcpOptions,
+    TcpProgram, TcpRole, TcpRunConfig, TcpServerConfig, TcpSideStats, TcpStats, TcpTemplate,
+    TcpTemplateStats,
 };
 #[cfg(feature = "profile")]
 pub use tcp::{

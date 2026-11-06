@@ -15,6 +15,15 @@ pub(crate) const SYN: u8 = 0x02;
 pub(crate) const RST: u8 = 0x04;
 pub(crate) const PSH: u8 = 0x08;
 pub(crate) const ACK: u8 = 0x10;
+/// ECN-Echo (RFC 3168): on a SYN with CWR, asks for ECN; on a SYN-ACK,
+/// agrees; afterwards, the receiver saw a Congestion Experienced mark.
+pub(crate) const ECE: u8 = 0x40;
+/// Congestion Window Reduced: the sender reacted to an ECE.
+pub(crate) const CWR: u8 = 0x80;
+
+/// ECN codepoints of the IP header's last two TOS / traffic class bits.
+pub(crate) const ECT0: u8 = 0b10;
+pub(crate) const CE: u8 = 0b11;
 
 /// The link layer part of a received frame.
 #[derive(Clone, Copy, Debug)]
@@ -86,6 +95,8 @@ pub(crate) struct Ip<'a> {
     pub proto: u8,
     /// TTL or hop limit.
     pub hop_limit: u8,
+    /// The ECN codepoint (the low two bits of the TOS / traffic class).
+    pub ecn: u8,
     pub payload: &'a [u8],
 }
 
@@ -120,6 +131,7 @@ pub(crate) fn parse_ipv4(p: &[u8], verify: bool) -> Option<Ip<'_>> {
         dst: Ipv4Addr::new(p[16], p[17], p[18], p[19]).into(),
         proto: p[9],
         hop_limit: p[8],
+        ecn: p[1] & 3,
         payload: &p[ihl..total],
     })
 }
@@ -161,6 +173,7 @@ pub(crate) fn parse_ipv6(p: &[u8]) -> Option<Ip<'_>> {
         dst: addr(24),
         proto: next,
         hop_limit: p[7],
+        ecn: (p[1] >> 4) & 3,
         payload: &p[at..end],
     })
 }
@@ -177,6 +190,8 @@ pub(crate) struct Segment<'a> {
     /// The options: MSS, window scale and SACK permitted on SYNs,
     /// timestamps and SACK blocks on any segment.
     pub opts: TcpOpts,
+    /// The IP header's ECN codepoint.
+    pub ecn: u8,
     pub data: &'a [u8],
 }
 
@@ -212,6 +227,7 @@ pub(crate) fn parse_tcp<'a>(ip: &Ip<'a>, verify: bool) -> Option<Segment<'a>> {
         flags: p[13],
         window: be16(p, 14)?,
         opts: TcpOpts::parse(&p[20..off]),
+        ecn: ip.ecn,
         data: &p[off..],
     })
 }
@@ -323,12 +339,25 @@ pub(crate) fn push_ip(
     id: u16,
     ttl: u8,
 ) {
+    push_ip_ecn(f, path, proto, payload_len, id, ttl, 0);
+}
+
+/// [`push_ip`] with an ECN codepoint in the TOS / traffic class.
+pub(crate) fn push_ip_ecn(
+    f: &mut Vec<u8>,
+    path: &Path,
+    proto: u8,
+    payload_len: usize,
+    id: u16,
+    ttl: u8,
+    ecn: u8,
+) {
     push_link(f, path.dst_mac, path.src_mac, path.vlan, path.ethertype());
     let start = f.len();
     match (path.src, path.dst) {
         (IpAddr::V4(src), IpAddr::V4(dst)) => {
             let total = (20 + payload_len) as u16;
-            f.extend_from_slice(&[0x45, 0]);
+            f.extend_from_slice(&[0x45, ecn & 3]);
             f.extend_from_slice(&total.to_be_bytes());
             f.extend_from_slice(&id.to_be_bytes());
             f.extend_from_slice(&[0x40, 0, ttl, proto, 0, 0]); // DF
@@ -342,7 +371,7 @@ pub(crate) fn push_ip(
                 IpAddr::V6(a) => a,
                 IpAddr::V4(a) => a.to_ipv6_mapped(),
             };
-            f.extend_from_slice(&[0x60, 0, 0, 0]);
+            f.extend_from_slice(&[0x60, (ecn & 3) << 4, 0, 0]);
             f.extend_from_slice(&(payload_len as u16).to_be_bytes());
             f.extend_from_slice(&[proto, ttl]);
             f.extend_from_slice(&v6(src).octets());
@@ -474,12 +503,24 @@ pub(crate) struct TcpHeader {
     pub opts: TcpOpts,
 }
 
+#[cfg(test)]
 pub(crate) fn tcp_frame(path: &Path, h: &TcpHeader, data: &[u8], ip_id: u16) -> Vec<u8> {
+    tcp_frame_ecn(path, h, data, ip_id, 0)
+}
+
+/// [`tcp_frame`] with an ECN codepoint in the IP header.
+pub(crate) fn tcp_frame_ecn(
+    path: &Path,
+    h: &TcpHeader,
+    data: &[u8],
+    ip_id: u16,
+    ecn: u8,
+) -> Vec<u8> {
     let opt_len = h.opts.wire_len();
     debug_assert!(opt_len <= 40, "{opt_len} bytes of TCP options");
     let tcp_len = 20 + opt_len + data.len();
     let mut f = Vec::with_capacity(18 + 40 + tcp_len);
-    push_ip(&mut f, path, 6, tcp_len, ip_id, 64);
+    push_ip_ecn(&mut f, path, 6, tcp_len, ip_id, 64, ecn);
     let start = f.len();
     f.extend_from_slice(&h.sport.to_be_bytes());
     f.extend_from_slice(&h.dport.to_be_bytes());

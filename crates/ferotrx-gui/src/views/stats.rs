@@ -204,6 +204,18 @@ impl RunColumn {
             ),
             ("elapsed".into(), format!("{:.1} s", r.elapsed_s)),
         ];
+        let s = &r.server;
+        if c.ecn_connections + s.ecn_connections > 0 {
+            rows.push((
+                "ECN".into(),
+                format!(
+                    "{} connections, {} CE marks, {} reductions",
+                    n(c.ecn_connections.max(s.ecn_connections)),
+                    n(c.ce_marks + s.ce_marks),
+                    n(c.ecn_reductions + s.ecn_reductions)
+                ),
+            ));
+        }
         if let Some(l) = &c.connect_time {
             lat_rows("connect ", l, &mut rows);
         }

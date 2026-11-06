@@ -9,9 +9,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use ferotrx_core::{
-    parse_connect_addr, parse_duration, parse_port_range, parse_size, Capture, HostOptions,
-    MacAddr, TcpHostSpec, TcpProfile, TcpProgram, TcpRole, TcpRunConfig, TcpSource, TcpStats,
-    TcpTemplateSpec,
+    parse_connect_addr, parse_duration, parse_port_range, parse_size, Capture, Congestion,
+    HostOptions, MacAddr, TcpHostSpec, TcpProfile, TcpProgram, TcpRole, TcpRunConfig, TcpSource,
+    TcpStats, TcpTemplateSpec,
 };
 use ferotrx_ctl::protocol::{RunState, TcpCounters, TcpRunInfo, TcpTemplateCounters};
 
@@ -136,6 +136,17 @@ pub struct TcpArgs {
     #[arg(long)]
     no_sack: bool,
 
+    /// Congestion control: newreno (default) or cubic (RFC 9438, with
+    /// HyStart++). Templates with their own keep it.
+    #[arg(long, value_name = "NAME", value_parser = parse_congestion)]
+    congestion: Option<Congestion>,
+
+    /// Use ECN (RFC 3168) when the other end agrees: data is sent
+    /// ECN-capable, and a router's CE marks slow the sender down instead of
+    /// drops.
+    #[arg(long)]
+    ecn: bool,
+
     /// Do not check the bytes received against the capture.
     #[arg(long)]
     no_verify: bool,
@@ -223,6 +234,10 @@ pub(crate) struct HostArgs {
     /// How long the hosts may take to get their addresses (default 30s).
     #[arg(long, value_parser = parse_duration, value_name = "TIME")]
     setup_timeout: Option<Duration>,
+}
+
+fn parse_congestion(s: &str) -> std::result::Result<Congestion, String> {
+    s.parse()
 }
 
 fn parse_window(s: &str) -> std::result::Result<u32, String> {
@@ -441,6 +456,10 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
     }
     if args.no_sack {
         o.sack = false;
+    }
+    set(&mut o.congestion, args.congestion);
+    if args.ecn {
+        o.ecn = true;
     }
     if args.no_verify {
         profile.options.verify = false;
@@ -681,6 +700,12 @@ fn side_line(c: &TcpCounters) -> String {
     }
     if c.max_in_flight > 0 {
         line.push_str(&format!("; at most {} bytes in flight", c.max_in_flight));
+    }
+    if c.ecn_connections > 0 {
+        line.push_str(&format!(
+            "; ECN on {}, {} CE marks received, {} reductions for ECN",
+            c.ecn_connections, c.ce_marks, c.ecn_reductions
+        ));
     }
     for (l, what) in [(&c.connect_time, "connect"), (&c.first_byte, "first byte")] {
         if let Some(l) = l {

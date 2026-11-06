@@ -61,3 +61,5 @@ verify = true        # check every byte received against the capture
 # window_scaling = true
 # timestamps = true       # RTT from every ACK, and PAWS
 # sack = true
+# congestion = "newreno"  # or "cubic" (RFC 9438, with HyStart++)
+# ecn = false             # ECN (RFC 3168), when the other end agrees

@@ -591,6 +591,12 @@ class TcpCounters(Record):
     paws_dropped: int = 0
     #: Most bytes one connection had in flight at once.
     max_in_flight: int = 0
+    #: Connections that agreed on ECN.
+    ecn_connections: int = 0
+    #: Segments received marked Congestion Experienced (ECN).
+    ce_marks: int = 0
+    #: Window reductions for an ECN echo.
+    ecn_reductions: int = 0
     #: Client: from the first SYN to the end of the handshake.
     connect_time: LatencyCounters | None = None
     #: Client: from the first SYN to the first byte from the server.

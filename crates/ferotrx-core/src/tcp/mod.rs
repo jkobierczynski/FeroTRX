@@ -15,8 +15,9 @@
 //!   sequence and acknowledgement numbers, retransmits lost segments, plays
 //!   the program and closes with FINs. It negotiates window scaling,
 //!   timestamps (with PAWS) and SACK, measures round-trip times for its
-//!   retransmission timeout, and does Reno/NewReno congestion control with
-//!   SACK-based recovery; `docs/tcp-engine.md` has the details. A router in between can rewrite
+//!   retransmission timeout, and does NewReno or CUBIC congestion control
+//!   ([`Congestion`]) with SACK-based recovery and optional ECN;
+//!   `docs/tcp-engine.md` has the details. A router in between can rewrite
 //!   addresses and ports as it likes: each end only talks to what it sees.
 //! * [`run_tcp`] and [`TcpJob`] run the engine on [`PacketPort`]s, ports that
 //!   send and receive. `ferotrx-io` opens them on interfaces.
@@ -24,6 +25,7 @@
 //! The client and the server can run in one engine (two ports, or one port
 //! with two VLANs) or in two engines on different machines.
 
+pub(crate) mod cc;
 pub(crate) mod engine;
 pub(crate) mod hosts;
 #[cfg(feature = "profile")]
@@ -32,6 +34,7 @@ pub(crate) mod program;
 mod run;
 pub(crate) mod wire;
 
+pub use cc::{CcAck, CcWindow, Congestion, CongestionController, Cubic, NewReno};
 pub use engine::{
     TcpClientConfig, TcpConfig, TcpEndpoint, TcpEngine, TcpOptions, TcpServerConfig, TcpSideStats,
     TcpStats, TcpTemplate, TcpTemplateStats,

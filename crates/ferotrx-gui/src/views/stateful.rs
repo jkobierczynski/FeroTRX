@@ -43,6 +43,10 @@ pub struct StatefulState {
     pub concurrency: String,
     pub duration: String,
     pub workers: String,
+    /// TCP: `newreno` or `cubic`; empty is the profile's.
+    pub congestion: String,
+    /// TCP: `on` or `off`; empty is the profile's.
+    pub ecn: String,
     #[serde(skip)]
     pub check: Option<Result<String, String>>,
 }
@@ -110,6 +114,14 @@ impl StatefulState {
         }
         if let Some(w) = num(&self.workers, "workers")? {
             p.insert("workers".into(), json!(w as u64));
+        }
+        if self.kind == Kind::Tcp {
+            if !self.congestion.is_empty() {
+                p.insert("congestion".into(), self.congestion.clone().into());
+            }
+            if !self.ecn.is_empty() {
+                p.insert("ecn".into(), (self.ecn == "on").into());
+            }
         }
         Ok(p.into())
     }
@@ -223,6 +235,23 @@ impl FeroApp {
                 ui.add(egui::TextEdit::singleline(v).hint_text(hint).desired_width(140.0));
                 ui.end_row();
             }
+            if st.kind == Kind::Tcp {
+                for (label, v, id, choices) in [
+                    ("Congestion control", &mut st.congestion, "st-cc", &["newreno", "cubic"]),
+                    ("ECN", &mut st.ecn, "st-ecn", &["on", "off"]),
+                ] {
+                    ui.label(label);
+                    egui::ComboBox::from_id_salt(id)
+                        .selected_text(if v.is_empty() { "from the profile" } else { v.as_str() })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(v, String::new(), "from the profile");
+                            for c in choices {
+                                ui.selectable_value(v, c.to_string(), *c);
+                            }
+                        });
+                    ui.end_row();
+                }
+            }
         });
         ui.add_enabled_ui(connected, |ui| {
             if ui.button(RichText::new("▶ Start").strong()).clicked() {
@@ -286,10 +315,16 @@ mod tests {
             count: "1000".into(),
             duration: "10s".into(),
             workers: "2".into(),
+            congestion: "cubic".into(),
+            ecn: "on".into(),
             ..Default::default()
         };
         let p = st.params().unwrap();
         let t: ferotrx_ctl::protocol::TcpStartParams = serde_json::from_value(p).unwrap();
+        assert_eq!(
+            (t.congestion.as_deref(), t.ecn),
+            (Some("cubic"), Some(true))
+        );
         assert_eq!(t.cps, Some(200.0));
         assert_eq!(t.connections, Some(1000));
         assert_eq!(t.workers, Some(2));

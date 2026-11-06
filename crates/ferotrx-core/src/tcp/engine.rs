@@ -12,9 +12,12 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::cc::{CcAck, CcWindow, Congestion, CongestionController};
 use super::hosts::{self, Host, MAX_HOPS};
 use super::program::{TcpProgram, TcpRole};
-use super::wire::{self, Path, Segment, TcpHeader, TcpOpts, ACK, FIN, PSH, RST, SYN};
+use super::wire::{
+    self, Path, Segment, TcpHeader, TcpOpts, ACK, CE, CWR, ECE, ECT0, FIN, PSH, RST, SYN,
+};
 use crate::app::{App, AppCx, AppRole, AppSession, Receive, SessionInit, Transport};
 use crate::net::{ETHERTYPE_IPV4, ETHERTYPE_IPV6, IPPROTO_ICMPV6};
 use crate::traffic::EventClock;
@@ -253,6 +256,10 @@ pub struct TcpTemplate {
     pub connections: u64,
     /// Most of this template's connections open at once; 0 is no limit of its own.
     pub concurrency: usize,
+    /// This template's own congestion control and ECN, instead of the
+    /// run's [`TcpOptions`].
+    pub congestion: Option<Congestion>,
+    pub ecn: Option<bool>,
 }
 
 impl TcpTemplate {
@@ -270,6 +277,8 @@ impl TcpTemplate {
             model: TrafficModel::default(),
             connections: 0,
             concurrency: 0,
+            congestion: None,
+            ecn: None,
         }
     }
 
@@ -402,8 +411,8 @@ pub struct TcpOptions {
     /// doubles on each retry (default 250 ms). Once measured, the timeout
     /// follows the round-trip time (RFC 6298).
     pub rto: Duration,
-    /// The shortest retransmission timeout the round-trip time can give
-    /// (default 200 ms).
+    /// The least the retransmission timeout adds to the smoothed round-trip
+    /// time, for its variation (default 200 ms, as Linux's `rto_min`).
     pub min_rto: Duration,
     /// Retransmissions of data before a connection is given up and reset (default 8).
     pub max_retries: u32,
@@ -443,6 +452,12 @@ pub struct TcpOptions {
     /// Think time: how long an end waits after the other end's message
     /// before it sends its own (default 0). Adds to `keep_timing`'s gaps.
     pub think_time: Duration,
+    /// The congestion control: NewReno (default) or CUBIC with HyStart++.
+    pub congestion: Congestion,
+    /// Use ECN (RFC 3168) when the other end agrees: data goes out marked
+    /// ECT(0), a router's Congestion Experienced mark comes back as ECE and
+    /// the sender slows down as for a loss, without one (default false).
+    pub ecn: bool,
     /// Seed for initial sequence numbers.
     pub seed: u64,
 }
@@ -466,6 +481,8 @@ impl Default for TcpOptions {
             verify: true,
             keep_timing: false,
             think_time: Duration::ZERO,
+            congestion: Congestion::NewReno,
+            ecn: false,
             seed: 0x5eed_f00d,
         }
     }
@@ -561,6 +578,14 @@ pub struct TcpSideStats {
     pub paws_dropped: u64,
     /// Most bytes one connection had in flight, unacknowledged, at once.
     pub max_in_flight: u64,
+    /// Connections that agreed on ECN in their handshake.
+    pub ecn_connections: u64,
+    /// Segments that arrived marked Congestion Experienced (ECN), echoed
+    /// to the sender with ECE.
+    pub ce_marks: u64,
+    /// Times the sender reduced its window for an ECN echo (at most once a
+    /// round trip), instead of for a loss.
+    pub ecn_reductions: u64,
     /// Client: from the first SYN to the end of the handshake.
     pub connect_time: LatencyStats,
     /// Client: from the first SYN to the first byte from the server.
@@ -652,7 +677,13 @@ fn idx(role: TcpRole) -> usize {
 }
 
 impl Shared {
-    fn new(t: &TcpTemplate, options: TcpOptions) -> Self {
+    fn new(t: &TcpTemplate, mut options: TcpOptions) -> Self {
+        if let Some(c) = t.congestion {
+            options.congestion = c;
+        }
+        if let Some(e) = t.ecn {
+            options.ecn = e;
+        }
         let program = &*t.program;
         if let Some(app) = &t.app {
             return Shared {
@@ -725,6 +756,18 @@ struct Conn {
     snd_wnd: usize,
     cwnd: usize,
     ssthresh: usize,
+    /// Changes `cwnd` and `ssthresh`.
+    cc: Box<dyn CongestionController>,
+    /// ECN (RFC 3168): offered, then agreed on in the handshake.
+    ecn_ok: bool,
+    /// Client: our SYN asks for ECN (not after a SYN was lost).
+    ecn_syn: bool,
+    /// Receiver: a CE mark came; ECE goes on every ACK until a CWR comes.
+    ece_pending: bool,
+    /// Sender: reduced for an ECE; the next new segment carries CWR.
+    cwr_pending: bool,
+    /// Sender: no other reduction for ECE until this is acknowledged.
+    ecn_recover: Option<u32>,
     /// Bytes from `snd_una` on, not yet acknowledged.
     snd_buf: VecDeque<u8>,
     fin_queued: bool,
@@ -738,6 +781,9 @@ struct Conn {
     sacked: Vec<(u32, u32)>,
     /// In loss recovery: `snd_max` when it began. It ends when that is acknowledged.
     recover: Option<u32>,
+    /// `snd_max` at the last retransmission timeout: duplicate ACKs for
+    /// what was sent before it start no fast retransmit (RFC 6582, 4.1).
+    rto_recover: Option<u32>,
     /// In loss recovery: the gaps up to here have been retransmitted.
     high_rxt: u32,
     /// Most bytes in flight so far.
@@ -838,9 +884,13 @@ impl Out<'_> {
     }
 
     fn segment(&mut self, port: usize, path: &Path, h: &TcpHeader, data: &[u8]) {
+        self.segment_ecn(port, path, h, data, 0);
+    }
+
+    fn segment_ecn(&mut self, port: usize, path: &Path, h: &TcpHeader, data: &[u8], ecn: u8) {
         *self.ip_id = self.ip_id.wrapping_add(1);
         self.frames
-            .push((port, wire::tcp_frame(path, h, data, *self.ip_id)));
+            .push((port, wire::tcp_frame_ecn(path, h, data, *self.ip_id, ecn)));
     }
 }
 
@@ -910,6 +960,12 @@ impl Conn {
             snd_wnd: 0,
             cwnd: 10 * mss,
             ssthresh: usize::MAX,
+            cc: o.congestion.controller(),
+            ecn_ok: o.ecn,
+            ecn_syn: o.ecn,
+            ece_pending: false,
+            cwr_pending: false,
+            ecn_recover: None,
             snd_buf: VecDeque::new(),
             fin_queued: false,
             fin_seq: None,
@@ -917,6 +973,7 @@ impl Conn {
             closed_first: false,
             sacked: Vec::new(),
             recover: None,
+            rto_recover: None,
             high_rxt: i.iss,
             peak_in_flight: 0,
             ws_ok: o.window_scaling,
@@ -992,6 +1049,13 @@ impl Conn {
             _ => self.ts_ok = false,
         }
         self.sack_ok &= seg.opts.sack_ok;
+        // RFC 3168: the SYN asks with ECE and CWR, the SYN-ACK agrees with
+        // ECE alone.
+        self.ecn_ok &= if self.state == State::SynSent {
+            seg.has(ECE) && !seg.has(CWR)
+        } else {
+            seg.has(ECE) && seg.has(CWR)
+        };
         // A SYN's window is never scaled.
         self.snd_wnd = usize::from(seg.window);
         self.cwnd = 10 * self.smss();
@@ -1018,7 +1082,10 @@ impl Conn {
         (w >> self.rcv_shift) << self.rcv_shift
     }
 
-    fn header(&self, o: &TcpOptions, seq: u32, flags: u8, now: Duration) -> TcpHeader {
+    fn header(&self, o: &TcpOptions, seq: u32, mut flags: u8, now: Duration) -> TcpHeader {
+        if self.ece_pending && flags & (ACK | SYN) == ACK {
+            flags |= ECE;
+        }
         let window = if flags & SYN != 0 {
             (o.receive_window as usize).min(0xffff)
         } else {
@@ -1039,10 +1106,11 @@ impl Conn {
     }
 
     fn send_syn(&self, o: &TcpOptions, out: &mut Out, now: Duration) {
-        let flags = if self.state == State::SynRcvd {
-            SYN | ACK
-        } else {
-            SYN
+        let flags = match self.state {
+            State::SynRcvd if self.ecn_ok => SYN | ACK | ECE,
+            State::SynRcvd => SYN | ACK,
+            _ if self.ecn_syn => SYN | ECE | CWR,
+            _ => SYN,
         };
         let mut h = self.header(o, self.iss, flags, now);
         h.opts.mss = Some(mss_for(self.path.src, o.mss));
@@ -1086,14 +1154,65 @@ impl Conn {
         }
     }
 
-    fn emit_data(&self, o: &TcpOptions, out: &mut Out, off: usize, len: usize, now: Duration) {
+    /// Sends `len` bytes of `snd_buf` from `off`. New data (not a
+    /// retransmission) goes out ECN-capable when ECN is on (RFC 3168,
+    /// 6.1.5), the first after a reduction with CWR.
+    fn emit_data(
+        &mut self,
+        o: &TcpOptions,
+        out: &mut Out,
+        off: usize,
+        len: usize,
+        new_data: bool,
+        now: Duration,
+    ) {
         let data: Vec<u8> = self.snd_buf.range(off..off + len).copied().collect();
         let mut flags = ACK;
         if off + len == self.snd_buf.len() {
             flags |= PSH;
         }
+        let ect = self.ecn_ok && new_data;
+        if ect && self.cwr_pending {
+            flags |= CWR;
+            self.cwr_pending = false;
+        }
         let h = self.header(o, self.snd_una.wrapping_add(off as u32), flags, now);
-        out.segment(self.port, &self.path, &h, &data);
+        let ecn = if ect { ECT0 } else { 0 };
+        out.segment_ecn(self.port, &self.path, &h, &data, ecn);
+    }
+
+    /// Within the window of data an ECN reduction covers: a loss in it is
+    /// the same congestion, and does not reduce again (RFC 3168, 6.1.2).
+    fn ecn_window(&self) -> bool {
+        self.ecn_recover
+            .is_some_and(|r| wire::seq_lt(self.snd_una, r))
+    }
+
+    /// After a reduction for a loss, with ECN: say so with CWR, and take
+    /// ECN echoes for the same window as the same congestion (RFC 3168,
+    /// 6.1.2).
+    fn reduced_for_loss(&mut self) {
+        if self.ecn_ok {
+            self.cwr_pending = true;
+            self.ecn_recover = Some(self.snd_max);
+        }
+    }
+
+    /// Lets the congestion controller change the window.
+    fn with_cc<R>(
+        &mut self,
+        o: &TcpOptions,
+        f: impl FnOnce(&mut dyn CongestionController, &mut CcWindow) -> R,
+    ) -> R {
+        let mut w = CcWindow {
+            cwnd: self.cwnd,
+            ssthresh: self.ssthresh,
+            smss: self.smss(),
+        };
+        let r = f(&mut *self.cc, &mut w);
+        self.cwnd = w.cwnd.clamp(w.smss, (o.send_window as usize).max(w.smss));
+        self.ssthresh = w.ssthresh;
+        r
     }
 
     /// Calls the application session with `f` and does what it asks:
@@ -1312,7 +1431,7 @@ impl Conn {
                 len = len.min(span(seq, l));
             }
             let new_data = wire::seq_le(self.snd_max, seq);
-            self.emit_data(o, out, off, len, now);
+            self.emit_data(o, out, off, len, new_data, now);
             off += len;
             self.snd_nxt = self.snd_una.wrapping_add(off as u32);
             if wire::seq_lt(self.snd_max, self.snd_nxt) {
@@ -1364,7 +1483,11 @@ impl Conn {
     fn base_rto(&self, o: &TcpOptions) -> Duration {
         match self.srtt {
             Some(srtt) => {
-                (srtt + (4 * self.rttvar).max(Duration::from_millis(1))).clamp(o.min_rto, MAX_RTO)
+                // The variation's part is at least `min_rto`, as in Linux:
+                // timestamps measure every ACK, and on a steady path the
+                // variation shrinks to nothing, so a timeout of barely the
+                // round trip would expire as soon as a queue grows.
+                (srtt + (4 * self.rttvar).max(o.min_rto)).min(MAX_RTO)
             }
             None => o.rto,
         }
@@ -1386,23 +1509,29 @@ impl Conn {
 
     /// Measures the round-trip time from an ACK that acknowledges something
     /// new: from its timestamp echo, or from the segment being timed.
-    fn measure_rtt(&mut self, seg: &Segment, now: Duration) {
+    /// Measures the round-trip time from what `seg` acknowledges, if it can;
+    /// returns the measurement.
+    fn measure_rtt(&mut self, seg: &Segment, now: Duration) -> Option<Duration> {
         if self.ts_ok {
             if let Some((_, ecr)) = seg.opts.ts {
                 let ms = self.tsval(now).wrapping_sub(ecr);
                 if ecr != 0 && ms < 60_000 {
-                    self.rtt_sample(Duration::from_millis(u64::from(ms)));
+                    let rtt = Duration::from_millis(u64::from(ms));
+                    self.rtt_sample(rtt);
                     self.rtt_probe = None;
-                    return;
+                    return Some(rtt);
                 }
             }
         }
         if let Some((end, at)) = self.rtt_probe {
             if wire::seq_le(end, seg.ack) {
-                self.rtt_sample(now.saturating_sub(at));
+                let rtt = now.saturating_sub(at);
+                self.rtt_sample(rtt);
                 self.rtt_probe = None;
+                return Some(rtt);
             }
         }
+        None
     }
 
     /// Whether a reset ends this connection (RFC 793, RFC 1337).
@@ -1522,6 +1651,17 @@ impl Conn {
             self.transmit(o, out, now);
             return Fate::Keep;
         }
+        if self.ecn_ok {
+            // RFC 3168: echo a CE mark with ECE until the sender says CWR.
+            if seg.has(CWR) {
+                self.ece_pending = false;
+            }
+            if seg.ecn == CE {
+                self.ece_pending = true;
+                self.need_ack = true;
+                out.add(self.role, self.tpl, |s| s.ce_marks += 1);
+            }
+        }
         if let (true, Some((val, _))) = (self.ts_ok, seg.opts.ts) {
             // Echo the timestamp of the segment that the next ACK acknowledges.
             if wire::seq_le(seg.seq, self.rcv_nxt) && wire::seq_le(self.ts_recent, val) {
@@ -1546,7 +1686,11 @@ impl Conn {
         self.rto = self.base_rto(o);
         self.deadline = None;
         self.last_rx = now;
-        out.add(self.role, self.tpl, |s| s.established += 1);
+        let ecn = u64::from(self.ecn_ok);
+        out.add(self.role, self.tpl, |s| {
+            s.established += 1;
+            s.ecn_connections += ecn;
+        });
         if self.role == TcpRole::Client {
             let t = now.saturating_sub(self.opened);
             out.add(self.role, self.tpl, |s| s.connect_time.record(Some(t)));
@@ -1574,7 +1718,21 @@ impl Conn {
                 }
             }
         }
-        let smss = self.smss();
+        // ECN echo: congestion without a loss. Reduce once a round trip,
+        // and not during loss recovery, which already did.
+        let mut reduced = false;
+        if self.ecn_ok
+            && seg.has(ECE)
+            && self.recover.is_none()
+            && self.ecn_recover.is_none_or(|r| wire::seq_le(r, ack))
+        {
+            let flight = span(self.snd_una, self.snd_max);
+            self.with_cc(o, |c, w| c.on_congestion(w, flight, now));
+            self.ecn_recover = Some(self.snd_max);
+            self.cwr_pending = true;
+            reduced = true;
+            out.add(self.role, self.tpl, |s| s.ecn_reductions += 1);
+        }
         if wire::seq_lt(self.snd_una, ack) {
             let acked = span(self.snd_una, ack);
             let data = acked.min(self.snd_buf.len());
@@ -1583,7 +1741,7 @@ impl Conn {
                 // The FIN is acknowledged too.
                 self.fin_acked = true;
             }
-            self.measure_rtt(seg, now);
+            let rtt = self.measure_rtt(seg, now);
             self.snd_una = ack;
             if wire::seq_lt(self.snd_nxt, ack) {
                 self.snd_nxt = ack;
@@ -1601,7 +1759,7 @@ impl Conn {
                     // Everything sent before the loss is acknowledged.
                     self.recover = None;
                     self.dup_acks = 0;
-                    self.cwnd = self.ssthresh.max(smss);
+                    self.with_cc(o, |c, w| c.on_recovered(w, now));
                 }
                 Some(_) => {
                     // A partial ACK: more was lost.
@@ -1609,27 +1767,38 @@ impl Conn {
                 }
                 None => {
                     self.dup_acks = 0;
-                    if self.cwnd < self.ssthresh {
-                        // Slow start.
-                        self.cwnd += data.min(smss);
-                    } else {
-                        // Congestion avoidance: about a segment per round trip.
-                        self.cwnd += (smss * smss / self.cwnd).max(1);
+                    if !reduced {
+                        let a = CcAck {
+                            now,
+                            acked: data,
+                            rtt,
+                            srtt: self.srtt,
+                            ack,
+                            snd_max: self.snd_max,
+                        };
+                        self.with_cc(o, |c, w| c.on_ack(w, &a));
                     }
-                    self.cwnd = self.cwnd.min(o.send_window as usize);
                 }
             }
             self.deadline = self.in_flight().then_some(now + self.rto);
         } else if ack == self.snd_una && seg.data.is_empty() && !seg.has(FIN) && self.in_flight() {
             self.dup_acks += 1;
-            if self.recover.is_none() && self.dup_acks == 3 {
+            let after_rto = self.rto_recover.is_some_and(|r| wire::seq_le(ack, r));
+            if self.recover.is_none() && self.dup_acks == 3 && !after_rto {
                 // Fast retransmit, then fast recovery.
                 let flight = span(self.snd_una, self.snd_max);
-                self.ssthresh = (flight / 2).max(2 * smss);
-                self.cwnd = self.ssthresh;
+                if !reduced && !self.ecn_window() {
+                    self.with_cc(o, |c, w| c.on_congestion(w, flight, now));
+                    self.reduced_for_loss();
+                }
                 self.recover = Some(self.snd_max);
                 self.high_rxt = self.snd_una;
                 self.retransmit_gaps(o, out, now, true);
+                // The first unacknowledged segment went again: give it a
+                // whole timeout. The loss showed a round trip after it was
+                // sent, and on a path whose queue grew the timer started
+                // then would expire before the retransmission's ACK comes.
+                self.deadline = Some(now + self.rto);
             }
         }
         if self.recover.is_some() {
@@ -1675,7 +1844,7 @@ impl Conn {
             let off = span(self.snd_una, from);
             if off < self.snd_buf.len() {
                 let len = smss.min(self.snd_buf.len() - off).min(span(from, to));
-                self.emit_data(o, out, off, len, now);
+                self.emit_data(o, out, off, len, false, now);
                 self.high_rxt = from.wrapping_add(len as u32);
             } else if let Some(f) = self.fin_seq {
                 let h = self.header(o, f, FIN | ACK, now);
@@ -1883,13 +2052,22 @@ impl Conn {
         // Karn: nothing retransmitted is timed.
         self.rtt_probe = None;
         match self.state {
-            State::SynSent | State::SynRcvd => self.send_syn(o, out, now),
+            State::SynSent => {
+                // A lost SYN may be a middlebox that drops ECN setup: ask
+                // without it from now on (RFC 3168, 6.1.1.1). A SYN-ACK
+                // that agrees to the first one still sets ECN up, so both
+                // ends agree whichever SYN the server saw.
+                self.ecn_syn = false;
+                self.send_syn(o, out, now);
+            }
+            State::SynRcvd => self.send_syn(o, out, now),
             State::Open => {
                 // Back to slow start from the first unacknowledged byte,
                 // skipping what the other end has selectively acknowledged.
-                let smss = self.smss();
-                self.ssthresh = (span(self.snd_una, self.snd_max) / 2).max(2 * smss);
-                self.cwnd = smss;
+                let flight = span(self.snd_una, self.snd_max);
+                self.with_cc(o, |c, w| c.on_timeout(w, flight, now));
+                self.rto_recover = Some(self.snd_max);
+                self.reduced_for_loss();
                 self.recover = None;
                 self.dup_acks = 0;
                 self.snd_nxt = self.snd_una;

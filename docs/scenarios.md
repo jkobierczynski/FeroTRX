@@ -208,7 +208,9 @@ arrived) fails. A misspelt metric is an error that lists the right names.
 `established`, `established_pct`, `completed`, `completed_pct`, `failed`
 (reset or timed out), `failed_pct`, `reset`, `timed_out`, `mismatched`
 (other bytes than the capture), `open` (still open when the run ended),
-`retransmits`, `timeouts`, `cps` (completed per second),
+`retransmits`, `timeouts`, `ecn_connections`, `ce_marks` and
+`ecn_reductions` (both ends, see [ECN](tcp-engine.md#ecn)), `cps`
+(completed per second),
 `server_connections`, `server_completed`, `server_failed`,
 `server_mismatched`; with an [application protocol](app-protocols.md),
 also `app_transactions`, `app_failed`, `app_failed_pct`, `app_errors`
