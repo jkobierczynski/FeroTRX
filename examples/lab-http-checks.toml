@@ -1,0 +1,82 @@
+# FeroTRX stateful TCP profile: an HTTP/1.1 workload with success checks,
+# through a NAT router between two VLANs.
+#
+#   FeroTRX host --- switch (trunk) --- router --- VLAN 10: 192.168.10.0/24 (clients)
+#                                              \-- VLAN 20: 192.168.20.0/24 (server)
+#
+# Run it with:
+#   sudo ferotrx tcp -p examples/lab-http-checks.toml -i <interface>
+#
+# Each request says what its response must be: the status, texts in the
+# body (or not), the whole body, its size, response headers. A response
+# passes only if all of them hold; the counts are kept per request, with why
+# the others failed:
+#
+#   client: ...; 1500 transactions (200 x1500), 0 failed; passed per request:
+#   GET /download 500 of 500, POST /api/status 500 of 500, home 500 of 500
+#
+# The server's routes answer as the checks expect, so the profile passes
+# against itself; point the client at a real server or a proxy in between
+# (leave out [server], --connect ADDRESS) to check what that one answers.
+#
+# As in examples/lab-tcp.toml, the `ip`s must be free addresses in each VLAN,
+# not addresses of the FeroTRX machine, and `gateway` the router's address.
+format = 1
+cps = 50
+connections = 500
+concurrency = 100
+app = "http"
+
+[http]
+per_connection = 3          # each connection asks the three requests below
+host = "www.lab.local"
+
+[[http.request]]
+path = "/"
+name = "home"                                  # counted as "home", not "GET /"
+expect = 200
+expect_contains = ["<title>Lab</title>", "Welcome"]
+expect_lacks = ["Traceback", "error"]
+expect_headers = { "Content-Type" = "text/html*", "Cache-Control" = "no-store", "Set-Cookie" = "!" }
+
+[[http.request]]
+path = "/download"
+expect_size = "256K"                           # also "1K-2K", ">=1K", "<=1M"
+expect_headers = { "Transfer-Encoding" = "chunked" }
+
+[[http.request]]
+method = "POST"
+path = "/api/status"
+body = '{"check":true}'
+content_type = "application/json"
+expect = "2xx"
+expect_body = '{"status":"ok"}'                # the whole body, byte for byte
+expect_headers = { "Content-Type" = "application/json" }
+
+[[http.route]]
+path = "/"
+body = "<html><head><title>Lab</title></head><body>Welcome to the lab</body></html>\n"
+content_type = "text/html; charset=utf-8"
+headers = { "Cache-Control" = "no-store" }
+
+[[http.route]]
+path = "/download"
+body_size = "256K"
+chunked = true
+
+[[http.route]]
+path = "/api/status"
+method = "POST"
+body = '{"status":"ok"}'
+content_type = "application/json"
+
+[client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20

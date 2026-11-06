@@ -218,7 +218,9 @@ arrived) fails. A misspelt metric is an error that lists the right names.
 (completed per second),
 `server_connections`, `server_completed`, `server_failed`,
 `server_mismatched`; with an [application protocol](app-protocols.md),
-also `app_transactions`, `app_failed`, `app_failed_pct`, `app_errors`
+also `app_transactions`, `app_failed`, `app_failed_pct`, `app_passed`,
+`app_passed_pct` (every check held, see
+[response checks](app-protocols.md#response-checks)), `app_errors`
 (HTTP 4xx/5xx, DNS error codes), `protocol_errors` and `response_min`,
 `response_avg`, `response_p99`, `response_max` (ms, from a request to its
 whole answer); over TLS `tls_handshakes`, `tls_failed`, `tls_unexpected`

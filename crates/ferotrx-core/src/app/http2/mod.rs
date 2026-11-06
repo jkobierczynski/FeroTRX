@@ -903,11 +903,14 @@ impl ClientSession {
             return;
         };
         let req = &self.cfg.http.client.requests[i];
-        cx.transaction(
-            AppTransaction::new(status.to_string(), req.expect.matches(status))
-                .with_error(status >= 400)
-                .with_response_time(cx.now().saturating_sub(at)),
-        );
+        let mut t = AppTransaction::new(status.to_string(), true)
+            .with_error(status >= 400)
+            .with_response_time(cx.now().saturating_sub(at))
+            .with_name(req.label());
+        if let Err(why) = req.judge(status, &[], 0, None) {
+            t = t.failed_because(why);
+        }
+        cx.transaction(t);
         self.answered += 1;
         let think = self.cfg.http.client.think_time;
         if !think.is_zero() {
@@ -1312,6 +1315,7 @@ pub fn parse(t: &toml::Table, base: &std::path::Path) -> Result<Http2> {
     }
     let http = super::http::parse(&rest, base)
         .map_err(|e| Error::Profile(e.to_string().trim_start_matches("profile: ").to_string()))?;
+    super::http::status_checks_only(&http, "HTTP/2")?;
     let mut s = Http2Settings::default();
     let num = |k: &str| -> Result<Option<u32>> {
         match own.get(k) {

@@ -189,6 +189,10 @@ pub struct AppTransaction {
     pub error: bool,
     /// Client: from the request to the whole answer.
     pub response_time: Option<Duration>,
+    /// Client: which request it was (`GET /`), for pass/fail per request.
+    pub name: Option<String>,
+    /// Why it did not go as expected (`status 500, expected 2xx`).
+    pub failure: Option<String>,
 }
 
 impl AppTransaction {
@@ -198,6 +202,8 @@ impl AppTransaction {
             ok,
             error: false,
             response_time: None,
+            name: None,
+            failure: None,
         }
     }
 
@@ -208,6 +214,19 @@ impl AppTransaction {
 
     pub fn with_response_time(mut self, t: Duration) -> Self {
         self.response_time = Some(t);
+        self
+    }
+
+    /// Counts it under this request's name.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Marks it failed, for this reason.
+    pub fn failed_because(mut self, why: impl Into<String>) -> Self {
+        self.ok = false;
+        self.failure = Some(why.into());
         self
     }
 }
@@ -569,6 +588,12 @@ pub struct AppStats {
     pub protocol_error_samples: Vec<String>,
     /// Transactions by label (`200`, `404`, `NOERROR`, `NXDOMAIN`).
     pub codes: BTreeMap<String, u64>,
+    /// Client: transactions that passed and failed per request (`GET /`).
+    pub requests: BTreeMap<String, RequestCounts>,
+    /// Client: why transactions failed (`GET /: status 500, expected
+    /// 2xx`), with counts; up to [`FAILURE_KINDS`](Self::FAILURE_KINDS)
+    /// kinds, the rest under `other`.
+    pub failures: BTreeMap<String, u64>,
     /// Client: from each request to its whole answer.
     pub response_time: LatencyStats,
     /// Handshakes that ended, either way (TLS).
@@ -593,6 +618,13 @@ pub struct AppStats {
     pub last_handshake: Option<Duration>,
     /// Media streams (RTP), for protocols that carry them (SIP).
     pub media: MediaStats,
+}
+
+/// Transactions of one request that went as expected and that did not.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RequestCounts {
+    pub passed: u64,
+    pub failed: u64,
 }
 
 /// Media streams of one side: what [`MediaReport`]s added up to.
@@ -746,6 +778,38 @@ impl AppStats {
         if let Some(rt) = t.response_time {
             self.response_time.record(Some(rt));
         }
+        if let Some(n) = &t.name {
+            let c = self.requests.entry(n.clone()).or_default();
+            if t.ok {
+                c.passed += 1;
+            } else {
+                c.failed += 1;
+            }
+        }
+        if let Some(why) = &t.failure {
+            let key = match &t.name {
+                Some(n) => format!("{n}: {why}"),
+                None => why.clone(),
+            };
+            self.count_failure(key, 1);
+        }
+    }
+
+    /// How many kinds of failure [`failures`](Self::failures) keeps apart.
+    pub const FAILURE_KINDS: usize = 20;
+
+    fn count_failure(&mut self, key: String, n: u64) {
+        let key = if self.failures.contains_key(&key) || self.failures.len() < Self::FAILURE_KINDS {
+            key
+        } else {
+            "other".to_string()
+        };
+        *self.failures.entry(key).or_default() += n;
+    }
+
+    /// Transactions that went as expected.
+    pub fn passed(&self) -> u64 {
+        self.transactions - self.failed
     }
 
     /// How many protocol errors [`protocol_error_samples`](Self::protocol_error_samples) keeps.
@@ -816,6 +880,14 @@ impl AppStats {
         for (k, v) in &o.codes {
             *self.codes.entry(k.clone()).or_default() += v;
         }
+        for (k, v) in &o.requests {
+            let c = self.requests.entry(k.clone()).or_default();
+            c.passed += v.passed;
+            c.failed += v.failed;
+        }
+        for (k, v) in &o.failures {
+            self.count_failure(k.clone(), *v);
+        }
         self.response_time.merge(&o.response_time);
         self.handshakes += o.handshakes;
         self.handshake_failures += o.handshake_failures;
@@ -849,6 +921,12 @@ impl AppStats {
     /// The labels and their counts, most first: `200 x40, 404 x2`.
     pub fn codes_text(&self) -> String {
         counts_text(&self.codes)
+    }
+
+    /// Why transactions failed, most first:
+    /// `GET /: status 500, expected 2xx x3`.
+    pub fn failures_text(&self) -> String {
+        counts_text(&self.failures)
     }
 }
 

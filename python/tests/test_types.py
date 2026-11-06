@@ -222,6 +222,8 @@ def test_tcp_run_app_and_tls_counters() -> None:
                     "failed": 0,
                     "errors": 2,
                     "codes": {"200": 2, "404": 2},
+                    "requests": {"GET /": {"passed": 1, "failed": 1}},
+                    "failures": {"GET /: body lacks \"Welcome\"": 1},
                     "tls": {
                         "handshakes": 2,
                         "failed": 0,
@@ -239,6 +241,8 @@ def test_tcp_run_app_and_tls_counters() -> None:
     )
     app = info.client.app
     assert app is not None and app.codes["404"] == 2
+    assert app.requests["GET /"].passed == 1 and app.requests["GET /"].failed == 1
+    assert app.failures == {'GET /: body lacks "Welcome"': 1}
     assert app.tls is not None and app.tls.resumed == 1 and app.tls.unexpected == 0
     assert app.tls.time is not None and app.tls.time.avg_us == 1200.0
     assert app.tls.full == 1 and app.tls.rate == 250.5

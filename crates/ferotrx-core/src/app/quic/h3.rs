@@ -535,11 +535,16 @@ impl H3Client {
                         .and_then(|s| s.parse::<u16>().ok());
                     let req = &self.cfg.http.client.requests[i];
                     match status {
-                        Some(s) if m.buf.is_empty() => cx.transaction(
-                            AppTransaction::new(s.to_string(), req.expect.matches(s))
+                        Some(s) if m.buf.is_empty() => {
+                            let mut t = AppTransaction::new(s.to_string(), true)
                                 .with_error(s >= 400)
-                                .with_response_time(cx.now().saturating_sub(at)),
-                        ),
+                                .with_response_time(cx.now().saturating_sub(at))
+                                .with_name(req.label());
+                            if let Err(why) = req.judge(s, &[], 0, None) {
+                                t = t.failed_because(why);
+                            }
+                            cx.transaction(t)
+                        }
                         _ => {
                             cx.transaction(
                                 AppTransaction::new("incomplete", false).with_error(true),
