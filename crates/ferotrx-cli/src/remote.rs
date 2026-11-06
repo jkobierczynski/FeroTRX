@@ -343,6 +343,12 @@ enum CtlCommand {
         /// Impair the frames the run receives.
         #[arg(long, value_name = "SPEC")]
         impair_rx: Option<String>,
+        /// Congestion control instead of the profile's: newreno or cubic.
+        #[arg(long, value_name = "NAME")]
+        congestion: Option<String>,
+        /// Use ECN (RFC 3168).
+        #[arg(long)]
+        ecn: bool,
     },
     /// Show the counters of one TCP run, or of every TCP run.
     TcpStats { id: Option<u64> },
@@ -677,6 +683,8 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
             workers,
             impair,
             impair_rx,
+            congestion,
+            ecn,
         } => {
             let mut params = TcpStartParams {
                 iface,
@@ -686,6 +694,8 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                 workers,
                 impair,
                 impair_rx,
+                congestion,
+                ecn: ecn.then_some(true),
                 ..Default::default()
             };
             if upload {

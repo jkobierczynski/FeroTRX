@@ -197,6 +197,22 @@ jobs:
           sudo NETEM="$impair" LOG_INVALID=1 MIX=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
           sudo NETEM="$impair" LOG_INVALID=1 IPV6=1 MIX=1 NO_VLAN=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
 
+      # ECN through a bottleneck that marks instead of dropping (tbf at
+      # 20 Mbit/s into fq_codel ecn on the router): every connection agrees
+      # on ECN, the router marks and drops nothing, the server slows down
+      # without retransmitting. NewReno over IPv4 with VLANs, CUBIC over IPv6
+      # without; then Linux (cubic) as the sender to the emulated client.
+      - name: TCP congestion control and ECN (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y ethtool
+          cargo build -p ferotrx-cli
+          sudo modprobe 8021q || true
+          sudo modprobe sch_tbf || true
+          sudo modprobe sch_fq_codel || true
+          sudo ECN=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx
+          sudo ECN=1 IPV6=1 NO_VLAN=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx --congestion cubic
+
       # Stateful UDP through the NAT router: DNS lookups between emulated
       # clients and an emulated server (which dig then asks too), with 3%
       # loss, a mix of DNS, NTP and a timed echo, and over IPv6.

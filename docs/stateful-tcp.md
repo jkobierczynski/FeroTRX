@@ -88,7 +88,8 @@ done in 19.980 s: 17012 frames (7314720 bytes) sent, 17012 (7268504 bytes) recei
   PAWS) and SACK, so a connection can keep megabytes in flight on a long path
   and recover from several losses per round trip without a timeout. The
   retransmission timeout follows the measured round-trip time. Congestion
-  control is Reno/NewReno with SACK-based recovery; see
+  control is NewReno or CUBIC (`--congestion cubic`, with HyStart++) with
+  SACK-based recovery, and `--ecn` turns on ECN; see
   [docs/tcp-engine.md](tcp-engine.md) for what the engine does and does
   not do. `--send-window` and `--receive-window` (e.g. `4M`, the default),
   `--rto`, `--min-rto`, `--syn-retries`, `--max-retries`, `--idle-timeout`,
@@ -128,6 +129,8 @@ receive_window = "4M"
 window_scaling = true
 timestamps = true
 sack = true
+congestion = "newreno"      # or "cubic"; a [[template]] can have its own
+ecn = false                 # ask for ECN (RFC 3168)
 verify = true
 ```
 

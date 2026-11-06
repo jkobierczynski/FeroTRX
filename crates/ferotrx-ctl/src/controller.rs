@@ -1045,6 +1045,12 @@ impl Controller {
         }
         .send_settings()?;
         profile.output = output.or(&profile.output);
+        if let Some(c) = &p.congestion {
+            profile.options.congestion = c.parse().map_err(RpcError::invalid_params)?;
+        }
+        if let Some(e) = p.ecn {
+            profile.options.ecn = e;
+        }
         apply_impair(&mut profile.impair, &p.impair, &p.impair_rx)?;
         let started = start_tcp_with(&profile, p.iface.as_deref(), config, &*self.open_port)
             .map_err(RpcError::failed)?;

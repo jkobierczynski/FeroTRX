@@ -820,6 +820,13 @@ pub struct TcpStartParams {
     /// Impairments of the frames the run receives, before the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impair_rx: Option<String>,
+    /// Congestion control instead of the profile's `[tcp]` one: `newreno`
+    /// or `cubic`. Templates with their own keep it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub congestion: Option<String>,
+    /// Use ECN (RFC 3168), or not, instead of the profile's `[tcp]` setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ecn: Option<bool>,
 }
 
 /// A stateful TCP run, as `tcp.start`, `tcp.stats`, `tcp.stop` and `tcp.list` report it.
@@ -893,6 +900,15 @@ pub struct TcpCounters {
     /// Most bytes one connection had in flight at once.
     #[serde(default)]
     pub max_in_flight: u64,
+    /// Connections that agreed on ECN.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ecn_connections: u64,
+    /// Segments received marked Congestion Experienced.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ce_marks: u64,
+    /// Window reductions for an ECN echo.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ecn_reductions: u64,
     /// Client: from the first SYN to the end of the handshake.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connect_time: Option<LatencyCounters>,
@@ -1084,6 +1100,9 @@ impl From<&TcpSideStats> for TcpCounters {
             timeouts: s.timeouts,
             paws_dropped: s.paws_dropped,
             max_in_flight: s.max_in_flight,
+            ecn_connections: s.ecn_connections,
+            ce_marks: s.ce_marks,
+            ecn_reductions: s.ecn_reductions,
             connect_time: (s.connect_time.count() > 0).then(|| (&s.connect_time).into()),
             first_byte: (s.first_byte.count() > 0).then(|| (&s.first_byte).into()),
             app: AppCounters::of(&s.app),

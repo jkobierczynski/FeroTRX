@@ -300,6 +300,8 @@ const TEMPLATE_TCP: &[Setting] = &[
     s("model", "Traffic model", K::Text),
     s("connect", "Connect to", K::Text),
     s("connect_ips", "Server addresses", K::Int(1 << 24)),
+    s("congestion", "Congestion control", K::Choice(CONGESTION)).default("[tcp]'s"),
+    s("ecn", "ECN", K::Bool).default("[tcp]'s"),
 ];
 
 const TEMPLATE_UDP: &[Setting] = &[
@@ -330,6 +332,8 @@ const ENDPOINT: &[Setting] = &[
     s("hostname", "Host name", K::Text).help("For DHCP"),
 ];
 
+const CONGESTION: &[&str] = &["newreno", "cubic"];
+
 const TCP_OPTIONS: &[Setting] = &[
     s("mss", "MSS", K::Int(65535)).default("1460"),
     s("send_window", "Send window", K::Size),
@@ -337,6 +341,10 @@ const TCP_OPTIONS: &[Setting] = &[
     s("window_scaling", "Window scaling", K::Bool).default("on"),
     s("timestamps", "Timestamps", K::Bool).default("on"),
     s("sack", "SACK", K::Bool).default("on"),
+    s("congestion", "Congestion control", K::Choice(CONGESTION)).default("newreno"),
+    s("ecn", "ECN", K::Bool)
+        .default("off")
+        .help("RFC 3168, when the other end agrees"),
     s("rto", "Initial RTO", K::Duration).default("1s"),
     s("min_rto", "Min RTO", K::Duration).default("200ms"),
     s("max_retries", "Max retries", K::Int(1000)),

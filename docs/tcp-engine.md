@@ -28,6 +28,7 @@ offered it too, as RFC 7323 and RFC 2018 require. Each can be turned off in
 | Window scaling (RFC 7323) | on, shift from `receive_window` | Windows larger than 64 KB. Without it, at most 65535 bytes are in flight. |
 | Timestamps (RFC 7323) | on | Every segment carries TSval/TSecr (12 bytes, taken from the data so frames keep their size). They give a round-trip sample from every ACK and enable PAWS. |
 | SACK (RFC 2018) | on | The receiver reports up to three (four without timestamps) blocks that arrived after a gap; the sender retransmits only the gaps. |
+| ECN (RFC 3168) | off (`ecn = true`, `--ecn`) | Explicit Congestion Notification: see [ECN](#ecn). |
 
 `receive_window` (default 4 MiB) is the window each end announces;
 `send_window` (default 4 MiB) is the most each end keeps in flight. The
@@ -65,19 +66,31 @@ open.
 
 ## Sending and congestion control
 
-The engine follows the classic Reno/NewReno rules (RFC 5681, RFC 6582),
-with SACK-based loss recovery after RFC 6675:
+Loss recovery follows the NewReno rules (RFC 5681, RFC 6582), with SACK
+after RFC 6675. How much the window grows and how far it backs off is up to
+the congestion controller, `congestion` in `[tcp]` or in a `[[template]]`
+(`--congestion` on the command line):
+
+| `congestion` | Grows | Backs off to |
+|---|---|---|
+| `newreno` (default) | Slow start: up to one segment per ACK. Above the threshold: about one segment per round trip. | Half of what is in flight. |
+| `cubic` (RFC 9438) | Slow start with HyStart++ (RFC 9406): when the smallest round-trip time of a round grows by an eighth of the last round's (4 to 16 ms), the queue is filling, and slow start slows to a quarter for up to five rounds, then ends, before a loss. Above the threshold: a cubic curve of the time since the last reduction, back to the window before it (W_max) and then beyond, or as fast as Reno would if that is faster. | 70% of the window (of what was in flight when the application did not fill it); with fast convergence, a second reduction below the last maximum remembers less. |
+
+CUBIC grows by time instead of by round trips, so on a long path it gets
+back to where it was much faster: on a simulated 100 Mbit/s path with a
+200 ms round trip and one segment in 2000 lost, a 32 MB download takes 19 s
+with CUBIC and 45 s with NewReno. The controllers are behind a trait,
+`ferotrx_core::CongestionController`, that the engine calls on each ACK of
+new data, each congestion event and each timeout.
 
 * **Initial window:** 10 segments (RFC 6928).
-* **Slow start:** the congestion window grows by up to one segment per ACK
-  until the slow-start threshold, which starts unlimited.
-* **Congestion avoidance:** above the threshold, about one segment per round
-  trip.
 * **Limits:** in flight is at most the smallest of the congestion window, the
   other end's window and `send_window`.
 * **Fast retransmit and recovery:** on the third duplicate ACK, the
-  threshold and the window become half of what is in flight, and recovery
-  lasts until everything sent before the loss is acknowledged.
+  controller sets the threshold and the window, and recovery lasts until
+  everything sent before the loss is acknowledged. Duplicate ACKs for what
+  was sent before a retransmission timeout start no fast retransmit (RFC
+  6582, 4.1).
   * With SACK, every gap below the highest SACKed byte is taken as lost and
     retransmitted once, as far as the window allows; new data follows when
     the gaps are done ("pipe" from RFC 6675, simplified: gaps below the
@@ -89,22 +102,49 @@ with SACK-based loss recovery after RFC 6675:
   timestamp echoes, or, without timestamps, from one timed segment at a time
   (Karn: never a retransmitted one). The handshake gives the first sample.
   Before it, the timeout is `rto` (250 ms); after, smoothed RTT plus four
-  times its variation, at least `min_rto` (200 ms), at most 8 s. Each
-  timeout doubles it.
-* **After a timeout:** the threshold becomes half of what was in flight, the
-  window one segment, and sending starts again from the first
-  unacknowledged byte, skipping what the other end has SACKed.
+  times its variation, the latter at least `min_rto` (200 ms, as Linux's
+  `rto_min`: timestamps measure every ACK, and on a steady path the
+  variation shrinks to nothing), at most 8 s. Each timeout doubles it, and
+  a fast retransmit restarts it for the segment it resends.
+* **After a timeout:** the controller sets the threshold (NewReno: half of
+  what was in flight), the window becomes one segment, and sending starts
+  again from the first unacknowledged byte, skipping what the other end has
+  SACKed.
 * **Giving up:** after `syn_retries` (6) retransmissions of a SYN or SYN-ACK,
   `max_retries` (8) of data, or `idle_timeout` (30 s) with nothing received,
   the connection is reset and counted as timed out.
+
+## ECN
+
+With `ecn = true` (`--ecn`), each end asks for Explicit Congestion
+Notification (RFC 3168) in the handshake: the SYN carries ECE and CWR, and
+a SYN-ACK with ECE alone agrees. Only when both ends agree:
+
+* New data goes out ECN-capable, ECT(0) in the IP header; retransmissions,
+  SYNs and pure ACKs never do (RFC 3168, 6.1.5).
+* A router whose queue fills (fq_codel, RED or CoDel with `ecn`) marks such
+  packets Congestion Experienced instead of dropping them. The receiver
+  echoes the mark with ECE on every ACK until a segment with CWR arrives.
+* The sender reduces for an ECE as for a loss, through its controller, at
+  most once a round trip, and not again for a loss in the same window; the
+  next new segment carries CWR. Nothing is retransmitted: nothing was lost.
+* A SYN that has to be sent again goes without ECE and CWR, in case a
+  middlebox drops them (RFC 3168, 6.1.1.1). A SYN-ACK that agrees to the
+  first SYN still sets ECN up, so both ends agree whichever SYN the server
+  saw.
+
+The counters show it: `ecn_connections` (connections that agreed),
+`ce_marks` (marked segments received) and `ecn_reductions`. `ferotrx tcp`
+prints them as `ECN on N, M CE marks received, K reductions for ECN`, and
+scenarios can require them (`ce_marks > 0`). Accurate ECN and L4S (ECT(1))
+are not done.
 
 ## What it does not do
 
 * No delayed ACKs, Nagle, or pacing of segments within a window: segments
   go out as fast as the windows allow, and the port sends them at line rate.
-* No CUBIC, BBR, ECN, or other congestion controllers; no RACK or tail loss
-  probes; no D-SACK; no zero-window probing beyond sending one segment when
-  nothing is in flight.
+* No BBR, Accurate ECN or L4S; no RACK or tail loss probes; no D-SACK; no
+  zero-window probing beyond sending one segment when nothing is in flight.
 * No PMTU discovery: frames are sized by the MSS, and IPv4 sets DF.
 * No urgent data, TCP Fast Open, MD5 or TCP-AO, and no simultaneous open.
 * The receive window does not shrink: the program reads everything at once.
@@ -123,9 +163,10 @@ cost nothing until theirs ends.
 Per side and per template: connections started, established, completed,
 reset, timed out and mismatched; payload bytes sent and received;
 `retransmits` (all retransmitted segments) and `timeouts` (those after a
-retransmission timeout); `paws_dropped`; and `max_in_flight`, the most bytes
+retransmission timeout); `paws_dropped`; `max_in_flight`, the most bytes
 one connection had unacknowledged at once, which shows whether window
-scaling is filling a long path.
+scaling is filling a long path; and the ECN counters `ecn_connections`,
+`ce_marks` and `ecn_reductions`.
 
 ## Tests
 
@@ -135,11 +176,22 @@ scaling is filling a long path.
   losses per window, burst losses at a short queue, reordering, duplicates and
   loss both ways over IPv4 and IPv6, PAWS dropping an old duplicate,
   RTT-based timeouts on a 300 ms path, per-template rates, a reset in
-  TIME_WAIT, one after the last ACK and one outside the window.
+  TIME_WAIT, one after the last ACK and one outside the window; CUBIC
+  against NewReno on a long lossy path, ECN through a queue that marks (no
+  retransmissions; without ECN the same queue drops), ECN negotiation and
+  which segments are ECN-capable, and a template with its own controller.
+* `crates/ferotrx-core/src/tcp/cc.rs`: CUBIC's curve (back to W_max in K
+  seconds), fast convergence, HyStart++ leaving slow start when delays grow
+  and staying in it after a single slow round.
 * `scripts/tcp-nat-netns.sh` in CI: `BDP=1` (netem: 50 Mbit/s, 40 ms each
   way) checks more than 64 KB in flight through a real Linux router, and
   `NETEM="delay 5ms reorder 10% 50% duplicate 2% loss 2%"` runs the
   template mix through reordering, duplicates and loss, over IPv4 and IPv6.
+  `ECN=1` puts a 20 Mbit/s bottleneck into fq_codel with `ecn` on the
+  router: every connection agrees on ECN, the router marks and drops
+  nothing, and the server slows down without retransmitting (NewReno over
+  IPv4, CUBIC over IPv6); then Linux (cubic, `tcp_ecn=1`) sends to the
+  emulated client through it, which echoes the marks.
 
 ## Message timing
 

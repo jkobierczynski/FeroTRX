@@ -229,6 +229,24 @@ pub const TCP_METRICS: &[MetricDef] = &[
     ),
     m("retransmits", Count, Lower, "segments sent again"),
     m("timeouts", Count, Lower, "retransmission timeouts"),
+    m(
+        "ecn_connections",
+        Count,
+        Neither,
+        "connections that agreed on ECN",
+    ),
+    m(
+        "ce_marks",
+        Count,
+        Neither,
+        "segments received marked Congestion Experienced, both ends",
+    ),
+    m(
+        "ecn_reductions",
+        Count,
+        Neither,
+        "window reductions for an ECN echo, both ends",
+    ),
     m("cps", PerSecond, Higher, "completed connections per second"),
     m(
         "server_connections",

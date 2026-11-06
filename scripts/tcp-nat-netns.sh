@@ -28,6 +28,17 @@
 # way (netem; NETEM replaces that), 500 KB in flight to fill it. It checks
 # that the server had more than 64 KB in flight, which needs window scaling.
 #
+# ECN=1 puts a bottleneck with an ECN-marking queue on the router, as an
+# access link with fq_codel would have: 20 Mbit/s (tbf) into fq_codel with
+# ecn, both ways. Three 2 MB downloads go through it with --ecn (add
+# --congestion cubic to try CUBIC). It checks that every connection agreed
+# on ECN, that the router marked CE and dropped nothing, and that the server
+# slowed down for the marks without a single retransmission. Then, if
+# python3 and ethtool are installed, the same with Linux as the sender: a
+# web server on the router (its cubic, net.ipv4.tcp_ecn=1) and the emulated
+# client with --ecn downloading from it, which must see CE marks and echo
+# them. Needs the sch_tbf and sch_fq_codel modules.
+#
 # LOG_INVALID=1 logs why conntrack found packets INVALID (the router drops
 # them) and prints the first of those kernel log lines at the end. It sets
 # net.netfilter.nf_log_all_netns=1 on the host, which stays set.
@@ -184,10 +195,20 @@ fi
 if [ "${BDP:-}" = 1 ] && [ -z "${NETEM:-}" ]; then
     NETEM="delay 40ms rate 50mbit limit 5000"
 fi
+# The router's ways out: the trunk carries both directions; without VLANs,
+# one link to each side.
+if [ $vlan = yes ]; then links=rt; else links="rc rs"; fi
+if [ "${ECN:-}" = 1 ]; then
+    for l in $links; do
+        if ! r tc qdisc add dev $l root handle 1: tbf rate 20mbit burst 20k latency 1s ||
+            ! r tc qdisc add dev $l parent 1:1 fq_codel ecn; then
+            echo "cannot add tbf and fq_codel on $l (no sch_tbf or sch_fq_codel module?)" >&2
+            exit 2
+        fi
+    done
+    echo "router: a 20 Mbit/s bottleneck into fq_codel, which marks ECN-capable packets"
+fi
 if [ -n "${NETEM:-}" ]; then
-    # The router's ways out: the trunk carries both directions; without
-    # VLANs, one link to each side.
-    if [ $vlan = yes ]; then links=rt; else links="rc rs"; fi
     for l in $links; do
         # shellcheck disable=SC2086
         if ! r tc qdisc add dev $l root netem $NETEM; then
@@ -215,15 +236,37 @@ if [ "${LOG_INVALID:-}" = 1 ]; then
     dmesg_start=$(dmesg 2>/dev/null | wc -l)
 fi
 
+# ECN=1: the router's queues marked packets CE and dropped none.
+ecn_qdisc_check() {
+    stats=$(for l in $links; do r tc -s qdisc show dev $l; done)
+    marked=$(echo "$stats" | sed -n 's/.*ecn_mark \([0-9]*\).*/\1/p' | awk '{n += $1} END {print n + 0}')
+    dropped=$(echo "$stats" | sed -n 's/.*(dropped \([0-9]*\),.*/\1/p' | awk '{n += $1} END {print n + 0}')
+    echo "router: $marked packets marked CE, $dropped dropped"
+    if [ "$marked" -eq 0 ]; then
+        echo "FAIL: the router marked nothing: no ECN-capable packets, or no queue?" >&2
+        return 1
+    fi
+    if [ "$dropped" -ne 0 ]; then
+        echo "FAIL: the router dropped packets: they should have been marked" >&2
+        return 1
+    fi
+}
+
 # The addresses are given here rather than taken from examples/lab-tcp.toml,
 # so editing that profile for a real lab does not break this script.
+# (the client's alone too, for runs against a real server: client_links,
+# client_hosts, and the number of link options before the caller's).
 if [ $vlan = yes ]; then
+    client_links="-i t0 --client-vlan 10"
     set -- -i t0 --client-vlan 10 --server-vlan 20 "$@"
+    nlinks=6
 else
+    client_links="--client-iface c0"
     set -- --client-iface c0 --server-iface s0 "$@"
+    nlinks=4
 fi
-hosts="--client-ip $(net 10)100/$plen --client-ips 10 --client-gw $(net 10)1
-       --server-ip $(net 20)50/$plen --server-gw $(net 20)1"
+client_hosts="--client-ip $(net 10)100/$plen --client-ips 10 --client-gw $(net 10)1"
+hosts="$client_hosts --server-ip $(net 20)50/$plen --server-gw $(net 20)1"
 if [ "${MIX:-}" = 1 ]; then
     examples=$(cd "$(dirname "$0")/../examples" && pwd)
     profile=$(mktemp /tmp/ferotrx-mix.XXXXXX)
@@ -280,7 +323,7 @@ EOT
         status=1
     fi
     rm -f "$profile" "$out"
-elif [ "${BDP:-}" = 1 ]; then
+elif [ "${BDP:-}" = 1 ] || [ "${ECN:-}" = 1 ]; then
     profile=$(mktemp /tmp/ferotrx-bdp.XXXXXX)
     out=$(mktemp /tmp/ferotrx-bdp-out.XXXXXX)
     {
@@ -299,15 +342,38 @@ elif [ "${BDP:-}" = 1 ]; then
         printf '%s\n' '[server]'
         printf '%s\n' 'ip = "0.0.0.0"'
     } >"$profile"
+    ecn=
+    [ "${ECN:-}" = 1 ] && ecn=--ecn
     # shellcheck disable=SC2086
-    "$BIN" tcp -p "$profile" $hosts -n 3 --cps 1 "$@" >"$out" 2>&1
+    "$BIN" tcp -p "$profile" $hosts -n 3 --cps 1 $ecn "$@" >"$out" 2>&1
     status=$?
     cat "$out"
-    flight=$(sed -n 's/^  server: .*at most \([0-9]*\) bytes in flight.*/\1/p' "$out")
-    echo "the server had at most ${flight:-?} bytes in flight"
-    if [ -z "$flight" ] || [ "$flight" -le 65535 ]; then
-        echo "FAIL: no more than 64 KB in flight: is window scaling working?" >&2
-        status=1
+    if [ "${BDP:-}" = 1 ]; then
+        flight=$(sed -n 's/^  server: .*at most \([0-9]*\) bytes in flight.*/\1/p' "$out")
+        echo "the server had at most ${flight:-?} bytes in flight"
+        if [ -z "$flight" ] || [ "$flight" -le 65535 ]; then
+            echo "FAIL: no more than 64 KB in flight: is window scaling working?" >&2
+            status=1
+        fi
+    fi
+    if [ "${ECN:-}" = 1 ]; then
+        # ECN on all three, both ends; CE marks reached the client; the
+        # server reduced for them and resent nothing.
+        client=$(grep '^  client: ' "$out" || true)
+        server=$(grep '^  server: ' "$out" || true)
+        marks=$(echo "$client" | sed -n 's/.*ECN on 3, \([0-9]*\) CE marks received.*/\1/p')
+        reductions=$(echo "$server" | sed -n 's/.*ECN on 3, [0-9]* CE marks received, \([0-9]*\) reductions.*/\1/p')
+        rtx=$(echo "$server" | sed -n 's/.* \([0-9]*\) retransmits.*/\1/p')
+        echo "ECN: ${marks:-?} CE marks at the client, ${reductions:-?} reductions at the server, ${rtx:-?} retransmits"
+        if [ -z "$marks" ] || [ "$marks" -eq 0 ] || [ -z "$reductions" ] || [ "$reductions" -eq 0 ]; then
+            echo "FAIL: no ECN, or no CE marks echoed and acted on" >&2
+            status=1
+        fi
+        if [ "${rtx:-1}" -ne 0 ]; then
+            echo "FAIL: the server retransmitted: the queue dropped instead of marking?" >&2
+            status=1
+        fi
+        ecn_qdisc_check || status=1
     fi
     rm -f "$profile" "$out"
 else
@@ -317,10 +383,65 @@ else
     status=$?
 fi
 
+if [ "${ECN:-}" = 1 ] && [ $status = 0 ]; then
+    if command -v python3 >/dev/null 2>&1 && command -v ethtool >/dev/null 2>&1; then
+        echo "== Linux as the sender: cubic with ECN on the router, the emulated client echoes"
+        www=$(mktemp -d /tmp/ferotrx-www.XXXXXX)
+        out=$(mktemp /tmp/ferotrx-ecn-out.XXXXXX)
+        head -c 2097152 /dev/zero >"$www/big"
+        r sysctl -qw net.ipv4.tcp_ecn=1
+        r sysctl -qw net.ipv4.tcp_congestion_control=cubic 2>/dev/null || true
+        echo "the router's TCP: $(r sysctl -n net.ipv4.tcp_congestion_control)," \
+            "net.ipv4.tcp_ecn=$(r sysctl -n net.ipv4.tcp_ecn)"
+        # Full checksums on what the router itself sends through the veth.
+        if [ $vlan = yes ]; then rlinks="rt rt.10 rt.20"; else rlinks="rc rs"; fi
+        for l in $rlinks; do r ethtool -K $l tx off >/dev/null 2>&1 || true; done
+        if [ "${IPV6:-}" = 1 ]; then bind=::; else bind=0.0.0.0; fi
+        (cd "$www" && exec ip netns exec $NS python3 -m http.server 8000 --bind $bind) \
+            >/dev/null 2>&1 &
+        pypid=$!
+        sleep 1
+        cat >"$www/client.toml" <<EOT
+app = "http"
+port = 8000
+[http]
+requests = ["GET /big 200"]
+[client]
+ip = "0.0.0.0"
+EOT
+        shift $nlinks
+        # shellcheck disable=SC2086
+        "$BIN" tcp -p "$www/client.toml" $client_links $client_hosts \
+            --connect "$(net 10)1" -n 3 --cps 1 --ecn "$@" >"$out" 2>&1 || status=1
+        kill $pypid 2>/dev/null || true
+        wait $pypid 2>/dev/null || true
+        cat "$out"
+        client=$(grep '^  client: ' "$out" || true)
+        marks=$(echo "$client" | sed -n 's/.*ECN on 3, \([0-9]*\) CE marks received.*/\1/p')
+        echo "Linux as the sender: ${marks:-no ECN, no} CE marks echoed to it"
+        if ! echo "$client" | grep -q '3 completed'; then
+            echo "FAIL: the downloads from Linux did not complete" >&2
+            status=1
+        fi
+        if [ -z "$marks" ] || [ "$marks" -eq 0 ]; then
+            echo "FAIL: Linux did not agree on ECN, or nothing was marked" >&2
+            status=1
+        fi
+        ecn_qdisc_check || status=1
+        rm -rf "$www" "$out"
+    else
+        echo "no python3 or ethtool: skipping Linux as the sender"
+    fi
+fi
+
 if [ "${IPV6:-}" = 1 ]; then
     # The router found the client addresses it answered by neighbor discovery.
     echo "router's IPv6 neighbors:"
     r ip -6 neigh show | grep -v '^fe80' || true
+fi
+if [ "${ECN:-}" = 1 ]; then
+    echo "the router's bottleneck:"
+    for l in $links; do r tc -s qdisc show dev $l; done
 fi
 if [ -n "${NETEM:-}" ]; then
     echo "netem on the router:"

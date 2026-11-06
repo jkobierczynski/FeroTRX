@@ -17,7 +17,7 @@ this checkout, else the installed one); arguments after it go to the
 
 | Script | What it runs | Options |
 | --- | --- | --- |
-| `tcp-nat-netns.sh` | `ferotrx tcp` with `examples/http.pcap` through a NAT router between VLANs 10 and 20 on a trunk | `LOSS=0.03`, `MIX=1` (three templates to four servers), `NETEM="..."`, `BDP=1` (long fat pipe), `IPV6=1`, `NO_VLAN=1`, `LOG_INVALID=1`, `QUEUES=4` (multi-queue veths, for `--workers`) |
+| `tcp-nat-netns.sh` | `ferotrx tcp` with `examples/http.pcap` through a NAT router between VLANs 10 and 20 on a trunk | `LOSS=0.03`, `MIX=1` (three templates to four servers), `NETEM="..."`, `BDP=1` (long fat pipe), `ECN=1` (a bottleneck that marks ECN; needs `sch_fq_codel`), `IPV6=1`, `NO_VLAN=1`, `LOG_INVALID=1`, `QUEUES=4` (multi-queue veths, for `--workers`) |
 | `udp-netns.sh` | `ferotrx udp` DNS lookups through the same kind of router, then `dig` against the DNS server | `LOSS=0.03`, `MIX=1` (DNS, NTP, echo), `IPV6=1`, `NO_VLAN=1`, `QUEUES=4` |
 | `app-netns.sh` | `ferotrx tcp` with HTTP and DNS over TCP (`examples/lab-http.toml`) through the router, then `curl` against the emulated web server and the emulated client against `python3 -m http.server` | `LOSS=0.03`, `IPV6=1`, `NO_VLAN=1` |
 | `sip-netns.sh` | `ferotrx udp` SIP calls with RTP (`examples/lab-sip.toml`) through the router, then SIPp's caller and registrations against the emulated server and the emulated phones against SIPp's answering end | `LOSS=0.03`, `IPV6=1` (emulated ends only), `NO_VLAN=1` |

@@ -31,8 +31,8 @@ The full guide, with every method, TLS, errors and the asyncio client, is
 [docs/python-client.md](https://github.com/jkobierczynski/FeroTRX/blob/main/docs/python-client.md).
 Examples are in [`examples/`](examples/).
 
-The package version follows FeroTRX's: `ferotrx` 0.28.0 is made for
-`ferotrx serve` 0.28.0 (control protocol 2) and reads older and newer servers
+The package version follows FeroTRX's: `ferotrx` 0.29.0 is made for
+`ferotrx serve` 0.29.0 (control protocol 2) and reads older and newer servers
 of the same protocol.
 
 ## Development

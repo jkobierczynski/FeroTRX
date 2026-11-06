@@ -11,6 +11,7 @@ use serde::Deserialize;
 use crate::profile::OutputFile;
 use crate::{Addressing, Emulation, SendSettings};
 
+use super::cc::Congestion;
 use super::engine::{
     TcpClientConfig, TcpConfig, TcpEndpoint, TcpOptions, TcpServerConfig, TcpTemplate,
 };
@@ -67,6 +68,8 @@ use crate::{
 /// verify = true
 /// keep_timing = false         # wait the capture's gaps between messages
 /// think_time = "0s"           # pause before answering the other end's message
+/// congestion = "newreno"      # or "cubic" (RFC 9438, with HyStart++)
+/// ecn = false                 # RFC 3168, when the other end agrees
 /// ```
 ///
 /// Instead of `pcap`, a session can be written out as `[[message]]` tables,
@@ -103,6 +106,8 @@ use crate::{
 /// model = "burst=5"           # its own traffic model (needs its own cps)
 /// connections = 50            # at most 50 of these
 /// concurrency = 4             # at most 4 open at once
+/// congestion = "cubic"        # its own congestion control and ECN
+/// ecn = true                  # (default: [tcp]'s)
 ///
 /// [[template]]
 /// name = "echo"
@@ -182,6 +187,9 @@ pub struct TcpTemplateSpec {
     pub connections: Option<u64>,
     /// Most connections of this template open at once (default: no limit of its own).
     pub concurrency: Option<usize>,
+    /// The template's own congestion control and ECN (default: `[tcp]`'s).
+    pub congestion: Option<Congestion>,
+    pub ecn: Option<bool>,
 }
 
 impl TcpTemplateSpec {
@@ -198,6 +206,8 @@ impl TcpTemplateSpec {
             model: TrafficModel::default(),
             connections: None,
             concurrency: None,
+            congestion: None,
+            ecn: None,
         }
     }
 
@@ -485,6 +495,8 @@ struct RawTemplate {
     shape: Vec<String>,
     connections: Option<u64>,
     concurrency: Option<usize>,
+    congestion: Option<String>,
+    ecn: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -548,7 +560,14 @@ struct RawOptions {
     verify: Option<bool>,
     keep_timing: Option<bool>,
     think_time: Option<String>,
+    congestion: Option<String>,
+    ecn: Option<bool>,
     seed: Option<u64>,
+}
+
+/// `newreno` or `cubic`.
+fn parse_congestion(s: &str) -> Result<Congestion> {
+    s.parse().map_err(Error::Profile)
 }
 
 /// A size in bytes: a number, or text such as `"64K"` or `"4M"`.
@@ -825,6 +844,12 @@ impl TcpProfile {
                     cps: t.cps,
                     connections: t.connections,
                     concurrency: t.concurrency,
+                    congestion: t
+                        .congestion
+                        .map(|c| parse_congestion(&c))
+                        .transpose()
+                        .map_err(ctx)?,
+                    ecn: t.ecn,
                 });
             }
             out
@@ -891,6 +916,10 @@ impl TcpProfile {
                 verify: o.verify.unwrap_or(defaults.verify),
                 keep_timing: o.keep_timing.unwrap_or(defaults.keep_timing),
                 think_time: d(o.think_time, defaults.think_time)?,
+                congestion: o
+                    .congestion
+                    .map_or(Ok(defaults.congestion), |c| parse_congestion(&c))?,
+                ecn: o.ecn.unwrap_or(defaults.ecn),
                 seed: o.seed.unwrap_or(defaults.seed),
             };
         }
@@ -1020,6 +1049,8 @@ impl TcpProfile {
                 model: t.model.clone(),
                 connections: t.connections.unwrap_or(0),
                 concurrency: t.concurrency.unwrap_or(0),
+                congestion: t.congestion,
+                ecn: t.ecn,
             });
         }
         let server = match &self.server {
@@ -1180,6 +1211,8 @@ mod tests {
             cps = 2.5
             connections = 20
             concurrency = 3
+            congestion = "newreno"
+            ecn = false
             [[template.message]]
             from = "server"
             text = "data"
@@ -1198,6 +1231,8 @@ mod tests {
             window_scaling = false
             timestamps = false
             sack = false
+            congestion = "CUBIC"
+            ecn = true
             "#,
             Path::new("."),
         )
@@ -1221,6 +1256,7 @@ mod tests {
         );
         assert_eq!((o.send_window, o.receive_window), (8 << 20, 65535));
         assert!(!o.window_scaling && !o.timestamps && !o.sack && o.verify);
+        assert_eq!((o.congestion, o.ecn), (Congestion::Cubic, true));
         let programs = p
             .programs()
             .unwrap()
@@ -1233,6 +1269,12 @@ mod tests {
         assert_eq!(
             (t[1].cps, t[1].connections, t[1].concurrency),
             (Some(2.5), 20, 3)
+        );
+        // The first template takes [tcp]'s; the second has its own.
+        assert_eq!((t[0].congestion, t[0].ecn), (None, None));
+        assert_eq!(
+            (t[1].congestion, t[1].ecn),
+            (Some(Congestion::NewReno), Some(false))
         );
 
         assert_eq!(parse_size("64K").unwrap(), 65536);
@@ -1381,6 +1423,10 @@ mod tests {
             (
                 "[[template]]\npcap = \"a.pcap\"\n[[template]]\npcap = \"b.pcap\"\n[server]\nip = \"10.0.0.1\"\nport = 80",
                 "each its `port`",
+            ),
+            (
+                "[[template]]\npcap = \"a.pcap\"\ncongestion = \"bbr\"\n[client]\nip = \"10.0.0.1\"",
+                "template 1: unknown congestion control \"bbr\"",
             ),
         ] {
             let err = TcpProfile::from_toml(text, Path::new("."))

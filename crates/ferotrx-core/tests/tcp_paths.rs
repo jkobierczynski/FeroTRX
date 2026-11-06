@@ -101,6 +101,8 @@ struct Direction {
     /// Frames waiting or being sent, for the queue limit: their departure times.
     queued: VecDeque<Duration>,
     dropped_queue: u64,
+    /// Frames marked Congestion Experienced instead of dropped.
+    marked: u64,
 }
 
 struct Link {
@@ -109,7 +111,32 @@ struct Link {
     rate: u64,
     /// Most frames waiting to be sent, per direction.
     queue: usize,
+    /// ECN: with this many frames waiting, ECN-capable frames are marked
+    /// CE (a simple AQM such as RED's or CoDel's marking).
+    mark_at: Option<usize>,
     dirs: [Direction; 2],
+}
+
+/// The ECN bits of an untagged IPv4 or IPv6 frame.
+fn ecn_of(f: &[u8]) -> u8 {
+    match u16::from_be_bytes([f[12], f[13]]) {
+        0x0800 => f[15] & 3,
+        _ => (f[15] >> 4) & 3,
+    }
+}
+
+/// Marks an ECN-capable frame Congestion Experienced, fixing the IPv4
+/// header checksum.
+fn mark_ce(f: &mut [u8]) {
+    if u16::from_be_bytes([f[12], f[13]]) == 0x0800 {
+        f[15] |= 3;
+        let ihl = usize::from(f[14] & 0x0f) * 4;
+        f[24..26].fill(0);
+        let sum = csum(&f[14..14 + ihl], 0);
+        f[24..26].copy_from_slice(&sum.to_be_bytes());
+    } else {
+        f[15] |= 3 << 4;
+    }
 }
 
 impl Link {
@@ -119,17 +146,25 @@ impl Link {
             flight: VecDeque::new(),
             queued: VecDeque::new(),
             dropped_queue: 0,
+            marked: 0,
         };
         Link {
             delay,
             rate: rate_mbit * 1_000_000 / 8,
             queue,
+            mark_at: None,
             dirs: [dir(), dir()],
         }
     }
 
+    /// Marks ECN-capable frames CE from `n` frames waiting on.
+    fn marking(mut self, n: usize) -> Self {
+        self.mark_at = Some(n);
+        self
+    }
+
     /// Puts a frame on direction `d` (0: client to server, 1: back).
-    fn send(&mut self, d: usize, frame: Vec<u8>, now: Duration, extra: Duration) {
+    fn send(&mut self, d: usize, mut frame: Vec<u8>, now: Duration, extra: Duration) {
         let (delay, rate, queue) = (self.delay, self.rate, self.queue);
         let dir = &mut self.dirs[d];
         while dir.queued.front().is_some_and(|&t| t <= now) {
@@ -138,6 +173,13 @@ impl Link {
         if dir.queued.len() >= queue {
             dir.dropped_queue += 1;
             return;
+        }
+        if self
+            .mark_at
+            .is_some_and(|n| dir.queued.len() >= n && ecn_of(&frame) != 0)
+        {
+            mark_ce(&mut frame);
+            dir.marked += 1;
         }
         let start = dir.busy_until.max(now);
         let tx = (frame.len() as u64 * 1_000_000_000)
@@ -932,4 +974,259 @@ fn a_reset_after_the_last_ack_completes() {
     let (c, s) = (&client.stats().client, &server.stats().server);
     assert_eq!((c.completed, c.failed()), (1, 0), "{c:?}");
     assert_eq!((s.completed, s.failed(), s.reset), (1, 0, 0), "{s:?}");
+}
+
+fn with(congestion: Congestion, ecn: bool) -> TcpOptions {
+    TcpOptions {
+        congestion,
+        ecn,
+        ..Default::default()
+    }
+}
+
+/// Runs a download of `size` over `link` with `opts` at both ends, losing
+/// every `nth` data segment the server sends (0: none); returns how long
+/// it took and the server's counters.
+fn download_over(
+    link: &mut Link,
+    size: usize,
+    opts: TcpOptions,
+    nth: u64,
+) -> (Duration, TcpSideStats, TcpSideStats) {
+    let (mut client, mut server) = engines(download(size), 1, false, opts.clone(), opts);
+    let mut n = 0u64;
+    let mut impair = |d: usize, f: &[u8], _: &mut Watch, _: Duration| {
+        if nth > 0 && d == 1 && tcp_of(f).is_some_and(|s| s.payload > 0) {
+            n += 1;
+            if n.is_multiple_of(nth) {
+                return (Fate::Drop, Vec::new());
+            }
+        }
+        (Fate::Pass, Vec::new())
+    };
+    let (took, _) = run(
+        &mut client,
+        &mut server,
+        link,
+        Duration::from_secs(120),
+        &mut impair,
+    );
+    assert_clean(&client, &server, 1);
+    (
+        took,
+        client.stats().client.clone(),
+        server.stats().server.clone(),
+    )
+}
+
+#[test]
+fn cubic_fills_a_long_fat_lossy_pipe_faster_than_newreno() {
+    // 100 Mbit/s, 200 ms round trip, one data segment in 2000 lost. Its
+    // windows are set by the losses: NewReno halves and grows back a
+    // segment per round trip; CUBIC backs off to 70% and grows back on its
+    // curve, by time instead of round trips, so it keeps more in flight
+    // (here 32 MB take 19 s instead of 45 s).
+    let path = || Link::new(Duration::from_millis(100), 100, 2000);
+    let mut took = Vec::new();
+    for c in Congestion::ALL {
+        let (t, _, s) = download_over(&mut path(), 32 * MB, with(c, false), 2000);
+        // The losses, each resent once, in recovery.
+        assert!(s.retransmits >= 10 && s.timeouts == 0, "{c}: {s:?}");
+        took.push(t);
+    }
+    let (reno, cubic) = (took[0], took[1]);
+    assert!(
+        cubic.as_secs_f64() < reno.as_secs_f64() * 0.6,
+        "newreno {reno:?}, cubic {cubic:?}"
+    );
+}
+
+#[test]
+fn ecn_with_a_marking_queue_needs_no_retransmits() {
+    // A short queue that slow start overflows; with ECN it marks from 20
+    // frames waiting, and the sender slows down before the queue is full.
+    for c in Congestion::ALL {
+        let mut link = Link::new(Duration::from_millis(20), 50, 60).marking(20);
+        let (_, client, server) = download_over(&mut link, 4 * MB, with(c, true), 0);
+        assert_eq!(link.dirs[1].dropped_queue, 0, "{c}");
+        assert!(link.dirs[1].marked > 0, "{c}");
+        assert_eq!(
+            (server.retransmits, server.timeouts),
+            (0, 0),
+            "{c}: {server:?}"
+        );
+        assert_eq!((client.ecn_connections, server.ecn_connections), (1, 1));
+        // Every mark the client saw came back as ECE; the server reduced at
+        // most once a round trip for them.
+        assert_eq!(client.ce_marks, link.dirs[1].marked, "{c}");
+        assert!(
+            server.ecn_reductions > 0 && server.ecn_reductions <= client.ce_marks,
+            "{c}: {server:?}"
+        );
+        // Without ECN, the same queue overflows.
+        let mut link = Link::new(Duration::from_millis(20), 50, 60).marking(20);
+        let (_, client, server) = download_over(&mut link, 4 * MB, with(c, false), 0);
+        assert!(
+            link.dirs[1].dropped_queue > 0 && server.retransmits > 0,
+            "{c}"
+        );
+        assert_eq!(link.dirs[1].marked, 0, "{c}: nothing ECN-capable");
+        assert_eq!((client.ecn_connections, server.ce_marks), (0, 0));
+    }
+}
+
+#[test]
+fn ecn_is_used_only_when_both_ends_agree_and_marks_new_data_only() {
+    for (c_ecn, s_ecn) in [(true, true), (true, false), (false, true)] {
+        let (mut client, mut server) = engines(
+            download(MB),
+            1,
+            false,
+            with(Congestion::NewReno, c_ecn),
+            with(Congestion::NewReno, s_ecn),
+        );
+        let both = c_ecn && s_ecn;
+        let (mut syn, mut synack) = (None, None);
+        let (mut ect_data, mut ect_other, mut ect_resent) = (0, 0, 0);
+        let mut highest = 0u32;
+        let mut drops = 0;
+        let mut impair = |d: usize, f: &[u8], _: &mut Watch, _: Duration| {
+            let Some(s) = tcp_of(f) else {
+                return (Fate::Pass, Vec::new());
+            };
+            match (d, s.flags & 0x12) {
+                (0, 0x02) => {
+                    syn.get_or_insert(s.flags);
+                }
+                (1, 0x12) => {
+                    synack.get_or_insert(s.flags);
+                }
+                _ => {}
+            }
+            let ect = ecn_of(f) == 0b10;
+            if d == 1 && s.payload > 0 {
+                let end = s.seq.wrapping_add(s.payload as u32);
+                let resent = highest != 0 && (end.wrapping_sub(highest) as i32) <= 0;
+                if resent {
+                    ect_resent += u32::from(ect);
+                } else {
+                    ect_data += u32::from(ect);
+                    highest = end;
+                    // Lose a few, for retransmissions.
+                    if s.seq % 97 == 0 || drops < 3 && end > 100_000 && end < 200_000 {
+                        drops += 1;
+                        return (Fate::Drop, Vec::new());
+                    }
+                }
+            } else if s.payload == 0 {
+                ect_other += u32::from(ect);
+            }
+            (Fate::Pass, Vec::new())
+        };
+        run(
+            &mut client,
+            &mut server,
+            &mut Link::new(Duration::from_millis(5), 100, 1000),
+            Duration::from_secs(30),
+            &mut impair,
+        );
+        assert_clean(&client, &server, 1);
+        // ECE and CWR on the SYN when the client offers it; ECE alone on
+        // the SYN-ACK when the server agrees.
+        assert_eq!(syn.unwrap() & 0xc0, if c_ecn { 0xc0 } else { 0 });
+        assert_eq!(synack.unwrap() & 0xc0, if both { 0x40 } else { 0 });
+        let s = &server.stats().server;
+        assert_eq!(s.ecn_connections, u64::from(both));
+        assert!(s.retransmits > 0, "{s:?}");
+        // New data is ECN-capable; retransmissions, SYNs and pure ACKs never.
+        assert_eq!(ect_data > 0, both, "{c_ecn} {s_ecn}");
+        assert_eq!((ect_resent, ect_other), (0, 0));
+    }
+}
+
+#[test]
+fn a_template_has_its_own_congestion_control_and_ecn() {
+    // The run's options say NewReno without ECN; the template says CUBIC
+    // with ECN, at both ends.
+    let mut tpl = TcpTemplate::new(Arc::new(download(MB)), "10.0.0.2:80".parse().unwrap());
+    tpl.congestion = Some(Congestion::Cubic);
+    tpl.ecn = Some(true);
+    let mut c = TcpClientConfig::new(TcpEndpoint::new(0, CLIENT_MAC, addr("10.0.0.1")));
+    c.connections = 1;
+    let mut client = TcpEngine::new(TcpConfig {
+        templates: vec![tpl.clone()],
+        client: Some(c),
+        server: None,
+        options: TcpOptions::default(),
+    })
+    .unwrap();
+    let mut server = TcpEngine::new(TcpConfig {
+        templates: vec![tpl],
+        client: None,
+        server: Some(TcpServerConfig::new(TcpEndpoint::new(
+            0,
+            SERVER_MAC,
+            addr("10.0.0.2"),
+        ))),
+        options: TcpOptions::default(),
+    })
+    .unwrap();
+    let mut link = Link::new(Duration::from_millis(20), 50, 60).marking(20);
+    run(
+        &mut client,
+        &mut server,
+        &mut link,
+        Duration::from_secs(30),
+        &mut pass,
+    );
+    assert_clean(&client, &server, 1);
+    let s = &server.stats().server;
+    assert_eq!(s.ecn_connections, 1, "{s:?}");
+    assert!(link.dirs[1].marked > 0 && s.ecn_reductions > 0, "{s:?}");
+}
+
+#[test]
+fn both_ends_agree_on_ecn_whichever_syn_the_server_saw() {
+    // A lost SYN-ACK: the client asks again without ECN, the server answers
+    // the first SYN's agreement again, and both use ECN. A lost first SYN:
+    // the server only sees the one without ECN, and neither does.
+    for (lose, want) in [(1usize, 1u64), (0, 0)] {
+        let (mut client, mut server) = engines(
+            download(100_000),
+            1,
+            false,
+            with(Congestion::NewReno, true),
+            with(Congestion::NewReno, true),
+        );
+        let mut syns = Vec::new();
+        let mut lost = false;
+        let mut impair = |d: usize, f: &[u8], _: &mut Watch, _: Duration| {
+            if let Some(s) = tcp_of(f).filter(|s| s.flags & 0x02 != 0) {
+                if d == 0 {
+                    syns.push(s.flags & 0xc0);
+                }
+                if d == lose && !lost {
+                    lost = true;
+                    return (Fate::Drop, Vec::new());
+                }
+            }
+            (Fate::Pass, Vec::new())
+        };
+        run(
+            &mut client,
+            &mut server,
+            &mut Link::new(Duration::from_millis(5), 100, 1000),
+            Duration::from_secs(10),
+            &mut impair,
+        );
+        assert_clean(&client, &server, 1);
+        // The first SYN asked, the second did not.
+        assert_eq!(syns, [0xc0, 0], "lose {lose}");
+        let (c, s) = (&client.stats().client, &server.stats().server);
+        assert_eq!(
+            (c.ecn_connections, s.ecn_connections),
+            (want, want),
+            "lose {lose}"
+        );
+    }
 }
