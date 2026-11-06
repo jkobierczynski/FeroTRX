@@ -334,3 +334,68 @@ fn example_files_pass_the_check() {
     }
     assert!(found >= 10);
 }
+
+/// A sink that stalls once, as a paused VM would, and notes when each
+/// packet went out.
+struct StallingSink {
+    sent: Vec<Instant>,
+    stall_at: usize,
+    stall: Duration,
+}
+
+impl PacketSink for StallingSink {
+    fn send(&mut self, _data: &[u8]) -> std::result::Result<(), SinkError> {
+        if self.sent.len() == self.stall_at {
+            std::thread::sleep(self.stall);
+        }
+        self.sent.push(Instant::now());
+        Ok(())
+    }
+}
+
+/// The most packets sent within any `window`.
+fn densest(sent: &[Instant], window: Duration) -> usize {
+    let mut best = 0;
+    let mut j = 0;
+    for i in 0..sent.len() {
+        while sent[i] - sent[j] > window {
+            j += 1;
+        }
+        best = best.max(i - j + 1);
+    }
+    best
+}
+
+#[test]
+fn a_stream_with_a_max_lag_skips_what_a_stall_held_up() {
+    let a = one_packet(1);
+    let run_stalled = |lag: Option<Duration>| {
+        let mut stream =
+            Stream::new("s", CaptureSource::new(&a).loops(0)).with_rate(Rate::Pps(1000.0));
+        if let Some(lag) = lag {
+            stream = stream.with_max_lag(lag);
+        }
+        let mut sink = StallingSink {
+            sent: Vec::new(),
+            stall_at: 20,
+            stall: Duration::from_millis(60),
+        };
+        let cfg = RunConfig {
+            duration: Some(Duration::from_millis(250)),
+            ..Default::default()
+        };
+        let stats = run(&mut [stream], &mut sink, &cfg).unwrap();
+        (
+            stats.total.packets,
+            densest(&sink.sent, Duration::from_millis(2)),
+        )
+    };
+    // Catching up: about 250 packets, the 60 held up sent back to back.
+    let (sent, burst) = run_stalled(None);
+    assert!(sent >= 225, "sent {sent}");
+    assert!(burst >= 30, "burst {burst}");
+    // With 5 ms of lag: about 60 fewer, and no burst of more than 5 ms' worth.
+    let (sent, burst) = run_stalled(Some(Duration::from_millis(5)));
+    assert!((150..=215).contains(&sent), "sent {sent}");
+    assert!(burst <= 12, "burst {burst}");
+}
