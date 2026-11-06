@@ -1628,5 +1628,8 @@ mod lab_tests {
         assert!(bad.is_err());
         assert_eq!(Role::required_for("lab.get"), Some(Role::Read));
         assert_eq!(Role::required_for("lab.start"), Some(Role::Operator));
+        assert_eq!(Role::required_for("y1564.get"), Some(Role::Read));
+        assert_eq!(Role::required_for("y1564.list"), Some(Role::Read));
+        assert_eq!(Role::required_for("y1564.start"), Some(Role::Operator));
     }
 }

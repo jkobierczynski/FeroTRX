@@ -205,7 +205,9 @@ impl Role {
             "interfaces.list" | "profile.get" | "profile.list" | "run.stats" | "run.list"
             | "tcp.stats" | "tcp.list" | "udp.stats" | "udp.list" | "rx.stats" | "rx.list"
             | "lab.get" | "scenario.get" | "scenario.list" | "bench.get" | "bench.list"
-            | "stats.subscribe" | "stats.unsubscribe" => Some(Role::Read),
+            | "y1564.get" | "y1564.list" | "stats.subscribe" | "stats.unsubscribe" => {
+                Some(Role::Read)
+            }
             _ => Some(Role::Operator),
         }
     }
