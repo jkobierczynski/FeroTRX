@@ -3,12 +3,16 @@
 # examples/fleet/fleet.toml across them, the way a controller drives agents
 # on three machines:
 #
-#   controller (this namespace)  10.99.0.1 on bridge fleet-m (management)
+#   controller (ns ftrx-lab)     10.99.0.1 on bridge fleet-m (management)
 #     |
 #     +-- east  (ns ftrx-east)  m0 10.99.0.11:4510   d0 web clients 10.98.0.100-104, probe
 #     +-- west  (ns ftrx-west)  m0 10.99.0.12:4510   d0 web clients 10.98.0.110-114
 #     +-- srv   (ns ftrx-srv)   m0 10.99.0.13:4510   d0 web server 10.98.0.80, probe receiver
 #                                                    (every d0 on bridge fleet-d: the lab's LAN)
+#
+# Both bridges and the controller live in their own namespace, ftrx-lab, so
+# nothing on the host (udev giving new links other MACs, Docker's bridge
+# netfilter) touches them.
 #
 # Each agent is `ferotrx serve` with a token and its own data directory.
 # `ferotrx fleet run` sends the profiles and http.pcap to the agents,
@@ -62,12 +66,9 @@ cleanup() {
     for p in $PIDS; do kill "$p" 2>/dev/null || true; done
     for a in $AGENTS; do
         n=${a%%:*}
-        ip link del "m-$n" 2>/dev/null || true
-        ip link del "d-$n" 2>/dev/null || true
         ip netns del "ftrx-$n" 2>/dev/null || true
     done
-    ip link del fleet-m 2>/dev/null || true
-    ip link del fleet-d 2>/dev/null || true
+    ip netns del ftrx-lab 2>/dev/null || true
     if [ -n "$WORK" ]; then
         if [ -n "$KEEP" ]; then
             mkdir -p "$KEEP" && cp -r "$WORK"/. "$KEEP"/ && echo "kept in $KEEP"
@@ -79,23 +80,25 @@ trap cleanup EXIT
 cleanup
 WORK=$(mktemp -d)
 
+LAB="ip netns exec ftrx-lab"
+ip netns add ftrx-lab
+$LAB ip link set lo up
 for br in fleet-m fleet-d; do
-    ip link add $br type bridge
-    sysctl -qw "net.ipv6.conf.$br.disable_ipv6=1" 2>/dev/null || true
-    ip link set $br up
+    $LAB ip link add $br type bridge
+    $LAB sysctl -qw "net.ipv6.conf.$br.disable_ipv6=1" 2>/dev/null || true
+    $LAB ip link set $br up
 done
-ip addr add 10.99.0.1/24 dev fleet-m
+$LAB ip addr add 10.99.0.1/24 dev fleet-m
 for a in $AGENTS; do
     n=${a%%:*}; host=${a##*:}; ns=ftrx-$n
     ip netns add $ns
     ip netns exec $ns ip link set lo up
     for link in m d; do
-        ip link add "$link-$n" type veth peer name "${link}0"
-        ip link set "${link}0" netns $ns
-        sysctl -qw "net.ipv6.conf.$link-$n.disable_ipv6=1" 2>/dev/null || true
+        $LAB ip link add "$link-$n" type veth peer name "${link}0" netns $ns
+        $LAB sysctl -qw "net.ipv6.conf.$link-$n.disable_ipv6=1" 2>/dev/null || true
         ip netns exec $ns sysctl -qw "net.ipv6.conf.${link}0.disable_ipv6=1" 2>/dev/null || true
-        ip link set "$link-$n" master fleet-$link
-        ip link set "$link-$n" up
+        $LAB ip link set "$link-$n" master fleet-$link
+        $LAB ip link set "$link-$n" up
         ip netns exec $ns ip link set "${link}0" up
     done
     ip netns exec $ns ip addr add 10.99.0.$host/24 dev m0
@@ -109,7 +112,7 @@ done
 for a in $AGENTS; do
     host=${a##*:}
     i=0
-    until "$BIN" ctl -c 10.99.0.$host:4510 info >/dev/null 2>&1; do
+    until $LAB "$BIN" ctl -c 10.99.0.$host:4510 info >/dev/null 2>&1; do
         i=$((i + 1))
         if [ $i -gt 100 ]; then
             echo "FAILED: agent at 10.99.0.$host:4510 does not answer" >&2
@@ -133,7 +136,7 @@ check() {
 run_of() { echo ".runs[] | select(.name == \"$1\")"; }
 
 echo "== fleet check"
-if "$BIN" fleet check "$PLAN"; then
+if $LAB "$BIN" fleet check "$PLAN"; then
     echo "ok: every agent answers and has its interfaces"
 else
     echo "FAILED: ferotrx fleet check"
@@ -142,7 +145,7 @@ fi
 
 echo "== 1. three agents together: everything passes"
 set +e
-"$BIN" fleet run "$PLAN" --duration 8s --report "$WORK/pass.json" "$@"
+$LAB "$BIN" fleet run "$PLAN" --duration 8s --report "$WORK/pass.json" "$@"
 status=$?
 set -e
 [ $status -eq 0 ] && echo "ok: ferotrx fleet run passed" || { echo "FAILED: ferotrx fleet run exited with $status"; fail=1; }
@@ -169,8 +172,8 @@ else
     find "$WORK/west" -type f
     fail=1
 fi
-out=$("$BIN" fleet deploy "$PLAN" 2>&1)
-if echo "$out" | grep -q '0 file(s) sent'; then
+out=$($LAB "$BIN" fleet deploy "$PLAN" 2>&1)
+if echo "$out" | grep -q '; 0 file(s) sent'; then
     echo "ok: a second deploy sends nothing new"
 else
     echo "FAILED: a second deploy sent files again:"
@@ -179,12 +182,12 @@ else
 fi
 
 echo "== 2. west cut off the LAN: the fleet fails"
-ip link set d-west nomaster
+$LAB ip link set d-west nomaster
 set +e
-"$BIN" fleet run "$PLAN" --duration 4s --report "$WORK/fail.json" -q "$@" >/dev/null
+$LAB "$BIN" fleet run "$PLAN" --duration 4s --report "$WORK/fail.json" -q "$@" >/dev/null
 status=$?
 set -e
-ip link set d-west master fleet-d
+$LAB ip link set d-west master fleet-d
 [ $status -ne 0 ] && echo "ok: ferotrx fleet run failed, as it should" || { echo "FAILED: ferotrx fleet run passed without west"; fail=1; }
 j="$WORK/fail.json"
 check "the web clients run failed" "($(run_of "web clients") | .passed) == false" "$j"
