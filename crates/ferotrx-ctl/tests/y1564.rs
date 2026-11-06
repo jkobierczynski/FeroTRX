@@ -31,7 +31,8 @@ packet = "eth(dst=02:00:00:00:01:01)/ipv4(src=10.9.1.2,dst=10.9.2.3,dscp=10)/udp
 yellow_packet = "eth(dst=02:00:00:00:01:01)/ipv4(src=10.9.1.2,dst=10.9.2.3,dscp=12)/udp(sport=4000,dport=9000)"
 sizes = "emix:ag"
 cir = "4mbps"
-eir = "1mbps"
+# Policing offers CIR + 1.25 EIR: well above CIR+EIR and its 5% tolerance.
+eir = "4mbps"
 "#;
 
 /// A server that sends on "wire0" and receives what was sent on "wire1":

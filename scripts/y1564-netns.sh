@@ -81,6 +81,8 @@ done
 r sysctl -qw net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.rc.send_redirects=0
 
 # police VOICE GREEN YELLOW: the rates of the three policers, Mbit/s.
+# On ingress a policer sees the IP packet only; overhead 18 adds the
+# Ethernet header and FCS, so it counts frames as ferotrx y1564 does.
 mode=
 police() {
     r tc qdisc del dev rc ingress 2>/dev/null || true
@@ -88,12 +90,12 @@ police() {
     if [ "$mode" != htb ] &&
         r tc qdisc add dev rc ingress 2>/dev/null &&
         r tc filter add dev rc ingress protocol ip prio 1 u32 match ip dsfield 0xb8 0xfc \
-            action police rate "$1"mbit burst 30k drop 2>/dev/null; then
+            action police rate "$1"mbit burst 30k overhead 18 drop 2>/dev/null; then
         mode=police
         r tc filter add dev rc ingress protocol ip prio 2 u32 match ip dsfield 0x28 0xfc \
-            action police rate "$2"mbit burst 30k drop
+            action police rate "$2"mbit burst 30k overhead 18 drop
         r tc filter add dev rc ingress protocol ip prio 3 u32 match ip dsfield 0x30 0xfc \
-            action police rate "$3"mbit burst 30k drop
+            action police rate "$3"mbit burst 30k overhead 18 drop
     else
         mode=htb
         r tc qdisc del dev rc ingress 2>/dev/null || true
