@@ -259,7 +259,7 @@ ecn_qdisc_check() {
 if [ $vlan = yes ]; then
     client_links="-i t0 --client-vlan 10"
     set -- -i t0 --client-vlan 10 --server-vlan 20 "$@"
-    nlinks=5
+    nlinks=6
 else
     client_links="--client-iface c0"
     set -- --client-iface c0 --server-iface s0 "$@"
