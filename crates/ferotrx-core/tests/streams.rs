@@ -391,11 +391,16 @@ fn a_stream_with_a_max_lag_skips_what_a_stall_held_up() {
         )
     };
     // Catching up: about 250 packets, the 60 held up sent back to back.
-    let (sent, burst) = run_stalled(None);
-    assert!(sent >= 225, "sent {sent}");
+    let (caught_up, burst) = run_stalled(None);
+    assert!(caught_up >= 225, "sent {caught_up}");
     assert!(burst >= 30, "burst {burst}");
-    // With 5 ms of lag: about 60 fewer, and no burst of more than 5 ms' worth.
+    // With 5 ms of lag: at least the 55 held up left out, and no burst of
+    // more than 5 ms' worth. (Where sleeps overshoot by more than 5 ms, as on
+    // macOS runners, more are left out: the lower bound is loose.)
     let (sent, burst) = run_stalled(Some(Duration::from_millis(5)));
-    assert!((150..=215).contains(&sent), "sent {sent}");
+    assert!(
+        (50..=caught_up - 45).contains(&sent),
+        "sent {sent} of {caught_up}"
+    );
     assert!(burst <= 12, "burst {burst}");
 }
