@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/ferotrx-logo.svg" alt="FeroTRX, network testing platform" width="600">
+</p>
+
 # FeroTRX
 
 FeroTRX is a traffic generator and replay tool written in Rust, inspired by
