@@ -363,6 +363,10 @@ impl FeroApp {
                     ui.checkbox(&mut cfg.latency, "Signatures on all streams")
                         .on_hover_text("For a receiver on another machine (ferotrx rx)");
                     ui.end_row();
+                    ui.label("Impairments");
+                    ui.add(egui::TextEdit::singleline(&mut cfg.impair).hint_text("each stream's own").desired_width(260.0))
+                        .on_hover_text("What a bad link does to every stream: delay=20ms jitter=5ms loss=1% loss_burst=3 duplicate=0.1% reorder=0.5% corrupt=0.01% rate=10mbit mtu=1400 seed=1; none turns the streams' own off");
+                    ui.end_row();
                 });
             });
     }

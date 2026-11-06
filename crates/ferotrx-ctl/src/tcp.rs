@@ -101,7 +101,7 @@ pub fn start_tcp_with(
             send: profile.output.clone(),
             macs: engine.port_macs(i),
         };
-        let port = open(name, &settings)?;
+        let port = profile.impair.wrap(open(name, &settings)?, i);
         port_details.extend(port.describe());
         ports.push(port);
     }
@@ -171,6 +171,7 @@ impl TcpRun {
             elapsed_s: 0.0,
             cps: 0.0,
             hosts: Vec::new(),
+            impair: None,
         };
         info.fill(&stats);
         info

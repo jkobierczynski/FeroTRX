@@ -455,7 +455,7 @@ pub struct HostStatus {
 }
 
 /// Counters of a [`HostEngine`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct HostStats {
     pub hosts: Vec<HostStatus>,
     /// Frames the host emulation sent, and bytes.
@@ -466,6 +466,9 @@ pub struct HostStats {
     pub rx_bytes: u64,
     pub elapsed: Duration,
     pub stopped: bool,
+    /// What the ports' impairments did ([`PortImpair`](crate::PortImpair)):
+    /// frames sent and frames received; empty without them.
+    pub impair: crate::PortImpairStats,
 }
 
 impl HostStats {
@@ -839,6 +842,11 @@ impl HostEngine {
 
     /// The counters, with each host's state and addresses. The host list
     /// is brought up to date by [`set_elapsed`](Self::set_elapsed).
+    /// Puts what the ports' impairments did in the counters.
+    pub fn set_impairments(&mut self, stats: &crate::PortImpairStats) {
+        self.stats.impair = stats.clone();
+    }
+
     pub fn stats(&self) -> &HostStats {
         &self.stats
     }

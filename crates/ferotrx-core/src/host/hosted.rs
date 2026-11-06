@@ -361,11 +361,16 @@ impl EndpointHosts {
 pub trait HostedStats {
     /// Puts the hosts' states and addresses into the counters.
     fn set_hosts(&mut self, hosts: Vec<HostStatus>);
+    /// Puts what the ports' impairments did into the counters.
+    fn set_impair(&mut self, stats: &crate::PortImpairStats);
 }
 
 impl HostedStats for TcpStats {
     fn set_hosts(&mut self, hosts: Vec<HostStatus>) {
         self.hosts = hosts;
+    }
+    fn set_impair(&mut self, stats: &crate::PortImpairStats) {
+        self.impair = stats.clone();
     }
 }
 
@@ -373,11 +378,17 @@ impl HostedStats for UdpStats {
     fn set_hosts(&mut self, hosts: Vec<HostStatus>) {
         self.hosts = hosts;
     }
+    fn set_impair(&mut self, stats: &crate::PortImpairStats) {
+        self.impair = stats.clone();
+    }
 }
 
 impl HostedStats for HostStats {
     fn set_hosts(&mut self, hosts: Vec<HostStatus>) {
         self.hosts = hosts;
+    }
+    fn set_impair(&mut self, stats: &crate::PortImpairStats) {
+        self.impair = stats.clone();
     }
 }
 
@@ -397,6 +408,7 @@ pub struct Hosted<E: PortEngine> {
     /// When the engine was built.
     t0: Duration,
     stats: E::Stats,
+    impair: crate::PortImpairStats,
     error: Option<String>,
 }
 
@@ -416,6 +428,7 @@ where
             inner: None,
             t0: Duration::ZERO,
             stats: E::Stats::default(),
+            impair: crate::PortImpairStats::default(),
             error: None,
         }
     }
@@ -435,6 +448,7 @@ where
             None => E::Stats::default(),
         };
         self.stats.set_hosts(self.hosts.statuses());
+        self.stats.set_impair(&self.impair);
     }
 }
 
@@ -522,6 +536,11 @@ where
         self.refresh();
     }
 
+    fn set_impairments(&mut self, stats: &crate::PortImpairStats) {
+        self.impair = stats.clone();
+        self.refresh();
+    }
+
     fn stats(&self) -> &E::Stats {
         &self.stats
     }
@@ -556,6 +575,9 @@ impl PortEngine for HostEngine {
     }
     fn finish(&mut self) {
         HostEngine::finish(self)
+    }
+    fn set_impairments(&mut self, stats: &crate::PortImpairStats) {
+        HostEngine::set_impairments(self, stats)
     }
     fn stats(&self) -> &HostStats {
         HostEngine::stats(self)

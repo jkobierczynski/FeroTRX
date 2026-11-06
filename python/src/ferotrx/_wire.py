@@ -323,6 +323,7 @@ def start(
     latency: bool,
     rx: str | None,
     rx_wait: str | None,
+    impair: str | None = None,
 ) -> Call[RunInfo]:
     if rx is None and rx_wait is not None:
         raise ValueError("rx_wait needs rx")
@@ -335,6 +336,7 @@ def start(
         ignore_errors=ignore_errors,
         latency=latency,
         rx=None if rx is None else _drop_none(iface=rx, wait=rx_wait),
+        impair=impair,
     )
     return Call("run.start", params, _record(RunInfo))
 

@@ -43,6 +43,10 @@ The [README](../README.md) has the overview and a quickstart.
 * [Call quality, jitter and latency](call-quality.md): RTP loss, jitter,
   late packets and RTCP round trips per call, E-model R and MOS, TCP
   connect and first-byte times.
+* [Impairments](impairments.md): delay, jitter, loss and bursts,
+  duplicates, reordering, corruption, rate limits and MTU on streams, on
+  TCP/UDP/host ports and in a two-port bridge (`ferotrx impair`), without
+  netem.
 * [Benchmarking](benchmarking.md): `ferotrx bench`, RFC 2544, IMIX.
 * [Scenarios and regression tests](scenarios.md): `ferotrx scenario`,
   expected outcomes, JUnit reports, comparing runs.

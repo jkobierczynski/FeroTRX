@@ -81,6 +81,58 @@ fn media_rows(m: &ferotrx_ctl::protocol::MediaCounters, rows: &mut Vec<(String, 
     }
 }
 
+/// What an impairment did: in, out, dropped and how long frames were held.
+fn impair_rows(
+    prefix: &str,
+    c: &ferotrx_ctl::protocol::ImpairCounters,
+    rows: &mut Vec<(String, String)>,
+) {
+    rows.push((
+        format!("{prefix}impaired in / out"),
+        format!("{} / {}", n(c.packets), n(c.passed)),
+    ));
+    rows.push((
+        format!("{prefix}impair lost / MTU / queue"),
+        format!(
+            "{} / {} / {}",
+            n(c.lost),
+            n(c.mtu_dropped),
+            n(c.queue_dropped)
+        ),
+    ));
+    if c.duplicated + c.reordered + c.corrupted > 0 {
+        rows.push((
+            format!("{prefix}impair dup / reord / corrupt"),
+            format!(
+                "{} / {} / {}",
+                n(c.duplicated),
+                n(c.reordered),
+                n(c.corrupted)
+            ),
+        ));
+    }
+    if let Some(d) = &c.delay {
+        rows.push((
+            format!("{prefix}impair held avg / max"),
+            format!("{} / {}", us(d.avg_us), us(d.max_us)),
+        ));
+    }
+}
+
+fn port_impair_rows(
+    c: &Option<ferotrx_ctl::protocol::PortImpairCounters>,
+    rows: &mut Vec<(String, String)>,
+) {
+    if let Some(c) = c {
+        if let Some(tx) = &c.tx {
+            impair_rows("sent: ", tx, rows);
+        }
+        if let Some(rx) = &c.rx {
+            impair_rows("received: ", rx, rows);
+        }
+    }
+}
+
 fn lat_rows(prefix: &str, l: &LatencyCounters, rows: &mut Vec<(String, String)>) {
     rows.push((
         format!("{prefix}latency min/avg/max"),
@@ -114,6 +166,9 @@ impl RunColumn {
             rows.push((format!("{}: packets", s.name), n(s.counters.packets)));
             if let Some(l) = &s.latency {
                 latency_rows(&format!("{}: ", s.name), l, &mut rows);
+            }
+            if let Some(i) = &s.impair {
+                impair_rows(&format!("{}: ", s.name), i, &mut rows);
             }
         }
         Self {
@@ -155,6 +210,7 @@ impl RunColumn {
         if let Some(l) = &c.first_byte {
             lat_rows("first byte ", l, &mut rows);
         }
+        port_impair_rows(&r.impair, &mut rows);
         for t in &r.templates {
             rows.push((
                 format!("{}: completed", t.name),
@@ -201,6 +257,7 @@ impl RunColumn {
         if let Some(m) = c.app.as_ref().and_then(|a| a.media.as_ref()) {
             media_rows(m, &mut rows);
         }
+        port_impair_rows(&r.impair, &mut rows);
         for t in &r.templates {
             rows.push((
                 format!("{}: answered", t.name),

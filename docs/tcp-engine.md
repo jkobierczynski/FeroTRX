@@ -58,6 +58,10 @@ open.
   with a reset of its own when conntrack finds a packet INVALID (out of the
   window it tracks) and so leaves it addressed to the router; ending
   TIME_WAIT then would make us reset the other end's next FIN.
+* In LAST_ACK (the other end closed first, has all our data and only our FIN
+  is not acknowledged), a reset counts the connection as completed: it comes
+  from an end that has left TIME_WAIT because its last ACK and our resent
+  FINs were lost.
 
 ## Sending and congestion control
 
@@ -131,7 +135,7 @@ scaling is filling a long path.
   losses per window, burst losses at a short queue, reordering, duplicates and
   loss both ways over IPv4 and IPv6, PAWS dropping an old duplicate,
   RTT-based timeouts on a 300 ms path, per-template rates, a reset in
-  TIME_WAIT and one outside the window.
+  TIME_WAIT, one after the last ACK and one outside the window.
 * `scripts/tcp-nat-netns.sh` in CI: `BDP=1` (netem: 50 Mbit/s, 40 ms each
   way) checks more than 64 KB in flight through a real Linux router, and
   `NETEM="delay 5ms reorder 10% 50% duplicate 2% loss 2%"` runs the

@@ -31,6 +31,11 @@ pub fn tcp_metrics(s: &TcpStats) -> Metrics {
     put(&mut m, "retransmits", c.retransmits as f64);
     put(&mut m, "timeouts", c.timeouts as f64);
     put(&mut m, "cps", s.cps());
+    put(
+        &mut m,
+        "impair_dropped",
+        (s.impair.tx.dropped() + s.impair.rx.dropped()) as f64,
+    );
     let sv = &s.server;
     put(&mut m, "server_connections", sv.started as f64);
     put(&mut m, "server_completed", sv.completed as f64);
@@ -111,6 +116,11 @@ pub fn udp_metrics(s: &UdpStats) -> Metrics {
     put(&mut m, "unmatched", c.unmatched as f64);
     put(&mut m, "errors", c.errors as f64);
     put(&mut m, "retries", c.retries as f64);
+    put(
+        &mut m,
+        "impair_dropped",
+        (s.impair.tx.dropped() + s.impair.rx.dropped()) as f64,
+    );
     latency_metrics(&mut m, "response", &c.response_time);
     put(&mut m, "tps", s.tps());
     put(&mut m, "server_answered", s.server.answered as f64);
@@ -196,6 +206,11 @@ pub fn traffic_metrics(run: &RunStats, rx: Option<&RxStats>, flows: &[FlowReport
     put(&mut m, "tx_mbps", t.mbps());
     put(&mut m, "tx_pps", t.pps());
     put(&mut m, "send_errors", t.send_errors as f64);
+    put(
+        &mut m,
+        "impair_dropped",
+        t.impair.as_ref().map_or(0, |i| i.dropped()) as f64,
+    );
     let tx: u64 = flows.iter().map(|f| f.tx).sum();
     let got: u64 = flows.iter().map(|f| f.rx).sum();
     let lost: u64 = flows.iter().map(|f| f.lost).sum();

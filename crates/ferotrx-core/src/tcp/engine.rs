@@ -601,6 +601,9 @@ pub struct TcpStats {
     /// Frames the ports dropped before the engine could read them (a full
     /// capture buffer): lost on this machine, not on the network.
     pub rx_dropped: u64,
+    /// What the ports' impairments did ([`PortImpair`](crate::PortImpair)):
+    /// frames sent and frames received; empty without them.
+    pub impair: crate::PortImpairStats,
     pub elapsed: Duration,
     /// True if the run was stopped or hit its duration before the client finished.
     pub stopped: bool,
@@ -1422,6 +1425,15 @@ impl Conn {
         }
     }
 
+    /// LAST_ACK: the other end closed first, we have its FIN and it has all
+    /// our data; only our FIN is not acknowledged yet. A reset now comes
+    /// from an end that has seen everything and left TIME_WAIT (its last
+    /// ACK was lost, and our FIN came again too late), so the connection
+    /// completed.
+    fn last_ack(&self) -> bool {
+        self.fin_rcvd && self.fin_queued && !self.closed_first && self.snd_buf.is_empty()
+    }
+
     /// Handles a segment for this connection.
     fn on_segment(&mut self, sh: &Shared, out: &mut Out, seg: &Segment, now: Duration) -> Fate {
         let o = &sh.options;
@@ -1430,9 +1442,9 @@ impl Conn {
             if !self.rst_acceptable(o, seg) {
                 return Fate::Keep;
             }
-            if self.goodbye {
-                // What it reset came after its goodbye: the conversation
-                // was over.
+            if self.goodbye || self.last_ack() {
+                // What it reset came after its goodbye, or after it closed
+                // and we sent all we had: the conversation was over.
                 self.finish(out);
             } else if !self.counted {
                 out.add(self.role, self.tpl, |s| s.reset += 1);
@@ -2173,6 +2185,11 @@ impl TcpEngine {
     /// Sets the frames the ports dropped before the engine read them.
     pub fn set_rx_dropped(&mut self, frames: u64) {
         self.stats.rx_dropped = frames;
+    }
+
+    /// Puts what the ports' impairments did in the counters.
+    pub fn set_impairments(&mut self, stats: &crate::PortImpairStats) {
+        self.stats.impair = stats.clone();
     }
 
     /// Frames to send, as (port, frame). Empties the queue.

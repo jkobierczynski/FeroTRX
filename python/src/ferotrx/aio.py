@@ -352,6 +352,7 @@ class AsyncClient:
         latency: bool = False,
         rx: str | None = None,
         rx_wait: str | None = None,
+        impair: str | None = None,
     ) -> RunInfo:
         output = _wire.output_spec(
             iface=iface,
@@ -375,6 +376,7 @@ class AsyncClient:
                 latency=latency,
                 rx=rx,
                 rx_wait=rx_wait,
+                impair=impair,
             )
         )
 
@@ -413,6 +415,8 @@ class AsyncClient:
         batch: int | None = None,
         dpdk_args: str | Sequence[str] | None = None,
         workers: int | None = None,
+        impair: str | None = None,
+        impair_rx: str | None = None,
     ) -> TcpRunInfo:
         return await self._run(
             _wire.tcp_start(
@@ -431,6 +435,8 @@ class AsyncClient:
                 batch=batch,
                 dpdk_args=dpdk_args,
                 workers=workers,
+                impair=impair,
+                impair_rx=impair_rx,
             )
         )
 
@@ -471,6 +477,8 @@ class AsyncClient:
         batch: int | None = None,
         dpdk_args: str | Sequence[str] | None = None,
         workers: int | None = None,
+        impair: str | None = None,
+        impair_rx: str | None = None,
     ) -> UdpRunInfo:
         return await self._run(
             _wire.udp_start(
@@ -489,6 +497,8 @@ class AsyncClient:
                 batch=batch,
                 dpdk_args=dpdk_args,
                 workers=workers,
+                impair=impair,
+                impair_rx=impair_rx,
             )
         )
 

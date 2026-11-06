@@ -374,6 +374,12 @@ pub const TCP_METRICS: &[MetricDef] = &[
         Lower,
         "slowest first byte from the server",
     ),
+    m(
+        "impair_dropped",
+        Count,
+        Neither,
+        "frames the run's own impairments dropped (loss, MTU, queue limit)",
+    ),
 ];
 
 /// Metrics of a UDP check: the client side, and the server's with `server_`.
@@ -413,6 +419,12 @@ pub const UDP_METRICS: &[MetricDef] = &[
     m("mos_min", Count, Higher, "estimated MOS of the worst call"),
     m("r_factor", Count, Higher, "E-model R (0 to 100) of the calls, average of the worse way"),
     m("r_factor_min", Count, Higher, "E-model R of the worst call"),
+    m(
+        "impair_dropped",
+        Count,
+        Neither,
+        "frames the run's own impairments dropped (loss, MTU, queue limit)",
+    ),
 ];
 
 /// Metrics of a traffic check. Latency figures are of the worst stream.
@@ -488,6 +500,12 @@ pub const TRAFFIC_METRICS: &[MetricDef] = &[
         Millis,
         Lower,
         "RFC 3550 jitter of the worst stream",
+    ),
+    m(
+        "impair_dropped",
+        Count,
+        Neither,
+        "frames the run's own impairments dropped (loss, MTU, queue limit)",
     ),
 ];
 
