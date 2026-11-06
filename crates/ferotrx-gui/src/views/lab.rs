@@ -176,7 +176,7 @@ impl FeroApp {
                 }
                 ui.separator();
                 if lab.running {
-                    ui.colored_label(egui::Color32::from_rgb(0x2e, 0xa0, 0x43), "● running");
+                    ui.colored_label(crate::theme::good(ui), "● running");
                     for l in &lab.summary {
                         ui.label(l);
                     }

@@ -392,7 +392,7 @@ pub fn state_color(ui: &egui::Ui, running: bool, failed: bool) -> Color32 {
     if failed {
         ui.visuals().error_fg_color
     } else if running {
-        Color32::from_rgb(0x2e, 0xa0, 0x43)
+        crate::theme::good(ui)
     } else {
         ui.visuals().weak_text_color()
     }

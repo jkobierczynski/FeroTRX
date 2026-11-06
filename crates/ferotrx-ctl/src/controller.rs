@@ -504,6 +504,9 @@ impl Controller {
                 .map(|i| InterfaceEntry {
                     name: i.name,
                     description: i.description,
+                    alias: i.alias,
+                    mac: i.mac,
+                    addresses: i.addresses,
                 })
                 .collect())
         }

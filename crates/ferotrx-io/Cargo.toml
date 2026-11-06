@@ -22,6 +22,16 @@ dpdk = ["dep:cc", "dep:pkg-config"]
 ferotrx-core.workspace = true
 pcap = { workspace = true, optional = true }
 
+# Npcap's DLL folder and Windows' adapter names.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 

@@ -261,10 +261,7 @@ impl FeroApp {
         if let Some(c) = &st.check {
             match c {
                 Ok(s) => {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(0x2e, 0xa0, 0x43),
-                        "✔ the profile checks out",
-                    );
+                    ui.colored_label(crate::theme::good(ui), "✔ the profile checks out");
                     ui.monospace(s);
                 }
                 Err(e) => {

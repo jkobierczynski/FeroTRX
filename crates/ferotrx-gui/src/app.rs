@@ -21,6 +21,8 @@ const STORAGE_KEY: &str = "ferotrx-gui";
 /// The forms of the last session (a workspace without servers and ports).
 const FORMS_KEY: &str = "ferotrx-gui-forms";
 const WORKSPACE_KEY: &str = "ferotrx-gui-workspace";
+/// The theme: colours, widget style, text sizes.
+const THEME_KEY: &str = "ferotrx-gui-theme";
 /// Points kept per run in the rate charts.
 const HISTORY: usize = 600;
 
@@ -346,6 +348,8 @@ pub struct FeroApp {
     pub workspace_path: Option<String>,
     /// A layout from a workspace file, applied at the start of the next frame.
     pub pending_layout: Option<String>,
+    /// The theme and the Appearance window.
+    pub appearance: crate::theme::Appearance,
     pub ctx: egui::Context,
 }
 
@@ -364,6 +368,8 @@ pub struct Options {
     pub scenario: Option<String>,
     /// A workspace file to open (before the other options).
     pub workspace: Option<String>,
+    /// A theme file (TOML) to use instead of the saved theme.
+    pub theme: Option<String>,
 }
 
 impl FeroApp {
@@ -380,6 +386,9 @@ impl FeroApp {
             .and_then(|s| eframe::get_value(s, WORKSPACE_KEY))
             .flatten();
         let mut app = Self::with_workspace(cc.egui_ctx.clone(), work, Options::default());
+        if let Some(t) = cc.storage.and_then(|s| eframe::get_value(s, THEME_KEY)) {
+            app.appearance.theme = t;
+        }
         if let Some(f) = forms {
             app.restore_forms(f);
         }
@@ -415,6 +424,7 @@ impl FeroApp {
             lab_form: None,
             workspace_path: None,
             pending_layout: None,
+            appearance: Default::default(),
             ctx,
         };
         if let Some(last) = app.work.last.clone() {
@@ -436,6 +446,12 @@ impl FeroApp {
     /// connect, a port and profile, a scenario, a capture.
     pub fn apply_options(&mut self, opts: Options) {
         let app = self;
+        if let Some(path) = &opts.theme {
+            app.appearance.open_file(std::path::Path::new(path));
+            if let Some(Err(e)) = app.appearance.status.clone() {
+                app.error("", e);
+            }
+        }
         if let Some(path) = &opts.workspace {
             app.open_workspace(std::path::Path::new(path));
         }
@@ -938,6 +954,7 @@ impl FeroApp {
 
 impl eframe::App for FeroApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.appearance.update(ctx);
         self.apply_pending_layout(ctx);
         self.poll();
         self.ui(ctx);
@@ -955,5 +972,6 @@ impl eframe::App for FeroApp {
         w.work = Workspace::default();
         eframe::set_value(storage, FORMS_KEY, &w);
         eframe::set_value(storage, WORKSPACE_KEY, &self.workspace_path);
+        eframe::set_value(storage, THEME_KEY, &self.appearance.theme);
     }
 }

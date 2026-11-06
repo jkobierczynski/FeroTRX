@@ -130,6 +130,7 @@ The manual is in [docs/](docs/README.md):
 | Guide | What it covers |
 | --- | --- |
 | [Installing and building](docs/install.md) | packages, building, DPDK, permissions |
+| [FeroTRX on Windows](docs/windows.md) | the installer, Npcap, interface names |
 | [Replaying captures, rewrites and profiles](docs/replay.md) | `replay`, `run`, rewrites, `--vary`, TOML profiles |
 | [Inspecting and building packets](docs/packets.md) | `inspect`, `build`, the packet syntax |
 | [Traffic models and file checks](docs/traffic-models.md) | Poisson, bursts, ramps, shapes; `check` |

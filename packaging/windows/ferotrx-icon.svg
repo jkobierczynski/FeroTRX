@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="42 -10 300 300" width="256" height="256">
+  <title>FeroTRX</title>
+  <defs>
+    <linearGradient id="bars" gradientUnits="userSpaceOnUse" x1="100" y1="200" x2="270" y2="45">
+      <stop offset="0" stop-color="#033a70"/>
+      <stop offset="0.35" stop-color="#03628a"/>
+      <stop offset="0.68" stop-color="#03926e"/>
+      <stop offset="1" stop-color="#8dca24"/>
+    </linearGradient>
+  </defs>
+  <rect x="44" y="-8" width="296" height="296" rx="64" fill="#f4f7fa"/>
+  <g fill="url(#bars)">
+    <path d="M115 209 V140 A6 6 0 0 1 121 134 H133 A6 6 0 0 1 139 140 V205 Z"/>
+    <path d="M155 201 V108 A6 6 0 0 1 161 102 H173 A6 6 0 0 1 179 108 V194 Z"/>
+    <path d="M196 186 V75 A6 6 0 0 1 202 69 H214 A6 6 0 0 1 220 75 V176 Z"/>
+    <path d="M236 162 V42 A6 6 0 0 1 242 36 H254 A6 6 0 0 1 260 42 V150 Z"/>
+    <path d="M84 197 C110 206 140 203 175 191 C215 178 255 148 291 110 C263 146 222 177 178 198 C140 211 105 213 84 197 Z"/>
+  </g>
+  <path fill="#0a2a50" d="M93 157 C68 174 52 200 60 222 C68 240 95 244 122 241 C182 233 250 197 292 158 C320 132 332 104 314 92 C303 85 288 83 272 86 C288 88 298 96 297 108 C296 126 286 138 276 146 C252 166 230 182 200 196 C160 212 122 222 100 221 C78 219 70 200 75 186 C79 174 85 165 93 157 Z"/>
+</svg>

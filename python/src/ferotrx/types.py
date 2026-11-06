@@ -216,6 +216,11 @@ class InterfaceEntry(Record):
 
     name: str = ""
     description: str | None = None
+    #: The name people know it by when that is not ``name`` ("Ethernet 2" on
+    #: Windows); accepted wherever an interface is named.
+    alias: str | None = None
+    mac: str | None = None
+    addresses: list[str] = field(default_factory=list)
 
 
 # ----- profile.* -----

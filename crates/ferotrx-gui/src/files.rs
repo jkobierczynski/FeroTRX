@@ -6,6 +6,10 @@
 //! replays, the file the `file` port writes, a profile the server reads) can
 //! be picked the same way when the server runs on this computer; for a
 //! server elsewhere they are typed, relative to its data directory.
+//!
+//! On Windows the dialogs are Explorer's own (`rfd`, on a thread of their
+//! own so the window keeps drawing); elsewhere they are drawn in the window
+//! (`egui-file-dialog`), which needs no desktop portal or GTK.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -61,6 +65,10 @@ pub enum Target {
     SaveY1564,
     /// Where to save the report of the Y.1564 run shown.
     Y1564Report,
+    /// A theme file for the Appearance window.
+    OpenTheme,
+    /// Where to save the theme.
+    SaveTheme,
 }
 
 /// The kinds of file a dialog lists first.
@@ -73,6 +81,7 @@ pub enum Kind {
     Junit,
     Workspace,
     Text,
+    Theme,
 }
 
 impl Kind {
@@ -85,14 +94,25 @@ impl Kind {
             Kind::Junit => ("JUnit XML (*.xml)", &["xml"]),
             Kind::Workspace => ("Workspaces (*.ferotrx)", &["ferotrx"]),
             Kind::Text => ("Text (*.txt, *.json)", &["txt", "json"]),
+            Kind::Theme => ("Themes (*.toml)", &["toml"]),
         }
     }
+}
+
+/// An Explorer dialog running on its own thread.
+#[cfg(windows)]
+struct Native {
+    rx: std::sync::mpsc::Receiver<Option<PathBuf>>,
+    /// Extension to add to a saved file named without one.
+    save_ext: Option<&'static str>,
 }
 
 /// The one file dialog of the window, and what it was opened for.
 #[derive(Default)]
 pub struct Dialogs {
     dialog: Option<FileDialog>,
+    #[cfg(windows)]
+    native: Option<Native>,
     target: Option<Target>,
     /// Where the last dialog picked something, to start there next time.
     pub last_dir: Option<PathBuf>,
@@ -101,12 +121,20 @@ pub struct Dialogs {
 impl Dialogs {
     /// Opens a dialog to pick an existing file.
     pub fn pick(&mut self, target: Target, title: &str, kind: Kind, current: &str) {
+        #[cfg(windows)]
+        if native_dialogs() {
+            return self.native(target, title, kind, current, None);
+        }
         let d = self.build(title, kind, current);
         self.show(d, target, false);
     }
 
     /// Opens a dialog to name a file to write, `name` filled in.
     pub fn save(&mut self, target: Target, title: &str, kind: Kind, current: &str, name: &str) {
+        #[cfg(windows)]
+        if native_dialogs() {
+            return self.native(target, title, kind, current, Some(name));
+        }
         let (label, ext) = kind.filter();
         let d = self
             .build(title, kind, current)
@@ -114,6 +142,37 @@ impl Dialogs {
             .add_save_extension(label, ext[0])
             .default_save_extension(label);
         self.show(d, target, true);
+    }
+
+    /// An Explorer dialog: `name` set for a save dialog.
+    #[cfg(windows)]
+    fn native(
+        &mut self,
+        target: Target,
+        title: &str,
+        kind: Kind,
+        current: &str,
+        name: Option<&str>,
+    ) {
+        let (label, exts) = kind.filter();
+        let mut d = rfd::FileDialog::new()
+            .set_title(title)
+            .set_directory(self.start_dir(current))
+            .add_filter(label, exts)
+            .add_filter("All files", &["*"]);
+        if let Some(n) = name {
+            d = d.set_file_name(n);
+        }
+        let save = name.is_some();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(if save { d.save_file() } else { d.pick_file() });
+        });
+        self.native = Some(Native {
+            rx,
+            save_ext: save.then_some(exts[0]),
+        });
+        self.target = Some(target);
     }
 
     fn build(&self, title: &str, kind: Kind, current: &str) -> FileDialog {
@@ -167,11 +226,38 @@ impl Dialogs {
     }
 
     pub fn is_open(&self) -> bool {
+        #[cfg(windows)]
+        if self.native.is_some() {
+            return true;
+        }
         self.dialog.is_some()
     }
 
     /// Draws the dialog; returns what was picked, once.
     pub fn update(&mut self, ctx: &egui::Context) -> Option<(Target, PathBuf)> {
+        #[cfg(windows)]
+        if let Some(n) = &self.native {
+            let picked = match n.rx.try_recv() {
+                Ok(p) => p,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Look again soon: nothing else wakes the window.
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    return None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+            };
+            let ext = n.save_ext;
+            self.native = None;
+            let target = self.target.take()?;
+            let mut path = picked?;
+            if let (Some(ext), None) = (ext, path.extension()) {
+                path.set_extension(ext);
+            }
+            if let Some(dir) = path.parent() {
+                self.last_dir = Some(dir.to_path_buf());
+            }
+            return Some((target, path));
+        }
         let d = self.dialog.as_mut()?;
         d.update(ctx);
         let picked = d.take_picked();
@@ -187,6 +273,13 @@ impl Dialogs {
         }
         Some((target, path))
     }
+}
+
+/// Explorer dialogs, unless FEROTRX_GUI_DIALOGS=egui asks for the ones drawn
+/// in the window.
+#[cfg(windows)]
+fn native_dialogs() -> bool {
+    std::env::var("FEROTRX_GUI_DIALOGS").map_or(true, |v| !v.eq_ignore_ascii_case("egui"))
 }
 
 /// `p` from the current directory when it is relative.

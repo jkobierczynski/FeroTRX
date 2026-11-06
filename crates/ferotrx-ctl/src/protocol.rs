@@ -288,6 +288,16 @@ pub struct InterfaceEntry {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The name people know it by when that is not `name` ("Ethernet 2" on
+    /// Windows); accepted wherever an interface is named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    /// MAC address, `aa:bb:cc:dd:ee:ff`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+    /// IP addresses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<String>,
 }
 
 // ----- profile.* -----

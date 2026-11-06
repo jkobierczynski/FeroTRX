@@ -57,6 +57,42 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test -p ferotrx-ctl --no-default-features
 
+      # The installer: build it from this build, install it silently, check
+      # what it put where (programs, examples, docs, PATH, *.ferotrx, Start
+      # menu), run ferotrx.exe from it, and uninstall. The runner has no
+      # Npcap: ferotrx.exe must still start (wpcap.dll is loaded late) and say
+      # what is missing when asked for interfaces.
+      - name: Windows installer (MSI)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build -p ferotrx-cli -p ferotrx-gui
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+          packaging\windows\build-msi.ps1 -BinDir target\debug -Out dist
+          $msi = (Get-ChildItem dist\*.msi).FullName
+          $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /l*v msi-install.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content msi-install.log -Tail 80; throw "install failed: $($p.ExitCode)" }
+          $dir = "$env:ProgramFiles\FeroTRX"
+          foreach ($f in 'ferotrx.exe', 'ferotrx-gui.exe', 'README.md', 'LICENSE.txt', 'examples\http.pcap', 'examples\lab-tcp.toml', 'docs\gui.md') {
+            if (-not (Test-Path "$dir\$f")) { throw "the installer left out $f" }
+          }
+          if (-not (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\FeroTRX.lnk")) { throw "no Start menu entry" }
+          if ([Environment]::GetEnvironmentVariable('PATH', 'Machine') -notlike "*$dir*") { throw "$dir is not on the PATH" }
+          $open = (Get-ItemProperty 'Registry::HKEY_CLASSES_ROOT\FeroTRX.Workspace\shell\open\command').'(default)'
+          if ($open -notlike '*ferotrx-gui.exe*%1*') { throw "*.ferotrx opens with: $open" }
+          & "$dir\ferotrx.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "ferotrx.exe --version failed" }
+          & "$dir\ferotrx.exe" run examples\lab-built-packets.toml --null --duration 1s
+          if ($LASTEXITCODE -ne 0) { throw "ferotrx.exe run --null failed" }
+          if (-not (Test-Path "$env:SystemRoot\System32\Npcap\wpcap.dll") -and -not (Test-Path "$env:SystemRoot\System32\wpcap.dll")) {
+            $out = & "$dir\ferotrx.exe" interfaces 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -eq 0 -or $out -notmatch 'Npcap is not installed') { throw "ferotrx interfaces without Npcap: $out" }
+          }
+          $p = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" /qn" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "uninstall failed: $($p.ExitCode)" }
+          if (Test-Path "$dir\ferotrx.exe") { throw "the uninstaller left ferotrx.exe" }
+
       # The GUI opens a window, connects to a server and keeps running: on a
       # virtual X display with Mesa's software OpenGL. `timeout` ending it
       # (exit 124) is the pass; anything earlier is a crash.

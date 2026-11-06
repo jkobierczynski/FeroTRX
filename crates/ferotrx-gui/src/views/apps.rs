@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -667,11 +667,8 @@ impl FeroApp {
         });
         match &st.check {
             Some(Ok(sum)) => {
-                ui.colored_label(
-                    Color32::from_rgb(0x2e, 0xa0, 0x43),
-                    "✔ the profile checks out",
-                )
-                .on_hover_text(sum);
+                ui.colored_label(crate::theme::good(ui), "✔ the profile checks out")
+                    .on_hover_text(sum);
             }
             Some(Err(e)) => {
                 ui.colored_label(ui.visuals().error_fg_color, e);
