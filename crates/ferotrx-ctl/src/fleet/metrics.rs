@@ -176,12 +176,34 @@ pub fn tcp_metrics(runs: &[&TcpRunInfo]) -> Metrics {
             put(&mut m, "tls_failed", sum(&tls, |t| t.failed) as f64);
             put(&mut m, "tls_unexpected", sum(&tls, |t| t.unexpected) as f64);
             put(&mut m, "tls_resumed", sum(&tls, |t| t.resumed) as f64);
+            put(&mut m, "tls_full", sum(&tls, |t| t.full) as f64);
+            let rates: Vec<f64> = tls.iter().filter_map(|t| t.rate).collect();
+            if !rates.is_empty() {
+                // Agents run at the same time: their rates add up.
+                put(&mut m, "tls_rate", rates.iter().sum());
+            }
             latency(
                 &mut m,
                 "handshake",
                 merge_latency(
                     tls.iter()
                         .filter_map(|t| t.time.as_ref().map(|l| (l, t.handshakes))),
+                ),
+            );
+            latency(
+                &mut m,
+                "handshake_full",
+                merge_latency(
+                    tls.iter()
+                        .filter_map(|t| t.full_time.as_ref().map(|l| (l, t.full))),
+                ),
+            );
+            latency(
+                &mut m,
+                "handshake_resumed",
+                merge_latency(
+                    tls.iter()
+                        .filter_map(|t| t.resumed_time.as_ref().map(|l| (l, t.resumed))),
                 ),
             );
         }

@@ -1100,7 +1100,12 @@ const TLS_SETTINGS: &[Setting] = &[
         Both,
     )
     .default("none"),
-    s("resumption", "Resumption", K::Bool, Both).default("on"),
+    s("resumption", "Resumption", K::Number, Both)
+        .default("1")
+        .help("The share of connections that resume a session: 1 all, 0 none (a full handshake each), 0.3 for 30%"),
+    s("hold", "Hold", K::Duration, Client)
+        .default("0")
+        .help("app = \"tls\" only: how long a connection stays open after its handshake"),
     s("expect", "Expect", K::Choice(&["success", "failure"]), Both).default("success"),
 ];
 

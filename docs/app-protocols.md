@@ -186,7 +186,7 @@ verify = true
 | `cipher_suites` | all | Suites in order of preference, by their names: `TLS13_AES_128_GCM_SHA256`, `TLS13_AES_256_GCM_SHA384`, `TLS13_CHACHA20_POLY1305_SHA256`, `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` (and `_AES_256_GCM_SHA384`, `_CHACHA20_POLY1305_SHA256`), `TLS_ECDHE_RSA_WITH_...` (the same three; they need an RSA certificate). The `TLS_`/`TLS13_` prefix can be left out. |
 | `groups` | all | Key exchange groups: `X25519`, `secp256r1`, `secp384r1`. |
 | `alpn` | `["http/1.1"]` for HTTP; for HTTP/2 `["h2"]` (client) and `["h2", "http/1.1"]` (server); else none | ALPN protocols in order of preference. |
-| `server_name` | none | Client: the name it asks for (SNI) and checks the certificate against. Without one it connects by address and sends no SNI. |
+| `server_name` | none | Client: the name it asks for (SNI) and checks the certificate against, or a list of names used in turn across connections. Without one it connects by address and sends no SNI. |
 | `verify` | false | Client: check the server's certificate, against `ca` or else the CA the run generates. |
 | `ca` | | Client: a PEM file of the CAs it trusts; implies `verify`. |
 | `cert`, `key` | generated | Server: its certificate chain and key (PEM files; one file with both works too). |
@@ -195,7 +195,8 @@ verify = true
 | `client_auth` | `none` | Server: ask for client certificates, `optional` or `required`. Client: present one (`client_cert`, else a generated one). |
 | `client_ca` | the generated CA | Server: the CAs client certificates must come from. |
 | `client_cert`, `client_key` | | Client: its certificate and key. |
-| `resumption` | true | Resume sessions on later connections (TLS 1.3 tickets, TLS 1.2 session ids and tickets). |
+| `resumption` | true | Resume sessions on later connections (TLS 1.3 tickets, TLS 1.2 session ids and tickets). `false`: every connection makes a new session with a full handshake, and the server keeps no sessions and sends no tickets. A share such as `0.3` or `"30%"`: that share of the connections, spread evenly, offers to resume; the others make new sessions. |
+| `hold` | 0 | `app = "tls"` only: how long the client keeps a connection open after its handshake. |
 | `expect` | `success` | `failure`: every handshake must fail, e.g. a client that offers TLS 1.2 to a server that wants 1.3. |
 
 The keys apply to both ends. `[tls.client]` and `[tls.server]` set them for
@@ -223,6 +224,44 @@ resumed a session, and its time from the first handshake message to the
 end. A handshake with another outcome than `expect` marks the connection
 mismatched, as a wrong HTTP status does. The protocol on top starts only
 once the handshake is done, so its response times leave the handshake out.
+
+### Handshake load
+
+`app = "tls"` is TLS with nothing on top: each connection is one
+handshake, then the client sends close_notify and closes (after `hold`, if
+given), and the server waits for that. With `resumption = false` every
+handshake is a new session (a full key exchange, the server's certificate
+and its signature), which is what costs a TLS terminator, a load balancer or
+an inspecting firewall the most; a share such as `resumption = 0.7` mixes in
+resumed ones, as returning browsers do. The rate is the template's `cps`
+(or a [traffic model](traffic-models.md)), and `--workers` spreads the
+handshakes over cores.
+
+```toml
+[[template]]
+name = "new"
+app = "tls"
+[template.tls]
+versions = ["1.3"]
+resumption = false
+server_name = ["www.lab.local", "api.lab.local"]   # in turn
+names = ["www.lab.local", "api.lab.local"]
+verify = true
+```
+
+The counters keep the handshakes that made a new session apart from the
+resumed ones (`new sessions`, and their times) and give the rate of
+handshakes that succeeded, from the first to end to the last. A TLS 1.3
+client that keeps sessions and is done before the server's tickets came
+(they follow the handshake) waits for them, up to half a second, before it
+closes, so the next connections have a ticket to resume with.
+
+The handshakes are made, not replayed: every connection has its own key
+exchange, randoms and session keys, and `openssl s_time -new` against the
+emulated server, or the emulated clients against any TLS server, work the
+same way. [examples/lab-tls.toml](../examples/lab-tls.toml) has new
+sessions only on three SNI names, 70% resumed sessions held open 100 ms, and
+TLS 1.2 with session ids.
 
 [examples/lab-https.toml](../examples/lab-https.toml) has four templates:
 TLS 1.3 with a verified certificate and resumed sessions, TLS 1.2 with one
@@ -805,8 +844,9 @@ Over TLS the line also has the handshakes:
 
 ```text
     https client: 80 connections, ...; 80 TLS handshakes (TLSv1.3
-    TLS13_AES_256_GCM_SHA384 http/1.1 x80), 79 resumed, 0 failed; handshake ms avg
-    1.33 p99 2.03 max 2.03; 160 transactions (200 x80, 404 x80), 0 failed; ...
+    TLS13_AES_256_GCM_SHA384 http/1.1 x80), 79 resumed, 0 failed, 1 new sessions,
+    40.1/s; handshake ms avg 1.33 p99 2.03 max 2.03 (new avg 2.01 p99 2.01, resumed
+    avg 1.32 p99 2.03); 160 transactions (200 x80, 404 x80), 0 failed; ...
     refused client: 20 connections, ...; 20 TLS handshakes (failed: alert
     ProtocolVersion x20), 0 resumed, 20 failed; ...; 0 transactions (), 0 failed
 ```
@@ -825,7 +865,9 @@ and over TLS `tls` in it:
 ```json
 "tls": {"handshakes": 80, "failed": 0, "unexpected": 0, "resumed": 79,
         "negotiated": {"TLSv1.3 TLS13_AES_256_GCM_SHA384 http/1.1": 80},
-        "time": {"avg_us": 1330.0, "p99_us": 2030.0, ...}}
+        "time": {"avg_us": 1330.0, "p99_us": 2030.0, ...},
+        "full": 1, "rate": 40.1,
+        "full_time": {"avg_us": 2010.0, ...}, "resumed_time": {"avg_us": 1320.0, ...}}
 ```
 
 and for SIP calls `media`:
@@ -858,9 +900,11 @@ a `ferotrx.MediaCounters`).
 [Scenario](scenarios.md) checks of kind `tcp` have the metrics
 `app_transactions`, `app_failed`, `app_failed_pct`, `app_errors`,
 `protocol_errors` and `response_min`/`_avg`/`_p99`/`_max`, and over TLS
-`tls_handshakes`, `tls_failed`, `tls_unexpected`, `tls_resumed` and
-`handshake_min`/`_avg`/`_p99`/`_max`, so a check can say
-`require = ["app_failed == 0", "tls_unexpected == 0", "handshake_p99 < 20ms"]`.
+`tls_handshakes`, `tls_failed`, `tls_unexpected`, `tls_resumed`, `tls_full`
+(new sessions), `tls_rate` (per second), `handshake_min`/`_avg`/`_p99`/`_max`
+and the same for new and resumed sessions apart (`handshake_full_*`,
+`handshake_resumed_*`), so a check can say
+`require = ["app_failed == 0", "tls_unexpected == 0", "handshake_p99 < 20ms", "tls_rate >= 500/s"]`.
 Checks of kind `udp` have `app_transactions`, `app_failed` and
 `protocol_errors`, and with SIP calls `media_streams`, `media_received`,
 `media_lost`, `media_loss_pct` (the worse of the two ways) and
@@ -929,6 +973,29 @@ CI runs it plain, with loss, over IPv6 and over AF_XDP with two workers.
 ```sh
 cargo build -p ferotrx-cli
 sudo scripts/app-netns.sh
+```
+
+TLS handshake load has a script of its own,
+[`scripts/tls-netns.sh`](../scripts/tls-netns.sh), with the same router:
+
+1. handshakes only (`app = "tls"`), every one a new session, TLS 1.3 with a
+   verified certificate and three SNI names in turn: every connection one
+   handshake, none resumed, none failed, and a rate counted;
+2. 30% of the sessions resumed, over TLS 1.3 (tickets) and TLS 1.2 (session
+   ids): between 20% and 30% must resume (the first connections that offer
+   have nothing to resume yet);
+3. HTTPS with a new session per connection, every request answered;
+4. `openssl s_time -new` (TLS 1.3) and `-reuse` (TLS 1.2) against the
+   emulated server, which must count as many handshakes, new and resumed,
+   as s_time made;
+5. `openssl s_server` on the router, and the emulated client makes new
+   sessions with it, then resumed ones with its tickets.
+
+CI runs it plain, with loss, over IPv6 and over AF_XDP with two workers.
+
+```sh
+sudo scripts/tls-netns.sh
+sudo LOSS=0.03 scripts/tls-netns.sh target/debug/ferotrx -B af_xdp --workers 2
 ```
 
 SIP runs over UDP and has a script of its own,

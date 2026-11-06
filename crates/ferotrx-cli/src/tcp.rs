@@ -736,7 +736,8 @@ fn side_line(c: &TcpCounters) -> String {
 }
 
 /// `200 TLS handshakes (TLSv1.3 TLS13_AES_256_GCM_SHA384 http/1.1 x200), 150
-/// resumed, 0 failed; handshake ms avg 1.20 p99 3.40`, or for SSH `20 SSH key
+/// resumed, 0 failed, 50 new sessions, 412.3/s; handshake ms avg 1.20 p99 3.40
+/// (new avg 2.10 p99 3.40, resumed avg 0.90 p99 1.20)`, or for SSH `20 SSH key
 /// exchanges (curve25519-sha256 ssh-ed25519 aes256-gcm@openssh.com x20), 0 failed`,
 /// or for SMB `20 SMB logins (SMB 3.1.1 signed AES-CMAC x20), 0 failed`
 pub(crate) fn tls_line(h: &ferotrx_ctl::protocol::HandshakeCounters) -> String {
@@ -779,15 +780,19 @@ pub(crate) fn tls_line(h: &ferotrx_ctl::protocol::HandshakeCounters) -> String {
         )
     } else {
         format!(
-            "{} TLS handshakes ({}), {} resumed, {} failed",
+            "{} TLS handshakes ({}), {} resumed, {} failed, {} new sessions",
             h.handshakes,
             what.join(", "),
             h.resumed,
-            h.failed
+            h.failed,
+            h.full
         )
     };
     if h.unexpected > 0 {
         line.push_str(&format!(" ({} not as expected)", h.unexpected));
+    }
+    if let Some(r) = h.rate {
+        line.push_str(&format!(", {r:.1}/s"));
     }
     if let Some(t) = &h.time {
         line.push_str(&format!(
@@ -796,6 +801,16 @@ pub(crate) fn tls_line(h: &ferotrx_ctl::protocol::HandshakeCounters) -> String {
             crate::udp::ms(t.p99_us),
             crate::udp::ms(t.max_us)
         ));
+        // New and resumed sessions apart, when there are both.
+        if let (Some(f), Some(r)) = (&h.full_time, &h.resumed_time) {
+            line.push_str(&format!(
+                " (new avg {} p99 {}, resumed avg {} p99 {})",
+                crate::udp::ms(f.avg_us),
+                crate::udp::ms(f.p99_us),
+                crate::udp::ms(r.avg_us),
+                crate::udp::ms(r.p99_us)
+            ));
+        }
     }
     line
 }

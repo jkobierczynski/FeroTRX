@@ -522,6 +522,14 @@ class HandshakeCounters(Record):
     negotiated: dict[str, int] = field(default_factory=dict)
     #: From each handshake's first message to its end.
     time: LatencyCounters | None = None
+    #: Handshakes that succeeded with a new session (not resumed).
+    full: int = 0
+    #: Successful handshakes per second, from the first to end to the last.
+    rate: float | None = None
+    #: The times of the handshakes that made a new session, and of those
+    #: that resumed one.
+    full_time: LatencyCounters | None = None
+    resumed_time: LatencyCounters | None = None
 
 
 @dataclass(kw_only=True)

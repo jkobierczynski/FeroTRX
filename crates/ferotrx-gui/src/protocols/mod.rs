@@ -276,7 +276,14 @@ impl Registry {
     pub fn app_names(&self, t: Transport) -> Vec<(&'static str, &'static str)> {
         let mut out = Vec::new();
         for e in &self.apps {
-            if e.name() == apps::TLS || !e.transports().contains(&t) {
+            if e.name() == apps::TLS {
+                // TLS alone: handshakes only.
+                if t == Transport::Tcp {
+                    out.push((apps::TLS, "TLS handshakes only"));
+                }
+                continue;
+            }
+            if !e.transports().contains(&t) {
                 continue;
             }
             out.push((e.name(), e.title()));

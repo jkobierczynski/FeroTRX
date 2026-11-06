@@ -684,6 +684,107 @@ fn https_profiles_and_handshakes_that_must_fail() {
 }
 
 #[test]
+fn tls_handshake_load_with_new_and_resumed_sessions() {
+    let run = |tls: &str| {
+        let text = format!(
+            r#"
+            connections = 40
+            cps = 400
+            app = "tls"
+            [client]
+            ip = "10.0.0.1/24"
+            [server]
+            ip = "10.0.0.80/24"
+            [tls]
+            {tls}
+        "#
+        );
+        let p = TcpProfile::from_toml(&text, Path::new(".")).unwrap();
+        let programs: Vec<_> = p.programs().unwrap().into_iter().map(Arc::new).collect();
+        let config = p
+            .config(&programs, &["lo".to_string()], Some("lo"))
+            .unwrap();
+        assert_eq!(config.templates[0].listen_port, 443);
+        let mut client_cfg = config.clone();
+        client_cfg.server = None;
+        let mut server_cfg = config;
+        server_cfg.client = None;
+        let mut client = TcpEngine::new(client_cfg).unwrap();
+        let mut server = TcpEngine::new(server_cfg).unwrap();
+        simulate(
+            &mut [&mut client, &mut server],
+            &mut Link::new(0, 0),
+            Duration::from_secs(30),
+        );
+        let (c, s) = (client.stats().client.clone(), server.stats().server.clone());
+        assert_eq!(
+            (
+                c.completed,
+                c.mismatched,
+                c.app.handshakes,
+                c.app.handshake_failures
+            ),
+            (40, 0, 40, 0),
+            "{tls}: {c:?}"
+        );
+        assert_eq!((s.mismatched, s.app.handshakes), (0, 40), "{tls}: {s:?}");
+        assert_eq!(c.app.transactions, 0);
+        (c.app, s.app)
+    };
+
+    // Every connection a new session, on SNI names in turn, verified.
+    let (c, s) = run(r#"
+        resumption = false
+        server_name = ["a.lab.local", "b.lab.local"]
+        names = ["a.lab.local", "b.lab.local"]
+        verify = true
+    "#);
+    assert_eq!(
+        (c.resumed, c.full_handshakes(), s.resumed),
+        (0, 40, 0),
+        "{c:?}"
+    );
+    assert_eq!((c.full_time.count(), c.resumed_time.count()), (40, 0));
+    let rate = c.handshake_rate().unwrap();
+    assert!(rate > 50.0 && rate < 1000.0, "{rate}");
+
+    // TLS 1.2 too (no session ids or tickets).
+    let (c, _) = run("versions = [\"1.2\"]\nresumption = false");
+    assert_eq!(c.resumed, 0, "{c:?}");
+    assert!(
+        c.negotiated.keys().all(|k| k.starts_with("TLSv1.2 ")),
+        "{c:?}"
+    );
+
+    // Half of the connections offer to resume: all of them but the first
+    // that offers do, once a ticket came back.
+    let (c, _) = run("resumption = 0.5");
+    assert!((15..=20).contains(&c.resumed), "{c:?}");
+    assert_eq!(c.full_handshakes(), 40 - c.resumed);
+    assert_eq!(c.resumed_time.count(), c.resumed);
+    let (c, _) = run("resumption = \"25%\"\nversions = [\"1.2\"]");
+    assert!((6..=10).contains(&c.resumed), "{c:?}");
+
+    // Held open a while before closing.
+    let (c, _) = run("hold = \"20ms\"");
+    assert!(c.resumed > 30, "{c:?}");
+
+    for (bad, says) in [
+        ("resumption = 1.5", "share from 0 to 1"),
+        ("hold = 3", "hold must be a time"),
+        ("server_name = [1]", "list of names"),
+    ] {
+        let e = TcpProfile::from_toml(
+            &format!("app = \"tls\"\n[client]\nip = \"10.0.0.1/24\"\n[server]\nip = \"10.0.0.80/24\"\n[tls]\n{bad}"),
+            Path::new("."),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains(says), "{e}");
+    }
+}
+
+#[test]
 fn mqtt_qos_over_a_lossy_reordering_link_and_in_profiles() {
     use ferotrx_core::app::mqtt::{Mqtt, MqttVersion};
     let mut m = Mqtt::default();

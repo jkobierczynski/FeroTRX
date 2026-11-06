@@ -467,6 +467,9 @@ impl AppCx {
         }
         for h in &self.handshakes {
             stats.record_handshake(h);
+            if h.succeeded {
+                stats.handshake_done_at(self.now);
+            }
         }
         for m in &self.media {
             stats.media.record(m);
@@ -580,6 +583,14 @@ pub struct AppStats {
     pub negotiated: BTreeMap<String, u64>,
     /// From each handshake's first message to its end.
     pub handshake_time: LatencyStats,
+    /// The same for the handshakes that made a new session and for those
+    /// that resumed one.
+    pub full_time: LatencyStats,
+    pub resumed_time: LatencyStats,
+    /// When the first and the last handshake that succeeded ended (engine
+    /// time), for the rate.
+    pub first_handshake: Option<Duration>,
+    pub last_handshake: Option<Duration>,
     /// Media streams (RTP), for protocols that carry them (SIP).
     pub media: MediaStats,
 }
@@ -758,7 +769,33 @@ impl AppStats {
         *self.negotiated.entry(h.label.clone()).or_default() += 1;
         if let Some(t) = h.time {
             self.handshake_time.record(Some(t));
+            if h.succeeded {
+                if h.resumed {
+                    self.resumed_time.record(Some(t));
+                } else {
+                    self.full_time.record(Some(t));
+                }
+            }
         }
+    }
+
+    /// Notes that a handshake succeeded at `at` (engine time).
+    pub fn handshake_done_at(&mut self, at: Duration) {
+        self.first_handshake = Some(self.first_handshake.map_or(at, |f| f.min(at)));
+        self.last_handshake = Some(self.last_handshake.map_or(at, |l| l.max(at)));
+    }
+
+    /// Handshakes that succeeded with a new session (not resumed).
+    pub fn full_handshakes(&self) -> u64 {
+        (self.handshakes - self.handshake_failures).saturating_sub(self.resumed)
+    }
+
+    /// Successful handshakes per second, from the first to end to the last;
+    /// none before two ended at different times.
+    pub fn handshake_rate(&self) -> Option<f64> {
+        let ok = self.handshakes - self.handshake_failures;
+        let span = self.last_handshake?.checked_sub(self.first_handshake?)?;
+        (ok > 1 && !span.is_zero()).then(|| (ok - 1) as f64 / span.as_secs_f64())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -788,6 +825,18 @@ impl AppStats {
             *self.negotiated.entry(k.clone()).or_default() += v;
         }
         self.handshake_time.merge(&o.handshake_time);
+        self.full_time.merge(&o.full_time);
+        self.resumed_time.merge(&o.resumed_time);
+        let pick = |a: Option<Duration>,
+                    b: Option<Duration>,
+                    f: fn(Duration, Duration) -> Duration| {
+            match (a, b) {
+                (Some(a), Some(b)) => Some(f(a, b)),
+                (a, b) => a.or(b),
+            }
+        };
+        self.first_handshake = pick(self.first_handshake, o.first_handshake, Duration::min);
+        self.last_handshake = pick(self.last_handshake, o.last_handshake, Duration::max);
         self.media.merge(&o.media);
     }
 
@@ -828,11 +877,15 @@ impl fmt::Display for AppStats {
         if self.handshakes > 0 {
             write!(
                 f,
-                "; {} handshakes, {} failed ({})",
+                "; {} handshakes, {} resumed, {} failed ({})",
                 self.handshakes,
+                self.resumed,
                 self.handshake_failures,
                 self.negotiated_text()
             )?;
+            if let Some(r) = self.handshake_rate() {
+                write!(f, ", {r:.1}/s")?;
+            }
         }
         let m = &self.media;
         if m.streams > 0 {

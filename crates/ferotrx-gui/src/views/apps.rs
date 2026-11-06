@@ -458,7 +458,7 @@ pub fn app_section(
         put_sub(table, key, sub);
         changed = true;
     }
-    if transport == Transport::Tcp {
+    if transport == Transport::Tcp && app != TLS {
         if let Some((tls_editor, _)) = registry.app(TLS) {
             let tls_on = forced_tls
                 || matches!(
@@ -1216,7 +1216,7 @@ mod tests {
         let (tls, _) = reg.app(TLS).unwrap();
         for s in tls.settings() {
             let text = format!(
-                "format = 1\ncps = 1\nconnections = 1\napp = \"https\"\n[tls]\n{} = [true]\n[client]\nip = \"10.0.0.1/24\"\n[server]\nip = \"10.0.0.2/24\"\n",
+                "format = 1\ncps = 1\nconnections = 1\napp = \"tls\"\n[tls]\n{} = [true]\n[client]\nip = \"10.0.0.1/24\"\n[server]\nip = \"10.0.0.2/24\"\n",
                 s.key
             );
             if let Err(e) = ferotrx_core::check::check_text(

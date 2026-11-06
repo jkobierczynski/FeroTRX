@@ -228,6 +228,10 @@ def test_tcp_run_app_and_tls_counters() -> None:
                         "resumed": 1,
                         "negotiated": {"TLSv1.3 TLS13_AES_256_GCM_SHA384 http/1.1": 2},
                         "time": {"avg_us": 1200.0},
+                        "full": 1,
+                        "rate": 250.5,
+                        "full_time": {"avg_us": 1800.0},
+                        "resumed_time": {"avg_us": 600.0},
                     },
                 },
             },
@@ -237,4 +241,7 @@ def test_tcp_run_app_and_tls_counters() -> None:
     assert app is not None and app.codes["404"] == 2
     assert app.tls is not None and app.tls.resumed == 1 and app.tls.unexpected == 0
     assert app.tls.time is not None and app.tls.time.avg_us == 1200.0
+    assert app.tls.full == 1 and app.tls.rate == 250.5
+    assert app.tls.full_time is not None and app.tls.full_time.avg_us == 1800.0
+    assert app.tls.resumed_time is not None and app.tls.resumed_time.avg_us == 600.0
     assert info.server.app is None

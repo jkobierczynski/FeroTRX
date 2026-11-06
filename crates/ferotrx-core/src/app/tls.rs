@@ -174,9 +174,10 @@ pub struct TlsSettings {
     pub groups: Vec<String>,
     /// ALPN protocols (`http/1.1`, `h2`), in order of preference.
     pub alpn: Vec<String>,
-    /// Client: the name it asks for (SNI) and checks the certificate
-    /// against; none for the address it connects to (no SNI sent).
-    pub server_name: Option<String>,
+    /// Client: the names it asks for (SNI) and checks the certificate
+    /// against, used in turn across connections; none for the address it
+    /// connects to (no SNI sent).
+    pub server_names: Vec<String>,
     /// Client: check the server's certificate (against `ca`, else the
     /// generated lab CA).
     pub verify: bool,
@@ -196,8 +197,11 @@ pub struct TlsSettings {
     pub client_ca: Option<Vec<u8>>,
     /// Client: its certificate and key.
     pub client_cert: Option<CertKey>,
-    /// Resume sessions (tickets, session ids) on later connections.
-    pub resumption: bool,
+    /// The share of connections, 0 to 1, that offer to resume a session
+    /// (tickets, session ids) from an earlier one; the others make a new
+    /// session with a full handshake. A server with 0 keeps no sessions and
+    /// sends no tickets.
+    pub resumption: f64,
     /// Handshakes are expected to fail.
     pub expect_failure: bool,
 }
@@ -209,7 +213,7 @@ impl Default for TlsSettings {
             cipher_suites: Vec::new(),
             groups: Vec::new(),
             alpn: Vec::new(),
-            server_name: None,
+            server_names: Vec::new(),
             verify: false,
             ca: None,
             cert: None,
@@ -218,7 +222,7 @@ impl Default for TlsSettings {
             client_auth: ClientAuth::None,
             client_ca: None,
             client_cert: None,
-            resumption: true,
+            resumption: 1.0,
             expect_failure: false,
         }
     }
@@ -262,8 +266,15 @@ fn summary(client: &TlsSettings, server: &TlsSettings) -> String {
     if client.verify {
         s += ", verified";
     }
-    if let Some(n) = &client.server_name {
-        s += &format!(", SNI {n}");
+    match client.server_names.as_slice() {
+        [] => {}
+        [n] => s += &format!(", SNI {n}"),
+        [n, ..] => s += &format!(", SNI {n} and {} more", client.server_names.len() - 1),
+    }
+    if client.resumption <= 0.0 {
+        s += ", new sessions";
+    } else if client.resumption < 1.0 {
+        s += &format!(", {}% resumed", fmt_share(client.resumption));
     }
     match server.client_auth {
         ClientAuth::None if client.client_auth != ClientAuth::None => s += ", client certificate",
@@ -277,13 +288,39 @@ fn summary(client: &TlsSettings, server: &TlsSettings) -> String {
     s
 }
 
+/// `30`, `12.5`: a share as a percentage.
+fn fmt_share(f: f64) -> String {
+    let p = f * 100.0;
+    if (p - p.round()).abs() < 1e-9 {
+        format!("{}", p.round() as i64)
+    } else {
+        format!("{p:.1}")
+    }
+}
+
+/// Whether connection `index` offers to resume when a share `f` of them
+/// should: spread evenly, so any run of connections has about that share.
+pub(crate) fn resumes(index: u64, f: f64) -> bool {
+    if f >= 1.0 {
+        return true;
+    }
+    if f <= 0.0 {
+        return false;
+    }
+    let at = |i: u64| (i as f64 * f).floor() as u64;
+    at(index + 1) > at(index)
+}
+
 /// TLS under another stream protocol; see the [module](self) docs.
 pub struct Tls {
     inner: App,
     client: TlsSettings,
     server: TlsSettings,
     client_config: Arc<ClientConfig>,
+    /// For the connections that make a new session when only some resume.
+    client_fresh: Option<Arc<ClientConfig>>,
     server_config: Arc<ServerConfig>,
+    names: Vec<ServerName<'static>>,
 }
 
 impl fmt::Debug for Tls {
@@ -311,14 +348,29 @@ impl Tls {
             )));
         }
         let lab = LabCa::new(client.key_type)?;
-        let client_config = Arc::new(client_config(&client, &lab)?);
+        let client_config = client_config(&client, &lab)?;
+        let client_fresh = (client.resumption > 0.0 && client.resumption < 1.0).then(|| {
+            let mut c = client_config.clone();
+            c.resumption = Resumption::disabled();
+            Arc::new(c)
+        });
         let server_config = Arc::new(server_config(&server, &lab)?);
+        let names = client
+            .server_names
+            .iter()
+            .map(|n| {
+                ServerName::try_from(n.clone())
+                    .map_err(|_| err(format!("server_name `{n}` is not a valid name")))
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             inner,
             client,
             server,
-            client_config,
+            client_config: Arc::new(client_config),
+            client_fresh,
             server_config,
+            names,
         })
     }
 
@@ -382,15 +434,20 @@ impl AppProtocol for Tls {
             AppRole::Client => &self.client,
             AppRole::Server => &self.server,
         };
-        let server_name = match &self.client.server_name {
-            Some(n) => ServerName::try_from(n.clone()).ok(),
-            None => Some(ServerName::IpAddress(init.remote.ip().into())),
+        let server_name = if self.names.is_empty() {
+            Some(ServerName::IpAddress(init.remote.ip().into()))
+        } else {
+            Some(self.names[(init.index % self.names.len() as u64) as usize].clone())
+        };
+        let (client_config, resuming) = match &self.client_fresh {
+            Some(fresh) if !resumes(init.index, self.client.resumption) => (fresh.clone(), false),
+            _ => (self.client_config.clone(), self.client.resumption > 0.0),
         };
         Box::new(TlsSession {
             conn: conn.map(|c| c.map_err(|e| e.to_string())),
             inner,
             role: init.role,
-            client_config: self.client_config.clone(),
+            client_config,
             server_name,
             expect_failure: settings.expect_failure,
             began: None,
@@ -398,11 +455,96 @@ impl AppProtocol for Tls {
             inner_told_closed: false,
             peer_done: false,
             buf: vec![0; 16 * 1024],
+            resuming: init.role == AppRole::Client && resuming,
+            post_handshake: false,
+            close_pending: None,
         })
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+/// TLS alone (`app = "tls"`), for handshake load: after the handshake the
+/// client waits `hold`, then sends close_notify and closes; the server waits
+/// for that. Nothing else goes over the connection, so every connection is
+/// one handshake.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HandshakeOnly {
+    /// How long the client keeps the connection open after the handshake.
+    pub hold: Duration,
+}
+
+impl HandshakeOnly {
+    /// TLS alone with `settings` at each end, for [`App::new`].
+    pub fn tls(hold: Duration, client: TlsSettings, server: TlsSettings) -> Result<Tls> {
+        Tls::with_ends(App::new(HandshakeOnly { hold }), client, server)
+    }
+}
+
+impl AppProtocol for HandshakeOnly {
+    fn name(&self) -> &str {
+        "handshake"
+    }
+
+    fn describe(&self) -> String {
+        if self.hold.is_zero() {
+            "handshakes only".into()
+        } else {
+            format!("handshakes only, held {:?}", self.hold)
+        }
+    }
+
+    fn default_port(&self) -> u16 {
+        443
+    }
+
+    fn supports(&self, transport: Transport) -> bool {
+        transport == Transport::Stream
+    }
+
+    fn session(&self, init: &SessionInit) -> Box<dyn AppSession> {
+        Box::new(HoldSession {
+            client: init.role == AppRole::Client,
+            hold: self.hold,
+        })
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+struct HoldSession {
+    client: bool,
+    hold: Duration,
+}
+
+impl AppSession for HoldSession {
+    fn start(&mut self, cx: &mut AppCx) {
+        if self.client {
+            if self.hold.is_zero() {
+                cx.close();
+            } else {
+                cx.wake_at(cx.now() + self.hold);
+            }
+        }
+    }
+
+    fn receive(&mut self, _data: &[u8], _cx: &mut AppCx) -> Receive {
+        // Whatever a real peer sends (a banner) is left alone.
+        Receive::Taken
+    }
+
+    fn peer_closed(&mut self, cx: &mut AppCx) {
+        cx.close();
+    }
+
+    fn timer(&mut self, cx: &mut AppCx) {
+        if self.client {
+            cx.close();
+        }
     }
 }
 
@@ -429,7 +571,19 @@ struct TlsSession {
     /// answer it with a reset).
     peer_done: bool,
     buf: Vec<u8>,
+    /// Client: it keeps sessions for later connections.
+    resuming: bool,
+    /// Records came after the handshake (TLS 1.3 session tickets).
+    post_handshake: bool,
+    /// The protocol on top is done, but a resuming TLS 1.3 client waits
+    /// for the server's session tickets (they come after the handshake)
+    /// until this time before it closes.
+    close_pending: Option<Duration>,
 }
+
+/// How long a TLS 1.3 client that keeps sessions waits for the server's
+/// tickets before it closes a connection it is done with.
+const TICKET_WAIT: Duration = Duration::from_millis(500);
 
 impl TlsSession {
     /// Sends what rustls has to send.
@@ -469,7 +623,14 @@ impl TlsSession {
     fn inner_call(&mut self, cx: &mut AppCx, f: impl FnOnce(&mut dyn AppSession, &mut AppCx)) {
         let mut icx = AppCx::new(cx.now(), cx.wall());
         f(&mut *self.inner, &mut icx);
-        let close = icx.wants_close();
+        let mut close = icx.wants_close();
+        if close && self.awaits_ticket() {
+            icx.close = false;
+            close = false;
+            let at = cx.now() + TICKET_WAIT;
+            self.close_pending = Some(at);
+            cx.wake_at(at);
+        }
         let sends = cx.absorb(icx);
         let Some(Ok(conn)) = &mut self.conn else {
             return;
@@ -499,6 +660,28 @@ impl TlsSession {
         if close && !self.peer_done {
             conn.send_close_notify();
         }
+    }
+
+    /// A TLS 1.3 client that keeps sessions and has had nothing from the
+    /// server since the handshake: its tickets are still to come.
+    fn awaits_ticket(&self) -> bool {
+        self.resuming
+            && self.state == State::Open
+            && !self.post_handshake
+            && !self.peer_done
+            && matches!(&self.conn, Some(Ok(c)) if c.protocol_version() == Some(rustls::ProtocolVersion::TLSv1_3))
+    }
+
+    /// Closes the connection the protocol on top was done with.
+    fn close_now(&mut self, cx: &mut AppCx) {
+        self.close_pending = None;
+        if let Some(Ok(conn)) = &mut self.conn {
+            if !self.peer_done {
+                conn.send_close_notify();
+            }
+        }
+        self.flush(cx);
+        cx.close();
     }
 
     /// After rustls took records: the end of the handshake, then the
@@ -604,6 +787,9 @@ impl AppSession for TlsSession {
             self.fail(cx, e);
             return Receive::Taken;
         }
+        if self.state == State::Open && !data.is_empty() {
+            self.post_handshake = true;
+        }
         let mut rd = data;
         while !rd.is_empty() {
             let Some(Ok(conn)) = &mut self.conn else {
@@ -626,12 +812,20 @@ impl AppSession for TlsSession {
                 return Receive::Taken;
             }
         }
+        if self.close_pending.is_some() && self.post_handshake {
+            self.close_now(cx);
+            return Receive::Taken;
+        }
         self.flush(cx);
         Receive::Taken
     }
 
     fn peer_closed(&mut self, cx: &mut AppCx) {
         self.peer_done = true;
+        if self.close_pending.is_some() {
+            self.close_now(cx);
+            return;
+        }
         match self.state {
             State::Handshaking => self.fail(cx, "closed during the handshake".into()),
             State::Open => {
@@ -646,6 +840,14 @@ impl AppSession for TlsSession {
     }
 
     fn timer(&mut self, cx: &mut AppCx) {
+        if let Some(at) = self.close_pending {
+            if cx.now() >= at {
+                self.close_now(cx);
+            } else {
+                cx.wake_at(at);
+            }
+            return;
+        }
         if self.state == State::Open {
             self.inner_call(cx, |s, icx| s.timer(icx));
             self.flush(cx);
@@ -816,7 +1018,7 @@ fn client_config(s: &TlsSettings, lab: &LabCa) -> Result<ClientConfig> {
         }
     };
     c.alpn_protocols = s.alpn.iter().map(|a| a.as_bytes().to_vec()).collect();
-    if !s.resumption {
+    if s.resumption <= 0.0 {
         c.resumption = Resumption::disabled();
     }
     Ok(c)
@@ -852,7 +1054,7 @@ fn server_config(s: &TlsSettings, lab: &LabCa) -> Result<ServerConfig> {
         .with_single_cert(chain, key)
         .map_err(|e| err(format!("cert: {e}")))?;
     c.alpn_protocols = s.alpn.iter().map(|a| a.as_bytes().to_vec()).collect();
-    if !s.resumption {
+    if s.resumption <= 0.0 {
         c.session_storage = Arc::new(NoServerSessionStorage {});
         c.send_tls13_tickets = 0;
     }
@@ -997,7 +1199,7 @@ mod profile {
         cipher_suites: Option<Vec<String>>,
         groups: Option<Vec<String>>,
         alpn: Option<Vec<String>>,
-        server_name: Option<String>,
+        server_name: Option<toml::Value>,
         verify: Option<bool>,
         ca: Option<PathBuf>,
         cert: Option<PathBuf>,
@@ -1008,7 +1210,7 @@ mod profile {
         client_ca: Option<PathBuf>,
         client_cert: Option<PathBuf>,
         client_key: Option<PathBuf>,
-        resumption: Option<bool>,
+        resumption: Option<toml::Value>,
         expect: Option<String>,
         client: Option<toml::Table>,
         server: Option<toml::Table>,
@@ -1039,7 +1241,19 @@ mod profile {
         s.cipher_suites = r.cipher_suites.clone().unwrap_or_default();
         s.groups = r.groups.clone().unwrap_or_default();
         s.alpn = r.alpn.clone().unwrap_or_default();
-        s.server_name = r.server_name.clone();
+        s.server_names = match &r.server_name {
+            None => Vec::new(),
+            Some(toml::Value::String(n)) => vec![n.clone()],
+            Some(toml::Value::Array(a)) if !a.is_empty() => a
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| err("`server_name` must be a name or a list of names"))
+                })
+                .collect::<Result<_>>()?,
+            Some(_) => return Err(err("`server_name` must be a name or a list of names")),
+        };
         s.verify = r.verify.unwrap_or(false) || r.ca.is_some();
         if let Some(p) = &r.ca {
             s.ca = Some(read(base, p, "ca")?);
@@ -1090,7 +1304,30 @@ mod profile {
         if s.client_cert.is_some() && s.client_auth == ClientAuth::None {
             s.client_auth = ClientAuth::Optional;
         }
-        s.resumption = r.resumption.unwrap_or(true);
+        s.resumption = match &r.resumption {
+            None | Some(toml::Value::Boolean(true)) => 1.0,
+            Some(toml::Value::Boolean(false)) => 0.0,
+            Some(v) => {
+                let f = match v {
+                    toml::Value::Float(f) => Some(*f),
+                    toml::Value::Integer(i) => Some(*i as f64),
+                    toml::Value::String(t) => t
+                        .trim()
+                        .strip_suffix('%')
+                        .and_then(|p| p.trim().parse::<f64>().ok())
+                        .map(|p| p / 100.0),
+                    _ => None,
+                };
+                match f {
+                    Some(f) if (0.0..=1.0).contains(&f) => f,
+                    _ => {
+                        return Err(err(
+                            "`resumption` must be true, false, a share from 0 to 1 or a percentage like \"30%\"",
+                        ))
+                    }
+                }
+            }
+        };
         s.expect_failure = match r.expect.as_deref().map(str::to_ascii_lowercase).as_deref() {
             None | Some("success") | Some("ok") => false,
             Some("failure") | Some("fail") | Some("failed") => true,
@@ -1328,7 +1565,7 @@ mod tests {
                 http(),
                 TlsSettings {
                     verify: true,
-                    server_name: Some("www.lab.local".into()),
+                    server_names: vec!["www.lab.local".into()],
                     names: vec!["www.lab.local".into()],
                     client_auth: ClientAuth::Required,
                     key_type: KeyType::Ed25519,
@@ -1347,7 +1584,7 @@ mod tests {
                 http(),
                 TlsSettings {
                     verify: true,
-                    server_name: Some("other.lab.local".into()),
+                    server_names: vec!["other.lab.local".into()],
                     ..Default::default()
                 },
             )
@@ -1403,6 +1640,19 @@ mod tests {
     }
 
     #[cfg(feature = "profile")]
+    #[test]
+    fn some_connections_resume() {
+        let picks = |f: f64| (0..100).filter(|&i| resumes(i, f)).count();
+        assert_eq!(
+            (picks(0.0), picks(0.3), picks(0.5), picks(1.0)),
+            (0, 30, 50, 100)
+        );
+        // Spread out, not in a block.
+        assert!(resumes(1, 0.5) != resumes(2, 0.5));
+        assert_eq!(fmt_share(0.3), "30");
+        assert_eq!(fmt_share(0.125), "12.5");
+    }
+
     #[test]
     fn profile_table() {
         let t: toml::Table = r#"
