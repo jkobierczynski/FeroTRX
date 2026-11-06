@@ -336,8 +336,39 @@ fn duration(s: Option<String>, what: &str) -> Result<Option<Duration>> {
         .transpose()
 }
 
+/// The `[vars]` table of a file that uses `${NAME}` (a scenario, a fleet
+/// plan), with `overrides` (`--set`) on top.
+pub(crate) fn read_vars(
+    text: &str,
+    overrides: &[(String, String)],
+    what: &str,
+) -> Result<BTreeMap<String, String>> {
+    let blank: toml::Table =
+        toml::from_str(&blank_vars(text)).map_err(|e| Error::Profile(format!("{what}: {e}")))?;
+    let mut vars = BTreeMap::new();
+    if let Some(t) = blank.get("vars") {
+        let toml::Value::Table(t) = t else {
+            return Err(Error::Profile("`vars` must be a table".into()));
+        };
+        // Read from the real text: a value may hold "${" only if it is not a variable.
+        let raw: toml::Table = toml::from_str(text).unwrap_or_default();
+        let real = raw.get("vars").and_then(|v| v.as_table()).unwrap_or(t);
+        for (k, v) in real {
+            vars.insert(k.clone(), var_value(k, v)?);
+        }
+    }
+    for (k, v) in overrides {
+        vars.insert(k.clone(), v.clone());
+    }
+    Ok(vars)
+}
+
 /// Replaces `${NAME}` with the variable's value.
-fn substitute(text: &str, vars: &BTreeMap<String, String>, what: &str) -> Result<String> {
+pub(crate) fn substitute(
+    text: &str,
+    vars: &BTreeMap<String, String>,
+    what: &str,
+) -> Result<String> {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(i) = rest.find("${") {
@@ -381,7 +412,7 @@ fn blank_vars(text: &str) -> String {
     out
 }
 
-fn var_value(name: &str, v: &toml::Value) -> Result<String> {
+pub(crate) fn var_value(name: &str, v: &toml::Value) -> Result<String> {
     match v {
         toml::Value::String(s) => Ok(s.clone()),
         toml::Value::Integer(i) => Ok(i.to_string()),
@@ -424,23 +455,7 @@ impl Scenario {
         allow: &dyn Fn(&Path) -> std::result::Result<PathBuf, String>,
     ) -> Result<Self> {
         // The variables first, then the text with them filled in.
-        let blank: toml::Table = toml::from_str(&blank_vars(text))
-            .map_err(|e| Error::Profile(format!("scenario: {e}")))?;
-        let mut vars = BTreeMap::new();
-        if let Some(t) = blank.get("vars") {
-            let toml::Value::Table(t) = t else {
-                return Err(Error::Profile("`vars` must be a table".into()));
-            };
-            // Read from the real text: a value may hold "${" only if it is not a variable.
-            let raw: toml::Table = toml::from_str(text).unwrap_or_default();
-            let real = raw.get("vars").and_then(|v| v.as_table()).unwrap_or(t);
-            for (k, v) in real {
-                vars.insert(k.clone(), var_value(k, v)?);
-            }
-        }
-        for (k, v) in overrides {
-            vars.insert(k.clone(), v.clone());
-        }
+        let vars = read_vars(text, overrides, "scenario")?;
         let text = substitute(text, &vars, "scenario")?;
         let raw: RawScenario =
             toml::from_str(&text).map_err(|e| Error::Profile(format!("scenario: {e}")))?;

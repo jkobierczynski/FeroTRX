@@ -161,6 +161,9 @@ pub enum Event {
     Connected {
         info: ServerInfo,
         interfaces: Vec<InterfaceEntry>,
+        /// The server's clock minus this machine's, in seconds (servers
+        /// from 0.31.0 tell the time).
+        clock_offset: Option<f64>,
     },
     /// Connecting failed, or the connection broke; the worker has ended.
     Closed(String),
@@ -235,13 +238,21 @@ fn worker(
             c.call_value("auth", serde_json::json!({ "token": settings.token }))
                 .map_err(|e| format!("login: {e}"))?;
         }
+        let now = || ferotrx_core::unix_seconds(std::time::SystemTime::now());
+        let t0 = now();
         let info = c.info().map_err(|e| e.to_string())?;
+        let t1 = now();
+        let clock_offset = info.time.map(|t| t - (t0 + t1) / 2.0);
         // A server built without libpcap lists no interfaces.
         let interfaces = c.interfaces().unwrap_or_default();
-        Ok((c, info, interfaces))
+        Ok((c, info, interfaces, clock_offset))
     }) {
-        Ok((c, info, interfaces)) => {
-            if !send(Event::Connected { info, interfaces }) {
+        Ok((c, info, interfaces, clock_offset)) => {
+            if !send(Event::Connected {
+                info,
+                interfaces,
+                clock_offset,
+            }) {
                 return;
             }
             c

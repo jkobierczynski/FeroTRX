@@ -125,6 +125,7 @@ mod bench;
 mod client;
 mod controller;
 mod files;
+pub mod fleet;
 pub mod protocol;
 mod scenario;
 mod server;
@@ -136,12 +137,12 @@ mod y1564;
 pub use audit::AuditLog;
 pub use auth::{Token, TokenError};
 pub use bench::{open_bench_sinks, BenchSinkOpener};
-pub use client::{Client, ClientError};
+pub use client::{Client, ClientError, UPLOAD_PIECE};
 pub use controller::{
     start_run, start_run_detailed, start_run_with_rx, Controller, ReceiverOpener, StartError,
     Started,
 };
-pub use files::{FilePolicy, DEFAULT_MAX_UPLOAD};
+pub use files::{sha256_hex, FilePolicy, DEFAULT_MAX_FILE, DEFAULT_MAX_UPLOAD};
 pub use protocol::{Role, RpcError};
 pub use scenario::{check_info, scenario_info, LabRunner, SinkOpener};
 pub use server::{Server, ServerConfig, MAX_LINE};

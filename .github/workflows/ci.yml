@@ -408,6 +408,15 @@ jobs:
           sudo modprobe cls_u32 || true
           sudo scripts/y1564-netns.sh ./target/debug/ferotrx -q
 
+      # Three agents (ferotrx serve) in namespaces, driven by `ferotrx fleet
+      # run`: deployed, started together, counters added up; then one agent
+      # cut off, which must fail.
+      - name: Fleet of agents started together (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo SPREAD=200 scripts/fleet-netns.sh ./target/debug/ferotrx
+
       # A regression scenario (examples/scenario-nat.toml) against the NAT
       # router: web and DNS pass, TCP 8080 and NTP are blocked, a voice
       # stream arrives. Then the router resets TCP to port 80, and the second

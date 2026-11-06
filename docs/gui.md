@@ -194,8 +194,9 @@ is a server, what it runs (a port's streams as built in the Streams tab, or
 a TCP or UDP profile) and its own settings; "+ Every connected server"
 adds one per server with the streams of the port selected on the left.
 **▶ Start all** loads every member's streams first and starts them all only
-when every server has accepted them, so they begin within a poll of each
-other; **■ Stop all** stops them together. The table shows each member's
+when every server has accepted them, with a start time one second ahead
+in each server's own clock (`start_at`, from the clock offset measured when
+it connected), so they begin together; **■ Stop all** stops them together. The table shows each member's
 state and counters with a total row, and the chart each member's rate and
 their sum over time. The group is saved in the workspace.
 
@@ -301,5 +302,3 @@ GUI can drive a server across the lab as easily as the local one.
 
 * Call quality (jitter, MOS) charts, once the engine measures them (#49).
 * Forms keep the profile's values but not its comments.
-* Groups start within one poll of each other, not at one instant; agents
-  that start on a shared clock are issue #21.

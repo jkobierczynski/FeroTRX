@@ -196,6 +196,25 @@ backend settings; then `y1564_get`, `y1564_stop`, `y1564_runs` and
 `y1564_remove`. The report is in `done.report`, as in
 `ferotrx y1564 --report` ([Y.1564](y1564.md)).
 
+## Files and a shared start
+
+```python
+import time
+c.upload_file("lab/http.pcap", "examples/http.pcap")   # skipped if the server has it
+c.file_stat("lab/http.pcap").sha256
+
+servers = [ferotrx.Client(h, token=tok) for h in ("10.99.0.11", "10.99.0.12")]
+offsets = [s.info().time - time.time() for s in servers]
+at = time.time() + 2
+for s, off in zip(servers, offsets):
+    s.tcp_start("lab/web-clients.toml", start_at=at + off)
+```
+
+`upload_file` sends in pieces of 1 MiB with `file_put`, to the server's
+first data directory. `start`, `tcp_start` and `udp_start` take
+`start_at`, Unix seconds by the server's clock; the run's `started_at` says
+when it began. [Fleets](fleet.md) do all this from one plan.
+
 ## Errors
 
 | Exception | Code | When |

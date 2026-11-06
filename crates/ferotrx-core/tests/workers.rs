@@ -144,6 +144,7 @@ fn run_tcp_split(config: TcpConfig, workers: usize, through_relay: bool) -> TcpS
         TcpRunConfig {
             duration: Some(Duration::from_secs(60)),
             stop: None,
+            start_at: None,
         },
     )
     .unwrap();
@@ -253,6 +254,7 @@ fn udp_dns_over_three_workers() {
         TcpRunConfig {
             duration: Some(Duration::from_secs(60)),
             stop: None,
+            start_at: None,
         },
     )
     .unwrap();

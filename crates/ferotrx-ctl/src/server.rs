@@ -796,6 +796,11 @@ fn audit_params(params: &Value) -> Value {
         let bytes = text.len();
         p["toml"] = json!({ "bytes": bytes });
     }
+    // A file's bytes (file.put): only how many.
+    if let Some(Value::String(data)) = p.get("data") {
+        let bytes = data.len() / 4 * 3;
+        p["data"] = json!({ "bytes": bytes });
+    }
     p
 }
 

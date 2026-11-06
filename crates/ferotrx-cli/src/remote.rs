@@ -72,6 +72,11 @@ pub struct ServeArgs {
     #[arg(long, value_name = "SIZE", default_value = "1M")]
     max_upload: String,
 
+    /// Largest file a client may send with `file.put` (a controller
+    /// deploying profiles and pcaps), e.g. 256M; 0 refuses them.
+    #[arg(long, value_name = "SIZE", default_value = "256M")]
+    max_file: String,
+
     /// Longest request, e.g. 4M.
     #[arg(long, value_name = "SIZE", default_value = "4M")]
     max_request: String,
@@ -141,7 +146,9 @@ pub fn cmd_serve(args: ServeArgs) -> Result<()> {
         args.data_dirs
     };
     let max_upload = parse_size(&args.max_upload)?;
-    let files = FilePolicy::dirs(&dirs)?.with_max_upload(max_upload as usize);
+    let files = FilePolicy::dirs(&dirs)?
+        .with_max_upload(max_upload as usize)
+        .with_max_file(parse_size(&args.max_file)?);
     let idle = parse_duration(&args.idle_timeout)?;
     let audit = match &args.audit_log {
         Some(p) => AuditLog::to_file(p)
@@ -626,6 +633,7 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                     wait: s.rx_wait,
                 }),
                 impair: s.impair,
+                start_at: None,
             };
             let run = c.start(&params)?;
             if json && !s.watch {

@@ -50,6 +50,10 @@ impl<T: Read + Write + Send> Stream for T {}
 /// }
 /// # Ok::<(), ferotrx_ctl::ClientError>(())
 /// ```
+/// Bytes per `file.put` in [`Client::upload`]: well within the server's
+/// default request limit once in base64.
+pub const UPLOAD_PIECE: usize = 1024 * 1024;
+
 pub struct Client {
     reader: BufReader<Box<dyn Stream>>,
     /// The socket under it, for timeouts.
@@ -212,6 +216,57 @@ impl Client {
 
     pub fn interfaces(&mut self) -> Result<Vec<InterfaceEntry>, ClientError> {
         self.call("interfaces.list", &Value::Null)
+    }
+
+    /// Writes one piece of a file on the server (`file.put`).
+    pub fn file_put(
+        &mut self,
+        path: impl Into<std::path::PathBuf>,
+        data: &[u8],
+        offset: u64,
+    ) -> Result<FileInfo, ClientError> {
+        use base64::Engine;
+        self.call(
+            "file.put",
+            &FilePutParams {
+                path: path.into(),
+                data: base64::engine::general_purpose::STANDARD.encode(data),
+                offset,
+            },
+        )
+    }
+
+    /// A file's size and SHA-256 on the server (`file.stat`).
+    pub fn file_stat(
+        &mut self,
+        path: impl Into<std::path::PathBuf>,
+    ) -> Result<FileInfo, ClientError> {
+        self.call("file.stat", &FileStatParams { path: path.into() })
+    }
+
+    /// Sends `data` to `path` on the server in pieces of [`UPLOAD_PIECE`]
+    /// bytes, unless the server has the same file already (by SHA-256).
+    /// Returns true if it sent it.
+    pub fn upload(
+        &mut self,
+        path: impl Into<std::path::PathBuf>,
+        data: &[u8],
+    ) -> Result<bool, ClientError> {
+        let path = path.into();
+        let have = self.file_stat(&path)?;
+        if have.exists && have.sha256.as_deref() == Some(&crate::files::sha256_hex(data)) {
+            return Ok(false);
+        }
+        let mut offset = 0u64;
+        let mut pieces = data.chunks(UPLOAD_PIECE).peekable();
+        if pieces.peek().is_none() {
+            self.file_put(&path, &[], 0)?;
+        }
+        for piece in pieces {
+            self.file_put(&path, piece, offset)?;
+            offset += piece.len() as u64;
+        }
+        Ok(true)
     }
 
     pub fn load_profile(&mut self, params: &LoadProfileParams) -> Result<ProfileInfo, ClientError> {

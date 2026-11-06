@@ -390,6 +390,7 @@ pub fn cmd_host(args: HostArgs) -> Result<()> {
         TcpRunConfig {
             duration: profile.duration,
             stop: Some(stop),
+            start_at: None,
         },
     )?;
     let mut shown: Vec<HostState> = Vec::new();

@@ -1,0 +1,15 @@
+# The web clients of examples/fleet/fleet.toml. Each agent gets its own
+# copy, with its own ${client_ip} from the plan's [[agent]] table.
+format = 1
+pcap = "../http.pcap"
+connect = "${server_ip}:80"
+cps = 25
+connections = 50
+concurrency = 20
+
+[client]
+ip = "${client_ip}/24"
+ips = 5
+
+[tcp]
+rto = "250ms"

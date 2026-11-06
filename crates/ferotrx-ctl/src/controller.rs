@@ -450,6 +450,11 @@ impl Controller {
                 let p: RunId = parse(params)?;
                 to_value(self.y1564_remove(p.id)?)
             }
+            "file.put" => to_value(self.file_put(parse(params)?)?),
+            "file.stat" => {
+                let p: FileStatParams = parse(params)?;
+                to_value(self.files.stat(&p.path)?)
+            }
             "lab.get" => to_value(self.lab_info()),
             "lab.start" => to_value(self.lab_start(parse(params)?)?),
             "lab.stop" => to_value(self.lab_stop()),
@@ -475,7 +480,19 @@ impl Controller {
             role: None,
             user: None,
             lab: self.lab_unavailable().is_none(),
+            time: Some(ferotrx_core::unix_seconds(std::time::SystemTime::now())),
+            max_file: Some(self.files.max_file()),
         }
+    }
+
+    /// Writes a piece of a file a client sends (`file.put`), such as a
+    /// profile and its pcaps that a controller deploys.
+    pub fn file_put(&self, p: FilePutParams) -> Result<FileInfo, RpcError> {
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(p.data.as_bytes())
+            .map_err(|e| RpcError::invalid_params(format!("data is not base64: {e}")))?;
+        self.files.put(&p.path, &data, p.offset)
     }
 
     pub fn interfaces(&self) -> Result<Vec<InterfaceEntry>, RpcError> {
@@ -572,6 +589,7 @@ impl Controller {
 
     /// Starts a run of a loaded profile and returns it.
     pub fn start(&self, p: StartParams) -> Result<RunInfo, RpcError> {
+        let start_at = start_time(p.start_at)?;
         let mut profile = lock(&self.profiles)
             .get(&p.profile)
             .cloned()
@@ -618,6 +636,7 @@ impl Controller {
             duration,
             ignore_send_errors: p.ignore_errors,
             stop: None,
+            start_at,
         };
         if p.latency {
             profile.enable_latency();
@@ -1133,6 +1152,7 @@ impl Controller {
 
     /// Starts a stateful TCP run from a TCP profile.
     pub fn tcp_start(&self, p: TcpStartParams) -> Result<TcpRunInfo, RpcError> {
+        let start_at = start_time(p.start_at)?;
         let failed = |e: ferotrx_core::Error| RpcError::failed(e);
         let mut profile = match (p.path, p.toml) {
             (Some(path), None) => TcpProfile::from_path(self.files.readable(&path)?)
@@ -1163,6 +1183,7 @@ impl Controller {
         let config = TcpRunConfig {
             duration,
             stop: None,
+            start_at,
         };
         let output = OutputSpec {
             backend: p.backend,
@@ -1219,6 +1240,7 @@ impl Controller {
 
     /// Starts a stateful UDP run from a UDP profile.
     pub fn udp_start(&self, p: UdpStartParams) -> Result<UdpRunInfo, RpcError> {
+        let start_at = start_time(p.start_at)?;
         let failed = |e: ferotrx_core::Error| RpcError::failed(e);
         let mut profile = match (p.path, p.toml) {
             (Some(path), None) => UdpProfile::from_path(self.files.readable(&path)?)
@@ -1249,6 +1271,7 @@ impl Controller {
         let config = TcpRunConfig {
             duration,
             stop: None,
+            start_at,
         };
         let output = OutputSpec {
             backend: p.backend,
@@ -1399,6 +1422,7 @@ impl Run {
             total,
             streams,
             rx,
+            started_at: self.job.started_at().map(ferotrx_core::unix_seconds),
         }
     }
 }
@@ -1484,6 +1508,24 @@ impl OutputSpec {
         s.validate().map_err(bad)?;
         Ok(s)
     }
+}
+
+/// Furthest ahead a run may be told to start.
+const MAX_START_AHEAD: Duration = Duration::from_secs(3600);
+
+/// The `start_at` of a start call, checked.
+fn start_time(at: Option<f64>) -> Result<Option<std::time::SystemTime>, RpcError> {
+    let Some(s) = at else {
+        return Ok(None);
+    };
+    let t = ferotrx_core::from_unix_seconds(s)
+        .ok_or_else(|| RpcError::invalid_params("start_at is not a time"))?;
+    if t > std::time::SystemTime::now() + MAX_START_AHEAD {
+        return Err(RpcError::invalid_params(
+            "start_at is more than an hour ahead (seconds since 1970, as server.info's time)",
+        ));
+    }
+    Ok(Some(t))
 }
 
 pub(crate) fn parse<T: DeserializeOwned>(params: Value) -> Result<T, RpcError> {

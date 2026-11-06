@@ -12,6 +12,7 @@ from . import _wire
 from ._wire import Address, Call, PathLike
 from .errors import ConnectionClosed, FerotrxError, NotFound, ProtocolError
 from .types import (
+    FileInfo,
     InterfaceEntry,
     Notification,
     ProfileInfo,
@@ -307,6 +308,31 @@ class AsyncClient:
     async def interfaces(self) -> list[InterfaceEntry]:
         return await self._run(_wire.interfaces())
 
+    # ----- file.* -----
+
+    async def file_put(self, path: PathLike, data: bytes, *, offset: int = 0) -> FileInfo:
+        """Writes ``data`` at ``offset`` of ``path`` in the server's data
+        directory (0 starts the file afresh; pieces go in order)."""
+        return await self._run(_wire.file_put(path, data, offset))
+
+    async def file_stat(self, path: PathLike) -> FileInfo:
+        """A file's size and SHA-256 on the server; ``exists`` False if none."""
+        return await self._run(_wire.file_stat(path))
+
+    async def upload_file(self, path: PathLike, data: bytes | PathLike) -> bool:
+        """Sends ``data`` (bytes, or a local file's path) to ``path`` on the
+        server in pieces, unless it has the same file already. True if sent."""
+        body = _wire.read_local(data)
+        have = await self.file_stat(path)
+        if have.exists and have.sha256 == _wire.sha256(body):
+            return False
+        pieces = [body[i : i + _wire.UPLOAD_PIECE] for i in range(0, len(body), _wire.UPLOAD_PIECE)]
+        offset = 0
+        for piece in pieces or [b""]:
+            await self.file_put(path, piece, offset=offset)
+            offset += len(piece)
+        return True
+
     # ----- profiles -----
 
     async def load_profile(
@@ -354,6 +380,7 @@ class AsyncClient:
         rx: str | None = None,
         rx_wait: str | None = None,
         impair: str | None = None,
+        start_at: float | None = None,
     ) -> RunInfo:
         output = _wire.output_spec(
             iface=iface,
@@ -378,6 +405,7 @@ class AsyncClient:
                 rx=rx,
                 rx_wait=rx_wait,
                 impair=impair,
+                start_at=start_at,
             )
         )
 
@@ -420,6 +448,7 @@ class AsyncClient:
         impair_rx: str | None = None,
         congestion: str | None = None,
         ecn: bool | None = None,
+        start_at: float | None = None,
     ) -> TcpRunInfo:
         return await self._run(
             _wire.tcp_start(
@@ -442,6 +471,7 @@ class AsyncClient:
                 impair_rx=impair_rx,
                 congestion=congestion,
                 ecn=ecn,
+                start_at=start_at,
             )
         )
 
@@ -484,6 +514,7 @@ class AsyncClient:
         workers: int | None = None,
         impair: str | None = None,
         impair_rx: str | None = None,
+        start_at: float | None = None,
     ) -> UdpRunInfo:
         return await self._run(
             _wire.udp_start(
@@ -504,6 +535,7 @@ class AsyncClient:
                 workers=workers,
                 impair=impair,
                 impair_rx=impair_rx,
+                start_at=start_at,
             )
         )
 

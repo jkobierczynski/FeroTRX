@@ -180,6 +180,7 @@ impl LabRunner {
         let config = TcpRunConfig {
             duration: check.duration.or(p.duration),
             stop: Some(Arc::new(AtomicBool::new(false))),
+            start_at: None,
         };
         let started = start_tcp_with(p, check.iface.as_deref(), config, &*self.open_port)
             .map_err(|e| e.to_string())?;
@@ -221,6 +222,7 @@ impl LabRunner {
         let config = TcpRunConfig {
             duration: check.duration.or(p.duration),
             stop: Some(Arc::new(AtomicBool::new(false))),
+            start_at: None,
         };
         let started = start_udp_with(p, check.iface.as_deref(), config, &*self.open_port)
             .map_err(|e| e.to_string())?;
@@ -291,6 +293,7 @@ impl LabRunner {
                 duration: check.duration,
                 ignore_send_errors: false,
                 stop: Some(Arc::new(AtomicBool::new(false))),
+                start_at: None,
             },
             Some(RxSettings {
                 receiver,

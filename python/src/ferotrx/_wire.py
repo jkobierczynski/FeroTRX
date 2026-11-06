@@ -13,6 +13,7 @@ from typing import Any, Generic, TypeVar
 
 from .errors import ProtocolError, RpcError
 from .types import (
+    FileInfo,
     InterfaceEntry,
     Notification,
     ProfileInfo,
@@ -286,6 +287,39 @@ def unload_profile(name: str) -> Call[None]:
     return Call("profile.unload", {"name": name}, _none)
 
 
+#: Bytes per ``file.put`` in ``upload_file``: within the server's request
+#: limit once in base64.
+UPLOAD_PIECE = 1024 * 1024
+
+
+def file_put(path: PathLike, data: bytes, offset: int) -> Call[FileInfo]:
+    import base64
+
+    params = {
+        "path": _path(path),
+        "data": base64.b64encode(data).decode("ascii"),
+        "offset": offset,
+    }
+    return Call("file.put", params, _record(FileInfo))
+
+
+def file_stat(path: PathLike) -> Call[FileInfo]:
+    return Call("file.stat", {"path": _path(path)}, _record(FileInfo))
+
+
+def sha256(data: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(data).hexdigest()
+
+
+def read_local(data: bytes | PathLike) -> bytes:
+    """The bytes to upload: given, or read from a local file."""
+    if isinstance(data, (bytes, bytearray)):
+        return bytes(data)
+    return Path(data).read_bytes()
+
+
 def output_spec(
     *,
     iface: str | None = None,
@@ -325,6 +359,7 @@ def start(
     rx: str | None,
     rx_wait: str | None,
     impair: str | None = None,
+    start_at: float | None = None,
 ) -> Call[RunInfo]:
     if rx is None and rx_wait is not None:
         raise ValueError("rx_wait needs rx")
@@ -338,6 +373,7 @@ def start(
         latency=latency,
         rx=None if rx is None else _drop_none(iface=rx, wait=rx_wait),
         impair=impair,
+        start_at=start_at,
     )
     return Call("run.start", params, _record(RunInfo))
 

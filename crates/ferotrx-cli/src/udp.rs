@@ -333,6 +333,7 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
         TcpRunConfig {
             duration: profile.duration,
             stop: Some(stop),
+            start_at: None,
         },
     )
     .map_err(|e| anyhow::anyhow!(e))?;
