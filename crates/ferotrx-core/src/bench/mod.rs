@@ -29,7 +29,7 @@
 
 mod info;
 #[cfg(feature = "profile")]
-mod profile;
+pub(crate) mod profile;
 mod report;
 mod runner;
 

@@ -126,6 +126,7 @@ mod traffic;
 mod transform;
 mod udp;
 mod workers;
+mod y1564;
 
 pub use app::{
     App, AppHandshake, AppProtocol, AppSession, AppStats, MediaReport, MediaStats, Transport,
@@ -158,8 +159,8 @@ pub use impair::{
 };
 pub use job::{Job, JobState, RxSettings, JOB_STATS_INTERVAL};
 pub use latency::{
-    signed_len, wall_clock, FlowReport, FlowStats, LatencyStats, PacketReceiver, PortReceiver,
-    RxConfig, RxJob, RxStats, Signature, SIGNATURE_LEN,
+    signed_len, wall_clock, FlowReport, FlowStats, IntervalStats, LatencyStats, PacketReceiver,
+    PortReceiver, RxConfig, RxJob, RxStats, Signature, SIGNATURE_LEN,
 };
 pub use net::{MacAddr, TPID_QINQ, TPID_VLAN};
 pub use pacer::{parse_duration, Pacer, Rate};
@@ -198,3 +199,10 @@ pub use udp::{
 #[cfg(feature = "profile")]
 pub use udp::{UdpProfile, UdpSource, UdpTemplateSpec};
 pub use workers::{merge_all, share, worker_seed, MergeStats};
+#[cfg(feature = "profile")]
+pub use y1564::Y1564Profile;
+pub use y1564::{
+    run_y1564, Acceptance, Color, FlowRecord, FlowResult, IntervalRecord, JobServiceRunner,
+    ServiceFrames, ServiceResult, ServiceRunner, ServiceSpec, ServiceSummary, ServiceVerdict,
+    StepFlow, StepKind, StepRecord, Y1564Config, Y1564Report, Y1564Step, Y1564Summary, Y1564Test,
+};

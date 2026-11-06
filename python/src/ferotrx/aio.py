@@ -21,12 +21,13 @@ from .types import (
     StatsUpdate,
     TcpRunInfo,
     UdpRunInfo,
+    Y1564RunInfo,
 )
 
 __all__ = ["AsyncClient", "connect"]
 
 T = TypeVar("T")
-Info = TypeVar("Info", RunInfo, TcpRunInfo, UdpRunInfo, RxRunInfo)
+Info = TypeVar("Info", RunInfo, TcpRunInfo, UdpRunInfo, RxRunInfo, Y1564RunInfo)
 
 
 class AsyncClient:
@@ -522,6 +523,68 @@ class AsyncClient:
         self, id: int, timeout: float | None = None, poll: float = 0.2
     ) -> UdpRunInfo:
         return await self._wait(self.udp_stats, id, timeout, poll)
+
+    # ----- y1564.* -----
+
+    async def y1564_start(
+        self,
+        path: PathLike | None = None,
+        *,
+        iface: str,
+        rx: str,
+        toml: str | None = None,
+        upload: bool = False,
+        tests: Sequence[str] | None = None,
+        services: Sequence[str] | None = None,
+        line_rate: str | None = None,
+        step_duration: str | None = None,
+        performance_duration: str | None = None,
+        backend: str | None = None,
+        queue: int | None = None,
+        xdp_mode: str | None = None,
+        workers: int | None = None,
+    ) -> Y1564RunInfo:
+        """Starts a Y.1564 service activation test of a profile (``path`` on
+        the server, this machine's file with ``upload=True``, or ``toml``
+        text), sending on ``iface`` and receiving on ``rx``. ``tests``
+        (``"configuration"``, ``"performance"``), ``services`` (names) and
+        the durations replace the profile's."""
+        return await self._run(
+            _wire.y1564_start(
+                path,
+                toml=toml,
+                upload=upload,
+                tests=tests,
+                services=services,
+                iface=iface,
+                rx=rx,
+                line_rate=line_rate,
+                step_duration=step_duration,
+                performance_duration=performance_duration,
+                backend=backend,
+                queue=queue,
+                xdp_mode=xdp_mode,
+                workers=workers,
+            )
+        )
+
+    async def y1564_get(self, id: int) -> Y1564RunInfo:
+        """The test's steps so far, and its report once it has ended."""
+        return await self._run(_wire.y1564_get(id))
+
+    async def y1564_stop(self, id: int, *, wait: bool = True) -> Y1564RunInfo:
+        return await self._run(_wire.stop(Y1564RunInfo, "y1564", id, wait))
+
+    async def y1564_runs(self) -> list[Y1564RunInfo]:
+        return await self._run(_wire.runs(Y1564RunInfo, "y1564"))
+
+    async def y1564_remove(self, id: int) -> Y1564RunInfo:
+        return await self._run(_wire.remove(Y1564RunInfo, "y1564", id))
+
+    async def y1564_wait(
+        self, id: int, timeout: float | None = None, poll: float = 0.5
+    ) -> Y1564RunInfo:
+        return await self._wait(self.y1564_get, id, timeout, poll)
 
     # ----- rx.* -----
 

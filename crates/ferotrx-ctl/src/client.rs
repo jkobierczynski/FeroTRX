@@ -346,6 +346,28 @@ impl Client {
         self.call("bench.remove", &RunId { id })
     }
 
+    /// Starts a Y.1564 service activation test on the server (`y1564.start`).
+    pub fn y1564_start(&mut self, params: &Y1564StartParams) -> Result<Y1564RunInfo, ClientError> {
+        self.call("y1564.start", params)
+    }
+
+    pub fn y1564_get(&mut self, id: u64) -> Result<Y1564RunInfo, ClientError> {
+        self.call("y1564.get", &RunId { id })
+    }
+
+    pub fn y1564_runs(&mut self) -> Result<Vec<Y1564RunInfo>, ClientError> {
+        self.call("y1564.list", &Value::Null)
+    }
+
+    /// Stops a Y.1564 test and waits for it to end.
+    pub fn y1564_stop(&mut self, id: u64) -> Result<Y1564RunInfo, ClientError> {
+        self.call("y1564.stop", &StopParams { id, wait: true })
+    }
+
+    pub fn y1564_remove(&mut self, id: u64) -> Result<Y1564RunInfo, ClientError> {
+        self.call("y1564.remove", &RunId { id })
+    }
+
     /// Reads a scenario on the server and lists its checks (`scenario.check`).
     pub fn scenario_check(
         &mut self,

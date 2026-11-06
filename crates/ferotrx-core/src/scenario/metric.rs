@@ -19,16 +19,24 @@ pub enum CheckKind {
     /// Stateless streams ([`Profile`](crate::Profile)) with a receiver for
     /// loss, latency and throughput.
     Traffic,
+    /// A Y.1564 service activation test ([`Y1564Profile`](crate::Y1564Profile)).
+    Y1564,
 }
 
 impl CheckKind {
-    pub const ALL: [CheckKind; 3] = [CheckKind::Tcp, CheckKind::Udp, CheckKind::Traffic];
+    pub const ALL: [CheckKind; 4] = [
+        CheckKind::Tcp,
+        CheckKind::Udp,
+        CheckKind::Traffic,
+        CheckKind::Y1564,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             CheckKind::Tcp => "tcp",
             CheckKind::Udp => "udp",
             CheckKind::Traffic => "traffic",
+            CheckKind::Y1564 => "y1564",
         }
     }
 
@@ -43,6 +51,7 @@ impl CheckKind {
             CheckKind::Tcp => TCP_METRICS,
             CheckKind::Udp => UDP_METRICS,
             CheckKind::Traffic => TRAFFIC_METRICS,
+            CheckKind::Y1564 => Y1564_METRICS,
         }
     }
 
@@ -524,6 +533,72 @@ pub const TRAFFIC_METRICS: &[MetricDef] = &[
         Count,
         Neither,
         "frames the run's own impairments dropped (loss, MTU, queue limit)",
+    ),
+];
+
+/// Metrics of a Y.1564 check. Loss, delay and delay variation are of the
+/// green frames, the worst over every step and service.
+pub const Y1564_METRICS: &[MetricDef] = &[
+    m(
+        "passed",
+        Count,
+        Higher,
+        "1 when every step passed, 0 when one failed",
+    ),
+    m(
+        "steps",
+        Count,
+        Neither,
+        "steps run, configuration and performance",
+    ),
+    m("steps_failed", Count, Lower, "steps that failed"),
+    m(
+        "services_failed",
+        Count,
+        Lower,
+        "services that failed a step",
+    ),
+    m(
+        "flr_pct",
+        Percent,
+        Lower,
+        "frame loss ratio of the green frames, the worst step",
+    ),
+    m(
+        "ftd",
+        Millis,
+        Lower,
+        "mean frame transfer delay, the worst step",
+    ),
+    m(
+        "fdv",
+        Millis,
+        Lower,
+        "frame delay variation (p99 - min), the worst step",
+    ),
+    m(
+        "availability_pct",
+        Percent,
+        Higher,
+        "availability in the performance test, the worst service",
+    ),
+    m(
+        "ses",
+        Count,
+        Lower,
+        "severely errored intervals in the performance test, all services",
+    ),
+    m(
+        "ir_mbps",
+        Mbps,
+        Higher,
+        "information rate received in the performance test, all services",
+    ),
+    m(
+        "yellow_loss_pct",
+        Percent,
+        Neither,
+        "yellow frames lost, the worst step (allowed)",
     ),
 ];
 

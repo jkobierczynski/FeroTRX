@@ -26,6 +26,7 @@ this checkout, else the installed one); arguments after it go to the
 | `latency-netns.sh` | a profile with two latency streams and a plain one, through a router with delay and loss | `DELAY=5ms`, `LOSS=0.02`, `DURATION=4s`, `IPV6=1` |
 | `impair-netns.sh` | `ferotrx impair` between two hosts in namespaces (ping through delay, jitter, loss, an MTU and duplicates), a stream's own `impair` measured by `ferotrx rx`, and a rate limit; no netem needed (see [Impairments](impairments.md)) | |
 | `bench-netns.sh` | `ferotrx bench` against a router that forwards 20 Mbit/s through a token bucket | `RATE=20`, `LINE=100`, `DELAY=2ms`, `SIZES="1020 imix"`, `TRIAL=1s` |
+| `y1564-netns.sh` | `ferotrx y1564` (voice and data) through a router that polices by DSCP, then again with data's policer below its CIR, which must fail | `STEP=2s`, `PERF=4s`, `LOW=only` or `LOW=no` |
 | `hosts-netns.sh` | `ferotrx host` and `ferotrx tcp --client-ip dhcp` against dnsmasq and a bridge with IGMP/MLD snooping; a FeroTRX DHCP server for busybox `udhcpc` and emulated clients | `IPV6=1` (SLAAC, DHCPv6, MLD, router advertisements, a DHCPv6 server for `udhcpc6`) |
 | `lab-examples.sh` | the control server's lab router (`serve --lab`, `lab.start`), with `examples/lab-tcp.toml` and `examples/lab-udp-mix.toml` as they are | `BLOCK=1` (router resets TCP to port 80) |
 | `scenario-netns.sh` | `examples/scenario-nat.toml`, then the same after breaking the router's firewall, which must show as a regression | `KEEP=DIR` keeps the reports |
@@ -45,7 +46,7 @@ feature: [stateful TCP](stateful-tcp.md#lab-script),
 [stateful UDP](stateful-udp.md#lab-script),
 [application protocols](app-protocols.md#lab-script),
 [loss and latency](loss-latency.md#lab-script),
-[benchmarking](benchmarking.md), [host emulation](host-emulation.md#lab-script)
+[benchmarking](benchmarking.md), [Y.1564](y1564.md#lab-script), [host emulation](host-emulation.md#lab-script)
 and [scenarios](scenarios.md#an-example-run).
 
 Things to know:

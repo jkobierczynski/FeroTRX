@@ -732,6 +732,45 @@ class UdpRunInfo(Record):
         raise KeyError(name)
 
 
+# ----- y1564.* -----
+
+
+@dataclass(kw_only=True)
+class Y1564RunInfo(Record):
+    """A Y.1564 service activation test (``y1564.*``).
+
+    ``steps`` holds each step as it ended, and ``report`` the whole report
+    once the run has ended, both as the server's JSON (see
+    ``docs/y1564.md``); ``text`` is the report as ``ferotrx y1564`` prints it.
+    """
+
+    id: int = 0
+    #: The profile's file on the server, or ``upload``.
+    profile: str = ""
+    iface: str = ""
+    rx: str = ""
+    state: RunState = RunState.RUNNING
+    error: str | None = None
+    elapsed_s: float = 0.0
+    tests: list[str] = field(default_factory=list)
+    services: list[str] = field(default_factory=list)
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    info: dict[str, Any] | None = None
+    report: dict[str, Any] | None = None
+    text: str | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.state == RunState.RUNNING
+
+    @property
+    def passed(self) -> bool | None:
+        """Whether every step passed; None until the run has ended."""
+        if self.report is None:
+            return None
+        return bool(self.report.get("passed"))
+
+
 # ----- notifications -----
 
 

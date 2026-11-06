@@ -8,6 +8,7 @@ mod remote;
 mod scenario;
 mod tcp;
 mod udp;
+mod y1564;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -61,6 +62,11 @@ enum Command {
     /// rate), latency, frame loss and back-to-back bursts, for a list of frame
     /// sizes or mixes such as IMIX; writes a JSON and a text report.
     Bench(bench::BenchArgs),
+    /// Test services the Y.1564 way: per service, steps up to the CIR, CIR +
+    /// EIR and a policing step; then all services at their CIR for a long
+    /// time, with loss, delay, delay variation and availability against
+    /// each service's acceptance criteria. Exits with an error if a step fails.
+    Y1564(y1564::Y1564Args),
     /// Regression tests: run a scenario file's checks (TCP, UDP, streams
     /// with a receiver) against expected outcomes, write JSON and JUnit
     /// reports, keep a history and compare runs.
@@ -567,6 +573,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Host(args) => host::cmd_host(args),
         Command::Rx(args) => latency::cmd_rx(args),
         Command::Bench(args) => bench::cmd_bench(args),
+        Command::Y1564(args) => y1564::cmd_y1564(args),
         Command::Scenario(args) => scenario::cmd_scenario(args),
         Command::Check(args) => check::cmd_check(args),
         Command::Impair(args) => impair::cmd_impair(args),

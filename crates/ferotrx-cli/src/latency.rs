@@ -350,6 +350,7 @@ pub fn cmd_rx(args: RxCmdArgs) -> Result<()> {
         RxConfig {
             duration: args.duration,
             stop: Some(stop),
+            interval: None,
         },
     )?;
     if !args.quiet {

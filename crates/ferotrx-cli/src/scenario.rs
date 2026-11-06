@@ -373,6 +373,8 @@ fn show(args: ShowArgs) -> Result<()> {
     for c in &s.checks {
         let mut line = format!("{} ({}, {})", c.name, c.kind(), c.source);
         match c.expect {
+            Expect::Complete if c.kind() == CheckKind::Y1564 => line.push_str(": expect pass"),
+            Expect::Blocked if c.kind() == CheckKind::Y1564 => line.push_str(": expect fail"),
             Expect::Complete => line.push_str(": expect complete"),
             Expect::Blocked => line.push_str(": expect blocked"),
             Expect::Any => {}
@@ -403,6 +405,15 @@ fn show(args: ShowArgs) -> Result<()> {
             Workload::Traffic(p) => {
                 let names: Vec<&str> = p.streams.iter().map(|s| s.name.as_str()).collect();
                 format!("streams {}", names.join(", "))
+            }
+            Workload::Y1564(p) => {
+                let names: Vec<&str> = p.config.services.iter().map(|s| s.name.as_str()).collect();
+                let tests: Vec<&str> = p.config.tests.iter().map(|t| t.name()).collect();
+                format!(
+                    "Y.1564 {} of services {}",
+                    tests.join(" and "),
+                    names.join(", ")
+                )
             }
         };
         println!("    runs: {what}");

@@ -54,10 +54,11 @@ use crate::{parse_duration, Error, Profile, Result, TcpProfile, UdpProfile};
 
 pub use collect::{
     tcp_metrics, tcp_summary, traffic_metrics, traffic_summary, udp_metrics, udp_summary,
+    y1564_metrics, y1564_summary,
 };
 pub use metric::{
     Better, CheckKind, Condition, MetricDef, Metrics, Op, Unit, TCP_METRICS, TRAFFIC_METRICS,
-    UDP_METRICS,
+    UDP_METRICS, Y1564_METRICS,
 };
 pub use report::{
     check_line, compare, format_utc, run_scenario, Change, CheckChange, CheckReport, CheckRun,
@@ -127,6 +128,12 @@ impl Expect {
             (CheckKind::Traffic, Expect::Blocked) => {
                 vec![c("tx_packets", Gt, 0.0), c("rx_packets", Eq, 0.0)]
             }
+            // For a service test, "blocked" is a test expected to fail: a
+            // policer set too low, a link that cannot carry the services.
+            (CheckKind::Y1564, Expect::Complete) => vec![c("passed", Eq, 1.0)],
+            (CheckKind::Y1564, Expect::Blocked) => {
+                vec![c("steps", Gt, 0.0), c("passed", Eq, 0.0)]
+            }
         }
     }
 }
@@ -139,6 +146,8 @@ pub enum Workload {
     /// Stateless streams; every stream carries a latency signature unless
     /// the profile marks some.
     Traffic(Profile),
+    /// A Y.1564 service activation test, sent on `iface` and received on `rx`.
+    Y1564(Box<crate::Y1564Profile>),
 }
 
 impl Workload {
@@ -147,6 +156,7 @@ impl Workload {
             Workload::Tcp(_) => CheckKind::Tcp,
             Workload::Udp(_) => CheckKind::Udp,
             Workload::Traffic(_) => CheckKind::Traffic,
+            Workload::Y1564(_) => CheckKind::Y1564,
         }
     }
 }
@@ -300,6 +310,7 @@ struct RawCheck {
     tcp: Option<RawWorkload>,
     udp: Option<RawWorkload>,
     traffic: Option<RawWorkload>,
+    y1564: Option<RawWorkload>,
     iface: Option<String>,
     rx: Option<String>,
     rx_wait: Option<String>,
@@ -497,18 +508,20 @@ impl Scenario {
         ),
     ) -> Result<Check> {
         let (iface, rx, rx_wait, dur, attempts) = defaults;
-        let (kind, raw) = match (c.tcp, c.udp, c.traffic) {
-            (Some(w), None, None) => (CheckKind::Tcp, w),
-            (None, Some(w), None) => (CheckKind::Udp, w),
-            (None, None, Some(w)) => (CheckKind::Traffic, w),
-            (None, None, None) => {
+        let (kind, raw) = match (c.tcp, c.udp, c.traffic, c.y1564) {
+            (Some(w), None, None, None) => (CheckKind::Tcp, w),
+            (None, Some(w), None, None) => (CheckKind::Udp, w),
+            (None, None, Some(w), None) => (CheckKind::Traffic, w),
+            (None, None, None, Some(w)) => (CheckKind::Y1564, w),
+            (None, None, None, None) => {
                 return Err(Error::Profile(
-                    "give the run: tcp, udp or traffic (a profile file or a table)".into(),
+                    "give the run: tcp, udp, traffic or y1564 (a profile file or a table)".into(),
                 ))
             }
             _ => {
                 return Err(Error::Profile(
-                    "give one of tcp, udp and traffic; make another check for the other".into(),
+                    "give one of tcp, udp, traffic and y1564; make another check for the other"
+                        .into(),
                 ))
             }
         };
@@ -531,6 +544,7 @@ impl Scenario {
             CheckKind::Tcp => Workload::Tcp(TcpProfile::from_toml(&text, &dir)?),
             CheckKind::Udp => Workload::Udp(UdpProfile::from_toml(&text, &dir)?),
             CheckKind::Traffic => Workload::Traffic(Profile::from_toml(&text, &dir)?),
+            CheckKind::Y1564 => Workload::Y1564(Box::new(crate::Y1564Profile::from_toml(&text)?)),
         };
         // The check's impairments, over the profile's: a network made worse
         // for this check only.
@@ -558,6 +572,13 @@ impl Scenario {
                     for s in &mut p.streams {
                         s.impair = Some(spec.clone());
                     }
+                }
+            }
+            Workload::Y1564(_) => {
+                if impair.is_some() || impair_rx.is_some() {
+                    return Err(Error::Profile(
+                        "a y1564 check measures the network as it is: no impair".into(),
+                    ));
                 }
             }
         }
@@ -591,16 +612,16 @@ impl Scenario {
             require,
             attempts,
         };
-        if kind == CheckKind::Traffic {
+        if matches!(kind, CheckKind::Traffic | CheckKind::Y1564) {
             if check.rx.is_none() {
-                return Err(Error::Profile(
-                    "a traffic check needs `rx`, the interface to receive on".into(),
-                ));
+                return Err(Error::Profile(format!(
+                    "a {kind} check needs `rx`, the interface to receive on"
+                )));
             }
             if check.iface.is_none() {
-                return Err(Error::Profile(
-                    "a traffic check needs `iface`, the interface to send on".into(),
-                ));
+                return Err(Error::Profile(format!(
+                    "a {kind} check needs `iface`, the interface to send on"
+                )));
             }
         }
         if check.conditions().is_empty() {
@@ -737,9 +758,24 @@ packet = "eth/ipv4(dst=${server})/udp/raw(len=100)"
         let e = err("name = \"x\"\n");
         assert!(e.contains("at least one [[check]]"), "{e}");
         let e = err("[[check]]\nname = \"a\"\n");
-        assert!(e.contains("tcp, udp or traffic"), "{e}");
+        assert!(e.contains("tcp, udp, traffic or y1564"), "{e}");
         let e = err("[[check]]\nname = \"a\"\ntcp = \"x.toml\"\nudp = \"y.toml\"\n");
-        assert!(e.contains("one of tcp, udp and traffic"), "{e}");
+        assert!(e.contains("one of tcp, udp, traffic and y1564"), "{e}");
+        let y = "[[check]]\nname = \"a\"\n[check.y1564]\nservice = [{ name = \"s\", packet = \"eth/ipv4/udp\", cir = 5 }]\n";
+        let e = err(y);
+        assert!(e.contains("a y1564 check needs `rx`"), "{e}");
+        let s = Scenario::from_toml(
+            &format!("iface = \"a\"\nrx = \"b\"\n{y}"),
+            Path::new("."),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(s.checks[0].kind(), CheckKind::Y1564);
+        assert_eq!(s.checks[0].conditions()[0].metric, "passed");
+        let e = err(&format!(
+            "iface = \"a\"\nrx = \"b\"\n{y}[check.impair]\nloss = 0.1\n"
+        ));
+        assert!(e.contains("no impair"), "{e}");
         let e = err("[[check]]\nname = \"a\"\ntcp = \"${nope}.toml\"\n");
         assert!(e.contains("${nope} is not set"), "{e}");
         let e = err("[[check]]\nname = \"a\"\ntcp = \"/no/such/file.toml\"\n");

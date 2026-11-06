@@ -85,6 +85,8 @@ pub enum Pending {
     ScenarioStarted,
     /// `bench.start`: show the run.
     BenchStarted,
+    /// `y1564.start`: show the run.
+    Y1564Started,
     /// `profile.load` of a multi-server group's member.
     GroupLoaded { member: usize },
     /// A start of a group's member.
@@ -291,6 +293,7 @@ pub enum Tab {
     Capture,
     Scenario,
     Bench,
+    Y1564,
     Group,
     Charts,
 }
@@ -325,6 +328,7 @@ pub struct FeroApp {
     pub groups: crate::views::GroupsState,
     pub apps: crate::views::AppsState,
     pub bench: crate::views::BenchState,
+    pub y1564: crate::views::Y1564State,
     pub log: Vec<LogLine>,
     pub next_tag: u64,
     pub started: Instant,
@@ -398,6 +402,7 @@ impl FeroApp {
             groups: Default::default(),
             apps: Default::default(),
             bench: Default::default(),
+            y1564: Default::default(),
             log: Vec::new(),
             next_tag: 1,
             started: Instant::now(),
@@ -502,6 +507,7 @@ impl FeroApp {
         self.groups = f.groups;
         self.apps = f.apps;
         self.bench = f.bench;
+        self.y1564 = f.y1564;
         self.tab = f.view.tab;
         self.bottom = f.view.bottom;
         if !f.capture.path.is_empty() {
@@ -785,6 +791,21 @@ impl FeroApp {
                             Err(e) => self.error(&name, format!("bench.start: {e}")),
                         }
                     }
+                    (Pending::Y1564Started, Ok(v)) => {
+                        match serde_json::from_value::<ferotrx_ctl::protocol::Y1564RunInfo>(v) {
+                            Ok(r) => {
+                                self.y1564.run = Some(r.id);
+                                let s = &mut self.servers[i];
+                                s.snap.y1564.retain(|x| x.id != r.id);
+                                s.snap.y1564.push(r.clone());
+                                self.info(
+                                    &name,
+                                    format!("Y.1564 test {} started as run {}", r.profile, r.id),
+                                );
+                            }
+                            Err(e) => self.error(&name, format!("y1564.start: {e}")),
+                        }
+                    }
                     (Pending::ScenarioChecked, Err(e)) => {
                         self.scenario.checked = Some(Err(e.to_string()));
                     }
@@ -816,6 +837,7 @@ impl FeroApp {
                             }
                             Pending::Interfaces => format!("interfaces.list: {e}"),
                             Pending::BenchStarted => format!("benchmark: {e}"),
+                            Pending::Y1564Started => format!("Y.1564: {e}"),
                             Pending::ScenarioChecked | Pending::ScenarioStarted => {
                                 format!("scenario: {e}")
                             }
