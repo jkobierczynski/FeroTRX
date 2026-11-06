@@ -124,9 +124,11 @@ computer (profiles you open and save, captures, certificates) are always
 picked this way. Files on the server (the capture a stream replays, the pcap
 the `file` port writes, a profile the server reads) can be picked the same
 way when the server runs on this computer (`127.0.0.1`, `::1`,
-`localhost`); for a server elsewhere, type the path, relative to the
+`localhost`, and the server reports this computer's host name and
+system); for a server elsewhere, type the path, relative to the
 server's data directory (where `ferotrx serve` was started, or
-`--data-dir`).
+`--data-dir`). A loopback address forwarded into a virtual machine (such
+as a VirtualBox NAT port forward to 127.0.0.1:4510) counts as elsewhere.
 
 Relative paths inside a profile start at the profile's own folder, as with
 `ferotrx run`: open `examples/lab-two-vlans.toml` and its `pcap = "dns.pcap"`
