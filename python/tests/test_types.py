@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+import ferotrx
 from ferotrx import RunInfo, RunState, ServerInfo, TcpRunInfo, _wire
 from ferotrx.errors import Forbidden, NotFound, RpcError
 
@@ -121,6 +122,45 @@ def test_start_params() -> None:
     for bad in ({}, {"iface": "a", "file": "b"}):
         with pytest.raises(ValueError):
             _wire.output_spec(**bad)  # type: ignore[arg-type]
+
+
+def test_y1564_params_and_info() -> None:
+    call = _wire.y1564_start(
+        None,
+        toml="[[service]]",
+        upload=False,
+        tests=["configuration"],
+        services=None,
+        iface="eth1",
+        rx="eth2",
+        line_rate="1gbps",
+        step_duration=None,
+    )
+    assert call.method == "y1564.start"
+    assert call.params == {
+        "toml": "[[service]]",
+        "tests": ["configuration"],
+        "iface": "eth1",
+        "rx": "eth2",
+        "line_rate": "1gbps",
+    }
+    info = ferotrx.Y1564RunInfo.from_dict(
+        {
+            "id": 3,
+            "profile": "upload",
+            "iface": "eth1",
+            "rx": "eth2",
+            "state": "finished",
+            "tests": ["configuration"],
+            "services": ["data"],
+            "steps": [{"name": "25% CIR", "passed": True}],
+            "report": {"passed": False},
+        }
+    )
+    assert not info.running
+    assert info.passed is False
+    assert info.steps[0]["name"] == "25% CIR"
+    assert ferotrx.Y1564RunInfo().passed is None
 
 
 def test_errors_by_code() -> None:

@@ -10,6 +10,7 @@ mod scenario;
 pub(crate) mod stateful;
 mod stats;
 mod streams;
+mod y1564;
 
 use eframe::egui::{self, RichText};
 
@@ -22,6 +23,7 @@ pub use lab::LabForm;
 pub use scenario::ScenarioState;
 pub use stateful::StatefulState;
 pub use streams::{string_list, EditorState};
+pub use y1564::Y1564State;
 
 use crate::app::{BottomTab, FeroApp, ServerState, Status, Tab};
 use crate::conn::ConnSettings;
@@ -47,6 +49,7 @@ impl FeroApp {
             Tab::Capture => self.capture_tab(ui),
             Tab::Scenario => self.scenario_tab(ui),
             Tab::Bench => self.bench_tab(ui),
+            Tab::Y1564 => self.y1564_tab(ui),
             Tab::Group => self.groups_tab(ui),
             Tab::Charts => self.charts_tab(ui),
         });
@@ -89,6 +92,11 @@ impl FeroApp {
                     Tab::Bench,
                     "Benchmark",
                     "RFC 2544 throughput, latency, frame loss and back-to-back, run on the server",
+                ),
+                (
+                    Tab::Y1564,
+                    "Y.1564",
+                    "Service activation: services with CIR, EIR and acceptance criteria, run on the server",
                 ),
                 (
                     Tab::Group,

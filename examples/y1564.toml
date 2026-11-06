@@ -1,0 +1,55 @@
+# A Y.1564 service activation test of a network between two interfaces of
+# this machine:
+#
+#   sudo ferotrx y1564 examples/y1564.toml -i eth1 --rx eth2 --report y1564.json
+#
+# FeroTRX sends on eth1 into the network (here a router at 02:00:00:00:01:01
+# between 10.9.1.0/24 and 10.9.2.0/24), which polices each service to its
+# bandwidth profile and delivers the frames on eth2, where they are received
+# and counted. Green frames (within the CIR) and yellow ones (the EIR) are
+# counted apart; yellow ones may be dropped. Writes y1564.json and y1564.txt.
+# See docs/y1564.md.
+format = 1
+
+[y1564]
+line_rate = "1gbps"
+tests = ["configuration", "performance"]
+steps = [25, 50, 75, 100]       # percent of the CIR, green frames only
+step_duration = "60s"           # Y.1564 suggests 60 s a step
+overshoot = 125                 # policing step: yellow frames at 125% of the EIR
+performance_duration = "15m"    # 15 minutes up to 24 hours
+interval = "1s"                 # loss and delay per second, and availability
+ir_tolerance = 5                # percent
+
+# Voice: a small CIR, no excess, strict delay. Marked EF; yellow frames would
+# be best effort.
+[[service]]
+name = "voice"
+packet = "eth(src=02:00:00:00:01:02,dst=02:00:00:00:01:01)/ipv4(src=10.9.1.2,dst=10.9.2.2,dscp=46)/udp(sport=5004,dport=5004)"
+yellow_packet = "eth(src=02:00:00:00:01:02,dst=02:00:00:00:01:01)/ipv4(src=10.9.1.2,dst=10.9.2.2,dscp=0)/udp(sport=5004,dport=5004)"
+sizes = 252                     # 256 bytes on the wire
+cir = "10mbps"
+flr = 0.01                      # percent
+ftd = "10ms"
+fdv = "2ms"
+availability = 99.95
+
+# Data: a CIR with excess on top, in EMIX frame sizes (64, 128, 256, 1024 and
+# 1518 bytes on the wire, in turn), with bursts the policer must take.
+[[service]]
+name = "data"
+packet = "eth(src=02:00:00:00:01:02,dst=02:00:00:00:01:01)/ipv4(src=10.9.1.2,dst=10.9.2.3,dscp=10)/udp(sport=4000,dport=9000)"
+yellow_packet = "eth(src=02:00:00:00:01:02,dst=02:00:00:00:01:01)/ipv4(src=10.9.1.2,dst=10.9.2.3,dscp=12)/udp(sport=4000,dport=9000)"
+vary = ["port_src=4000..4063"]
+sizes = "emix:abceg"
+cir = "100mbps"
+eir = "50mbps"
+cbs = 12176                     # bytes: eight 1522-byte frames
+ebs = 12176
+flr = 0.1
+ftd = "20ms"
+fdv = "5ms"
+availability = 99.9
+
+[output]
+# backend = "af_xdp"

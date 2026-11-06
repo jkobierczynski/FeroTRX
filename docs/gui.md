@@ -174,6 +174,18 @@ writes the JSON report and the text report next to it, as
 `ferotrx bench --report` does. Throughput in orange means the sender did
 not reach the offered rate: it measured the sender, not the device.
 
+## Y.1564
+
+The Y.1564 tab runs [service activation tests](y1564.md) on the server
+(`y1564.start`). Pick the profile (edited here, New for two services
+through the lab router, or a file on the server), the interface to send on
+and the one to receive on, and optionally the tests, services, line rate
+and step and performance durations. Each configuration step shows as it
+ends, per service: offered rate, information rate, FLR, FTD, FDV, yellow
+loss and the verdict with its reasons. The performance test gets a table
+per service and charts of loss and delay per interval. Save report…
+writes the JSON and text reports, as `ferotrx y1564 --report` does.
+
 ## Several servers at once
 
 The Multi-server tab starts runs on several servers together, for traffic
@@ -288,8 +300,6 @@ GUI can drive a server across the lab as easily as the local one.
 ## Not done yet
 
 * Call quality (jitter, MOS) charts, once the engine measures them (#49).
-* ITU-T Y.1564 service tests in the Benchmark tab, once the engine has them
-  (#52).
 * Forms keep the profile's values but not its comments.
 * Groups start within one poll of each other, not at one instant; agents
   that start on a shared clock are issue #21.

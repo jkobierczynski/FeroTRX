@@ -56,6 +56,9 @@ each milestone added and what comes next.
   [Guide](docs/loss-latency.md)
 * **Benchmarking**: RFC 2544 throughput, latency, frame loss and
   back-to-back, with IMIX and other size mixes. [Guide](docs/benchmarking.md)
+* **Y.1564 service activation**: services with a CIR, EIR and burst sizes,
+  the configuration steps and policing, and a performance test with
+  availability, judged against FLR, FTD and FDV. [Guide](docs/y1564.md)
 * **Regression scenarios**: checks with expected outcomes, JSON and JUnit
   reports, run history and comparisons, for CI. [Guide](docs/scenarios.md)
 * **Fast backends**: libpcap/Npcap everywhere, AF_XDP on Linux, DPDK as a
@@ -136,10 +139,11 @@ The manual is in [docs/](docs/README.md):
 | [One run on several cores](docs/multi-core.md) | `--workers`, splitting streams and flows |
 | [Loss and latency](docs/loss-latency.md) | signatures, `--rx`, `rx` |
 | [Benchmarking](docs/benchmarking.md) | `bench`, RFC 2544 |
+| [Y.1564 service activation](docs/y1564.md) | `y1564`, CIR/EIR, policing, availability |
 | [Scenarios and regression tests](docs/scenarios.md) | `scenario` |
 | [Remote control](docs/remote-control.md) | `serve`, `ctl`, the protocol, security |
 | [The Python client](docs/python-client.md) | the `ferotrx` Python package |
-| [The desktop GUI](docs/gui.md) | `ferotrx-gui`: ports, stream and packet editor, application profiles, benchmarks, workspaces |
+| [The desktop GUI](docs/gui.md) | `ferotrx-gui`: ports, stream and packet editor, application profiles, benchmarks, Y.1564, workspaces |
 | [Using FeroTRX as a library](docs/library.md) | the Rust API |
 | [Lab scripts](docs/lab-scripts.md) | network namespace labs, as run in CI |
 

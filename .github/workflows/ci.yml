@@ -396,6 +396,18 @@ jobs:
           sudo modprobe sch_netem || true
           sudo scripts/bench-netns.sh ./target/debug/ferotrx -q
 
+      # Y.1564 through a router that polices two services by DSCP (tc police
+      # on its ingress): every configuration step and the performance test
+      # pass; then with one service's policer below its CIR the test fails,
+      # at that service's 100% step.
+      - name: Y.1564 service activation through a policing router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo modprobe act_police || true
+          sudo modprobe cls_u32 || true
+          sudo scripts/y1564-netns.sh ./target/debug/ferotrx -q
+
       # A regression scenario (examples/scenario-nat.toml) against the NAT
       # router: web and DNS pass, TCP 8080 and NTP are blocked, a voice
       # stream arrives. Then the router resets TCP to port 80, and the second

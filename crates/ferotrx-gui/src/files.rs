@@ -55,6 +55,12 @@ pub enum Target {
     SaveBench,
     /// Where to save the report of the benchmark run shown.
     BenchReport,
+    /// A Y.1564 profile for the Y.1564 tab.
+    OpenY1564,
+    /// Where to save the Y.1564 profile.
+    SaveY1564,
+    /// Where to save the report of the Y.1564 run shown.
+    Y1564Report,
 }
 
 /// The kinds of file a dialog lists first.

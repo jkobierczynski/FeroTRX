@@ -79,6 +79,10 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 | `bench.get`, `bench.remove` | `id` | the benchmark run: `state`, `elapsed_s`, `tests`, `sizes`, every finished `trial` with its `size`, the run `info` (host, interfaces, backend), and once it has ended the `report` (as in `ferotrx bench --report`) and its `text` |
 | `bench.stop` | `id`, `wait` (default true) | the benchmark run: it ends after the trial under way, with a partial report |
 | `bench.list` | | every benchmark run |
+| `y1564.start` | a [Y.1564 profile](y1564.md) as `path` or `toml`; `iface` and `rx`; optional `tests`, `services`, `line_rate`, `step_duration`, `performance_duration`, `backend`, `xdp_mode`, `queue`, `workers` | the Y.1564 run, on a thread of the server |
+| `y1564.get`, `y1564.remove` | `id` | the Y.1564 run: `state`, `elapsed_s`, `tests`, `services`, every finished `steps` record (flows and service verdicts), the run `info`, and once it has ended the `report` (as in `ferotrx y1564 --report`) and its `text` |
+| `y1564.stop` | `id`, `wait` (default true) | the run: the step under way ends early, and the report is partial |
+| `y1564.list` | | every Y.1564 run |
 | `lab.start` | optional `ipv6`, `nat`, `loss`, `delay`, `block_tcp`, `block_udp`, `dhcp`, `queues` | the lab router, built (server started with `--lab`; see [lab scripts](lab-scripts.md#a-standing-lab-router)) |
 | `lab.stop` | | the lab router, removed |
 | `lab.get` | | the lab router, or why there can be none |

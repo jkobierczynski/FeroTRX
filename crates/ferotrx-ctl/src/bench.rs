@@ -49,7 +49,7 @@ pub fn open_bench_sinks(
 }
 
 /// A sink shared by the trials: opened once, as DPDK and AF_XDP want.
-struct SharedSink(Arc<Mutex<Box<dyn PacketSink + Send>>>);
+pub(crate) struct SharedSink(pub(crate) Arc<Mutex<Box<dyn PacketSink + Send>>>);
 
 impl PacketSink for SharedSink {
     fn send(&mut self, data: &[u8]) -> Result<(), SinkError> {
@@ -64,7 +64,7 @@ impl PacketSink for SharedSink {
 }
 
 /// A receiver shared by the trials, so nothing arrives while one is reopened.
-struct SharedReceiver(Arc<Mutex<Box<dyn PacketReceiver>>>);
+pub(crate) struct SharedReceiver(pub(crate) Arc<Mutex<Box<dyn PacketReceiver>>>);
 
 impl PacketReceiver for SharedReceiver {
     fn recv(&mut self, buf: &mut Vec<u8>) -> Result<Option<Duration>, SinkError> {

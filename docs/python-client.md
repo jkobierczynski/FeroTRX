@@ -179,6 +179,23 @@ web = done.template("web").client.app
 assert web.failed == 0 and web.codes.get("404", 0) > 0
 ```
 
+## Y.1564
+
+```python
+run = c.y1564_start("y1564.toml", upload=True, iface="enp0s3", rx="enp0s8",
+                    step_duration="10s", performance_duration="1m")
+done = c.y1564_wait(run.id)
+done.passed                       # every step passed
+for step in done.steps:
+    for s in step["services"]:
+        print(step["name"], s["service"], s["flr_pct"], s["passed"])
+```
+
+`y1564_start` also takes `toml`, `tests`, `services`, `line_rate` and the
+backend settings; then `y1564_get`, `y1564_stop`, `y1564_runs` and
+`y1564_remove`. The report is in `done.report`, as in
+`ferotrx y1564 --report` ([Y.1564](y1564.md)).
+
 ## Errors
 
 | Exception | Code | When |

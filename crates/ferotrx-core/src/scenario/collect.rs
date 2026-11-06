@@ -291,6 +291,79 @@ pub fn traffic_summary(metrics: &Metrics) -> String {
     line
 }
 
+/// The metrics of a Y.1564 check.
+pub fn y1564_metrics(r: &crate::Y1564Report) -> Metrics {
+    let mut m = Metrics::new();
+    put(&mut m, "passed", if r.passed { 1.0 } else { 0.0 });
+    let steps = r.configuration.len() + usize::from(r.performance.is_some());
+    put(&mut m, "steps", steps as f64);
+    put(&mut m, "steps_failed", r.failed_steps() as f64);
+    put(
+        &mut m,
+        "services_failed",
+        r.services.iter().filter(|s| !s.passed).count() as f64,
+    );
+    if steps > 0 {
+        put(
+            &mut m,
+            "flr_pct",
+            r.worst(|s| Some(s.flr_pct)).unwrap_or(0.0),
+        );
+    }
+    if let Some(v) = r.worst(|s| s.ftd_ms) {
+        put(&mut m, "ftd", v);
+    }
+    if let Some(v) = r.worst(|s| s.fdv_ms) {
+        put(&mut m, "fdv", v);
+    }
+    if let Some(v) = r.worst(|s| s.yellow_flr_pct) {
+        put(&mut m, "yellow_loss_pct", v);
+    }
+    if let Some(v) = r.min_availability() {
+        put(&mut m, "availability_pct", v);
+    }
+    if let Some(p) = &r.performance {
+        put(
+            &mut m,
+            "ses",
+            p.services.iter().filter_map(|s| s.ses).sum::<u64>() as f64,
+        );
+        put(
+            &mut m,
+            "ir_mbps",
+            p.services.iter().map(|s| s.ir_mbps).sum(),
+        );
+    }
+    m
+}
+
+/// One line on a Y.1564 check.
+pub fn y1564_summary(r: &crate::Y1564Report) -> String {
+    let steps = r.configuration.len() + usize::from(r.performance.is_some());
+    let mut line = format!(
+        "{}: {} step(s), {} failed",
+        if r.passed { "passed" } else { "failed" },
+        steps,
+        r.failed_steps()
+    );
+    if let Some(flr) = r.worst(|s| Some(s.flr_pct)) {
+        line.push_str(&format!("; worst green FLR {flr:.3}%"));
+    }
+    if let Some(a) = r.min_availability() {
+        line.push_str(&format!(", availability {a:.3}%"));
+    }
+    let failed: Vec<&str> = r
+        .services
+        .iter()
+        .filter(|s| !s.passed)
+        .map(|s| s.service.as_str())
+        .collect();
+    if !failed.is_empty() {
+        line.push_str(&format!("; failed: {}", failed.join(", ")));
+    }
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

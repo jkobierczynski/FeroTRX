@@ -7,11 +7,12 @@ use std::time::{Duration, Instant};
 
 use ferotrx_core::scenario::{
     run_scenario, tcp_metrics, tcp_summary, traffic_metrics, traffic_summary, udp_metrics,
-    udp_summary, Check, CheckRun, CheckRunner, Progress, RunOptions, Scenario, Workload,
+    udp_summary, y1564_metrics, y1564_summary, Check, CheckRun, CheckRunner, Progress, RunOptions,
+    Scenario, Workload,
 };
 use ferotrx_core::{
-    Job, PacketPort, PacketReceiver, PacketSink, Profile, RunConfig, RxSettings, SendSettings,
-    SinkError, TcpProfile, TcpRunConfig, UdpProfile, LINKTYPE_ETHERNET,
+    run_y1564, Job, PacketPort, PacketReceiver, PacketSink, Profile, RunConfig, RxSettings,
+    SendSettings, SinkError, TcpProfile, TcpRunConfig, UdpProfile, Y1564Profile, LINKTYPE_ETHERNET,
 };
 
 use crate::controller::{ReceiverOpener, Run};
@@ -20,6 +21,7 @@ use crate::tcp::TcpRun;
 use crate::tcp::{start_tcp_with, PortOpener};
 use crate::udp::start_udp_with;
 use crate::udp::UdpRun;
+use crate::y1564::service_runner;
 
 /// Opens an interface to send stateless traffic on: its name, the profile's
 /// `[output]` settings and the link type.
@@ -331,12 +333,52 @@ impl LabRunner {
     }
 }
 
+impl LabRunner {
+    /// A Y.1564 test, sent on the check's `iface` and received on `rx`;
+    /// a check `duration` is its `max_time`.
+    fn y1564(
+        &mut self,
+        check: &Check,
+        p: &Y1564Profile,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<CheckRun, String> {
+        let (Some(iface), Some(rx)) = (&check.iface, &check.rx) else {
+            return Err("a y1564 check needs `iface` and `rx`".into());
+        };
+        let mut profile = p.clone();
+        profile.config.stop = Some(stop.clone());
+        if check.duration.is_some() {
+            profile.config.max_time = check.duration;
+        }
+        // The receiver first, so it sees the first frame.
+        let receiver =
+            (self.open_receiver)(rx).map_err(|e| format!("cannot receive on {rx}: {e}"))?;
+        let sink = (self.open_sink)(iface, &profile.output, LINKTYPE_ETHERNET)
+            .map_err(|e| format!("cannot send on {iface}: {e}"))?;
+        let mut runner = service_runner(&profile, vec![sink], receiver, stop.clone());
+        let progress = &mut self.progress;
+        let report = run_y1564(&profile.config, &mut runner, |step| {
+            if let Some(f) = progress.as_mut() {
+                for line in step.lines() {
+                    f(check, &line);
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+        Ok(CheckRun {
+            metrics: y1564_metrics(&report),
+            summary: y1564_summary(&report),
+        })
+    }
+}
+
 impl CheckRunner for LabRunner {
     fn run(&mut self, check: &Check, stop: &Arc<AtomicBool>) -> Result<CheckRun, String> {
         match &check.workload {
             Workload::Tcp(p) => self.tcp(check, p, stop),
             Workload::Udp(p) => self.udp(check, p, stop),
             Workload::Traffic(p) => self.traffic(check, p, stop),
+            Workload::Y1564(p) => self.y1564(check, p, stop),
         }
     }
 }

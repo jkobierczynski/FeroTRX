@@ -187,7 +187,53 @@ pub struct FlowStats {
     /// One more than the highest sequence number seen.
     pub next_seq: u64,
     pub latency: LatencyStats,
+    /// Per interval of send time, when [`RxStats::interval`] is set: the
+    /// packets sent in each interval that arrived, keyed by the send time
+    /// divided by the interval.
+    pub intervals: BTreeMap<u64, IntervalStats>,
     window: Vec<u64>,
+}
+
+/// Packets of a flow sent in one interval that arrived (once), and their
+/// latency.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IntervalStats {
+    pub packets: u64,
+    pub bytes: u64,
+    /// Packets with a latency: not those that seemed to arrive before they left.
+    pub timed: u64,
+    pub latency_sum_ns: u128,
+    pub latency_min_ns: u64,
+    pub latency_max_ns: u64,
+}
+
+impl IntervalStats {
+    fn record(&mut self, len: usize, latency: Option<Duration>) {
+        self.packets += 1;
+        self.bytes += len as u64;
+        if let Some(l) = latency {
+            let ns = u64::try_from(l.as_nanos()).unwrap_or(u64::MAX);
+            if self.timed == 0 || ns < self.latency_min_ns {
+                self.latency_min_ns = ns;
+            }
+            self.latency_max_ns = self.latency_max_ns.max(ns);
+            self.timed += 1;
+            self.latency_sum_ns += u128::from(ns);
+        }
+    }
+
+    pub fn min(&self) -> Option<Duration> {
+        (self.timed > 0).then(|| Duration::from_nanos(self.latency_min_ns))
+    }
+
+    pub fn max(&self) -> Option<Duration> {
+        (self.timed > 0).then(|| Duration::from_nanos(self.latency_max_ns))
+    }
+
+    pub fn mean(&self) -> Option<Duration> {
+        (self.timed > 0)
+            .then(|| Duration::from_nanos((self.latency_sum_ns / u128::from(self.timed)) as u64))
+    }
 }
 
 impl FlowStats {
@@ -201,6 +247,7 @@ impl FlowStats {
             first_seq: seq,
             next_seq: seq,
             latency: LatencyStats::default(),
+            intervals: BTreeMap::new(),
             window: vec![0; (WINDOW / 64) as usize],
         }
     }
@@ -223,7 +270,7 @@ impl FlowStats {
         (&mut self.window[(i / 64) as usize], 1u64 << (i % 64))
     }
 
-    fn record(&mut self, sig: &Signature, len: usize, rx_time: Duration) {
+    fn record(&mut self, sig: &Signature, len: usize, rx_time: Duration, interval: Option<u128>) {
         self.packets += 1;
         self.bytes += len as u64;
         let seq = sig.seq;
@@ -257,7 +304,12 @@ impl FlowStats {
             *word |= bit;
             self.out_of_order += 1;
         }
-        self.latency.record(rx_time.checked_sub(sig.tx_time));
+        let latency = rx_time.checked_sub(sig.tx_time);
+        self.latency.record(latency);
+        if let Some(ns) = interval {
+            let key = u64::try_from(sig.tx_time.as_nanos() / ns).unwrap_or(u64::MAX);
+            self.intervals.entry(key).or_default().record(len, latency);
+        }
     }
 }
 
@@ -289,6 +341,9 @@ pub struct RxStats {
     /// How long the receiver has been running.
     pub elapsed: Duration,
     pub flows: BTreeMap<u32, FlowStats>,
+    /// When set, every flow also counts what arrived per interval of send
+    /// time ([`FlowStats::intervals`]), e.g. per second for availability.
+    pub interval: Option<Duration>,
 }
 
 impl RxStats {
@@ -301,10 +356,11 @@ impl RxStats {
             self.untagged += 1;
             return None;
         };
+        let interval = self.interval.map(|d| d.as_nanos()).filter(|&ns| ns > 0);
         self.flows
             .entry(sig.flow)
             .or_insert_with(|| FlowStats::new(sig.flow, sig.seq))
-            .record(&sig, frame.len(), rx_time);
+            .record(&sig, frame.len(), rx_time, interval);
         Some(sig)
     }
 
@@ -451,7 +507,7 @@ mod tests {
         let mut f = FlowStats::new(4, 5);
         let at = Duration::from_secs(11);
         for s in [5, 6, 8, 9, 7, 9, 20, 3] {
-            f.record(&sig(s), 60, at);
+            f.record(&sig(s), 60, at, None);
         }
         // 3..=20 is 18 numbers; seen 3,5,6,7,8,9,20 once each.
         assert_eq!(f.packets, 8);
@@ -460,8 +516,8 @@ mod tests {
         assert_eq!((f.first_seq, f.next_seq), (3, 21));
         assert_eq!(f.seq_lost(), 18 - 7);
         // Far ahead, then something too old to tell.
-        f.record(&sig(100_000), 60, at);
-        f.record(&sig(50), 60, at);
+        f.record(&sig(100_000), 60, at, None);
+        f.record(&sig(50), 60, at, None);
         assert_eq!(f.out_of_order, 3);
         assert_eq!(f.duplicates, 1);
     }

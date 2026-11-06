@@ -53,9 +53,10 @@ from .types import (
     UdpCounters,
     UdpRunInfo,
     UdpTemplateCounters,
+    Y1564RunInfo,
 )
 
-__version__ = "0.29.0"
+__version__ = "0.30.0"
 
 __all__ = [
     "__version__",
@@ -103,6 +104,7 @@ __all__ = [
     "TcpRunInfo",
     "UdpCounters",
     "UdpTemplateCounters",
+    "Y1564RunInfo",
     "UdpRunInfo",
     "Notification",
     "StatsUpdate",

@@ -48,6 +48,8 @@ The [README](../README.md) has the overview and a quickstart.
   TCP/UDP/host ports and in a two-port bridge (`ferotrx impair`), without
   netem.
 * [Benchmarking](benchmarking.md): `ferotrx bench`, RFC 2544, IMIX.
+* [Y.1564 service activation](y1564.md): `ferotrx y1564`, services with a
+  CIR and EIR, configuration steps, policing, the performance test.
 * [Scenarios and regression tests](scenarios.md): `ferotrx scenario`,
   expected outcomes, JUnit reports, comparing runs.
 

@@ -23,6 +23,7 @@ from .types import (
     StatsUpdate,
     TcpRunInfo,
     UdpRunInfo,
+    Y1564RunInfo,
 )
 
 #: Version of the method set this client speaks.
@@ -390,6 +391,27 @@ def udp_start(
 
 def rx_start(iface: str, *, duration: str | None) -> Call[RxRunInfo]:
     return Call("rx.start", _drop_none(iface=iface, duration=duration), _record(RxRunInfo))
+
+
+def y1564_start(
+    path: PathLike | None,
+    *,
+    toml: str | None,
+    upload: bool,
+    tests: Sequence[str] | None,
+    services: Sequence[str] | None,
+    **kw: Any,
+) -> Call[Y1564RunInfo]:
+    params = _engine_params(path, toml, upload, None, **kw)
+    if tests:
+        params["tests"] = list(tests)
+    if services:
+        params["services"] = list(services)
+    return Call("y1564.start", params, _record(Y1564RunInfo))
+
+
+def y1564_get(id: int) -> Call[Y1564RunInfo]:
+    return Call("y1564.get", {"id": id}, _record(Y1564RunInfo))
 
 
 # The run families share stop/stats/list/remove; ``cls`` is what each reports

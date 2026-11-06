@@ -1747,6 +1747,79 @@ pub struct BenchRunInfo {
     pub text: Option<String>,
 }
 
+/// Parameters of `y1564.start`: a Y.1564 profile (`[y1564]` and
+/// `[[service]]` tables, see `docs/y1564.md`) as a file or as text, the
+/// interfaces, and values that replace the profile's, as `ferotrx y1564`
+/// takes them.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Y1564StartParams {
+    /// A Y.1564 profile on the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// The profile's text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toml: Option<String>,
+    /// Send on this interface.
+    pub iface: String,
+    /// Receive on this interface (may be `iface`).
+    pub rx: String,
+    /// `pcap` (default), `af_xdp` or `dpdk`; others from the profile's `[output]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xdp_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers: Option<u16>,
+    /// Tests instead of the profile's: `configuration`, `performance`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tests: Vec<String>,
+    /// Only these services (by name).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<String>,
+    /// Speed of the link, e.g. `1gbps`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_rate: Option<String>,
+    /// Length of each configuration step, e.g. `60s`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_duration: Option<String>,
+    /// Length of the performance test, e.g. `15m`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performance_duration: Option<String>,
+}
+
+/// A Y.1564 run, as `y1564.start`, `y1564.get`, `y1564.stop` and
+/// `y1564.list` show it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Y1564RunInfo {
+    pub id: u64,
+    /// The profile's file, or `upload`.
+    pub profile: String,
+    pub iface: String,
+    pub rx: String,
+    pub state: RunState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub elapsed_s: f64,
+    pub tests: Vec<String>,
+    pub services: Vec<String>,
+    /// Every step so far, in order.
+    #[serde(default)]
+    pub steps: Vec<ferotrx_core::StepRecord>,
+    /// The machine, interfaces and backend, as the report has them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<ferotrx_core::RunInfo>,
+    /// The report, once the run has ended (also when stopped: partial).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<ferotrx_core::Y1564Report>,
+    /// The report as `ferotrx y1564` prints it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
 // ----- stats.* -----
 
 /// Parameters of `stats.subscribe`.

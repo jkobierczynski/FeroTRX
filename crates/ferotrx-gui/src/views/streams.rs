@@ -402,6 +402,9 @@ impl FeroApp {
             Target::OpenBench | Target::SaveBench | Target::BenchReport => {
                 self.bench_file(target, &path)
             }
+            Target::OpenY1564 | Target::SaveY1564 | Target::Y1564Report => {
+                self.y1564_file(target, &path)
+            }
             Target::CompareReport { .. } | Target::SaveComparison => {
                 self.compare_file(target, &path)
             }

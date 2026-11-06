@@ -183,6 +183,14 @@ def test_engine_errors_without_interfaces(server: Server) -> None:
         assert c.rx_runs() == []
         with pytest.raises(ferotrx.Failed):
             c.rx_start("no-such-iface0")
+        assert c.y1564_runs() == []
+        with pytest.raises(ferotrx.NotFound):
+            c.y1564_get(12345)
+        y1564 = '[[service]]\nname = "data"\npacket = "eth/ipv4/udp"\ncir = "5mbps"\n'
+        with pytest.raises(ferotrx.InvalidParams):
+            c.y1564_start(toml=y1564, iface="a", rx="b", tests=["speed"])
+        with pytest.raises(ferotrx.Failed):
+            c.y1564_start(toml=y1564, iface="no-such-iface0", rx="no-such-iface0")
 
 
 def test_threads_share_a_client(server: Server) -> None:

@@ -21,6 +21,7 @@ use crate::protocol::*;
 use crate::scenario::{scenario_info, LabRunner, RunLists, ScenarioRun};
 use crate::tcp::{start_tcp_with, PortOpener, TcpRun};
 use crate::udp::{start_udp_with, UdpRun};
+use crate::y1564::{Y1564Job, Y1564Run};
 use ferotrx_core::scenario::{Scenario, Workload};
 
 /// Error from [`start_run`].
@@ -139,6 +140,7 @@ pub struct Controller {
     files: FilePolicy,
     scenario_runs: Mutex<BTreeMap<u64, Arc<ScenarioRun>>>,
     bench_runs: Mutex<BTreeMap<u64, Arc<BenchRun>>>,
+    y1564_runs: Mutex<BTreeMap<u64, Arc<Y1564Run>>>,
     open_bench_sinks: Arc<BenchSinkOpener>,
     open_port: Arc<PortOpener>,
     open_receiver: Arc<ReceiverOpener>,
@@ -184,6 +186,7 @@ impl Controller {
             files: FilePolicy::unrestricted(),
             scenario_runs: Mutex::default(),
             bench_runs: Mutex::default(),
+            y1564_runs: Mutex::default(),
             open_bench_sinks: Arc::new(open_bench_sinks),
             open_port: Arc::new(ferotrx_io::open_port_with),
             open_receiver: Arc::new(ferotrx_io::open_receiver),
@@ -432,6 +435,20 @@ impl Controller {
             "bench.remove" => {
                 let p: RunId = parse(params)?;
                 to_value(self.bench_remove(p.id)?)
+            }
+            "y1564.start" => to_value(self.y1564_start(parse(params)?)?),
+            "y1564.get" => {
+                let p: RunId = parse(params)?;
+                to_value(self.y1564_run(p.id)?.info())
+            }
+            "y1564.list" => to_value(self.y1564_runs()),
+            "y1564.stop" => {
+                let p: StopParams = parse(params)?;
+                to_value(self.y1564_stop(p.id, p.wait)?)
+            }
+            "y1564.remove" => {
+                let p: RunId = parse(params)?;
+                to_value(self.y1564_remove(p.id)?)
             }
             "lab.get" => to_value(self.lab_info()),
             "lab.start" => to_value(self.lab_start(parse(params)?)?),
@@ -687,6 +704,10 @@ impl Controller {
         for r in &benches {
             r.stop();
         }
+        let y1564: Vec<Arc<Y1564Run>> = lock(&self.y1564_runs).values().cloned().collect();
+        for r in &y1564 {
+            r.stop();
+        }
         let scenarios: Vec<Arc<ScenarioRun>> =
             lock(&self.scenario_runs).values().cloned().collect();
         for r in &scenarios {
@@ -802,6 +823,7 @@ impl Controller {
                 Workload::Tcp(t) => self.check_tcp_files(t)?,
                 Workload::Udp(u) => self.check_udp_files(u)?,
                 Workload::Traffic(t) => self.check_stream_files(t)?,
+                Workload::Y1564(_) => {}
             }
         }
         for name in &p.only {
@@ -1001,6 +1023,114 @@ impl Controller {
         Ok(run.info())
     }
 
+    /// Starts a Y.1564 service activation test (as `ferotrx y1564`) on a
+    /// thread of its own; `y1564.get` follows its steps.
+    pub fn y1564_start(&self, p: Y1564StartParams) -> Result<Y1564RunInfo, RpcError> {
+        let bad = |e: String| RpcError::invalid_params(e);
+        let (text, name) = match (&p.path, &p.toml) {
+            (Some(path), None) => {
+                let file = self.files.readable(path)?;
+                let text = std::fs::read_to_string(&file).map_err(|e| {
+                    RpcError::failed(format!("cannot read {}: {e}", path.display()))
+                })?;
+                (text, path.display().to_string())
+            }
+            (None, Some(text)) => {
+                self.files.upload(text)?;
+                (text.clone(), "upload".to_string())
+            }
+            _ => return Err(RpcError::invalid_params("give either path or toml")),
+        };
+        let mut profile = ferotrx_core::Y1564Profile::from_toml(&text)
+            .map_err(|e| RpcError::failed(format!("{name}: {e}")))?;
+        let c = &mut profile.config;
+        if !p.tests.is_empty() {
+            c.tests = p
+                .tests
+                .iter()
+                .map(|t| t.parse().map_err(|e: ferotrx_core::Error| e.to_string()))
+                .collect::<Result<_, _>>()
+                .map_err(bad)?;
+        }
+        if !p.services.is_empty() {
+            profile
+                .keep_services(&p.services)
+                .map_err(|e| bad(e.to_string()))?;
+        }
+        let c = &mut profile.config;
+        if let Some(r) = &p.line_rate {
+            c.line_rate_mbps = match r.parse::<Rate>().map_err(|e| bad(e.to_string()))? {
+                Rate::Mbps(m) => m,
+                _ => return Err(bad("line_rate is a bit rate such as 1gbps".into())),
+            };
+        }
+        if let Some(d) = &p.step_duration {
+            c.step_duration = parse_duration(d).map_err(|e| bad(e.to_string()))?;
+        }
+        if let Some(d) = &p.performance_duration {
+            c.performance_duration = parse_duration(d).map_err(|e| bad(e.to_string()))?;
+        }
+        c.validate().map_err(|e| bad(e.to_string()))?;
+        let send = OutputSpec {
+            backend: p.backend,
+            queue: p.queue,
+            xdp_mode: p.xdp_mode,
+            workers: p.workers,
+            ..Default::default()
+        }
+        .send_settings()?
+        .or(&profile.output);
+        let id = self.next_run.fetch_add(1, Ordering::Relaxed);
+        let job = Y1564Job {
+            profile,
+            profile_name: name,
+            profile_text: text,
+            iface: p.iface,
+            rx: p.rx,
+            send,
+        };
+        let run = Y1564Run::spawn(id, job, &*self.open_bench_sinks, &*self.open_receiver)
+            .map_err(RpcError::failed)?;
+        let info = run.info();
+        lock(&self.y1564_runs).insert(id, run);
+        Ok(info)
+    }
+
+    fn y1564_run(&self, id: u64) -> Result<Arc<Y1564Run>, RpcError> {
+        lock(&self.y1564_runs)
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| RpcError::not_found(format!("no Y.1564 run {id}")))
+    }
+
+    pub fn y1564_runs(&self) -> Vec<Y1564RunInfo> {
+        let runs: Vec<Arc<Y1564Run>> = lock(&self.y1564_runs).values().cloned().collect();
+        runs.iter().map(|r| r.info()).collect()
+    }
+
+    /// Stops a Y.1564 test; the step under way ends early and the report is
+    /// partial. With `wait`, answers once it has ended (or after 10 s).
+    pub fn y1564_stop(&self, id: u64, wait: bool) -> Result<Y1564RunInfo, RpcError> {
+        let run = self.y1564_run(id)?;
+        run.stop();
+        if wait {
+            run.wait(STOP_TIMEOUT);
+        }
+        Ok(run.info())
+    }
+
+    /// Forgets a Y.1564 run that has ended.
+    pub fn y1564_remove(&self, id: u64) -> Result<Y1564RunInfo, RpcError> {
+        let run = self.y1564_run(id)?;
+        if run.is_running() {
+            return Err(RpcError::failed(format!(
+                "Y.1564 run {id} is still running; stop it first"
+            )));
+        }
+        lock(&self.y1564_runs).remove(&id);
+        Ok(run.info())
+    }
+
     /// Starts a stateful TCP run from a TCP profile.
     pub fn tcp_start(&self, p: TcpStartParams) -> Result<TcpRunInfo, RpcError> {
         let failed = |e: ferotrx_core::Error| RpcError::failed(e);
@@ -1182,6 +1312,7 @@ impl Controller {
             RxConfig {
                 duration,
                 stop: None,
+                interval: None,
             },
         )
         .map_err(RpcError::failed)?;

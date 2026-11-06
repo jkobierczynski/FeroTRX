@@ -367,3 +367,56 @@ fn a_scenario_that_names_a_lab_needs_one_or_lab_false() {
     let done = wait_for(&c, v["id"].as_u64().unwrap());
     assert!(done.report.unwrap().passed());
 }
+
+const Y1564: &str = r#"
+name = "service activation"
+iface = "tx"
+rx = "rx"
+
+[[check]]
+name = "performance"
+require = ["availability_pct >= 99.9%", "flr_pct < 0.1%"]
+[check.y1564.y1564]
+tests = ["performance"]
+performance_duration = "1s"
+interval = "200ms"
+rx_wait = "100ms"
+[[check.y1564.service]]
+name = "data"
+packet = "eth/ipv4(src=10.9.0.1,dst=10.9.0.2)/udp(sport=1000,dport=2000)"
+cir = "2mbps"
+
+[[check]]
+name = "unpoliced"
+expect = "fail"
+[check.y1564.y1564]
+tests = ["configuration"]
+steps = [100]
+step_duration = "200ms"
+rx_wait = "100ms"
+[[check.y1564.service]]
+name = "data"
+packet = "eth/ipv4(src=10.9.0.1,dst=10.9.0.2)/udp(sport=1000,dport=2000)"
+cir = "2mbps"
+"#;
+
+#[test]
+fn y1564_checks_pass_and_an_unpoliced_network_fails_policing() {
+    let scenario = Scenario::from_toml(Y1564, Path::new("."), &[]).unwrap();
+    let report = run_scenario(&scenario, &mut runner(), RunOptions::default());
+    assert!(report.passed(), "{}", report.text());
+    let perf = &report.checks[0];
+    assert_eq!(perf.metrics["passed"], 1.0);
+    assert_eq!(perf.metrics["availability_pct"], 100.0);
+    assert!(perf.metrics["ir_mbps"] > 1.8, "{:?}", perf.metrics);
+    let unpoliced = &report.checks[1];
+    // 100% CIR passes, policing fails: nothing polices the memory wire.
+    assert_eq!(unpoliced.metrics["passed"], 0.0);
+    assert_eq!(unpoliced.metrics["steps"], 2.0);
+    assert_eq!(unpoliced.metrics["steps_failed"], 1.0);
+    assert!(
+        unpoliced.summary.contains("failed: data"),
+        "{}",
+        unpoliced.summary
+    );
+}

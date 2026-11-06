@@ -13,7 +13,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::scenario::{Scenario, Workload};
-use crate::{BenchProfile, Error, Profile, Result, TcpEngine, TcpProfile, UdpEngine, UdpProfile};
+use crate::{
+    BenchProfile, Error, Profile, Result, TcpEngine, TcpProfile, UdpEngine, UdpProfile,
+    Y1564Profile,
+};
 
 /// The kinds of files FeroTRX reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +31,8 @@ pub enum FileKind {
     Hosts,
     /// A benchmark profile: a `[benchmark]` table.
     Bench,
+    /// A Y.1564 service activation profile: `[[service]]` tables.
+    Y1564,
     /// A scenario: `[[check]]` tables.
     Scenario,
 }
@@ -40,6 +45,7 @@ impl FileKind {
             FileKind::Udp => "udp",
             FileKind::Hosts => "hosts",
             FileKind::Bench => "bench",
+            FileKind::Y1564 => "y1564",
             FileKind::Scenario => "scenario",
         }
     }
@@ -61,10 +67,11 @@ impl FromStr for FileKind {
             "udp" => FileKind::Udp,
             "host" | "hosts" => FileKind::Hosts,
             "bench" | "benchmark" => FileKind::Bench,
+            "y1564" | "y.1564" => FileKind::Y1564,
             "scenario" => FileKind::Scenario,
             other => {
                 return Err(Error::InvalidSpec(format!(
-                    "unknown file kind '{other}': use traffic, tcp, udp, bench or scenario"
+                    "unknown file kind '{other}': use traffic, tcp, udp, hosts, bench, y1564 or scenario"
                 )))
             }
         })
@@ -83,7 +90,8 @@ pub struct FileCheck {
 
 /// Works out the kind of a file from its top-level keys.
 ///
-/// `[[check]]` is a scenario, `[benchmark]` a benchmark profile and
+/// `[[check]]` is a scenario, `[benchmark]` a benchmark profile,
+/// `[y1564]` or `[[service]]` a Y.1564 profile and
 /// `[[stream]]` a traffic profile, `[[host]]` a host profile. A UDP profile has `rate`, `app`,
 /// `queries`, `records`, `transactions` or a `[udp]` table (at the top or
 /// in a template); anything else is taken as a TCP profile.
@@ -97,6 +105,9 @@ pub fn detect_kind(text: &str) -> Result<FileKind> {
     }
     if has(&table, &["benchmark"]) {
         return Ok(FileKind::Bench);
+    }
+    if has(&table, &["y1564", "service"]) {
+        return Ok(FileKind::Y1564);
     }
     if has(&table, &["stream"]) {
         return Ok(FileKind::Traffic);
@@ -224,6 +235,7 @@ pub fn check_text(
         FileKind::Tcp => tcp(&TcpProfile::from_toml(&text, dir)?, "", &mut out)?,
         FileKind::Udp => udp(&UdpProfile::from_toml(&text, dir)?, "", &mut out)?,
         FileKind::Bench => bench(&BenchProfile::from_toml(&text)?, &mut out)?,
+        FileKind::Y1564 => y1564(&Y1564Profile::from_toml(&text)?, "", &mut out),
         FileKind::Hosts => hosts(&crate::HostProfile::from_toml(&text)?, &mut out)?,
         FileKind::Scenario => scenario(&Scenario::from_toml(&text, dir, overrides)?, &mut out)?,
     }
@@ -495,6 +507,48 @@ fn bench(p: &BenchProfile, out: &mut FileCheck) -> Result<()> {
     Ok(())
 }
 
+fn y1564(p: &Y1564Profile, prefix: &str, out: &mut FileCheck) {
+    let c = &p.config;
+    out.summary.push(format!(
+        "{prefix}Y.1564: {} service(s), line rate {} Mbit/s, tests {}",
+        c.services.len(),
+        c.line_rate_mbps,
+        c.tests
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    for (s, f) in c.services.iter().zip(&p.frames) {
+        let mut line = format!(
+            "{prefix}service '{}': CIR {} Mbit/s, EIR {} Mbit/s, sizes {}",
+            s.name, s.cir_mbps, s.eir_mbps, s.size
+        );
+        if s.cbs > 0 || s.ebs > 0 {
+            line += &format!(", CBS {} EBS {} bytes", s.cbs, s.ebs);
+        }
+        if f.green
+            .packets
+            .iter()
+            .map(|p| &p.data)
+            .eq(f.yellow.packets.iter().map(|p| &p.data))
+            && s.eir_mbps > 0.0
+        {
+            out.warnings.push(format!(
+                "service '{}': yellow frames are like the green ones, so a color-aware network \
+                 cannot tell them apart (give yellow_packet)",
+                s.name
+            ));
+        }
+        out.summary.push(line);
+    }
+    out.summary.push(format!(
+        "{prefix}configuration steps of {}s, performance test of {}s",
+        c.step_duration.as_secs_f64(),
+        c.performance_duration.as_secs_f64()
+    ));
+}
+
 fn scenario(s: &Scenario, out: &mut FileCheck) -> Result<()> {
     out.summary.push(format!(
         "scenario '{}': {} check(s)",
@@ -517,6 +571,10 @@ fn scenario(s: &Scenario, out: &mut FileCheck) -> Result<()> {
             Workload::Tcp(p) => tcp(p, &prefix, &mut inner),
             Workload::Udp(p) => udp(p, &prefix, &mut inner),
             Workload::Traffic(p) => traffic(p, &prefix, &mut inner),
+            Workload::Y1564(p) => {
+                y1564(p, &prefix, &mut inner);
+                Ok(())
+            }
         }
         .map_err(ctx)?;
         out.summary.extend(inner.summary);
@@ -535,6 +593,8 @@ mod tests {
             ("[[stream]]\npacket = \"eth()\"", FileKind::Traffic),
             ("[[host]]\nipv4 = \"dhcp\"", FileKind::Hosts),
             ("[benchmark]\npacket = \"eth()\"", FileKind::Bench),
+            ("[[service]]\ncir = 5", FileKind::Y1564),
+            ("[y1564]\nline_rate = \"1gbps\"", FileKind::Y1564),
             ("[[check]]\ntcp = \"${x}.toml\"", FileKind::Scenario),
             ("cps = 5\npcap = \"a.pcap\"", FileKind::Tcp),
             ("pcap = \"a.pcap\"", FileKind::Tcp),

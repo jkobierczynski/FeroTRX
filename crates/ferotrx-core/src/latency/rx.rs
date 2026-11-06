@@ -51,6 +51,8 @@ pub struct RxConfig {
     pub duration: Option<Duration>,
     /// Set to true from another thread to stop.
     pub stop: Option<Arc<AtomicBool>>,
+    /// Count per interval of send time too (see [`RxStats::interval`]).
+    pub interval: Option<Duration>,
 }
 
 /// How often a running [`RxJob`] publishes its counters.
@@ -241,7 +243,10 @@ fn receive(
 ) -> Result<RxStats> {
     let start = Instant::now();
     shared.lock().start = start;
-    let mut stats = RxStats::default();
+    let mut stats = RxStats {
+        interval: config.interval,
+        ..Default::default()
+    };
     let mut buf = Vec::with_capacity(2048);
     let mut next_report = start + RX_STATS_INTERVAL;
     loop {

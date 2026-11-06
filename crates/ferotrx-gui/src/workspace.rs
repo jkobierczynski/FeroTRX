@@ -38,6 +38,7 @@ pub struct WorkspaceFile {
     pub groups: crate::views::GroupsState,
     pub apps: crate::views::AppsState,
     pub bench: crate::views::BenchState,
+    pub y1564: crate::views::Y1564State,
     /// The window's layout (egui's memory: panel sizes, open sections,
     /// scroll positions), as RON text.
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -125,6 +126,7 @@ impl FeroApp {
             groups: clone_json(&self.groups),
             apps: clone_json(&self.apps),
             bench: clone_json(&self.bench),
+            y1564: clone_json(&self.y1564),
             layout: ctx
                 .and_then(|c| c.memory(|m| ron::to_string(m).ok()))
                 .unwrap_or_default(),
@@ -187,6 +189,7 @@ impl FeroApp {
         self.groups = w.groups;
         self.apps = w.apps;
         self.bench = w.bench;
+        self.y1564 = w.y1564;
         self.capture = Default::default();
         if !w.capture.path.is_empty() {
             self.capture.path = w.capture.path;

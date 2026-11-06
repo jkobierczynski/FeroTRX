@@ -105,9 +105,10 @@ A check has exactly one of:
 | `tcp` | a TCP profile (`ferotrx tcp -p`) | stateful TCP connections, as `ferotrx tcp` |
 | `udp` | a UDP profile (`ferotrx udp -p`) | stateful UDP transactions, as `ferotrx udp` |
 | `traffic` | a traffic profile (`ferotrx run`) | the streams, with a receiver on `rx`, as `ferotrx run --rx` |
+| `y1564` | a [Y.1564 profile](y1564.md) (`ferotrx y1564`) | the service tests, sent on `iface` and received on `rx`, as `ferotrx y1564` |
 
 The value is a path to the profile or the profile's tables under
-`[check.tcp]`, `[check.udp]` or `[check.traffic]` (nested tables are written
+`[check.tcp]`, `[check.udp]`, `[check.traffic]` or `[check.y1564]` (nested tables are written
 `[check.tcp.client]`, `[[check.tcp.message]]`, `[[check.traffic.stream]]`).
 Everything the profile files allow works here. Pcap paths are relative to
 the file they are written in.
@@ -178,6 +179,10 @@ ferotrx scenario compare --history runs/
 | `blocked` | `connections > 0`, `established == 0` | `transactions > 0`, `answered == 0` | `tx_packets > 0`, `rx_packets == 0` |
 | `any` | only `require` | only `require` | only `require` |
 
+For a `y1564` check, `complete` (also written `pass`) needs every step to
+pass (`passed == 1`), and `blocked` (or `fail`) needs a step to fail
+(`steps > 0`, `passed == 0`).
+
 `complete` means every session played as captured, byte for byte (unless the
 profile turns `verify` off). A blocked check should have a `duration`: the
 client keeps trying (SYN retransmissions, UDP retries) until it gives up or
@@ -236,6 +241,12 @@ percentiles, maximum and jitter are of the worst stream). Every stream
 carries a latency signature unless the profile marks some with `latency`;
 see [loss-latency.md](loss-latency.md) for what the signature does to the
 packets. A traffic check needs a `duration` when a stream loops for ever.
+
+**Y.1564**: `passed` (1 or 0), `steps`, `steps_failed`, `services_failed`,
+`flr_pct`, `ftd` and `fdv` (ms, the worst green frames over the steps),
+`availability_pct` (the worst service), `ses`, `ir_mbps` (the performance
+test's information rate, all services) and `yellow_loss_pct`. See
+[Y.1564](y1564.md).
 
 ## Jittery machines
 
