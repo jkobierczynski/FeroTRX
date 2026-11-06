@@ -270,3 +270,48 @@ fn parses_a_table() {
     let bad: toml::Table = r#"tls = { versions = ["1.2"] }"#.parse().unwrap();
     assert!(parse(&bad, std::path::Path::new(".")).is_err());
 }
+
+/// A route's delay must wake the server on time even while the
+/// connection's own timer is later: these seeds lost a packet in a way
+/// that left the delayed POST unanswered until the idle timeout.
+#[cfg(feature = "profile")]
+#[test]
+fn a_delayed_route_answers_under_loss() {
+    let t: toml::Table = r#"
+        requests = ["GET /", "GET /style.css", "GET /app.js", "GET /big", "GET /missing 404", "POST /api 201"]
+        per_connection = 12
+        concurrent = 6
+        idle_timeout = "10s"
+        [[route]]
+        path = "/"
+        body = "<html></html>\n"
+        [[route]]
+        path = "/style.css"
+        body = "body { color: teal }\n"
+        [[route]]
+        path = "/app.js"
+        body_size = "20K"
+        [[route]]
+        path = "/big"
+        body_size = "300K"
+        [[route]]
+        method = "POST"
+        path = "/api"
+        status = 201
+        delay = "2ms"
+    "#
+    .parse()
+    .unwrap();
+    let h3 = parse(&t, std::path::Path::new(".")).unwrap();
+    for seed in [750u64, 975, 1273, 1486] {
+        let mut rng = AppRng::new(seed * 7 + 3);
+        let (c, s, t) = play_with(&h3, seed, Duration::from_micros(300), |_, _| {
+            rng.next_u64() % 100 < 3
+        });
+        assert_eq!(c.errors, Vec::<String>::new(), "seed {seed}: {c:?}");
+        assert_eq!(s.errors, Vec::<String>::new(), "seed {seed}: {s:?}");
+        assert_eq!(c.transactions.len(), 12, "seed {seed}: {c:?}");
+        assert_eq!(c.failed, 0, "seed {seed}");
+        assert!(t < Duration::from_secs(5), "seed {seed}: {t:?}");
+    }
+}

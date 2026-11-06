@@ -205,10 +205,18 @@ pub struct IntervalStats {
     pub latency_sum_ns: u128,
     pub latency_min_ns: u64,
     pub latency_max_ns: u64,
+    /// The lowest sequence number that arrived: as numbers only advance on
+    /// packets that left, the first numbers of two intervals tell how many
+    /// were sent between them, even when the sender fell behind.
+    pub first_seq: Option<u64>,
+    /// The highest sequence number that arrived.
+    pub last_seq: Option<u64>,
 }
 
 impl IntervalStats {
-    fn record(&mut self, len: usize, latency: Option<Duration>) {
+    fn record(&mut self, seq: u64, len: usize, latency: Option<Duration>) {
+        self.first_seq = Some(self.first_seq.map_or(seq, |s| s.min(seq)));
+        self.last_seq = Some(self.last_seq.map_or(seq, |s| s.max(seq)));
         self.packets += 1;
         self.bytes += len as u64;
         if let Some(l) = latency {
@@ -308,7 +316,10 @@ impl FlowStats {
         self.latency.record(latency);
         if let Some(ns) = interval {
             let key = u64::try_from(sig.tx_time.as_nanos() / ns).unwrap_or(u64::MAX);
-            self.intervals.entry(key).or_default().record(len, latency);
+            self.intervals
+                .entry(key)
+                .or_default()
+                .record(seq, len, latency);
         }
     }
 }

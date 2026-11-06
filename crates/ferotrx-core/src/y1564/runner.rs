@@ -11,6 +11,14 @@ use crate::{
     Stream, TrafficModel,
 };
 
+/// How far a flow may fall behind its schedule before frames are left out
+/// instead of sent late. After a stall (a paused VM, a busy CPU), catching up
+/// would send the missed frames back to back: a burst a policer rightly
+/// drops, which would count against the network. Left out, they show as
+/// "the sender fell short" instead. 5 ms is about the CBS of a 10 Mbit/s
+/// service of 6000 bytes.
+pub const MAX_LAG: Duration = Duration::from_millis(5);
+
 type OpenSink = Box<dyn FnMut() -> std::result::Result<Box<dyn PacketSink + Send>, SinkError>>;
 type OpenReceiver = Box<dyn FnMut() -> std::result::Result<Box<dyn PacketReceiver>, SinkError>>;
 
@@ -145,7 +153,8 @@ impl ServiceRunner for JobServiceRunner {
                 )
                 .with_rate(Rate::Pps(f.pps))
                 .with_latency(flow)
-                .keep_size(true);
+                .keep_size(true)
+                .with_max_lag(MAX_LAG);
                 if f.burst > 1 {
                     stream = stream.with_model(TrafficModel::default().with_burst(f.burst));
                 }

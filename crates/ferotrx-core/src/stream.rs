@@ -34,6 +34,13 @@ pub struct Stream<'a> {
     /// own counters are in [`ReplayStats::impair`]. A run waits at its end
     /// until the held packets are out, unless it is stopped.
     pub impair: Option<ImpairSpec>,
+    /// How far behind its schedule the stream may fall before it skips
+    /// packets instead of sending them late. `None` (the default) catches up:
+    /// after a stall (a busy CPU, a paused VM) the packets that are due go out
+    /// back to back, which a policer downstream sees as a burst. With a
+    /// limit, packets more than this late are left out, so the stream sends
+    /// fewer packets but never bursts more than this much of its rate.
+    pub max_lag: Option<Duration>,
     /// This stream's part of a stream split over several workers:
     /// (index, count); see [`shard`](Stream::shard).
     shard: (u64, u64),
@@ -53,6 +60,7 @@ impl<'a> Stream<'a> {
             keep_size: false,
             model: TrafficModel::default(),
             impair: None,
+            max_lag: None,
             shard: (0, 1),
             source: Box::new(source),
             transforms: Vec::new(),
@@ -78,6 +86,13 @@ impl<'a> Stream<'a> {
     /// Impairs the stream's packets by `spec` (see [`impair`](Self::impair)).
     pub fn with_impair(mut self, spec: ImpairSpec) -> Self {
         self.impair = (!spec.is_none()).then_some(spec);
+        self
+    }
+
+    /// Skips packets that fall more than `lag` behind the schedule (see
+    /// [`max_lag`](Self::max_lag)).
+    pub fn with_max_lag(mut self, lag: Duration) -> Self {
+        self.max_lag = Some(lag);
         self
     }
 
@@ -471,8 +486,29 @@ where
     Ok(stats)
 }
 
-/// Reads and transforms the next packet of `stream`, and works out when it leaves.
+/// Reads and transforms the next packet of `stream`, and works out when it
+/// leaves. With a [`max_lag`](Stream::max_lag), packets due longer ago than
+/// that are skipped.
 fn fill(stream: &mut Stream<'_>, lane: &mut Lane, st: &ReplayStats, start: Instant) -> Result<()> {
+    loop {
+        fill_one(stream, lane, st, start)?;
+        let late = match stream.max_lag {
+            Some(lag) if lane.pending => start.elapsed() > lane.deadline + lag,
+            _ => false,
+        };
+        if !late {
+            return Ok(());
+        }
+        lane.pending = false;
+    }
+}
+
+fn fill_one(
+    stream: &mut Stream<'_>,
+    lane: &mut Lane,
+    st: &ReplayStats,
+    start: Instant,
+) -> Result<()> {
     if stream
         .limit
         .is_some_and(|l| st.packets + st.send_errors >= l)

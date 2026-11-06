@@ -629,6 +629,9 @@ pub(crate) fn codes_line(a: &ferotrx_ctl::protocol::AppCounters) -> String {
     let mut line = codes.join(", ");
     if a.protocol_errors > 0 {
         line.push_str(&format!(", {} protocol errors", a.protocol_errors));
+        if !a.protocol_error_samples.is_empty() {
+            line.push_str(&format!(" ({})", a.protocol_error_samples.join("; ")));
+        }
     }
     line
 }

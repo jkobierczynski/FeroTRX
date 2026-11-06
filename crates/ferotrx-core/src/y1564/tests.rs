@@ -86,6 +86,8 @@ impl ServiceRunner for Net {
                             ..Default::default()
                         };
                         if packets > 0 {
+                            let seq = f.pps * len.as_secs_f64() * i as f64;
+                            iv.first_seq = Some(seq.round() as u64);
                             let ns = self.delay.as_nanos() as u64;
                             iv.timed = packets;
                             iv.latency_sum_ns = u128::from(ns) * u128::from(packets);
@@ -470,4 +472,39 @@ fn a_color_blind_service_is_judged_by_its_rate_when_policed() {
     c.services[0].color_aware = true;
     let r = run_y1564(&c, &mut Blind, |_| {}).unwrap();
     assert!(!step(&r, "data", StepKind::Policing).passed);
+}
+
+#[test]
+fn intervals_count_what_was_sent_by_sequence_numbers() {
+    // Intervals of a second: the sender stalls in the second one (50 sent,
+    // all arrive), 10 of the third's 100 are lost, nothing of the fourth
+    // arrives, and the fifth is whole.
+    let mut intervals = BTreeMap::new();
+    let mut add = |k: u64, seqs: &mut dyn Iterator<Item = u64>| {
+        let mut iv = IntervalStats::default();
+        for s in seqs {
+            iv.packets += 1;
+            iv.first_seq = Some(iv.first_seq.map_or(s, |f| f.min(s)));
+            iv.last_seq = Some(iv.last_seq.map_or(s, |f| f.max(s)));
+        }
+        intervals.insert(k, iv);
+    };
+    add(0, &mut (0..100));
+    add(1, &mut (100..150));
+    add(2, &mut (150..250).filter(|s| s % 10 != 5));
+    add(4, &mut (350..450));
+    let r = FlowResult {
+        tx: 450,
+        rx: 340,
+        start: Duration::ZERO,
+        elapsed: Duration::from_secs(5),
+        intervals,
+        ..Default::default()
+    };
+    let c = config(vec![service("a", 1.0, 0.0)], &[Y1564Test::Performance]);
+    let got: Vec<f64> = interval_records(&c, &r, Duration::from_secs(1))
+        .iter()
+        .map(|i| (i.flr_pct * 10.0).round() / 10.0)
+        .collect();
+    assert_eq!(got, [0.0, 0.0, 10.0, 100.0, 0.0]);
 }
