@@ -215,6 +215,9 @@ pub struct ServerState {
     pub conn: Option<Connection>,
     pub status: Status,
     pub info: Option<ServerInfo>,
+    /// The server's clock minus this machine's, in seconds, when it tells
+    /// the time: runs of a group start together by it.
+    pub clock_offset: Option<f64>,
     pub interfaces: Vec<InterfaceEntry>,
     pub snap: Snapshot,
     /// Rate history per run (`run:3`, `tcp:1`, ...).
@@ -237,6 +240,7 @@ impl ServerState {
             conn: None,
             status: Status::Disconnected,
             info: None,
+            clock_offset: None,
             interfaces: Vec::new(),
             snap: Snapshot::default(),
             history: BTreeMap::new(),
@@ -592,8 +596,13 @@ impl FeroApp {
     fn handle(&mut self, i: usize, e: Event, now: f64) {
         let name = self.servers[i].settings.addr.clone();
         match e {
-            Event::Connected { info, interfaces } => {
+            Event::Connected {
+                info,
+                interfaces,
+                clock_offset,
+            } => {
                 let s = &mut self.servers[i];
+                s.clock_offset = clock_offset;
                 let what = format!(
                     "connected: {} {} (protocol {}){}{}",
                     info.name,

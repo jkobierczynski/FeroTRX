@@ -187,6 +187,22 @@ class ServerInfo(Record):
     user: str | None = None
     #: True when ``lab.start`` may build a lab router (``ferotrx serve --lab``).
     lab: bool = False
+    #: The server's clock when it answered, in seconds since 1970, for
+    #: ``start_at`` (servers before 0.31.0 leave it out).
+    time: float | None = None
+    #: Largest file ``file_put`` takes, in bytes.
+    max_file: int | None = None
+
+
+@dataclass(kw_only=True)
+class FileInfo(Record):
+    """A file on the server, as ``file_put`` and ``file_stat`` report it."""
+
+    path: str = ""
+    exists: bool = False
+    size: int = 0
+    #: SHA-256 of the contents, in hex.
+    sha256: str | None = None
 
 
 @dataclass(kw_only=True)
@@ -373,6 +389,9 @@ class RunInfo(Record):
     rx: RxCounters | None = None
     #: What the streams' impairments did, all together.
     impair: ImpairCounters | None = None
+    #: When the run started sending, in seconds since 1970 by the server's
+    #: clock; None while it waits for its ``start_at``.
+    started_at: float | None = None
 
     @property
     def running(self) -> bool:
@@ -644,6 +663,9 @@ class TcpRunInfo(Record):
     hosts: list[HostInfo] = field(default_factory=list)
     #: What the ports' impairments did (``impair``, ``impair_rx``).
     impair: PortImpairCounters | None = None
+    #: When the run started sending, in seconds since 1970 by the server's
+    #: clock; None while it waits for its ``start_at``.
+    started_at: float | None = None
 
     @property
     def running(self) -> bool:
@@ -719,6 +741,9 @@ class UdpRunInfo(Record):
     hosts: list[HostInfo] = field(default_factory=list)
     #: What the ports' impairments did (``impair``, ``impair_rx``).
     impair: PortImpairCounters | None = None
+    #: When the run started sending, in seconds since 1970 by the server's
+    #: clock; None while it waits for its ``start_at``.
+    started_at: float | None = None
 
     @property
     def running(self) -> bool:

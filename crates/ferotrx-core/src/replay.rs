@@ -105,6 +105,7 @@ where
         duration: config.duration,
         ignore_send_errors: config.ignore_send_errors,
         stop: config.stop.clone(),
+        start_at: None,
     };
     let mut sink = sink;
     let stats = run_with_progress(&mut streams, &mut sink, &run_config, interval, |s| {

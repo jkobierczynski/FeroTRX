@@ -325,6 +325,9 @@ pub struct TcpRunConfig {
     pub duration: Option<Duration>,
     /// Set to stop the run from another thread (Ctrl-C).
     pub stop: Option<Arc<AtomicBool>>,
+    /// A [`PortJob`] waits for this wall-clock time before the engine
+    /// starts, so that runs on several machines start together.
+    pub start_at: Option<std::time::SystemTime>,
 }
 
 /// Frames read from one port before the others get a turn.
@@ -487,6 +490,8 @@ struct Live<S> {
     parts: Vec<S>,
     error: Option<String>,
     running: bool,
+    /// When the engine started, by the wall clock (after `start_at`).
+    started_at: Option<std::time::SystemTime>,
 }
 
 impl<S: Clone + Default + Send + 'static> PortJob<S> {
@@ -509,14 +514,18 @@ impl<S: Clone + Default + Send + 'static> PortJob<S> {
                 parts: Vec::new(),
                 error: None,
                 running: true,
+                started_at: None,
             }),
             changed: Condvar::new(),
         });
         let thread = {
             let shared = shared.clone();
+            let stop_flag = stop.clone();
             std::thread::Builder::new()
                 .name("ferotrx-engine".into())
                 .spawn(move || {
+                    let started = crate::wait_until(config.start_at, &stop_flag);
+                    lock(&shared.live).started_at = Some(started);
                     let result = run_engine(
                         &mut engine,
                         &mut ports,
@@ -549,6 +558,12 @@ impl<S: Clone + Default + Send + 'static> PortJob<S> {
     /// The latest counters, at most [`JOB_STATS_INTERVAL`](crate::JOB_STATS_INTERVAL) old.
     pub fn stats(&self) -> S {
         lock(&self.shared.live).stats.clone()
+    }
+
+    /// When the engine started, by the wall clock; `None` while the job
+    /// waits for its [`TcpRunConfig::start_at`].
+    pub fn started_at(&self) -> Option<std::time::SystemTime> {
+        lock(&self.shared.live).started_at
     }
 }
 
@@ -624,14 +639,18 @@ impl<S: Clone + Default + Send + MergeStats + 'static> PortJob<S> {
                 parts: vec![S::default(); n],
                 error: None,
                 running: true,
+                started_at: None,
             }),
             changed: Condvar::new(),
         });
         let thread = {
             let shared = shared.clone();
+            let stop_flag = stop.clone();
             std::thread::Builder::new()
                 .name("ferotrx-engine".into())
                 .spawn(move || {
+                    let started = crate::wait_until(config.start_at, &stop_flag);
+                    lock(&shared.live).started_at = Some(started);
                     let result = run_workers(engines, lanes, &router, &config, &shared);
                     let mut live = lock(&shared.live);
                     live.running = false;

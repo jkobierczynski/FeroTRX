@@ -175,6 +175,14 @@ pub struct ServerInfo {
     /// (`ferotrx serve --lab`, Linux, root).
     #[serde(default)]
     pub lab: bool,
+    /// The server's clock when it answered, in seconds since the Unix
+    /// epoch: a controller compares it with its own to start runs on
+    /// several servers together (`start_at`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<f64>,
+    /// Largest file `file.put` takes, in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_file: Option<u64>,
 }
 
 /// What a connection may do.
@@ -229,6 +237,43 @@ impl std::str::FromStr for Role {
             _ => Err(format!("unknown role '{s}' (use read or operator)")),
         }
     }
+}
+
+/// Parameters of `file.put`: a file written into the server's first data
+/// directory, in pieces of at most a few megabytes.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilePutParams {
+    /// Where, relative to the data directory, without `..`; folders on the
+    /// way are made.
+    pub path: PathBuf,
+    /// The bytes, in base64 (RFC 4648, with padding).
+    pub data: String,
+    /// Where the piece goes: 0 starts the file afresh, any other offset must
+    /// be the file's length so far (the pieces come in order).
+    #[serde(default)]
+    pub offset: u64,
+}
+
+/// Parameters of `file.stat`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileStatParams {
+    /// A file in the data directories, relative to the first one.
+    pub path: PathBuf,
+}
+
+/// A file on the server, as `file.put` and `file.stat` report it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FileInfo {
+    pub path: PathBuf,
+    pub exists: bool,
+    #[serde(default)]
+    pub size: u64,
+    /// SHA-256 of the contents in hex, for a controller to see whether it
+    /// must send the file again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 /// Parameters of `auth`.
@@ -391,6 +436,12 @@ pub struct StartParams {
     /// `ferotrx_core::ImpairSpec`); `none` turns the profile's off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impair: Option<String>,
+    /// Start at this wall-clock time, in seconds since the Unix epoch (the
+    /// clock `server.info` gives as `time`), so that runs on several servers
+    /// start together; until then the run waits. A time gone by starts at
+    /// once; at most an hour ahead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<f64>,
 }
 
 /// Where a run receives its own packets back, for loss and latency.
@@ -428,9 +479,10 @@ fn yes() -> bool {
 }
 
 /// What a run is doing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunState {
+    #[default]
     Running,
     /// Ended by itself: every stream finished, or a limit or duration was reached.
     Finished,
@@ -468,6 +520,26 @@ pub struct RunInfo {
     /// without them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impair: Option<ImpairCounters>,
+    /// When the run started sending, in seconds since the Unix epoch by the
+    /// server's clock; absent while it waits for its `start_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
+}
+
+impl ImpairCounters {
+    /// Frames that did not get through: lost, over the MTU or dropped by
+    /// the queue.
+    pub fn dropped(&self) -> u64 {
+        self.lost + self.mtu_dropped + self.queue_dropped
+    }
+}
+
+impl PortImpairCounters {
+    /// Frames dropped either way.
+    pub fn dropped(&self) -> u64 {
+        self.tx.as_ref().map_or(0, ImpairCounters::dropped)
+            + self.rx.as_ref().map_or(0, ImpairCounters::dropped)
+    }
 }
 
 /// What an impairment did (`ferotrx_core::ImpairStats`).
@@ -829,10 +901,16 @@ pub struct TcpStartParams {
     /// Use ECN (RFC 3168), or not, instead of the profile's `[tcp]` setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ecn: Option<bool>,
+    /// Start at this wall-clock time, in seconds since the Unix epoch (the
+    /// clock `server.info` gives as `time`), so that runs on several servers
+    /// start together; until then the run waits. A time gone by starts at
+    /// once; at most an hour ahead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<f64>,
 }
 
 /// A stateful TCP run, as `tcp.start`, `tcp.stats`, `tcp.stop` and `tcp.list` report it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TcpRunInfo {
     /// Run id; ids are shared with `run.*` runs, so they never clash.
     pub id: u64,
@@ -870,6 +948,10 @@ pub struct TcpRunInfo {
     /// What the ports' impairments did (`impair`, `impair_rx`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impair: Option<PortImpairCounters>,
+    /// When the run started sending, in seconds since the Unix epoch by the
+    /// server's clock; absent while it waits for its `start_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
 }
 
 /// The counters of one template of a [`TcpRunInfo`].
@@ -1196,10 +1278,16 @@ pub struct UdpStartParams {
     /// Impairments of the frames the run receives, before the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impair_rx: Option<String>,
+    /// Start at this wall-clock time, in seconds since the Unix epoch (the
+    /// clock `server.info` gives as `time`), so that runs on several servers
+    /// start together; until then the run waits. A time gone by starts at
+    /// once; at most an hour ahead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<f64>,
 }
 
 /// A stateful UDP run, as `udp.start`, `udp.stats`, `udp.stop` and `udp.list` report it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct UdpRunInfo {
     /// Run id; shared with the other runs, so they never clash.
     pub id: u64,
@@ -1236,6 +1324,10 @@ pub struct UdpRunInfo {
     /// What the ports' impairments did (`impair`, `impair_rx`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impair: Option<PortImpairCounters>,
+    /// When the run started sending, in seconds since the Unix epoch by the
+    /// server's clock; absent while it waits for its `start_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
 }
 
 /// The counters of one template of a [`UdpRunInfo`].

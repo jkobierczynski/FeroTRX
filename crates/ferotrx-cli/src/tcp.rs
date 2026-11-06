@@ -503,6 +503,7 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
         TcpRunConfig {
             duration: profile.duration,
             stop: Some(stop),
+            start_at: None,
         },
     )
     .map_err(|e| anyhow::anyhow!(e))?;

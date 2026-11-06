@@ -1,0 +1,13 @@
+# The web server of examples/fleet/fleet.toml: FeroTRX plays the server's
+# side of the HTTP session in http.pcap for every client that connects.
+# The pcap is one folder up; the controller sends it along and keeps the
+# two files the same distance apart on the agent.
+format = 1
+pcap = "../http.pcap"
+
+[server]
+ip = "${server_ip}/24"
+port = 80
+
+[tcp]
+rto = "250ms"

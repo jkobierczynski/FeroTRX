@@ -35,6 +35,8 @@ pub enum FileKind {
     Y1564,
     /// A scenario: `[[check]]` tables.
     Scenario,
+    /// A fleet plan: `[[agent]]` and `[[run]]` tables.
+    Fleet,
 }
 
 impl FileKind {
@@ -47,6 +49,7 @@ impl FileKind {
             FileKind::Bench => "bench",
             FileKind::Y1564 => "y1564",
             FileKind::Scenario => "scenario",
+            FileKind::Fleet => "fleet",
         }
     }
 }
@@ -69,9 +72,10 @@ impl FromStr for FileKind {
             "bench" | "benchmark" => FileKind::Bench,
             "y1564" | "y.1564" => FileKind::Y1564,
             "scenario" => FileKind::Scenario,
+            "fleet" => FileKind::Fleet,
             other => {
                 return Err(Error::InvalidSpec(format!(
-                    "unknown file kind '{other}': use traffic, tcp, udp, hosts, bench, y1564 or scenario"
+                    "unknown file kind '{other}': use traffic, tcp, udp, hosts, bench, y1564, scenario or fleet"
                 )))
             }
         })
@@ -90,7 +94,7 @@ pub struct FileCheck {
 
 /// Works out the kind of a file from its top-level keys.
 ///
-/// `[[check]]` is a scenario, `[benchmark]` a benchmark profile,
+/// `[[check]]` is a scenario, `[[agent]]` a fleet plan, `[benchmark]` a benchmark profile,
 /// `[y1564]` or `[[service]]` a Y.1564 profile and
 /// `[[stream]]` a traffic profile, `[[host]]` a host profile. A UDP profile has `rate`, `app`,
 /// `queries`, `records`, `transactions` or a `[udp]` table (at the top or
@@ -102,6 +106,9 @@ pub fn detect_kind(text: &str) -> Result<FileKind> {
     let has = |t: &toml::Table, keys: &[&str]| keys.iter().any(|k| t.contains_key(*k));
     if has(&table, &["check"]) {
         return Ok(FileKind::Scenario);
+    }
+    if has(&table, &["agent"]) {
+        return Ok(FileKind::Fleet);
     }
     if has(&table, &["benchmark"]) {
         return Ok(FileKind::Bench);
@@ -205,6 +212,17 @@ pub fn check_file(
         scenario(&Scenario::from_path(path, overrides)?, &mut out)?;
         return Ok(out);
     }
+    if kind == FileKind::Fleet {
+        let mut out = FileCheck {
+            kind: Some(kind),
+            ..Default::default()
+        };
+        fleet(
+            &crate::fleet::FleetPlan::from_path(path, overrides)?,
+            &mut out,
+        );
+        return Ok(out);
+    }
     check_text(
         &text,
         path.parent().unwrap_or(Path::new(".")),
@@ -238,6 +256,10 @@ pub fn check_text(
         FileKind::Y1564 => y1564(&Y1564Profile::from_toml(&text)?, "", &mut out),
         FileKind::Hosts => hosts(&crate::HostProfile::from_toml(&text)?, &mut out)?,
         FileKind::Scenario => scenario(&Scenario::from_toml(&text, dir, overrides)?, &mut out)?,
+        FileKind::Fleet => fleet(
+            &crate::fleet::FleetPlan::from_toml(&text, dir, overrides)?,
+            &mut out,
+        ),
     }
     Ok(out)
 }
@@ -583,6 +605,55 @@ fn scenario(s: &Scenario, out: &mut FileCheck) -> Result<()> {
     Ok(())
 }
 
+/// A fleet plan: its agents and runs. Reading it already read every
+/// profile as each agent gets it.
+fn fleet(p: &crate::fleet::FleetPlan, out: &mut FileCheck) {
+    out.summary.extend(p.summary());
+    for r in &p.runs {
+        for i in &r.instances {
+            let absolute = toml::from_str::<toml::Table>(&i.text)
+                .map(|t| absolute_paths(&t))
+                .unwrap_or_default();
+            for a in absolute {
+                out.warnings.push(format!(
+                    "run '{}' on '{}': {a} is an absolute path; it is not sent along and must be on the agent",
+                    r.name, i.agent
+                ));
+            }
+        }
+        if r.settings.duration.is_none()
+            && r.settings.limit.is_none()
+            && r.kind == crate::scenario::CheckKind::Traffic
+        {
+            out.warnings.push(format!(
+                "run '{}': no duration; a stream that loops for ever runs until Ctrl-C",
+                r.name
+            ));
+        }
+    }
+}
+
+/// String values that look like absolute file paths.
+fn absolute_paths(t: &toml::Table) -> Vec<String> {
+    fn walk(v: &toml::Value, out: &mut Vec<String>) {
+        match v {
+            toml::Value::String(s)
+                if s.len() < 1024
+                    && Path::new(s).is_absolute()
+                    && Path::new(s).extension().is_some() =>
+            {
+                out.push(s.clone())
+            }
+            toml::Value::Array(a) => a.iter().for_each(|v| walk(v, out)),
+            toml::Value::Table(t) => t.values().for_each(|v| walk(v, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    t.values().for_each(|v| walk(v, &mut out));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,6 +667,7 @@ mod tests {
             ("[[service]]\ncir = 5", FileKind::Y1564),
             ("[y1564]\nline_rate = \"1gbps\"", FileKind::Y1564),
             ("[[check]]\ntcp = \"${x}.toml\"", FileKind::Scenario),
+            ("[[agent]]\naddress = \"${a}:4510\"", FileKind::Fleet),
             ("cps = 5\npcap = \"a.pcap\"", FileKind::Tcp),
             ("pcap = \"a.pcap\"", FileKind::Tcp),
             ("app = \"dns\"", FileKind::Udp),

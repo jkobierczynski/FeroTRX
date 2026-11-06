@@ -130,6 +130,10 @@ pub enum Phase {
     Loading { waiting: usize },
 }
 
+/// Seconds from the start calls of a group to the instant its runs start:
+/// time for every server to open its interfaces and answer.
+pub const GROUP_LEAD_S: f64 = 1.0;
+
 /// The tab's state: the members, and the rates over time.
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -219,7 +223,7 @@ impl FeroApp {
     }
 
     /// Starts every enabled member: streams are loaded first, then all
-    /// the starts go out together.
+    /// the starts go out, for one instant [`GROUP_LEAD_S`] later.
     pub fn start_group(&mut self) {
         let mut loads = Vec::new();
         let mut starts = Vec::new();
@@ -343,7 +347,11 @@ impl FeroApp {
         self.groups.phase = Phase::Idle;
         let starts = std::mem::take(&mut self.groups.queued);
         let n = starts.len();
-        for (member, method, params) in starts {
+        // Every run starts at one instant, in each server's own clock;
+        // servers before 0.31.0 start when the call arrives.
+        let at = ferotrx_core::unix_seconds(std::time::SystemTime::now()) + GROUP_LEAD_S;
+        let mut timed = 0;
+        for (member, method, mut params) in starts {
             let Some(i) = self
                 .groups
                 .members
@@ -352,9 +360,27 @@ impl FeroApp {
             else {
                 continue;
             };
+            if let (Some(offset), Some(p)) = (self.servers[i].clock_offset, params.as_object_mut())
+            {
+                p.insert("start_at".into(), (at + offset).into());
+                timed += 1;
+            }
             self.call(i, &method, params, Pending::GroupStarted { member });
         }
-        self.info("", format!("group: {n} runs started"));
+        if timed == n {
+            self.info(
+                "",
+                format!("group: {n} runs start together in {GROUP_LEAD_S} s"),
+            );
+        } else {
+            self.info(
+                "",
+                format!(
+                    "group: {n} runs started; {} on servers before 0.31.0 start as the call arrives",
+                    n - timed
+                ),
+            );
+        }
     }
 
     /// A member's run started: remember its id.

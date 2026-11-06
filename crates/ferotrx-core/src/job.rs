@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::{
     merge_all, run_with_progress, share, Error, FlowReport, PacketReceiver, PacketSink, Rate,
@@ -87,6 +87,8 @@ struct Live {
     parts: Vec<RunStats>,
     state: JobState,
     start: Instant,
+    /// When the streams started, by the wall clock (after `start_at`).
+    started_at: Option<SystemTime>,
 }
 
 impl Job {
@@ -220,6 +222,7 @@ impl Job {
                 parts: vec![empty; count],
                 state: JobState::Running,
                 start: Instant::now(),
+                started_at: None,
             }),
             changed: Condvar::new(),
         });
@@ -230,7 +233,12 @@ impl Job {
             std::thread::Builder::new()
                 .name("ferotrx-job".into())
                 .spawn(move || {
-                    shared.lock().start = Instant::now();
+                    let started = crate::wait_until(config.start_at, &stop);
+                    {
+                        let mut live = shared.lock();
+                        live.start = Instant::now();
+                        live.started_at = Some(started);
+                    }
                     let mut result = run_workers(workers, &config, &shared, &stop);
                     if let Some(rx) = rx {
                         // Packets still on their way get `rx_wait` to arrive.
@@ -272,6 +280,12 @@ impl Job {
             shared,
             thread: Some(thread),
         })
+    }
+
+    /// When the streams started, by the wall clock; `None` while the job
+    /// waits for its [`RunConfig::start_at`].
+    pub fn started_at(&self) -> Option<SystemTime> {
+        self.shared.lock().started_at
     }
 
     /// The number of threads the streams run on (see [`spawn_workers`](Job::spawn_workers)).

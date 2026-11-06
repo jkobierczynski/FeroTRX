@@ -104,6 +104,8 @@ mod capture;
 pub mod check;
 mod error;
 mod field_engine;
+#[cfg(feature = "profile")]
+pub mod fleet;
 mod flows;
 mod host;
 mod impair;
@@ -120,6 +122,7 @@ mod send;
 mod sink;
 mod size_mix;
 mod source;
+mod start;
 mod stream;
 mod tcp;
 mod traffic;
@@ -173,6 +176,7 @@ pub use send::{Backend, SendSettings, XdpMode, DEFAULT_BATCH, MAX_WORKERS};
 pub use sink::{share_sink, NullSink, PacketSink, SinkError, VecSink};
 pub use size_mix::{SizeMix, FCS_LEN, L1_OVERHEAD, RFC2544_SIZES};
 pub use source::{CaptureSource, PacketSource};
+pub use start::{from_unix_seconds, unix_seconds, wait_until};
 pub use stream::{run, run_with_progress, RunConfig, RunStats, Stream};
 pub use tcp::{
     memory_ports, parse_size, run_engine, run_tcp, split_port, split_ports, CcAck, CcWindow,

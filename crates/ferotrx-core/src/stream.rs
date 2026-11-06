@@ -234,6 +234,9 @@ pub struct RunConfig {
     pub ignore_send_errors: bool,
     /// Set to true from another thread (for example a Ctrl-C handler) to stop early.
     pub stop: Option<Arc<AtomicBool>>,
+    /// A [`Job`](crate::Job) waits for this wall-clock time before it sends,
+    /// so that runs on several machines start together (see [`wait_until`](crate::wait_until)).
+    pub start_at: Option<std::time::SystemTime>,
 }
 
 /// Counters of a run: the total, and one entry per stream in the order given.

@@ -61,6 +61,9 @@ each milestone added and what comes next.
   availability, judged against FLR, FTD and FDV. [Guide](docs/y1564.md)
 * **Regression scenarios**: checks with expected outcomes, JSON and JUnit
   reports, run history and comparisons, for CI. [Guide](docs/scenarios.md)
+* **Fleets of agents**: one plan deploys TCP, UDP and traffic profiles to
+  several `ferotrx serve` agents, starts them at one instant on a shared
+  clock and adds up their counters. [Guide](docs/fleet.md)
 * **Fast backends**: libpcap/Npcap everywhere, AF_XDP on Linux, DPDK as a
   build option, for stateless and stateful runs.
   [Guide](docs/backends.md)
@@ -142,6 +145,7 @@ The manual is in [docs/](docs/README.md):
 | [Y.1564 service activation](docs/y1564.md) | `y1564`, CIR/EIR, policing, availability |
 | [Scenarios and regression tests](docs/scenarios.md) | `scenario` |
 | [Remote control](docs/remote-control.md) | `serve`, `ctl`, the protocol, security |
+| [Fleets: runs on several agents](docs/fleet.md) | `fleet run`, plans, shared start, sums |
 | [The Python client](docs/python-client.md) | the `ferotrx` Python package |
 | [The desktop GUI](docs/gui.md) | `ferotrx-gui`: ports, stream and packet editor, application profiles, benchmarks, Y.1564, workspaces |
 | [Using FeroTRX as a library](docs/library.md) | the Rust API |

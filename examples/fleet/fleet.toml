@@ -1,0 +1,77 @@
+# A FeroTRX fleet plan: three agents (`ferotrx serve` on three machines, or
+# in three network namespaces as scripts/fleet-netns.sh builds them) on one
+# LAN. Two of them run emulated web clients, the third an emulated web
+# server; the first also sends a probe stream that the server's machine
+# receives, for one-way loss and latency between the two.
+#
+#   ferotrx fleet check examples/fleet/fleet.toml     # reach the agents
+#   FEROTRX_TOKEN=... ferotrx fleet run examples/fleet/fleet.toml --report fleet.json
+#
+# The controller sends each run's profile, and the pcap it plays, to the
+# agents (under fleet/web-lab in their data directory), starts every run at
+# one instant, adds up the counters and judges the conditions below.
+# Change the addresses to your lab, here or with --set NAME=VALUE.
+format = 1
+name = "web-lab"
+description = "two client machines and a server machine, started together"
+start_delay = "2s"       # from the start calls to the shared start
+interval = "1s"          # counters added up this often
+
+[vars]
+east = "10.99.0.11:4510"
+west = "10.99.0.12:4510"
+srv = "10.99.0.13:4510"
+server_ip = "10.98.0.80"
+connections = 50         # per client machine
+
+[[agent]]
+name = "east"
+address = "${east}"
+token_env = "FEROTRX_TOKEN"   # or token = "...", or ca/cert/key for TLS
+iface = "d0"                  # the agent's interface for runs that name none
+vars = { client_ip = "10.98.0.100" }
+
+[[agent]]
+name = "west"
+address = "${west}"
+token_env = "FEROTRX_TOKEN"
+iface = "d0"
+vars = { client_ip = "10.98.0.110" }
+
+[[agent]]
+name = "srv"
+address = "${srv}"
+token_env = "FEROTRX_TOKEN"
+iface = "d0"
+
+[[run]]
+name = "web server"
+agent = "srv"
+tcp = "web-server.toml"
+duration = "15s"         # a server waits until stopped; this stops it
+
+[[run]]
+name = "web clients"
+agents = ["east", "west"]
+tcp = "web-clients.toml"
+delay = "500ms"          # after the server
+connections = ${connections}
+require = ["cps > 0"]                                # on the sum over both agents
+require_each = ["completed == ${connections}"]      # on each agent's part
+
+[[run]]
+name = "probe"
+agent = "east"
+rx_agent = "srv"         # received on the server's machine
+rx = "d0"
+rate = "500pps"
+limit = 2500
+[run.traffic]
+[[run.traffic.stream]]
+name = "probe"
+packet = "eth(src=02:00:00:00:99:01,dst=02:00:00:00:99:02)/ipv4(src=10.98.0.99,dst=10.98.0.98)/udp(sport=5000,dport=5001)"
+loops = 0
+
+[require]                # on the sums over every run of a kind
+tcp = ["failed == 0", "server_completed > 0"]
+traffic = ["loss_pct < 1"]

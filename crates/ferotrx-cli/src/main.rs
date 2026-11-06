@@ -1,5 +1,6 @@
 mod bench;
 mod check;
+mod fleet;
 mod host;
 mod impair;
 mod lab;
@@ -71,6 +72,10 @@ enum Command {
     /// with a receiver) against expected outcomes, write JSON and JUnit
     /// reports, keep a history and compare runs.
     Scenario(scenario::ScenarioArgs),
+    /// Runs on several agents (`ferotrx serve` on other machines) at once:
+    /// deploys the profiles and their pcaps, starts every run at one
+    /// instant, adds up the counters and judges the plan's conditions.
+    Fleet(fleet::FleetArgs),
     /// Check profile and scenario files without sending anything: reads the
     /// captures, builds the packets and sets the engines up as a run would,
     /// and prints a summary and warnings. Exits with 1 if any file has errors.
@@ -575,6 +580,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Bench(args) => bench::cmd_bench(args),
         Command::Y1564(args) => y1564::cmd_y1564(args),
         Command::Scenario(args) => scenario::cmd_scenario(args),
+        Command::Fleet(args) => fleet::cmd_fleet(args),
         Command::Check(args) => check::cmd_check(args),
         Command::Impair(args) => impair::cmd_impair(args),
         #[cfg(feature = "pcap")]
@@ -1133,6 +1139,7 @@ fn run_config(common: &CommonArgs) -> Result<RunConfig> {
         duration: common.duration,
         ignore_send_errors: common.ignore_errors,
         stop: Some(stop),
+        start_at: None,
     })
 }
 

@@ -236,3 +236,35 @@ def test_from_env(server: Server, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("FEROTRX_KEY", raising=False)
     with Client.from_env() as c:
         assert c.info().name == "ferotrx"
+
+
+def test_files_and_start_at(server: Server, tmp_path: Path) -> None:
+    import time
+
+    with connect(server) as c:
+        info = c.info()
+        assert info.time is not None and abs(info.time - time.time()) < 5
+        assert info.max_file and info.max_file > 0
+        c.file_put("a/b.bin", b"hello ", offset=0)
+        f = c.file_put("a/b.bin", b"world", offset=6)
+        assert f.exists and f.size == 11
+        assert (server.dir / "a/b.bin").read_bytes() == b"hello world"
+        assert not c.file_stat("nothing.bin").exists
+        with pytest.raises(ferotrx.InvalidParams):
+            c.file_put("../out.bin", b"x")
+        local = tmp_path / "big.bin"
+        local.write_bytes(bytes(range(256)) * 5000)
+        assert c.upload_file("big.bin", local)
+        assert not c.upload_file("big.bin", local.read_bytes())
+        assert (server.dir / "big.bin").read_bytes() == local.read_bytes()
+
+        # A run that waits for its start time.
+        c.load_profile(name="lab", toml=PROFILE)
+        at = time.time() + 0.6
+        run = c.start("lab", null=True, limit=10, start_at=at)
+        assert run.started_at is None
+        done = c.wait(run.id, timeout=20)
+        assert done.started_at is not None
+        assert at - 0.05 < done.started_at < at + 0.5
+        with pytest.raises(ferotrx.InvalidParams):
+            c.start("lab", null=True, limit=10, start_at=time.time() + 7200)

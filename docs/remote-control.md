@@ -48,24 +48,26 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `server.info` | | name, version, protocol, interfaces, backends, auth_required, tls, and this connection's role and user |
+| `server.info` | | name, version, protocol, interfaces, backends, auth_required, tls, this connection's role and user, the server's clock `time` (Unix seconds) and `max_file` |
 | `auth` | `token` | `true`; the connection now has the token's role |
 | `interfaces.list` | | `[{name, description}]` |
 | `profile.load` | `path` (on the server) or `toml` (+ `base_dir`), optional `name` | the profile's streams |
 | `profile.get`, `profile.unload` | `name` | profile / `true` |
 | `profile.list` | | loaded profiles |
-| `run.start` | `profile`, `output` (`{"iface": ..}`, `{"file": ..}` or `{"null": true}`; with `iface` also optional `backend`, `xdp_mode`, `queue`, `batch`, `dpdk_args`), optional `rate`, `limit`, `duration`, `ignore_errors`, `latency`, `rx` (`{"iface": .., "wait": "500ms"}`) | the run |
+| `run.start` | `profile`, `output` (`{"iface": ..}`, `{"file": ..}` or `{"null": true}`; with `iface` also optional `backend`, `xdp_mode`, `queue`, `batch`, `dpdk_args`), optional `rate`, `limit`, `duration`, `ignore_errors`, `latency`, `rx` (`{"iface": .., "wait": "500ms"}`), `start_at` | the run (`started_at` once it started) |
 | `run.stop` | `id`, `wait` (default true) | the run, final counters |
 | `run.stats`, `run.remove` | `id` | the run |
 | `run.list` | | every run |
-| `tcp.start` | a TCP profile as `path` (on the server) or `toml` (+ `base_dir`); optional `iface`, `cps`, `connections`, `concurrency`, `duration` | the TCP run |
+| `tcp.start` | a TCP profile as `path` (on the server) or `toml` (+ `base_dir`); optional `iface`, `cps`, `connections`, `concurrency`, `duration`, `start_at` | the TCP run |
 | `tcp.stop` | `id`, `wait` (default true) | the TCP run, final counters |
 | `tcp.stats`, `tcp.remove` | `id` | the TCP run |
 | `tcp.list` | | every TCP run |
-| `udp.start` | a UDP profile as `path` (on the server) or `toml` (+ `base_dir`); optional `iface`, `rate`, `transactions`, `concurrency`, `duration` | the UDP run |
+| `udp.start` | a UDP profile as `path` (on the server) or `toml` (+ `base_dir`); optional `iface`, `rate`, `transactions`, `concurrency`, `duration`, `start_at` | the UDP run |
 | `udp.stop` | `id`, `wait` (default true) | the UDP run, final counters |
 | `udp.stats`, `udp.remove` | `id` | the UDP run |
 | `udp.list` | | every UDP run |
+| `file.put` | `path` (relative, in the first data directory), `data` (base64), `offset` (0 starts the file; pieces in order) | the file's `size` so far |
+| `file.stat` | `path` | `exists`, `size`, `sha256` |
 | `rx.start` | `iface`, optional `duration` | the receiver, its flows |
 | `rx.stop` | `id`, `wait` (default true) | the receiver, final counters |
 | `rx.stats`, `rx.remove` | `id` | the receiver |
@@ -174,6 +176,14 @@ inside the `--data-dir` directories (repeatable; default: the directory the
 server was started in); relative paths start from the first one. Uploaded
 profiles may be at most `--max-upload` (1M); a request at most
 `--max-request` (4M). Profiles given with `-p` at start are not checked.
+`file.put` writes files of at most `--max-file` bytes (256M; 0 refuses
+files) under the first data directory; [fleets](fleet.md) send profiles and
+pcaps to the agents with it.
+
+**Starting together.** `run.start`, `tcp.start` and `udp.start` take
+`start_at`, Unix seconds by the server's clock (`server.info` tells it).
+The run opens its interfaces at once and waits for that time; a time gone
+by starts at once, one more than an hour ahead is refused.
 
 **Limits.** `--max-connections` (64), `--idle-timeout` (5m; connections
 watching stats are never idle), 30 s to log in, half a second after each
@@ -182,7 +192,7 @@ wrong token and the connection closed after five.
 **Audit log.** JSON lines on standard error, or appended to `--audit-log
 FILE`: `connect`, `refused`, `tls_error`, `login` (by token or certificate,
 with the certificate's SHA-256), `login_failed`, `denied`, `call` (every
-operator method with its parameters, uploaded profiles by size, and whether
+operator method with its parameters, uploaded profiles and `file.put` data by size, and whether
 it worked) and `disconnect` (with the reason). Tokens are never written.
 
 ```json

@@ -3,10 +3,13 @@
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use crate::protocol::RpcError;
+use crate::protocol::{FileInfo, RpcError};
 
 /// Longest profile a client may upload as `toml` text unless set otherwise.
 pub const DEFAULT_MAX_UPLOAD: usize = 1024 * 1024;
+
+/// Largest file a client may write with `file.put` unless set otherwise.
+pub const DEFAULT_MAX_FILE: u64 = 256 * 1024 * 1024;
 
 /// Where the files that clients name may be: profiles, the pcaps they play,
 /// and the pcap files runs write.
@@ -21,6 +24,7 @@ pub const DEFAULT_MAX_UPLOAD: usize = 1024 * 1024;
 pub struct FilePolicy {
     dirs: Option<Vec<PathBuf>>,
     max_upload: usize,
+    max_file: u64,
 }
 
 impl Default for FilePolicy {
@@ -35,6 +39,7 @@ impl FilePolicy {
         Self {
             dirs: None,
             max_upload: DEFAULT_MAX_UPLOAD,
+            max_file: DEFAULT_MAX_FILE,
         }
     }
 
@@ -63,6 +68,7 @@ impl FilePolicy {
         Ok(Self {
             dirs: Some(list),
             max_upload: DEFAULT_MAX_UPLOAD,
+            max_file: DEFAULT_MAX_FILE,
         })
     }
 
@@ -79,6 +85,106 @@ impl FilePolicy {
 
     pub fn max_upload(&self) -> usize {
         self.max_upload
+    }
+
+    /// Files written with `file.put` may be at most `bytes` long; 0 refuses
+    /// them.
+    pub fn with_max_file(mut self, bytes: u64) -> Self {
+        self.max_file = bytes;
+        self
+    }
+
+    pub fn max_file(&self) -> u64 {
+        self.max_file
+    }
+
+    /// A path a client may write with `file.put`: relative, without `..`,
+    /// inside the first data directory (or the current one).
+    fn put_path(&self, p: &Path) -> Result<PathBuf, RpcError> {
+        let plain =
+            !p.as_os_str().is_empty() && p.components().all(|c| matches!(c, Component::Normal(_)));
+        if !plain {
+            return Err(RpcError::invalid_params(format!(
+                "{}: give a relative path without '..'",
+                p.display()
+            )));
+        }
+        let path = self.resolve(p);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| RpcError::failed(format!("cannot write {}: {e}", p.display())))?;
+        }
+        self.writable(p)
+    }
+
+    /// Writes a piece of a file (`file.put`): offset 0 starts it afresh,
+    /// any other offset must be its length so far. Returns the file as it
+    /// is now.
+    pub fn put(&self, p: &Path, data: &[u8], offset: u64) -> Result<FileInfo, RpcError> {
+        use std::io::Write;
+        if self.max_file == 0 {
+            return Err(RpcError::forbidden(
+                "this server takes no files (--max-file 0)",
+            ));
+        }
+        let end = offset.saturating_add(data.len() as u64);
+        if end > self.max_file {
+            return Err(RpcError::invalid_params(format!(
+                "{} would be {end} bytes; this server takes files of at most {}",
+                p.display(),
+                self.max_file
+            )));
+        }
+        let path = self.put_path(p)?;
+        let fail = |e: io::Error| RpcError::failed(format!("cannot write {}: {e}", p.display()));
+        let mut file = if offset == 0 {
+            std::fs::File::create(&path).map_err(fail)?
+        } else {
+            let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if len != offset {
+                return Err(RpcError::invalid_params(format!(
+                    "{} is {len} bytes long, not {offset}: send the pieces in order",
+                    p.display()
+                )));
+            }
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .map_err(fail)?
+        };
+        file.write_all(data).map_err(fail)?;
+        drop(file);
+        self.stat(p)
+    }
+
+    /// A file's size and SHA-256 (`file.stat`); `exists` is false for one
+    /// that is not there.
+    pub fn stat(&self, p: &Path) -> Result<FileInfo, RpcError> {
+        let missing = FileInfo {
+            path: p.to_path_buf(),
+            ..Default::default()
+        };
+        let path = match self.readable(p) {
+            Ok(path) => path,
+            Err(e) if e.code == RpcError::FORBIDDEN => return Err(e),
+            Err(_) => return Ok(missing),
+        };
+        let data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(missing),
+            Err(e) => {
+                return Err(RpcError::failed(format!(
+                    "cannot read {}: {e}",
+                    p.display()
+                )))
+            }
+        };
+        Ok(FileInfo {
+            path: p.to_path_buf(),
+            exists: true,
+            size: data.len() as u64,
+            sha256: Some(sha256_hex(&data)),
+        })
     }
 
     /// A path as the client gave it, relative ones from the first directory.
@@ -183,6 +289,12 @@ impl FilePolicy {
         }
         Ok(())
     }
+}
+
+/// SHA-256 of `data`, in lower-case hex.
+pub fn sha256_hex(data: &[u8]) -> String {
+    let d = ring::digest::digest(&ring::digest::SHA256, data);
+    d.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

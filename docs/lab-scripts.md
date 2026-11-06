@@ -29,6 +29,7 @@ this checkout, else the installed one); arguments after it go to the
 | `y1564-netns.sh` | `ferotrx y1564` (voice and data) through a router that polices by DSCP, then again with data's policer below its CIR, which must fail | `STEP=2s`, `PERF=4s`, `LOW=only` or `LOW=no` |
 | `hosts-netns.sh` | `ferotrx host` and `ferotrx tcp --client-ip dhcp` against dnsmasq and a bridge with IGMP/MLD snooping; a FeroTRX DHCP server for busybox `udhcpc` and emulated clients | `IPV6=1` (SLAAC, DHCPv6, MLD, router advertisements, a DHCPv6 server for `udhcpc6`) |
 | `lab-examples.sh` | the control server's lab router (`serve --lab`, `lab.start`), with `examples/lab-tcp.toml` and `examples/lab-udp-mix.toml` as they are | `BLOCK=1` (router resets TCP to port 80) |
+| `fleet-netns.sh` | `ferotrx fleet run examples/fleet/fleet.toml` on three agents in namespaces (a web server, clients on two agents, a probe received on another agent), then again with one client agent cut off, which must fail | `SPREAD=100`, `KEEP=DIR` |
 | `scenario-netns.sh` | `examples/scenario-nat.toml`, then the same after breaking the router's firewall, which must show as a regression | `KEEP=DIR` keeps the reports |
 
 ```sh
@@ -46,7 +47,7 @@ feature: [stateful TCP](stateful-tcp.md#lab-script),
 [stateful UDP](stateful-udp.md#lab-script),
 [application protocols](app-protocols.md#lab-script),
 [loss and latency](loss-latency.md#lab-script),
-[benchmarking](benchmarking.md), [Y.1564](y1564.md#lab-script), [host emulation](host-emulation.md#lab-script)
+[benchmarking](benchmarking.md), [Y.1564](y1564.md#lab-script), [fleets](fleet.md#lab-script), [host emulation](host-emulation.md#lab-script)
 and [scenarios](scenarios.md#an-example-run).
 
 Things to know:
