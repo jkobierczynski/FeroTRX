@@ -462,6 +462,9 @@ impl AppCx {
             stats.record(t);
         }
         stats.protocol_errors += self.protocol_errors.len() as u64;
+        for e in &self.protocol_errors {
+            stats.sample_error(e);
+        }
         for h in &self.handshakes {
             stats.record_handshake(h);
         }
@@ -558,6 +561,9 @@ pub struct AppStats {
     pub errors: u64,
     /// Things the other end sent that the protocol could not take.
     pub protocol_errors: u64,
+    /// What the first few protocol errors were (up to
+    /// [`ERROR_SAMPLES`](Self::ERROR_SAMPLES), each once).
+    pub protocol_error_samples: Vec<String>,
     /// Transactions by label (`200`, `404`, `NOERROR`, `NXDOMAIN`).
     pub codes: BTreeMap<String, u64>,
     /// Client: from each request to its whole answer.
@@ -731,6 +737,19 @@ impl AppStats {
         }
     }
 
+    /// How many protocol errors [`protocol_error_samples`](Self::protocol_error_samples) keeps.
+    pub const ERROR_SAMPLES: usize = 5;
+
+    /// Keeps `e` among the samples of protocol errors, if there is room
+    /// and it is new.
+    pub fn sample_error(&mut self, e: &str) {
+        if self.protocol_error_samples.len() < Self::ERROR_SAMPLES
+            && !self.protocol_error_samples.iter().any(|s| s == e)
+        {
+            self.protocol_error_samples.push(e.to_string());
+        }
+    }
+
     pub fn record_handshake(&mut self, h: &AppHandshake) {
         self.handshakes += 1;
         self.handshake_failures += u64::from(!h.succeeded);
@@ -754,6 +773,9 @@ impl AppStats {
         self.failed += o.failed;
         self.errors += o.errors;
         self.protocol_errors += o.protocol_errors;
+        for e in &o.protocol_error_samples {
+            self.sample_error(e);
+        }
         for (k, v) in &o.codes {
             *self.codes.entry(k.clone()).or_default() += v;
         }
@@ -869,6 +891,19 @@ pub fn filler(n: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protocol_errors_keep_a_few_samples() {
+        let mut st = AppStats::default();
+        for e in ["a", "b", "a", "c", "d", "e", "f"] {
+            st.sample_error(e);
+        }
+        assert_eq!(st.protocol_error_samples, ["a", "b", "c", "d", "e"]);
+        let mut other = AppStats::default();
+        other.sample_error("z");
+        other.merge(&st);
+        assert_eq!(other.protocol_error_samples, ["z", "a", "b", "c", "d"]);
+    }
 
     #[test]
     fn stats_count_and_merge() {

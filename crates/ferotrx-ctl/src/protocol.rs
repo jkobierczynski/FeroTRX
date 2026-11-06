@@ -935,6 +935,9 @@ pub struct AppCounters {
     /// Things the other end sent that the protocol could not take.
     #[serde(default)]
     pub protocol_errors: u64,
+    /// What the first few protocol errors were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protocol_error_samples: Vec<String>,
     /// Transactions by status or response code, e.g. `{"200": 98, "404": 2}`.
     #[serde(default)]
     pub codes: std::collections::BTreeMap<String, u64>,
@@ -1035,6 +1038,7 @@ impl From<&ferotrx_core::AppStats> for AppCounters {
             failed: s.failed,
             errors: s.errors,
             protocol_errors: s.protocol_errors,
+            protocol_error_samples: s.protocol_error_samples.clone(),
             codes: s.codes.clone(),
             response_time: (s.response_time.count() > 0).then(|| (&s.response_time).into()),
             tls: (s.handshakes > 0).then(|| HandshakeCounters {

@@ -360,8 +360,12 @@ impl QuicSession {
         if conn.is_closed() {
             cx.close();
         }
+        // The connection's timer, unless HTTP/3 asked for an earlier wake
+        // (a route's delay, the client's think time): wake_at keeps only
+        // the last time it was given.
         if let Some(t) = conn.timeout() {
-            cx.wake_at(t.max(now));
+            let t = t.max(now);
+            cx.wake_at(cx.wake().map_or(t, |w| w.min(t)));
         }
         self.conn = Some(conn);
     }

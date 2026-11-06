@@ -658,6 +658,9 @@ impl Session {
                         s.app.record(&t);
                     }
                     s.app.protocol_errors += ax.protocol_errors().len() as u64;
+                    for e in ax.protocol_errors() {
+                        s.app.sample_error(e);
+                    }
                 });
                 Fit::Yes { ok, error }
             }
