@@ -236,6 +236,19 @@ pub struct ServerState {
 }
 
 impl ServerState {
+    /// True when the server runs on this computer, so its files are this
+    /// computer's: a loopback address, and (from 0.34 servers) the same host
+    /// name and operating system. 127.0.0.1 forwarded into a virtual machine
+    /// is a loopback address but another computer.
+    pub fn is_local(&self) -> bool {
+        self.settings.is_local()
+            && self
+                .info
+                .as_ref()
+                .and_then(|i| i.same_machine())
+                .unwrap_or(true)
+    }
+
     pub fn new(settings: ConnSettings) -> Self {
         Self {
             settings,
@@ -920,7 +933,7 @@ impl FeroApp {
     /// `ferotrx run` does; a server elsewhere from its data directory.
     fn load_params(&self, i: usize, name: &str, work: &PortWork) -> Value {
         let mut load = serde_json::json!({ "name": name, "toml": work.profile.to_toml(true) });
-        if self.servers[i].settings.is_local() && !work.base_dir.is_empty() {
+        if self.servers[i].is_local() && !work.base_dir.is_empty() {
             load["base_dir"] = work.base_dir.clone().into();
         }
         load

@@ -122,7 +122,7 @@ impl FeroApp {
         let work = self.work.ports.entry(key).or_default();
         let streams = &mut work.profile.streams;
         let ed = &mut self.editor;
-        ed.server_local = self.servers[i].settings.is_local();
+        ed.server_local = self.servers[i].is_local();
         // The table and the editor share the tab; the line between them drags.
         let h = ui.available_height();
         egui::TopBottomPanel::top("stream-table")
@@ -209,7 +209,7 @@ impl FeroApp {
             .collect();
         let run = self.port_run(i, port).cloned();
         let addr = self.servers[i].settings.addr.clone();
-        let local = self.servers[i].settings.is_local();
+        let local = self.servers[i].is_local();
         let file_out = &mut self.work.file_out;
         if let PortKind::File = port {
             let mut browse = false;

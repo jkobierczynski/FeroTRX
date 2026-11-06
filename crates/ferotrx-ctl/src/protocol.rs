@@ -183,6 +183,27 @@ pub struct ServerInfo {
     /// Largest file `file.put` takes, in bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_file: Option<u64>,
+    /// The server's host name and operating system (`linux`, `windows`,
+    /// `macos`): a client on a loopback address checks them before it treats
+    /// the server's files as its own, since 127.0.0.1 may be a port forward
+    /// into a virtual machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+}
+
+impl ServerInfo {
+    /// True when the server says it runs on this machine: same host name and
+    /// operating system. `None` from servers that don't say (before 0.34).
+    pub fn same_machine(&self) -> Option<bool> {
+        let host = self.host.as_deref()?;
+        let os = self.os.as_deref()?;
+        Some(
+            os == std::env::consts::OS
+                && ferotrx_io::hostname().is_some_and(|h| h.eq_ignore_ascii_case(host)),
+        )
+    }
 }
 
 /// What a connection may do.

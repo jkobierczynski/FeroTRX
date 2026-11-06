@@ -197,6 +197,10 @@ class ServerInfo(Record):
     time: float | None = None
     #: Largest file ``file_put`` takes, in bytes.
     max_file: int | None = None
+    #: The server's host name and operating system (``linux``, ``windows``,
+    #: ``macos``); servers before 0.34.0 leave them out.
+    host: str | None = None
+    os: str | None = None
 
 
 @dataclass(kw_only=True)

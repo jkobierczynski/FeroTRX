@@ -158,7 +158,7 @@ impl FeroApp {
             .map(|i| i.backends.clone())
             .unwrap_or_default();
         let addr = server.settings.addr.clone();
-        let local = server.settings.is_local();
+        let local = server.is_local();
         let mut browse = None;
         if let Some(PortKind::Interface(n)) = &self.sel_port {
             if self.stateful.iface.is_empty() {

@@ -317,7 +317,7 @@ impl FeroApp {
         };
         let connected = server.status == Status::Connected;
         let can = connected && server.can_operate();
-        let local = server.settings.is_local();
+        let local = server.is_local();
         let addr = server.settings.addr.clone();
         let ifaces: Vec<String> = server.interfaces.iter().map(|x| x.name.clone()).collect();
         let runs: Vec<ScenarioRunInfo> = server.snap.scenarios.clone();

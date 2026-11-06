@@ -556,7 +556,7 @@ impl FeroApp {
         let (can, local, addr, ifaces, backends) = match self.servers.get(i) {
             Some(s) => (
                 s.status == Status::Connected && s.can_operate(),
-                s.settings.is_local(),
+                s.is_local(),
                 s.settings.addr.clone(),
                 s.interfaces
                     .iter()
