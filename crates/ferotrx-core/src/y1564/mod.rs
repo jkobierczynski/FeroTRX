@@ -1081,9 +1081,11 @@ fn fmt_pct(v: f64) -> String {
 
 /// Loss and delay per whole interval of sending, and availability.
 ///
-/// Frames sent in an interval are taken as the flow's mean send rate times
-/// the interval: the sender keeps an even pace, so this is within a frame or
-/// two of the truth, and needs no counting on the sending side.
+/// Frames sent in an interval come from the sequence numbers: the first one
+/// that arrived from each interval, as numbers only advance on frames that
+/// left (the last one, with nothing after it, counts its own). A sender that fell behind (a stalled machine) thus sent fewer, and
+/// that is not loss. Across intervals with nothing at all the count is
+/// spread evenly; without numbers it is the flow's mean send rate.
 fn interval_records(config: &Y1564Config, r: &FlowResult, len: Duration) -> Vec<IntervalRecord> {
     let secs = r.elapsed.as_secs_f64();
     let ns = len.as_nanos();
@@ -1095,15 +1097,41 @@ fn interval_records(config: &Y1564Config, r: &FlowResult, len: Duration) -> Vec<
     let end = start + r.elapsed.as_nanos();
     let first = start.div_ceil(ns);
     let last = end / ns; // intervals [k*ns, (k+1)*ns) with k < last
+    let get = |k: u128| u64::try_from(k).ok().and_then(|k| r.intervals.get(&k));
+    // The first number sent in each interval from `first` to `last`, where
+    // something from it arrived.
+    let bounds: Vec<Option<u64>> = (first..=last)
+        .map(|k| get(k).and_then(|i| i.first_seq))
+        .collect();
+    let sent = |i: usize| -> f64 {
+        let before = bounds[..=i].iter().rposition(Option::is_some);
+        let after = bounds[i + 1..]
+            .iter()
+            .position(Option::is_some)
+            .map(|j| i + 1 + j);
+        match (before, after) {
+            (Some(a), Some(b)) => match (bounds[a], bounds[b]) {
+                (Some(x), Some(y)) if y > x => (y - x) as f64 / (b - a) as f64,
+                _ => per_interval,
+            },
+            // The last interval with nothing after it: its own numbers.
+            (Some(a), None) if a == i => {
+                let got = get(first + i as u128);
+                match got.and_then(|g| Some((g.first_seq?, g.last_seq?))) {
+                    Some((x, y)) => (y - x + 1) as f64,
+                    None => per_interval,
+                }
+            }
+            _ => per_interval,
+        }
+    };
     let mut out: Vec<IntervalRecord> = (first..last)
-        .map(|k| {
-            let got = u64::try_from(k)
-                .ok()
-                .and_then(|k| r.intervals.get(&k))
-                .cloned()
-                .unwrap_or_default();
-            let lost = (per_interval - got.packets as f64).max(0.0);
-            let flr_pct = lost * 100.0 / per_interval;
+        .enumerate()
+        .map(|(i, k)| {
+            let got = get(k).cloned().unwrap_or_default();
+            let sent = sent(i).max(got.packets as f64);
+            let lost = sent - got.packets as f64;
+            let flr_pct = if sent > 0.0 { lost * 100.0 / sent } else { 0.0 };
             IntervalRecord {
                 start_s: (k * ns - start) as f64 / 1e9,
                 rx: got.packets,
