@@ -85,9 +85,14 @@ jobs:
           & "$dir\ferotrx.exe" run examples\lab-built-packets.toml --null --duration 1s
           if ($LASTEXITCODE -ne 0) { throw "ferotrx.exe run --null failed" }
           if (-not (Test-Path "$env:SystemRoot\System32\Npcap\wpcap.dll") -and -not (Test-Path "$env:SystemRoot\System32\wpcap.dll")) {
+            # This call is meant to fail: don't let its exit code end the step.
+            $PSNativeCommandUseErrorActionPreference = $false
+            $ErrorActionPreference = 'Continue'
             $out = & "$dir\ferotrx.exe" interfaces 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            $ErrorActionPreference = 'Stop'
             Write-Host $out
-            if ($LASTEXITCODE -eq 0 -or $out -notmatch 'Npcap is not installed') { throw "ferotrx interfaces without Npcap: $out" }
+            if ($code -eq 0 -or $out -notmatch 'Npcap is not installed') { throw "ferotrx interfaces without Npcap: $out" }
           }
           $p = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" /qn" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "uninstall failed: $($p.ExitCode)" }
