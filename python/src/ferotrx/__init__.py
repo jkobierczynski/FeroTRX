@@ -23,7 +23,6 @@ from .errors import (
 )
 from .types import (
     AppCounters,
-    RequestCounters,
     Counters,
     DhcpLeaseInfo,
     DhcpServerInfo,
@@ -40,6 +39,7 @@ from .types import (
     Notification,
     PortImpairCounters,
     ProfileInfo,
+    RequestCounters,
     Role,
     RunInfo,
     RunState,

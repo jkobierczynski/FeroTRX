@@ -223,7 +223,7 @@ def test_tcp_run_app_and_tls_counters() -> None:
                     "errors": 2,
                     "codes": {"200": 2, "404": 2},
                     "requests": {"GET /": {"passed": 1, "failed": 1}},
-                    "failures": {"GET /: body lacks \"Welcome\"": 1},
+                    "failures": {'GET /: body lacks "Welcome"': 1},
                     "tls": {
                         "handshakes": 2,
                         "failed": 0,
