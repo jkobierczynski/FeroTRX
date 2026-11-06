@@ -183,8 +183,10 @@ if [ "$LOW" != only ]; then
     check "every configuration step passed" '[.configuration[].passed] | all' "$j"
     check "the steps ran: 2 + policing for voice, 2 + CIR+EIR + policing + CBS for data" \
         '(.configuration | length) == 8' "$j"
+    # Loss counts frames, and a policer drops big frames more often than small
+    # ones: 20% of data's yellow bytes over the policer is about 8% of its frames.
     check "data policing: yellow above the EIR dropped, IR at most CIR + EIR" \
-        '[.configuration[] | select(.step.kind == "policing") | .services[] | select(.service == "data")][0] | .yellow_flr_pct > 10 and .ir_mbps <= 15.75 and .flr_pct == 0' "$j"
+        '[.configuration[] | select(.step.kind == "policing") | .services[] | select(.service == "data")][0] | .yellow_flr_pct > 3 and .ir_mbps <= 15.75 and .flr_pct == 0' "$j"
     check "voice policing: color blind, IR at most the CIR" \
         '[.configuration[] | select(.step.kind == "policing") | .services[] | select(.service == "voice")][0] | .green_judged == false and .ir_mbps <= 4.2 and .ir_mbps > 3.6' "$j"
     check "performance: both services at their CIR, available" \
@@ -203,8 +205,9 @@ if [ "$LOW" != no ]; then
     router_counters
     [ $status -ne 0 ] && echo "ok: ferotrx y1564 failed, as it should" || { echo "FAILED: ferotrx y1564 passed with the policer too low"; fail=1; }
     j="$WORK/low.json"
+    # 30% of the bytes over the policer: some 14% of the frames (see above).
     check "data at 100% of its CIR loses green frames" \
-        '[.configuration[] | select(.step == {"kind":"cir","pct":100.0}) | .services[] | select(.service == "data")][0] | .passed == false and .flr_pct > 15' "$j"
+        '[.configuration[] | select(.step == {"kind":"cir","pct":100.0}) | .services[] | select(.service == "data")][0] | .passed == false and .flr_pct > 5' "$j"
     check "data at 50% of its CIR still passes" \
         '[.configuration[] | select(.step == {"kind":"cir","pct":50.0}) | .services[] | select(.service == "data")][0] | .passed' "$j"
     check "voice passes, data fails" \
