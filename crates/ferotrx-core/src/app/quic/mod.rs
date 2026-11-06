@@ -457,7 +457,8 @@ impl QuicSession {
 impl AppSession for QuicSession {
     fn start(&mut self, cx: &mut AppCx) {
         self.began = Some(cx.now());
-        let name = match &self.cfg.client_tls.server_name {
+        let names = &self.cfg.client_tls.server_names;
+        let name = match names.get((self.init.index % names.len().max(1) as u64) as usize) {
             Some(n) => rustls::pki_types::ServerName::try_from(n.clone()).ok(),
             None => Some(rustls::pki_types::ServerName::IpAddress(
                 self.init.remote.ip().into(),

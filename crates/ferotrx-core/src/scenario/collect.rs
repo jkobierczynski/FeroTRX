@@ -62,7 +62,13 @@ pub fn tcp_metrics(s: &TcpStats) -> Metrics {
         put(&mut m, "tls_failed", a.handshake_failures as f64);
         put(&mut m, "tls_unexpected", a.handshakes_unexpected as f64);
         put(&mut m, "tls_resumed", a.resumed as f64);
+        put(&mut m, "tls_full", a.full_handshakes() as f64);
+        if let Some(r) = a.handshake_rate() {
+            put(&mut m, "tls_rate", r);
+        }
         latency_metrics(&mut m, "handshake", &a.handshake_time);
+        latency_metrics(&mut m, "handshake_full", &a.full_time);
+        latency_metrics(&mut m, "handshake_resumed", &a.resumed_time);
     }
     m
 }

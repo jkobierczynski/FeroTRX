@@ -1111,6 +1111,18 @@ pub struct HandshakeCounters {
     /// From each handshake's first message to its end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<LatencyCounters>,
+    /// Handshakes that succeeded with a new session (not resumed).
+    #[serde(default)]
+    pub full: u64,
+    /// Successful handshakes per second, from the first to end to the last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate: Option<f64>,
+    /// The times of the handshakes that made a new session, and of those
+    /// that resumed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_time: Option<LatencyCounters>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_time: Option<LatencyCounters>,
 }
 
 impl From<&ferotrx_core::AppStats> for AppCounters {
@@ -1130,6 +1142,10 @@ impl From<&ferotrx_core::AppStats> for AppCounters {
                 resumed: s.resumed,
                 negotiated: s.negotiated.clone(),
                 time: (s.handshake_time.count() > 0).then(|| (&s.handshake_time).into()),
+                full: s.full_handshakes(),
+                rate: s.handshake_rate(),
+                full_time: (s.full_time.count() > 0).then(|| (&s.full_time).into()),
+                resumed_time: (s.resumed_time.count() > 0).then(|| (&s.resumed_time).into()),
             }),
             media: (s.media.streams > 0).then(|| {
                 let m = &s.media;

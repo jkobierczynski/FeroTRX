@@ -136,6 +136,37 @@ pub(crate) fn take_apps(
             Some(toml::Value::String(s)) => s.to_ascii_lowercase(),
             Some(_) => return Err(Error::Profile(format!("{what}`app` must be a name"))),
         };
+        // `tls` alone is handshakes only: the [tls] table, with `hold`.
+        if name == "tls" && !registry.contains("tls") {
+            t.remove("app");
+            let mut table = match t.remove("tls") {
+                None | Some(toml::Value::Boolean(true)) => toml::Table::new(),
+                Some(toml::Value::Table(x)) => x,
+                Some(_) => {
+                    return Err(Error::Profile(format!(
+                        "{what}`tls` must be true or a table of TLS settings"
+                    )))
+                }
+            };
+            let hold = match table.remove("hold") {
+                None => std::time::Duration::ZERO,
+                Some(toml::Value::String(h)) => crate::pacer::parse_duration(&h)
+                    .map_err(|e| Error::Profile(format!("{what}[tls] hold: {e}")))?,
+                Some(_) => {
+                    return Err(Error::Profile(format!(
+                        "{what}[tls] hold must be a time, e.g. \"100ms\""
+                    )))
+                }
+            };
+            return handshake_only(hold, &table, base_dir)
+                .map(Some)
+                .map_err(|e| {
+                    Error::Profile(format!(
+                        "{what}[tls]: {}",
+                        e.to_string().trim_start_matches("profile: ")
+                    ))
+                });
+        }
         // `https` is HTTP over TLS: the [http] table and TLS on; `h2` is
         // HTTP/2 over TLS and `h2c` HTTP/2 without, both with [http2].
         let (name, force_tls) = match name.as_str() {
@@ -247,6 +278,19 @@ impl ProfileApps {
 #[cfg(feature = "tls")]
 fn with_tls(app: App, table: &toml::Table, base_dir: &Path) -> Result<App> {
     super::tls::parse(app, table, base_dir).map(App::new)
+}
+
+#[cfg(feature = "tls")]
+fn handshake_only(hold: std::time::Duration, table: &toml::Table, base_dir: &Path) -> Result<App> {
+    let (client, server) = super::tls::parse_ends(table, base_dir)?;
+    super::tls::HandshakeOnly::tls(hold, client, server).map(App::new)
+}
+
+#[cfg(not(feature = "tls"))]
+fn handshake_only(_: std::time::Duration, _: &toml::Table, _: &Path) -> Result<App> {
+    Err(Error::Profile(
+        "this FeroTRX was built without TLS (feature `tls`)".into(),
+    ))
 }
 
 #[cfg(not(feature = "tls"))]

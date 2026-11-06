@@ -1,0 +1,75 @@
+# FeroTRX stateful TCP profile: TLS handshake load, through a NAT router
+# between two VLANs. Every connection is one real TLS handshake (rustls) and
+# nothing else (`app = "tls"`): the client waits `hold`, sends close_notify
+# and closes. What a TLS terminator, a load balancer or a firewall that
+# inspects TLS has to do per connection.
+#
+#   FeroTRX host --- switch (trunk) --- router --- VLAN 10: 192.168.10.0/24 (clients)
+#                                              \-- VLAN 20: 192.168.20.0/24 (server)
+#
+# Run it with:
+#   sudo ferotrx tcp -p examples/lab-tls.toml -i <interface>
+# and raise the rate with --cps (and --workers on several cores).
+#
+#   only the server (leave out [client]):
+#     openssl s_time -connect 192.168.20.80:443 -new -time 10
+#   only the client (leave out [server]), against a real server:
+#     sudo ferotrx tcp -p examples/lab-tls.toml -i eth0 --connect 192.168.20.10
+#
+# As in examples/lab-tcp.toml, the `ip`s must be free addresses in each VLAN,
+# not addresses of the FeroTRX machine, and `gateway` the router's address.
+format = 1
+cps = 200
+connections = 2000
+concurrency = 400
+
+# Every handshake a new session: a full key exchange and certificate each
+# time, the costly case for a server. Three SNI names in turn, each checked
+# against the server's certificate.
+[[template]]
+name = "new"
+app = "tls"
+weight = 2
+
+[template.tls]
+versions = ["1.3"]
+resumption = false
+server_name = ["www.lab.local", "api.lab.local", "cdn.lab.local"]
+names = ["www.lab.local", "api.lab.local", "cdn.lab.local"]
+verify = true
+
+# Browser-like: 70% of the connections resume an earlier session (TLS 1.3
+# tickets), the rest make a new one. The client keeps each connection open
+# 100 ms after its handshake.
+[[template]]
+name = "returning"
+app = "tls"
+port = 4443
+weight = 2
+
+[template.tls]
+resumption = 0.7
+hold = "100ms"
+
+# TLS 1.2 with one ECDHE suite and session ids, on its own port.
+[[template]]
+name = "tls12"
+app = "tls"
+port = 8443
+weight = 1
+
+[template.tls]
+versions = ["1.2"]
+cipher_suites = ["TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"]
+resumption = "50%"
+
+[client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20
