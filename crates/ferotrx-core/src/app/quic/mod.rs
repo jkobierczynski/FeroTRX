@@ -574,6 +574,7 @@ pub fn parse(t: &toml::Table, base: &std::path::Path) -> Result<Http3> {
     }
     let http = super::http::parse(&rest, base)
         .map_err(|e| Error::Profile(e.to_string().trim_start_matches("profile: ").to_string()))?;
+    super::http::status_checks_only(&http, "HTTP/3")?;
     let (client, server) = match own.get("tls") {
         Some(toml::Value::Table(x)) => super::tls::parse_ends(x, base).map_err(|e| {
             Error::Profile(format!(

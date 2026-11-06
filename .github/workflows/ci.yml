@@ -299,6 +299,22 @@ jobs:
           sudo IPV6=1 scripts/app-netns.sh ./target/debug/ferotrx
           sudo NO_VLAN=1 scripts/app-netns.sh ./target/debug/ferotrx -B af_xdp --workers 2
 
+      # HTTP/1.1 workloads with response checks through the NAT router:
+      # bodies, sizes and headers between emulated ends, a server whose
+      # answer must fail one check, and the emulated client checking a real
+      # server (python3 -m http.server); with 3% loss, over IPv6, and over
+      # AF_XDP with two workers.
+      - name: HTTP response checks through a NAT router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y ethtool
+          cargo build -p ferotrx-cli
+          sudo modprobe 8021q || true
+          sudo scripts/http-netns.sh ./target/debug/ferotrx
+          sudo NO_VLAN=1 LOSS=0.03 scripts/http-netns.sh ./target/debug/ferotrx
+          sudo IPV6=1 scripts/http-netns.sh ./target/debug/ferotrx
+          sudo NO_VLAN=1 scripts/http-netns.sh ./target/debug/ferotrx -B af_xdp --workers 2
+
       # TLS handshake load through the NAT router: new sessions only on
       # three SNI names, a share of resumed ones over TLS 1.3 and 1.2, HTTPS
       # with new sessions; openssl s_time (-new and -reuse) against the

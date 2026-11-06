@@ -104,6 +104,102 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub expect: StatusMatch,
+    /// What the response must have besides its status.
+    pub checks: ResponseChecks,
+    /// The name it is counted under; `None`: `METHOD PATH`.
+    pub name: Option<String>,
+}
+
+/// What a response must have besides its status, for a request to pass.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResponseChecks {
+    /// The whole body, byte for byte.
+    pub body: Option<Vec<u8>>,
+    /// Texts the body must contain, each.
+    pub contains: Vec<Vec<u8>>,
+    /// Texts the body must not contain.
+    pub lacks: Vec<Vec<u8>>,
+    /// The body's size: at least, at most (bytes).
+    pub size: Option<(u64, u64)>,
+    /// Headers, by name (any case), and what they must be.
+    pub headers: Vec<(String, HeaderMatch)>,
+}
+
+impl ResponseChecks {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The checks need the body's bytes, not only its size.
+    pub fn need_body(&self) -> bool {
+        self.body.is_some() || !self.contains.is_empty() || !self.lacks.is_empty()
+    }
+}
+
+/// What a response header must be.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HeaderMatch {
+    /// There, with any value (`"*"`).
+    Present,
+    /// Not there (`"!"`).
+    Absent,
+    /// This value, ignoring case and spaces around it.
+    Equals(String),
+    /// Starting with this, ignoring case (`"text/html*"`).
+    Prefix(String),
+}
+
+impl HeaderMatch {
+    /// From a profile's text: `*`, `!`, `text/html*` or a value.
+    pub fn parse(s: &str) -> Self {
+        let t = s.trim();
+        match t {
+            "*" => HeaderMatch::Present,
+            "!" => HeaderMatch::Absent,
+            _ => match t.strip_suffix('*') {
+                Some(p) => HeaderMatch::Prefix(p.to_string()),
+                None => HeaderMatch::Equals(t.to_string()),
+            },
+        }
+    }
+
+    fn matches(&self, v: Option<&str>) -> bool {
+        match (self, v) {
+            (HeaderMatch::Present, v) => v.is_some(),
+            (HeaderMatch::Absent, v) => v.is_none(),
+            (_, None) => false,
+            (HeaderMatch::Equals(want), Some(v)) => v.trim().eq_ignore_ascii_case(want),
+            (HeaderMatch::Prefix(p), Some(v)) => v
+                .trim()
+                .get(..p.len())
+                .is_some_and(|h| h.eq_ignore_ascii_case(p)),
+        }
+    }
+}
+
+impl fmt::Display for HeaderMatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HeaderMatch::Present => f.write_str("*"),
+            HeaderMatch::Absent => f.write_str("!"),
+            HeaderMatch::Equals(v) => f.write_str(v),
+            HeaderMatch::Prefix(p) => write!(f, "{p}*"),
+        }
+    }
+}
+
+/// `"text"`, shortened, for a failure reason.
+fn quoted(b: &[u8]) -> String {
+    let t = String::from_utf8_lossy(b);
+    let mut q: String = t.chars().take(40).collect();
+    if t.chars().count() > 40 {
+        q.push_str("...");
+    }
+    format!("{q:?}")
+}
+
+fn find(hay: &[u8], needle: &[u8]) -> bool {
+    needle.is_empty() || hay.windows(needle.len()).any(|w| w == needle)
 }
 
 impl HttpRequest {
@@ -114,7 +210,85 @@ impl HttpRequest {
             headers: Vec::new(),
             body: Vec::new(),
             expect: StatusMatch::Success,
+            checks: ResponseChecks::default(),
+            name: None,
         }
+    }
+
+    /// The name it is counted under: its own, else `METHOD PATH`.
+    pub fn label(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| format!("{} {}", self.method, self.path))
+    }
+
+    /// Whether a response passes: `Err` says why not. `headers` are the
+    /// response's (any case), `size` the body's length and `body` its bytes
+    /// when they were kept.
+    pub fn judge(
+        &self,
+        status: u16,
+        headers: &[(String, String)],
+        size: u64,
+        body: Option<&[u8]>,
+    ) -> std::result::Result<(), String> {
+        if !self.expect.matches(status) {
+            return Err(format!("status {status}, expected {}", self.expect));
+        }
+        let c = &self.checks;
+        for (name, want) in &c.headers {
+            let got = headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str());
+            if !want.matches(got) {
+                return Err(match (want, got) {
+                    (HeaderMatch::Absent, Some(v)) => format!("header {name}: {v}, expected none"),
+                    (_, None) => format!("no header {name}"),
+                    (w, Some(v)) => format!("header {name}: {v}, expected {w}"),
+                });
+            }
+        }
+        if let Some((lo, hi)) = c.size {
+            if size < lo || size > hi {
+                return Err(if lo == hi {
+                    format!("body of {size} bytes, expected {lo}")
+                } else if hi == u64::MAX {
+                    format!("body of {size} bytes, expected at least {lo}")
+                } else {
+                    format!("body of {size} bytes, expected {lo} to {hi}")
+                });
+            }
+        }
+        if !c.need_body() {
+            return Ok(());
+        }
+        let Some(b) = body else {
+            return Err(format!(
+                "body of {size} bytes too large to check (over {MAX_KEPT} kept)"
+            ));
+        };
+        if let Some(want) = &c.body {
+            if b != want.as_slice() {
+                let at = b.iter().zip(want).take_while(|(x, y)| x == y).count();
+                return Err(format!(
+                    "body differs at byte {at} ({} bytes, expected {})",
+                    b.len(),
+                    want.len()
+                ));
+            }
+        }
+        for t in &c.contains {
+            if !find(b, t) {
+                return Err(format!("body lacks {}", quoted(t)));
+            }
+        }
+        for t in &c.lacks {
+            if !t.is_empty() && find(b, t) {
+                return Err(format!("body has {}", quoted(t)));
+            }
+        }
+        Ok(())
     }
 
     pub fn get(path: &str) -> Self {
@@ -427,6 +601,10 @@ impl AppProtocol for Http {
             c.per_connection,
             if c.pipeline { ", pipelined" } else { "" }
         );
+        let checked = c.requests.iter().filter(|r| !r.checks.is_empty()).count();
+        if checked > 0 {
+            s.push_str(&format!(", {checked} with response checks"));
+        }
         if self.server.routes.is_empty() {
             s.push_str(", server answers 200 to all");
         } else {
@@ -477,8 +655,14 @@ impl AppProtocol for Http {
                     sent: 0,
                     answered: 0,
                     outstanding: VecDeque::new(),
-                    parser: Parser::default(),
+                    parser: if self.client.requests.iter().any(|r| r.checks.need_body()) {
+                        Parser::keep_bodies()
+                    } else {
+                        Parser::default()
+                    },
                     status: 0,
+                    headers: Vec::new(),
+                    body: None,
                     stop: false,
                 })
             }
@@ -582,23 +766,57 @@ enum PState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Head(Head),
+    /// The body of the message, when the parser keeps bodies (see
+    /// [`Parser::keep_bodies`]); just before its `Done`. Bodies over
+    /// [`MAX_KEPT`] are not kept.
+    Body(Vec<u8>),
     /// The message's body ended, after this many body bytes.
     Done(u64),
 }
+
+/// Longest body a parser keeps for checks.
+pub const MAX_KEPT: usize = 16 << 20;
 
 /// Longest header section taken.
 const MAX_HEAD: usize = 64 * 1024;
 
 /// An incremental parser for a stream of HTTP/1.1 messages. Bodies are
-/// counted, not kept.
+/// counted, and kept only when asked for.
 #[derive(Debug, Default)]
 pub struct Parser {
     buf: Vec<u8>,
     state: PState,
     body: u64,
+    keep: bool,
+    kept: Vec<u8>,
 }
 
 impl Parser {
+    /// A parser that also hands over each body (for checks).
+    pub fn keep_bodies() -> Self {
+        Self {
+            keep: true,
+            ..Default::default()
+        }
+    }
+
+    fn keep(&mut self, b: &[u8]) {
+        if self.keep && self.body <= MAX_KEPT as u64 {
+            self.kept.extend_from_slice(b);
+        }
+    }
+
+    /// The end of a message: its body (if kept and not too long), then `Done`.
+    fn done(&mut self, events: &mut Vec<Event>) {
+        if self.keep {
+            let b = std::mem::take(&mut self.kept);
+            if self.body <= MAX_KEPT as u64 {
+                events.push(Event::Body(b));
+            }
+        }
+        events.push(Event::Done(self.body));
+    }
+
     /// Takes `data`. `framing` says how the body of a message with the
     /// given head ends. Returns what was completed, in order.
     pub fn feed(
@@ -623,11 +841,12 @@ impl Parser {
                     let head = parse_head(&rest[..head_end])?;
                     pos += body_at;
                     self.body = 0;
+                    self.kept.clear();
                     let f = framing(&head)?;
                     events.push(Event::Head(head));
                     self.state = match f {
                         Framing::None | Framing::Length(0) => {
-                            events.push(Event::Done(0));
+                            self.done(&mut events);
                             PState::Head
                         }
                         Framing::Length(n) => PState::Fixed(n),
@@ -641,6 +860,8 @@ impl Parser {
                     }
                     let n = (left as usize).min(rest.len());
                     self.body += n as u64;
+                    let piece = rest[..n].to_vec();
+                    self.keep(&piece);
                     pos += n;
                     let chunk = matches!(self.state, PState::ChunkData(_));
                     self.state = match (left == n as u64, chunk) {
@@ -648,13 +869,15 @@ impl Parser {
                         (false, true) => PState::ChunkData(left - n as u64),
                         (true, true) => PState::ChunkEnd,
                         (true, false) => {
-                            events.push(Event::Done(self.body));
+                            self.done(&mut events);
                             PState::Head
                         }
                     };
                 }
                 PState::UntilClose => {
                     self.body += rest.len() as u64;
+                    let piece = rest.to_vec();
+                    self.keep(&piece);
                     pos = buf.len();
                     break;
                 }
@@ -682,7 +905,7 @@ impl Parser {
                         PState::ChunkEnd if line.is_empty() => PState::ChunkSize,
                         PState::ChunkEnd => return Err("no CRLF after a chunk".into()),
                         _ if line.is_empty() => {
-                            events.push(Event::Done(self.body));
+                            self.done(&mut events);
                             PState::Head
                         }
                         s => s,
@@ -697,13 +920,15 @@ impl Parser {
 
     /// The connection closed: ends a body that runs until then. An error if a
     /// message was cut short.
-    pub fn close(&mut self) -> std::result::Result<Option<Event>, String> {
+    pub fn close(&mut self) -> std::result::Result<Vec<Event>, String> {
         match self.state {
             PState::UntilClose => {
                 self.state = PState::Head;
-                Ok(Some(Event::Done(self.body)))
+                let mut events = Vec::new();
+                self.done(&mut events);
+                Ok(events)
             }
-            PState::Head if self.buf.iter().all(|b| b.is_ascii_whitespace()) => Ok(None),
+            PState::Head if self.buf.iter().all(|b| b.is_ascii_whitespace()) => Ok(Vec::new()),
             _ => Err("the connection closed in the middle of a message".into()),
         }
     }
@@ -807,8 +1032,11 @@ struct ClientSession {
     /// Requests sent and not answered yet: which, and when it went.
     outstanding: VecDeque<(usize, Duration)>,
     parser: Parser,
-    /// Status of the response being read.
+    /// Status and headers of the response being read.
     status: u16,
+    headers: Vec<(String, String)>,
+    /// Its body, when the checks need it.
+    body: Option<Vec<u8>>,
     /// The server said it closes: send nothing more.
     stop: bool,
 }
@@ -844,8 +1072,11 @@ impl ClientSession {
                     if h.wants_close(false) {
                         self.stop = true;
                     }
+                    self.headers = h.headers;
+                    self.body = None;
                 }
-                Event::Done(_) => {
+                Event::Body(b) => self.body = Some(b),
+                Event::Done(size) => {
                     if (100..200).contains(&self.status) {
                         continue; // an interim response; the real one follows
                     }
@@ -854,14 +1085,17 @@ impl ClientSession {
                         return;
                     };
                     let req = &self.cfg.client.requests[i];
-                    cx.transaction(
-                        AppTransaction::new(
-                            self.status.to_string(),
-                            req.expect.matches(self.status),
-                        )
+                    let mut t = AppTransaction::new(self.status.to_string(), true)
                         .with_error(self.status >= 400)
-                        .with_response_time(cx.now().saturating_sub(at)),
-                    );
+                        .with_response_time(cx.now().saturating_sub(at))
+                        .with_name(req.label());
+                    if let Err(why) =
+                        req.judge(self.status, &self.headers, size, self.body.as_deref())
+                    {
+                        t = t.failed_because(why);
+                    }
+                    cx.transaction(t);
+                    self.body = None;
                     self.answered += 1;
                 }
             }
@@ -917,8 +1151,8 @@ impl AppSession for ClientSession {
 
     fn peer_closed(&mut self, cx: &mut AppCx) {
         match self.parser.close() {
-            Ok(Some(e)) => self.take(vec![e], cx),
-            Ok(None) => {}
+            Ok(events) if events.is_empty() => {}
+            Ok(events) => self.take(events, cx),
             Err(e) => {
                 self.fail(cx, e);
                 return;
@@ -997,6 +1231,7 @@ impl AppSession for ServerSession {
                     let close = h.wants_close(true);
                     self.request = Some((h.start[0].clone(), h.start[1].clone(), close));
                 }
+                Event::Body(_) => {}
                 Event::Done(_) => {
                     let Some((method, target, close)) = self.request.take() else {
                         continue;
@@ -1085,6 +1320,30 @@ mod raw {
         pub body_file: Option<String>,
         pub content_type: Option<String>,
         pub expect: Option<Status>,
+        pub name: Option<String>,
+        pub expect_body: Option<String>,
+        pub expect_body_file: Option<String>,
+        pub expect_contains: Option<Texts>,
+        pub expect_lacks: Option<Texts>,
+        pub expect_size: Option<Size>,
+        #[serde(default)]
+        pub expect_headers: BTreeMap<String, String>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    pub enum Texts {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    impl Texts {
+        pub fn list(self) -> Vec<String> {
+            match self {
+                Texts::One(s) => vec![s],
+                Texts::Many(v) => v,
+            }
+        }
     }
 
     #[derive(Deserialize)]
@@ -1104,6 +1363,46 @@ mod raw {
         pub close: Option<bool>,
         pub delay: Option<String>,
     }
+}
+
+/// HTTP/2 and HTTP/3 check only the status so far: refuses other checks.
+#[cfg(feature = "profile")]
+pub(crate) fn status_checks_only(http: &Http, what: &str) -> Result<()> {
+    match http.client.requests.iter().find(|r| !r.checks.is_empty()) {
+        Some(r) => Err(Error::Profile(format!(
+            "{}: {what} checks only the status so far; expect_body, expect_contains, expect_lacks, expect_size and expect_headers are HTTP/1.1's",
+            r.label()
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// `expect_size`: `1234`, `"16K"`, `"1K-2K"`, `">=1K"` or `"<=1M"`, as
+/// (at least, at most).
+#[cfg(feature = "profile")]
+fn size_range(s: raw::Size) -> Result<(u64, u64)> {
+    let t = match s {
+        raw::Size::N(n) => return Ok((n, n)),
+        raw::Size::S(t) => t,
+    };
+    let t = t.trim();
+    let p = |x: &str| crate::parse_size(x.trim());
+    let r = if let Some(lo) = t.strip_prefix(">=") {
+        (p(lo)?, u64::MAX)
+    } else if let Some(hi) = t.strip_prefix("<=") {
+        (0, p(hi)?)
+    } else if let Some((lo, hi)) = t.split_once('-') {
+        (p(lo)?, p(hi)?)
+    } else {
+        let n = p(t)?;
+        (n, n)
+    };
+    if r.0 > r.1 {
+        return Err(Error::Profile(format!(
+            "expect_size `{t}`: the first size is over the second"
+        )));
+    }
+    Ok(r)
 }
 
 /// A body from `body`, `body_size` (filler) or `body_file`.
@@ -1163,6 +1462,45 @@ pub fn parse(t: &toml::Table, base: &std::path::Path) -> Result<Http> {
             }
             .map_err(ctx)?;
         }
+        req.name = q.name;
+        let ch = &mut req.checks;
+        ch.body = match (q.expect_body, q.expect_body_file) {
+            (None, None) => None,
+            (Some(b), None) => Some(b.into_bytes()),
+            (None, Some(f)) => {
+                let p = base.join(f);
+                Some(std::fs::read(&p).map_err(|e| {
+                    ctx(Error::Profile(format!("cannot read {}: {e}", p.display())))
+                })?)
+            }
+            _ => {
+                return Err(ctx(Error::Profile(
+                    "give one of `expect_body` and `expect_body_file`".into(),
+                )))
+            }
+        };
+        ch.contains = q
+            .expect_contains
+            .map(raw::Texts::list)
+            .unwrap_or_default()
+            .into_iter()
+            .map(String::into_bytes)
+            .collect();
+        ch.lacks = q
+            .expect_lacks
+            .map(raw::Texts::list)
+            .unwrap_or_default()
+            .into_iter()
+            .map(String::into_bytes)
+            .collect();
+        if let Some(sz) = q.expect_size {
+            ch.size = Some(size_range(sz).map_err(ctx)?);
+        }
+        ch.headers = q
+            .expect_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), HeaderMatch::parse(v)))
+            .collect();
         requests.push(req);
     }
     if !requests.is_empty() {
@@ -1252,7 +1590,7 @@ mod tests {
         let mut p = Parser::default();
         let e = feed_all(&mut p, b"HTTP/1.0 200 OK\r\n\r\nsome bytes", true);
         assert_eq!(e.len(), 1);
-        assert_eq!(p.close().unwrap(), Some(Event::Done(10)));
+        assert_eq!(p.close().unwrap(), vec![Event::Done(10)]);
         let mut p = Parser::default();
         assert!(p
             .feed(b"HTTP/1.1 abc\r\n\r\n", |h| response_framing(h, "GET"))
@@ -1378,6 +1716,132 @@ mod tests {
     }
 
     #[cfg(feature = "profile")]
+    #[test]
+    fn responses_are_checked_and_failures_counted_per_request() {
+        let mut http = Http::default();
+        let mut page = HttpRequest::get("/");
+        page.checks.contains = vec![b"Welcome".to_vec()];
+        page.checks.lacks = vec![b"error".to_vec()];
+        page.checks.headers = vec![
+            ("content-type".into(), HeaderMatch::parse("text/html*")),
+            ("Server".into(), HeaderMatch::parse("*")),
+            ("X-Debug".into(), HeaderMatch::parse("!")),
+        ];
+        let mut big = HttpRequest::get("/big");
+        big.checks.size = Some((100_000, 100_000));
+        big.name = Some("download".into());
+        let mut exact = HttpRequest::get("/exact");
+        exact.checks.body = Some(b"exactly this".to_vec());
+        let mut wrong = HttpRequest::get("/");
+        wrong.checks.contains = vec![b"Goodbye".to_vec()];
+        wrong.name = Some("wrong".into());
+        http.client.requests = vec![page, big, exact, wrong];
+        http.client.per_connection = 4;
+        http.client.pipeline = true;
+        http.server.routes = vec![
+            HttpRoute::new("/", 200)
+                .with_body("<h1>Welcome</h1>")
+                .with_header("Content-Type", "text/html; charset=utf-8"),
+            {
+                let mut r = HttpRoute::new("/big", 200);
+                r.body = Arc::from(crate::app::filler(100_000));
+                r.chunked = true;
+                r
+            },
+            HttpRoute::new("/exact", 200).with_body("exactly this"),
+        ];
+        let (c, _, closed) = play(http);
+        assert!(closed);
+        assert_eq!((c.transactions, c.failed, c.passed()), (4, 1, 3), "{c:?}");
+        assert_eq!(
+            c.requests["GET /"],
+            super::super::RequestCounts {
+                passed: 1,
+                failed: 0
+            }
+        );
+        assert_eq!(c.requests["download"].passed, 1);
+        assert_eq!(c.requests["GET /exact"].passed, 1);
+        assert_eq!(c.requests["wrong"].failed, 1);
+        assert_eq!(c.failures_text(), "wrong: body lacks \"Goodbye\" x1");
+    }
+
+    #[test]
+    fn judging_responses() {
+        let mut r = HttpRequest::get("/");
+        let h = vec![("Content-Type".to_string(), "text/plain".to_string())];
+        assert!(r.judge(200, &h, 5, None).is_ok());
+        assert_eq!(
+            r.judge(500, &h, 5, None).unwrap_err(),
+            "status 500, expected success"
+        );
+        r.checks.size = Some((10, u64::MAX));
+        assert_eq!(
+            r.judge(200, &h, 5, None).unwrap_err(),
+            "body of 5 bytes, expected at least 10"
+        );
+        r.checks.size = None;
+        r.checks.headers = vec![("content-type".into(), HeaderMatch::parse("text/html"))];
+        assert_eq!(
+            r.judge(200, &h, 5, None).unwrap_err(),
+            "header content-type: text/plain, expected text/html"
+        );
+        r.checks.headers = vec![("Location".into(), HeaderMatch::Present)];
+        assert_eq!(r.judge(200, &h, 5, None).unwrap_err(), "no header Location");
+        r.checks.headers.clear();
+        r.checks.body = Some(b"hello".to_vec());
+        assert_eq!(
+            r.judge(200, &h, 5, Some(b"help!")).unwrap_err(),
+            "body differs at byte 3 (5 bytes, expected 5)"
+        );
+        assert!(r.judge(200, &h, 5, None).unwrap_err().contains("too large"));
+        assert!(r.judge(200, &h, 5, Some(b"hello")).is_ok());
+    }
+
+    #[test]
+    fn parses_response_checks() {
+        let t: toml::Table = r#"
+            [[request]]
+            path = "/"
+            name = "home"
+            expect_contains = "Welcome"
+            expect_lacks = ["error", "Traceback"]
+            expect_size = "1K-2K"
+            expect_headers = { "Content-Type" = "text/html*", "Server" = "*", "X-Debug" = "!" }
+            [[request]]
+            path = "/exact"
+            expect_body = "hello"
+            [[request]]
+            path = "/big"
+            expect_size = ">=16K"
+        "#
+        .parse()
+        .unwrap();
+        let h = parse(&t, std::path::Path::new(".")).unwrap();
+        let r = &h.client.requests;
+        assert_eq!(r[0].label(), "home");
+        assert_eq!(r[0].checks.contains, vec![b"Welcome".to_vec()]);
+        assert_eq!(r[0].checks.lacks.len(), 2);
+        assert_eq!(r[0].checks.size, Some((1024, 2048)));
+        assert_eq!(r[0].checks.headers.len(), 3);
+        assert_eq!(r[1].checks.body.as_deref(), Some(&b"hello"[..]));
+        assert_eq!(r[2].checks.size, Some((16384, u64::MAX)));
+        assert_eq!(r[2].label(), "GET /big");
+        assert!(
+            h.describe().contains("3 with response checks"),
+            "{}",
+            h.describe()
+        );
+        for bad in [
+            "[[request]]\npath = \"/\"\nexpect_size = \"2K-1K\"",
+            "[[request]]\npath = \"/\"\nexpect_body = \"a\"\nexpect_body_file = \"b\"",
+            "[[request]]\npath = \"/\"\nexpect_header = {}",
+        ] {
+            let t: toml::Table = bad.parse().unwrap();
+            assert!(parse(&t, std::path::Path::new(".")).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn parses_a_table() {
         let t: toml::Table = r#"

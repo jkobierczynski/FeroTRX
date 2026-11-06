@@ -1032,6 +1032,21 @@ pub struct AppCounters {
     /// Media streams (RTP), for protocols that carry them (SIP).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<MediaCounters>,
+    /// Client: transactions that passed and failed per request, e.g.
+    /// `{"GET /": {"passed": 98, "failed": 2}}`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub requests: std::collections::BTreeMap<String, RequestCounters>,
+    /// Client: why transactions failed, with counts, e.g.
+    /// `{"GET /: status 500, expected 2xx": 2}`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub failures: std::collections::BTreeMap<String, u64>,
+}
+
+/// Transactions of one request; see `ferotrx_core::RequestCounts`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestCounters {
+    pub passed: u64,
+    pub failed: u64,
 }
 
 /// Media streams of one side; see `ferotrx_core::MediaStats`.
@@ -1135,6 +1150,20 @@ impl From<&ferotrx_core::AppStats> for AppCounters {
             protocol_error_samples: s.protocol_error_samples.clone(),
             codes: s.codes.clone(),
             response_time: (s.response_time.count() > 0).then(|| (&s.response_time).into()),
+            requests: s
+                .requests
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        RequestCounters {
+                            passed: v.passed,
+                            failed: v.failed,
+                        },
+                    )
+                })
+                .collect(),
+            failures: s.failures.clone(),
             tls: (s.handshakes > 0).then(|| HandshakeCounters {
                 handshakes: s.handshakes,
                 failed: s.handshake_failures,

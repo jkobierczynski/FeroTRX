@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ferotrx"
-version = "0.32.0"
+version = "0.33.0"
 description = "Python client for the FeroTRX traffic generator's control server"
 readme = "README.md"
 license = "GPL-3.0-or-later"

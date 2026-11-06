@@ -693,6 +693,28 @@ const HTTP_REQUEST: &[Setting] = &[
     s("expect", "Expected status", K::Choice(EXPECT_HTTP), Client).default("below 400"),
 ];
 
+/// HTTP/1.1's requests: those of HTTP/2 and 3 and the response checks.
+const HTTP1_REQUEST: &[Setting] = &[
+    s("method", "Method", K::Choice(HTTP_METHODS), Client).default("GET"),
+    s("path", "Path", K::Text, Client).default("/"),
+    s("name", "Name", K::Text, Client)
+        .default("METHOD PATH")
+        .help("What its pass/fail counts are under"),
+    s("headers", "Headers", K::Map, Client),
+    s("body", "Body", K::Text, Client),
+    s("body_size", "Body size", K::Size, Client).help("Filler of this size: 16K"),
+    s("body_file", "Body file", K::Path, Client).help("Relative to the profile"),
+    s("content_type", "Content-Type", K::Text, Client),
+    s("expect", "Expected status", K::Choice(EXPECT_HTTP), Client).default("below 400"),
+    s("expect_contains", "Body contains", K::List, Client).help("Texts the body must have, each"),
+    s("expect_lacks", "Body lacks", K::List, Client).help("Texts the body must not have"),
+    s("expect_body", "Body is", K::Text, Client).help("The whole body, byte for byte"),
+    s("expect_body_file", "Body is file", K::Path, Client).help("The whole body, from a file"),
+    s("expect_size", "Body size is", K::Size, Client).help("1234, 16K, 1K-2K, >=1K or <=1M"),
+    s("expect_headers", "Response headers", K::Map, Client)
+        .help("Name = value; text/html* for a prefix, * for any value, ! for none"),
+];
+
 const HTTP_ROUTE: &[Setting] = &[
     s("path", "Path", K::Text, Server)
         .help("Exact, or a prefix ending in *; * alone takes every path"),
@@ -709,6 +731,23 @@ const HTTP_ROUTE: &[Setting] = &[
     s("delay", "Delay", K::Duration, Server)
         .default("0")
         .help("Wait before answering: 20ms"),
+];
+
+const HTTP1_LISTS: &[TableList] = &[
+    TableList {
+        key: "request",
+        item: "request",
+        end: Client,
+        help: "Requests with headers, a body or response checks; they come after `requests`",
+        settings: HTTP1_REQUEST,
+    },
+    TableList {
+        key: "route",
+        item: "route",
+        end: Server,
+        help: "The server's answers: the first route that matches. Without routes every request gets 200.",
+        settings: HTTP_ROUTE,
+    },
 ];
 
 const HTTP_LISTS: &[TableList] = &[
@@ -1190,7 +1229,7 @@ pub fn builtin_app_editors() -> Vec<Box<dyn AppEditor>> {
             transports: TCP,
             port: Some(80),
             settings: HTTP_SETTINGS,
-            lists: HTTP_LISTS,
+            lists: HTTP1_LISTS,
             subtables: &[],
             example: "requests = [\"GET /\", \"GET /missing 404\"]\nper_connection = 2\n",
         }),

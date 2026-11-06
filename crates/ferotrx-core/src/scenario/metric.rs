@@ -291,13 +291,25 @@ pub const TCP_METRICS: &[MetricDef] = &[
         "app_failed",
         Count,
         Lower,
-        "application transactions that did not go as expected (status, response code)",
+        "application transactions that did not go as expected (status, response code, body, headers)",
     ),
     m(
         "app_failed_pct",
         Percent,
         Lower,
         "failed, of the application transactions",
+    ),
+    m(
+        "app_passed",
+        Count,
+        Higher,
+        "application transactions that passed every check (status, body, headers)",
+    ),
+    m(
+        "app_passed_pct",
+        Percent,
+        Higher,
+        "passed, of the application transactions",
     ),
     m(
         "app_errors",

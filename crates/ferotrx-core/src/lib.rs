@@ -132,7 +132,8 @@ mod workers;
 mod y1564;
 
 pub use app::{
-    App, AppHandshake, AppProtocol, AppSession, AppStats, MediaReport, MediaStats, Transport,
+    App, AppHandshake, AppProtocol, AppSession, AppStats, MediaReport, MediaStats, RequestCounts,
+    Transport,
 };
 #[cfg(feature = "profile")]
 pub use bench::BenchProfile;

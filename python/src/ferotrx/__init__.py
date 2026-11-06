@@ -39,6 +39,7 @@ from .types import (
     Notification,
     PortImpairCounters,
     ProfileInfo,
+    RequestCounters,
     Role,
     RunInfo,
     RunState,
@@ -57,7 +58,7 @@ from .types import (
     Y1564RunInfo,
 )
 
-__version__ = "0.32.0"
+__version__ = "0.33.0"
 
 __all__ = [
     "__version__",
@@ -100,6 +101,7 @@ __all__ = [
     "HostAddressInfo",
     "HostGroupInfo",
     "AppCounters",
+    "RequestCounters",
     "HandshakeCounters",
     "TcpCounters",
     "TcpTemplateCounters",

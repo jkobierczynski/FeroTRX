@@ -728,6 +728,20 @@ fn side_line(c: &TcpCounters) -> String {
             crate::udp::codes_line(a),
             a.failed
         ));
+        if !a.failures.is_empty() {
+            let mut v: Vec<(&String, &u64)> = a.failures.iter().collect();
+            v.sort_by(|x, y| y.1.cmp(x.1).then(x.0.cmp(y.0)));
+            let why: Vec<String> = v.iter().map(|(k, n)| format!("{k} x{n}")).collect();
+            line.push_str(&format!(" ({})", why.join("; ")));
+        }
+        if a.requests.len() > 1 {
+            let per: Vec<String> = a
+                .requests
+                .iter()
+                .map(|(k, r)| format!("{k} {} of {}", r.passed, r.passed + r.failed))
+                .collect();
+            line.push_str(&format!("; passed per request: {}", per.join(", ")));
+        }
         if let Some(r) = &a.response_time {
             line.push_str(&format!("; {}", crate::udp::response_line(r)));
         }

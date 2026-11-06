@@ -104,7 +104,10 @@ def _convert(tp: Any, value: Any) -> Any:
         (item,) = typing.get_args(tp)
         return [_convert(item, v) for v in value] if isinstance(value, list) else value
     if origin is dict:
-        return value
+        if not isinstance(value, dict):
+            return value
+        _, item = typing.get_args(tp)
+        return {k: _convert(item, v) for k, v in value.items()}
     if isinstance(tp, type):
         if issubclass(tp, Record):
             return tp.from_dict(value) if isinstance(value, dict) else value
@@ -126,6 +129,8 @@ def _plain(value: Any) -> Any:
         return value.value
     if isinstance(value, list):
         return [_plain(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
     return value
 
 
@@ -574,6 +579,14 @@ class MediaCounters(Record):
 
 
 @dataclass(kw_only=True)
+class RequestCounters(Record):
+    """Transactions of one request (``GET /``) that passed and failed."""
+
+    passed: int = 0
+    failed: int = 0
+
+
+@dataclass(kw_only=True)
 class AppCounters(Record):
     """What an application protocol counted on one side (HTTP, DNS, NTP)."""
 
@@ -593,6 +606,12 @@ class AppCounters(Record):
     tls: HandshakeCounters | None = None
     #: Media streams, for protocols that carry them (SIP calls' RTP).
     media: MediaCounters | None = None
+    #: Client: transactions that passed and failed per request, e.g.
+    #: ``{"GET /": RequestCounters(passed=98, failed=2)}``.
+    requests: dict[str, RequestCounters] = field(default_factory=dict)
+    #: Client: why transactions failed, with counts, e.g.
+    #: ``{"GET /: status 500, expected 2xx": 2}``.
+    failures: dict[str, int] = field(default_factory=dict)
 
 
 # ----- tcp.* -----

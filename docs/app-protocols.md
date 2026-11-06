@@ -94,7 +94,7 @@ The `[http]` table configures both ends. The client part:
 | Key | Default | What |
 |---|---|---|
 | `requests` | `["GET /"]` | Requests as `METHOD PATH [EXPECTED]`, e.g. `GET /`, `HEAD /big`, `GET /missing 404`. A bare path is a GET. |
-| `[[http.request]]` | | Requests with more: `method`, `path`, `headers = { "X-A" = "b" }`, a body (`body = "text"`, `body_size = "16K"` of filler, or `body_file = "upload.bin"`, relative to the profile), `content_type`, `expect`. They come after `requests`. |
+| `[[http.request]]` | | Requests with more: `method`, `path`, `headers = { "X-A" = "b" }`, a body (`body = "text"`, `body_size = "16K"` of filler, or `body_file = "upload.bin"`, relative to the profile), `content_type`, `expect`, a `name` and [response checks](#response-checks). They come after `requests`. |
 | `expect` | below 400 | The status a request must get: a code (`201`), a class (`2xx`), `success` (below 400) or `any`. |
 | `per_connection` | 1 | Requests per connection, with keep-alive; then the client closes. The requests are used in turn across all connections. |
 | `pipeline` | false | Send a connection's requests at once instead of each after the previous answer. |
@@ -128,10 +128,64 @@ keep-alive rules. The server answers what it cannot parse with
 
 What counts as a failure, which marks the connection mismatched:
 
-* client: a status other than the request's `expect`, a response that cannot
-  be parsed, a response nobody asked for, a server that closes before it
-  answered every request of the connection;
+* client: a status other than the request's `expect`, a response that fails
+  one of the request's checks, a response that cannot be parsed, a response
+  nobody asked for, a server that closes before it answered every request of
+  the connection;
 * server: a request that cannot be parsed.
+
+### Response checks
+
+A `[[http.request]]` can say more about its response than the status. The
+response passes only if every check holds; each request's passes and
+failures are counted under its `name` (default `METHOD PATH`), and each
+failure with its reason.
+
+| Key | What the response must have |
+|---|---|
+| `expect` | The status, as above. |
+| `expect_contains` | A text, or a list of texts, each somewhere in the body. |
+| `expect_lacks` | A text, or a list, none of them in the body (`"Traceback"`, `"error"`). |
+| `expect_body` / `expect_body_file` | The whole body, byte for byte (a file relative to the profile). |
+| `expect_size` | The body's size: `1234`, `"16K"`, a range `"1K-2K"`, `">=1K"` or `"<=1M"`. Chunked and until-close bodies count too. |
+| `expect_headers` | Headers by name (any case): a value (`"application/json"`, ignoring case), a prefix (`"text/html*"`), `"*"` for there with any value, `"!"` for not there. |
+| `name` | What the counts are kept under. |
+
+```toml
+[[http.request]]
+path = "/"
+name = "home"
+expect = 200
+expect_contains = ["<title>Lab</title>", "Welcome"]
+expect_lacks = "Traceback"
+expect_headers = { "Content-Type" = "text/html*", "Set-Cookie" = "!" }
+
+[[http.request]]
+method = "POST"
+path = "/api/status"
+body = '{"check":true}'
+content_type = "application/json"
+expect_body = '{"status":"ok"}'
+```
+
+The client keeps bodies only when a request checks their bytes
+(`expect_contains`, `expect_lacks`, `expect_body`), up to 16 MB each; a size
+check needs no copy. The first failed check gives the reason: `status 500,
+expected 2xx`, `body lacks "Welcome"`, `body has "Traceback"`, `body differs
+at byte 11 (21 bytes, expected 15)`, `body of 900 bytes, expected 1024 to
+2048`, `no header Location`, `header Content-Type: text/plain, expected
+text/html*`. The run's line counts them:
+
+```text
+  client: 60 connections, ...; 180 transactions (200 x180), 60 failed (POST
+  /api/status: body differs at byte 11 (21 bytes, expected 15) x60); passed per
+  request: GET /download 60 of 60, POST /api/status 0 of 60, home 60 of 60
+```
+
+[examples/lab-http-checks.toml](../examples/lab-http-checks.toml) checks a
+page, a chunked download and a JSON answer. HTTP/2 and HTTP/3 count passes
+and failures per request too, but check only the status so far; their
+profiles refuse the other checks.
 
 ## DNS
 
@@ -870,7 +924,15 @@ and over TLS `tls` in it:
         "full_time": {"avg_us": 2010.0, ...}, "resumed_time": {"avg_us": 1320.0, ...}}
 ```
 
-and for SIP calls `media`:
+and per request, with why they failed (clients only, left out when empty):
+
+```json
+"requests": {"home": {"passed": 60, "failed": 0},
+             "POST /api/status": {"passed": 0, "failed": 60}},
+"failures": {"POST /api/status: body differs at byte 11 (21 bytes, expected 15)": 60}
+```
+
+(up to 20 kinds of failure, the rest under `other`), and for SIP calls `media`:
 
 ```json
 "media": {"streams": 40, "packets_sent": 6040, "packets_received": 5961,
@@ -894,11 +956,12 @@ with the round trip, late packets, bursts and scores also in `media` (`rtt`,
 `mos_avg`, `mos_min`, `bands`).
 
 The Python client reads them as `TcpCounters.app` and `UdpCounters.app`
-(`ferotrx.AppCounters`, with `tls` a `ferotrx.HandshakeCounters` and `media`
-a `ferotrx.MediaCounters`).
+(`ferotrx.AppCounters`, with `tls` a `ferotrx.HandshakeCounters`, `media`
+a `ferotrx.MediaCounters` and `requests` `ferotrx.RequestCounters` by name).
 
 [Scenario](scenarios.md) checks of kind `tcp` have the metrics
-`app_transactions`, `app_failed`, `app_failed_pct`, `app_errors`,
+`app_transactions`, `app_failed`, `app_failed_pct`, `app_passed`,
+`app_passed_pct`, `app_errors`,
 `protocol_errors` and `response_min`/`_avg`/`_p99`/`_max`, and over TLS
 `tls_handshakes`, `tls_failed`, `tls_unexpected`, `tls_resumed`, `tls_full`
 (new sessions), `tls_rate` (per second), `handshake_min`/`_avg`/`_p99`/`_max`
@@ -974,6 +1037,20 @@ CI runs it plain, with loss, over IPv6 and over AF_XDP with two workers.
 cargo build -p ferotrx-cli
 sudo scripts/app-netns.sh
 ```
+
+HTTP response checks have a script of their own,
+[`scripts/http-netns.sh`](../scripts/http-netns.sh), with the same router:
+
+1. `examples/lab-http-checks.toml` between emulated ends: every request
+   must pass its checks;
+2. the same with a server that answers the POST with another body: exactly
+   that request must fail on every connection, with its reason counted, and
+   the run must exit with an error;
+3. the emulated client against `python3 -m http.server` on the router: a
+   page's exact body (from a file), a text, its size and headers, a 404, and
+   one check that must fail.
+
+CI runs it plain, with loss, over IPv6 and over AF_XDP with two workers.
 
 TLS handshake load has a script of its own,
 [`scripts/tls-netns.sh`](../scripts/tls-netns.sh), with the same router:
@@ -1124,7 +1201,8 @@ and TCP), and the built-in ones are in `crates/ferotrx-core/src/app/`.
 
 * HTTP: no `Expect: 100-continue` from the client, no request bodies sent
   chunked, no HTTP/2 server push, priorities or `Upgrade: h2c`. Bodies are
-  counted, not kept or compared.
+  counted, and kept (up to 16 MB) only for a request's body checks; HTTP/2
+  and HTTP/3 check only the status.
 * TLS 1.2 and 1.3 only, with the cipher suites and groups rustls has (no
   CBC, RSA key exchange, DHE or post-quantum groups); no generated RSA
   certificates, no OCSP or certificate revocation, no renegotiation, no

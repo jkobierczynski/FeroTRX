@@ -684,6 +684,90 @@ fn https_profiles_and_handshakes_that_must_fail() {
 }
 
 #[test]
+fn http_response_checks_over_a_lossy_link_and_in_profiles() {
+    let text = r#"
+        connections = 30
+        cps = 300
+        app = "http"
+        [http]
+        per_connection = 3
+        [[http.request]]
+        path = "/"
+        name = "home"
+        expect_contains = "Welcome"
+        expect_headers = { "Content-Type" = "text/html*", "Server" = "FeroTRX" }
+        [[http.request]]
+        path = "/big"
+        expect_size = "64K"
+        [[http.request]]
+        path = "/api"
+        expect = 200
+        expect_body = '{"ok":true}'
+        expect_headers = { "Content-Type" = "application/json" }
+        [[http.route]]
+        path = "/"
+        body = "<h1>Welcome</h1>"
+        content_type = "text/html; charset=utf-8"
+        [[http.route]]
+        path = "/big"
+        body_size = "64K"
+        chunked = true
+        [[http.route]]
+        path = "/api"
+        body = '{"ok":false}'
+        content_type = "application/json"
+        [client]
+        ip = "10.0.0.1/24"
+        [server]
+        ip = "10.0.0.80/24"
+    "#;
+    let p = TcpProfile::from_toml(text, Path::new(".")).unwrap();
+    let programs: Vec<_> = p.programs().unwrap().into_iter().map(Arc::new).collect();
+    let config = p
+        .config(&programs, &["lo".to_string()], Some("lo"))
+        .unwrap();
+    let mut client_cfg = config.clone();
+    client_cfg.server = None;
+    let mut server_cfg = config;
+    server_cfg.client = None;
+    let mut client = TcpEngine::new(client_cfg).unwrap();
+    let mut server = TcpEngine::new(server_cfg).unwrap();
+    let mut link = Link::new(41, 13);
+    simulate(
+        &mut [&mut client, &mut server],
+        &mut link,
+        Duration::from_secs(120),
+    );
+    let c = &client.stats().client;
+    assert!(link.dropped > 10, "{}", link.dropped);
+    // Every connection asks /api once, whose body is not the expected one.
+    assert_eq!(c.completed, 30, "{c:?}");
+    assert_eq!(c.mismatched, 30, "{c:?}");
+    let a = &c.app;
+    assert_eq!(
+        (a.transactions, a.failed, a.passed()),
+        (90, 30, 60),
+        "{a:?}"
+    );
+    assert_eq!(a.requests["home"].passed, 30);
+    assert_eq!(a.requests["GET /big"].passed, 30);
+    assert_eq!(a.requests["GET /api"].failed, 30);
+    assert_eq!(
+        a.failures_text(),
+        "GET /api: body differs at byte 6 (12 bytes, expected 11) x30"
+    );
+
+    // HTTP/2 checks only the status so far.
+    let e = TcpProfile::from_toml(
+        "app = \"h2c\"\n[http2]\n[[http2.request]]\npath = \"/\"\nexpect_contains = \"x\"\n[client]\nip = \"10.0.0.1/24\"\n[server]\nip = \"10.0.0.80/24\"\n",
+        Path::new("."),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("only the status"), "{e}");
+}
+
+#[test]
 fn tls_handshake_load_with_new_and_resumed_sessions() {
     let run = |tls: &str| {
         let text = format!(

@@ -156,6 +156,8 @@ pub fn tcp_metrics(runs: &[&TcpRunInfo]) -> Metrics {
         put(&mut m, "app_transactions", tx as f64);
         put(&mut m, "app_failed", failed as f64);
         put(&mut m, "app_failed_pct", pct(failed, tx));
+        put(&mut m, "app_passed", tx.saturating_sub(failed) as f64);
+        put(&mut m, "app_passed_pct", pct(tx.saturating_sub(failed), tx));
         put(&mut m, "app_errors", sum(&apps, |a| a.errors) as f64);
         put(
             &mut m,
