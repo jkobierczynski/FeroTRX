@@ -111,6 +111,25 @@ e.g. a profile that does not parse or an interface that will not open) and
 -32004 (forbidden: a read-only login changing something, or a path outside
 the data directories).
 
+## Servers that programs start
+
+A program that runs a server of its own, as the GUI does for
+[This computer](gui.md#this-computer), can let the system pick the port and
+tie the server's life to its own:
+
+```sh
+ferotrx serve -l 127.0.0.1:0 --tokens session/tokens.toml \
+    --port-file session/port --parent $$
+```
+
+`--port-file FILE` writes the address the server listens on to FILE once it
+listens (whole, by a rename) and stops the server when FILE is removed;
+`--parent PID` stops it when that process ends. Either way its runs stop
+first, as with Ctrl-C.
+
+On Windows, `ferotrx service install -- <serve options>` runs the server as
+a service from boot; see [Windows](windows.md#the-windows-service).
+
 ## Security
 
 **What is at stake.** The control server sends traffic from the machine's

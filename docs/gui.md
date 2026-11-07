@@ -14,10 +14,13 @@ see [Windows](windows.md)). It needs no privileges itself; the server does
 the sending.
 
 ```sh
-cargo build --release -p ferotrx-gui         # target/release/ferotrx-gui
+cargo build --release -p ferotrx-cli -p ferotrx-gui
 
-sudo ferotrx serve &                         # a server on 127.0.0.1:4510
-ferotrx-gui                                  # connects to it
+ferotrx-gui                                  # "This computer": Start runs a server here
+ferotrx-gui --local                          # ... and starts it right away
+
+sudo ferotrx serve &                         # or a server of your own on 127.0.0.1:4510
+ferotrx-gui --connect 127.0.0.1              # connects to it
 
 # A server elsewhere, over TLS with a client certificate (see remote-control.md):
 ferotrx-gui --connect 192.168.56.10 --ca ca.pem --cert alice.pem --key alice-key.pem
@@ -38,6 +41,50 @@ ferotrx-gui --theme lab-theme.toml
 `FEROTRX_TOKEN` work as for `ferotrx ctl`. Tokens are never saved; the rest
 (servers, every port's streams and settings, the forms of every tab, the
 last port open) is kept between sessions.
+
+## This computer
+
+The first time the GUI starts (and whenever **Add server…** has "This
+computer" ticked) it lists **This computer**: a server the GUI starts
+itself. **Start** runs the `ferotrx` next to `ferotrx-gui` (or the one on
+`PATH`) as
+
+```text
+ferotrx serve --listen 127.0.0.1:0 --tokens <session>/tokens.toml \
+    --port-file <session>/port --parent <GUI's process id> --data-dir <your home folder>
+```
+
+* **127.0.0.1, port 0**: only this computer can reach it, at a port the
+  system picks; the server writes it to its port file, and the GUI reads it.
+* **A token for this session**: 32 random bytes, kept in the GUI's memory;
+  the tokens file holds only its SHA-256. Other users and programs on the
+  machine cannot use the server.
+* **It stops with the GUI**: **Stop** (right-click) removes the port file,
+  which the server watches, and the server also stops when the GUI's
+  process ends, even after a crash. Its runs stop with it.
+* **Folders**: your home folder (and the installed examples, on Windows)
+  unless **Edit…** lists others, one per line. Files there can be picked
+  with this computer's file dialogs.
+* `<session>` is a folder of its own under the temporary directory, with
+  `server.log` (what the server printed: its audit log, errors), removed
+  when the server stops.
+
+Sending on interfaces needs rights the GUI asks for only when needed:
+
+* **Windows**: when Npcap was installed for administrators only, **Start**
+  starts the server as administrator, with a UAC prompt. Otherwise there is
+  no prompt.
+* **Linux**: the server needs root or the capabilities to send. Without
+  them, the server shows the command that gives them once:
+  `sudo setcap cap_net_raw,cap_net_admin+eip $(command -v ferotrx)`. The
+  `file` and `null` ports work without.
+* **macOS**: your user needs the BPF devices (`/dev/bpf*`), as Wireshark's
+  ChmodBPF sets up; or run `sudo ferotrx serve` and connect to it.
+
+For the lab router, AF_XDP or DPDK, use a server on Linux (`sudo ferotrx
+serve --lab` there): the GUI shows only what each server can do, so a
+server on Windows or macOS has no **Lab router** entry and only the
+backends its build has.
 
 ## Appearance
 
@@ -105,7 +152,7 @@ next to the profiles it uses.
 
 | Part | What it does |
 | --- | --- |
-| **Servers and ports** (left) | Each server with its state, version and backends, and its ports: the interfaces it can send on, plus `file` (a pcap written on the server) and `null` (count and drop), which need no root and are good for trying a profile. ▶ marks a port that is sending. Right-click a server to connect, disconnect, edit or remove it; **Add server…** adds one. |
+| **Servers and ports** (left) | Each server with its state, version and backends, and its ports: the interfaces it can send on, plus `file` (a pcap written on the server) and `null` (count and drop), which need no root and are good for trying a profile. ▶ marks a port that is sending. Right-click a server to connect, disconnect, edit or remove it (start and stop, for [This computer](#this-computer)); **Add server…** adds one. |
 | **Streams** tab | The selected port: Start, Stop and Check (load on the server without sending), Open…/Save… of profile files on this computer, the port settings, the stream table and the stream editor. |
 | **Stateful** tab | Start a TCP or UDP run from a profile, on the server or uploaded from here, with the usual overrides (rate, count, concurrency, duration, workers, backend). **Check** runs `ferotrx check` on a local file. |
 | **Applications** tab | Edit TCP and UDP profiles with forms for their application protocols (HTTP, HTTP/2, HTTP/3, DNS, NTP, MQTT, SSH, SIP/RTP, SMB, TLS), check and run them. See [application profiles](#application-profiles). |
@@ -145,6 +192,7 @@ packet can all be dragged.
 
 A server started with `--lab` (Linux, as root) can build a router for the
 lab examples on its own machine: **Lab router…** under the server opens it.
+Servers on Windows and macOS have no lab router, and no entry for it.
 The router is in a network namespace, reached on the link `ftrx-lab`, and
 routes and masquerades between VLAN 10 (clients, 192.168.10.0/24) and VLAN
 20 (servers, 192.168.20.0/24), as the `examples/lab-*.toml` profiles expect;

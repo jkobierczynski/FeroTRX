@@ -17,7 +17,8 @@ and pull request, each a minor version.
 | 6 | **M46, certificate revocation and safe file access**, [#74](https://github.com/jkobierczynski/FeroTRX/issues/74) | SEC-05, SEC-03, two file bugs found while checking | Needs an operator or a local user to matter. | 0.40.0 |
 | 7 | **M47, traffic guardrails**, [#75](https://github.com/jkobierczynski/FeroTRX/issues/75) | Section 5 safeguards, per-agent quotas | Protects against a careless or malicious operator; opt-in, so nothing changes for benchmarking. | 0.41.0 |
 
-Versions follow merge order, as before. If M41 and M42 go after all five
+Versions follow merge order, as before. (M41 was started first, on
+7 November, and takes 0.35.0: M43 and M44 move to 0.36.0 and 0.37.0.) If M41 and M42 go after all five
 security milestones instead, M45 to M47 become 0.37.0 to 0.39.0 and M41/M42
 become 0.40.0/0.41.0.
 

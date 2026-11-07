@@ -49,7 +49,9 @@ Caused by:
 
 If Npcap was installed with "Restrict Npcap driver's access to
 Administrators only", run `ferotrx` (or `ferotrx serve`) from a terminal
-started as administrator.
+started as administrator. The GUI's own server ("This computer", below)
+asks for that itself, with a UAC prompt, and only then; the Windows service
+runs as LocalSystem and may always use Npcap.
 
 ## Interface names
 
@@ -82,6 +84,58 @@ or remote desktop without one, it may not start.
 Use **Appearance…** in the top bar for colours, widget style and text
 sizes (see [the GUI guide](gui.md#appearance)).
 
+## The GUI's own server
+
+The GUI shows **This computer** under "Servers and ports" the first time it
+starts. **Start** runs the `ferotrx.exe` installed next to it as a server
+of the GUI's own: on 127.0.0.1 at a port Windows picks, with a token made
+up for this session (so no other user or program on the machine can use
+it), and without a console window. It stops when you click **Stop**, and
+when the GUI closes, even if the GUI crashes. Its files, output pcaps and
+captures can be any under your user folder (and the installed examples);
+**Edit…** gives it other folders. Details are in [the GUI guide](gui.md#this-computer).
+
+When Npcap is for administrators only, **Start** asks with a UAC prompt to
+start the server as administrator; otherwise it starts as you, with no
+prompt.
+
+## The Windows service
+
+To keep a server running from boot, without anyone logged in (for a test
+box that a GUI or `ferotrx ctl` elsewhere drives), install it as a service
+from a terminal started as administrator:
+
+```powershell
+# On this computer only, with a token:
+ferotrx service install -- --token SECRET
+
+# Reachable from the lab, over TLS with client certificates (remote-control.md):
+ferotrx service install -- --listen 0.0.0.0:4510 --tls-cert C:\ferotrx\server.pem `
+    --tls-key C:\ferotrx\server-key.pem --client-ca C:\ferotrx\ca.pem
+
+ferotrx service status
+ferotrx service stop
+ferotrx service start
+ferotrx service remove
+```
+
+Everything after `--` is given to `ferotrx serve`. The service is called
+`FeroTRX` (in **Services**, or `sc query FeroTRX`), starts at boot (or with
+`--manual` only on `ferotrx service start`; `--no-start` installs it
+without starting it) and runs as LocalSystem. Its folder is
+`%ProgramData%\FeroTRX`:
+
+| File | What |
+| --- | --- |
+| `data\` | The data directory, when `--data-dir` is not given: profiles, pcaps and output files clients name. |
+| `audit.log` | The audit log (logins, refusals, runs), when `--audit-log` is not given. |
+| `tokens.toml` | Tokens given with `--token` and `--read-token`, as SHA-256 only: a service's command line can be read by every user, so the tokens are not left on it. |
+| `service.log` | When the service started, stopped, and why it could not start. |
+
+The installer stops the service while it replaces `ferotrx.exe` (start it
+again after an upgrade with `ferotrx service start`), and removes it when
+FeroTRX is uninstalled. `ferotrx service remove` leaves the folder.
+
 ## Building the installer
 
 On Windows, with Rust, the Npcap SDK on `LIB` (see [installing](install.md))
@@ -98,5 +152,6 @@ tool) when it is missing. The installer is described in
 of both programs come from `packaging\windows` through their `build.rs`.
 CI builds the installer on every pull request, installs it silently,
 checks what it installed (programs, examples, `PATH`, the Start menu entry,
-the `*.ferotrx` association), runs `ferotrx.exe` from it without Npcap and
+the `*.ferotrx` association), runs `ferotrx.exe` from it without Npcap,
+installs, uses and removes the service, starts the GUI's own server, and
 uninstalls it.
