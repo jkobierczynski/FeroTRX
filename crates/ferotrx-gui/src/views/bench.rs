@@ -484,17 +484,20 @@ impl FeroApp {
             } else {
                 "Benchmark profile on the server"
             };
-            self.files
-                .pick(Target::OpenBench, title, Kind::Profile, &current);
+            self.files.pick(
+                Target::OpenBench,
+                title,
+                Kind::Of(ferotrx_core::check::FileKind::Bench),
+                &current,
+            );
         }
         if a.save_as {
-            let name = Path::new(&current)
-                .file_name()
-                .map_or("bench.toml".into(), |n| n.to_string_lossy().into_owned());
+            let name =
+                crate::files::save_name(&current, "bench", ferotrx_core::check::FileKind::Bench);
             self.files.save(
                 Target::SaveBench,
                 "Save the benchmark profile",
-                Kind::Profile,
+                Kind::Of(ferotrx_core::check::FileKind::Bench),
                 &current,
                 &name,
             );

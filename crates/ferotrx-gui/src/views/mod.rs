@@ -7,6 +7,7 @@ mod compare;
 mod groups;
 mod lab;
 mod scenario;
+mod start;
 pub(crate) mod stateful;
 mod stats;
 mod streams;
@@ -21,6 +22,7 @@ pub use compare::{CompareForm, Side as CompareSide};
 pub use groups::{GroupsState, Member, MemberKind};
 pub use lab::LabForm;
 pub use scenario::ScenarioState;
+pub use start::SettingsForm;
 pub use stateful::StatefulState;
 pub use streams::{string_list, EditorState};
 pub use y1564::Y1564State;
@@ -44,6 +46,7 @@ impl FeroApp {
             .min_size(120.0)
             .show(ui, |ui| self.bottom_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| match self.tab {
+            Tab::Start => self.start_tab(ui),
             Tab::Streams => self.streams_tab(ui),
             Tab::Stateful => self.stateful_tab(ui),
             Tab::Apps => self.apps_tab(ui),
@@ -64,6 +67,7 @@ impl FeroApp {
             self.workspace_menu(ui);
             ui.separator();
             for (tab, label, hover) in [
+                (Tab::Start, "Start", "Where to start: the first steps, and your folders"),
                 (
                     Tab::Streams,
                     "Streams",
@@ -118,6 +122,16 @@ impl FeroApp {
                     self.appearance.open = !self.appearance.open;
                 }
                 self.mode_switch(ui);
+                if ui
+                    .button("Settings…")
+                    .on_hover_text("Your folders: where file dialogs start")
+                    .clicked()
+                {
+                    self.settings_form = Some(crate::views::SettingsForm {
+                        settings: self.settings.clone(),
+                        status: None,
+                    });
+                }
                 if ui.button("Add server…").clicked() {
                     self.add_server = Some(ConnSettings::default());
                 }
@@ -320,7 +334,7 @@ impl FeroApp {
                 }
                 self.sel_server = i;
                 self.sel_port = Some(p);
-                if self.tab != Tab::Streams && self.tab != Tab::Stateful {
+                if ![Tab::Streams, Tab::Stateful, Tab::Start].contains(&self.tab) {
                     self.tab = Tab::Streams;
                 }
             }
@@ -405,11 +419,13 @@ impl FeroApp {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        self.settings_window(ctx);
         if let Some(save) = self.appearance.window(ctx) {
             use crate::files::{Kind, Target};
             let name = format!(
-                "{}.toml",
-                self.appearance.theme.name.to_lowercase().replace(' ', "-")
+                "{}.{}",
+                self.appearance.theme.name.to_lowercase().replace(' ', "-"),
+                crate::files::THEME_EXT
             );
             if save {
                 self.files

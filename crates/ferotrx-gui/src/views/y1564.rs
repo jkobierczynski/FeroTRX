@@ -541,17 +541,20 @@ impl FeroApp {
             } else {
                 "Y.1564 profile on the server"
             };
-            self.files
-                .pick(Target::OpenY1564, title, Kind::Profile, &current);
+            self.files.pick(
+                Target::OpenY1564,
+                title,
+                Kind::Of(ferotrx_core::check::FileKind::Y1564),
+                &current,
+            );
         }
         if a.save_as {
-            let name = Path::new(&current)
-                .file_name()
-                .map_or("y1564.toml".into(), |n| n.to_string_lossy().into_owned());
+            let name =
+                crate::files::save_name(&current, "y1564", ferotrx_core::check::FileKind::Y1564);
             self.files.save(
                 Target::SaveY1564,
                 "Save the Y.1564 profile",
-                Kind::Profile,
+                Kind::Of(ferotrx_core::check::FileKind::Y1564),
                 &current,
                 &name,
             );

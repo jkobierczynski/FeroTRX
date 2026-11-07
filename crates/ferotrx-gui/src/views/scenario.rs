@@ -227,18 +227,21 @@ impl ScenarioState {
         }
     }
 
-    /// `scenario.check` and `scenario.start` parameters. A server on this
-    /// computer (`local`) reads the profiles from the scenario's folder; one
-    /// elsewhere gets them in the scenario.
-    pub fn params(&self, local: bool) -> Result<Value, String> {
+    /// `scenario.check` and `scenario.start` parameters. The scenario's
+    /// folder goes along ([`crate::app::LOCAL_DIR`]): a server the GUI
+    /// started reads the profiles there, any other gets them, and the files
+    /// they name, sent first. `inline` puts the profiles into the scenario
+    /// instead, for a server that takes no files; so does naming a folder
+    /// on the server (`server_dir`), where the rest of the files are.
+    pub fn params(&self, inline: bool) -> Result<Value, String> {
         let mut p = json!({});
         if self.upload {
             if self.text.trim().is_empty() {
                 return Err("the scenario is empty: open one, or start a new one".into());
             }
-            if local {
+            if !inline && self.server_dir.trim().is_empty() {
                 p["toml"] = self.text.clone().into();
-                p["base_dir"] = self.folder().display().to_string().into();
+                p[crate::app::LOCAL_DIR] = self.folder().display().to_string().into();
             } else {
                 p["toml"] = inline_profiles(&self.text, &self.folder())?.into();
                 if !self.server_dir.trim().is_empty() {
@@ -318,6 +321,7 @@ impl FeroApp {
         let connected = server.status == Status::Connected;
         let can = connected && server.can_operate();
         let local = server.is_local();
+        let gui_started = server.settings.local;
         let addr = server.settings.addr.clone();
         let ifaces: Vec<String> = server.interfaces.iter().map(|x| x.name.clone()).collect();
         let runs: Vec<ScenarioRunInfo> = server.snap.scenarios.clone();
@@ -534,7 +538,7 @@ impl FeroApp {
             if st.upload {
                 st.check_local();
             } else {
-                match st.params(local) {
+                match st.params(false) {
                     Ok(p) => self.call(i, "scenario.check", p, Pending::ScenarioChecked),
                     Err(e) => self.error(&addr, e),
                 }
@@ -550,13 +554,13 @@ impl FeroApp {
                     let e = e.clone();
                     self.error(&addr, format!("scenario: {e}"));
                 }
-                _ => match st.params(local) {
+                _ => match st.params(false) {
                     Ok(p) => {
-                        // A server on this computer gets the scenario's folder;
+                        // A server the GUI started gets the scenario's folder;
                         // if it may not read it, the same run with the
                         // profiles in the scenario goes instead.
-                        let inline = (local && st.upload)
-                            .then(|| st.params(false).ok())
+                        let inline = (gui_started && st.upload)
+                            .then(|| st.params(true).ok())
                             .flatten();
                         self.call(i, "scenario.start", p, Pending::ScenarioStarted { inline })
                     }
@@ -580,17 +584,23 @@ impl FeroApp {
             } else {
                 "Scenario on the server"
             };
-            self.files
-                .pick(Target::OpenScenario, title, Kind::Profile, &current);
+            self.files.pick(
+                Target::OpenScenario,
+                title,
+                Kind::Of(ferotrx_core::check::FileKind::Scenario),
+                &current,
+            );
         }
         if a.save_as {
-            let name = Path::new(&current)
-                .file_name()
-                .map_or("scenario.toml".into(), |n| n.to_string_lossy().into_owned());
+            let name = crate::files::save_name(
+                &current,
+                "scenario",
+                ferotrx_core::check::FileKind::Scenario,
+            );
             self.files.save(
                 Target::SaveScenario,
                 "Save the scenario",
-                Kind::Profile,
+                Kind::Of(ferotrx_core::check::FileKind::Scenario),
                 &current,
                 &name,
             );
@@ -947,21 +957,37 @@ mod tests {
         assert_eq!(info.checks.len(), 6);
         assert_eq!(info.lab.as_ref().unwrap().block_tcp, [8080]);
 
-        // A server here reads the profiles from the scenario's folder.
-        let p = st.params(true).unwrap();
-        assert!(p["base_dir"].as_str().unwrap().ends_with("examples"));
+        // The scenario's folder goes along: read there, or sent from there.
+        let p = st.params(false).unwrap();
+        assert!(p[crate::app::LOCAL_DIR]
+            .as_str()
+            .unwrap()
+            .ends_with("examples"));
         assert_eq!(p["set"]["iface"], "eth9");
         assert!(p.get("only").is_none());
         assert!(p.get("lab").is_none());
+        // What the server gets once the GUI has decided where the files are.
+        let mut sent = p.clone();
+        assert!(crate::app::ship(&mut sent, true).unwrap().is_empty());
+        assert!(sent["base_dir"].as_str().unwrap().ends_with("examples"));
+        let mut remote = p.clone();
+        let files = crate::app::ship(&mut remote, false).unwrap();
+        assert!(
+            files
+                .iter()
+                .any(|(f, _)| f.ends_with("/examples/http.pcap")),
+            "{files:?}"
+        );
+        assert!(remote["base_dir"].as_str().unwrap().starts_with("gui/"));
         let shown = ferotrx_ctl::protocol::ScenarioStartParams {
             toml: Some(st.text.clone()),
-            ..serde_json::from_value(p.clone()).unwrap()
+            ..serde_json::from_value(sent).unwrap()
         };
         assert_eq!(shown.set["iface"], "eth9");
 
         st.skip.insert("voice stream".into());
         st.build_lab = false;
-        let p = st.params(true).unwrap();
+        let p = st.params(false).unwrap();
         assert_eq!(p["only"].as_array().unwrap().len(), 5);
         assert_eq!(p["lab"], false);
     }
@@ -978,15 +1004,18 @@ mod tests {
         };
         st.check_local();
         assert!(st.checked.as_ref().unwrap().is_ok(), "{:?}", st.checked);
-        let p = st.params(false).unwrap();
+        let p = st.params(true).unwrap();
         assert!(p.get("base_dir").is_none());
+        assert!(p.get(crate::app::LOCAL_DIR).is_none());
         let text = p["toml"].as_str().unwrap();
         assert!(!text.contains("lab-tcp.toml"), "{text}");
         let s = Scenario::from_toml(text, Path::new("/nowhere"), &[]).unwrap();
         assert_eq!(s.checks[0].source, "inline");
         assert_eq!(s.checks[1].source, "inline");
         st.server_dir = "profiles".into();
-        assert_eq!(st.params(false).unwrap()["base_dir"], "profiles");
+        let p = st.params(false).unwrap();
+        assert_eq!(p["base_dir"], "profiles");
+        assert!(p.get(crate::app::LOCAL_DIR).is_none());
     }
 
     #[test]

@@ -179,7 +179,7 @@ impl AppsState {
     /// Reads a profile file; its kind as `ferotrx check` detects it.
     pub fn open(&mut self, path: &str) -> Result<(), String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-        self.kind = match ferotrx_core::check::detect_kind(&text) {
+        self.kind = match ferotrx_core::check::kind_of(Path::new(path), &text) {
             Ok(ferotrx_core::check::FileKind::Udp) => ProfileKind::Udp,
             Ok(ferotrx_core::check::FileKind::Tcp) => ProfileKind::Tcp,
             Ok(k) => return Err(format!("{path} is a {k:?} file, not a TCP or UDP profile")),
@@ -234,15 +234,14 @@ impl AppsState {
         );
     }
 
-    /// `tcp.start` / `udp.start` parameters with the profile's text.
-    pub fn params(&self, local: bool) -> Result<Value, String> {
+    /// `tcp.start` / `udp.start` parameters with the profile's text, and
+    /// its folder ([`crate::app::LOCAL_DIR`]) for the files it names.
+    pub fn params(&self) -> Result<Value, String> {
         if self.text.trim().is_empty() {
             return Err("the profile is empty: open one, or start a new one".into());
         }
         let mut p = json!({ "toml": self.text });
-        if local {
-            p["base_dir"] = self.folder().display().to_string().into();
-        }
+        p[crate::app::LOCAL_DIR] = self.folder().display().to_string().into();
         for (k, v) in [
             ("iface", &self.iface),
             ("backend", &self.backend),
@@ -553,10 +552,9 @@ struct Actions {
 impl FeroApp {
     pub fn apps_tab(&mut self, ui: &mut egui::Ui) {
         let i = self.sel_server;
-        let (can, local, addr, ifaces, backends) = match self.servers.get(i) {
+        let (can, addr, ifaces, backends) = match self.servers.get(i) {
             Some(s) => (
                 s.status == Status::Connected && s.can_operate(),
-                s.is_local(),
                 s.settings.addr.clone(),
                 s.interfaces
                     .iter()
@@ -567,7 +565,7 @@ impl FeroApp {
                     .map(|i| i.backends.clone())
                     .unwrap_or_default(),
             ),
-            None => (false, false, String::new(), Vec::new(), Vec::new()),
+            None => (false, String::new(), Vec::new(), Vec::new()),
         };
         let mut a = Actions::default();
         let st = &mut self.apps;
@@ -681,10 +679,10 @@ impl FeroApp {
         } else {
             profile_editor(ui, &self.registry, st);
         }
-        self.apps_actions(a, i, local, &addr);
+        self.apps_actions(a, i, &addr);
     }
 
-    fn apps_actions(&mut self, a: Actions, i: usize, local: bool, addr: &str) {
+    fn apps_actions(&mut self, a: Actions, i: usize, addr: &str) {
         let st = &mut self.apps;
         if let Some(k) = a.new {
             st.new_profile(k);
@@ -713,7 +711,7 @@ impl FeroApp {
         }
         if a.start {
             st.check_here();
-            match (&st.check, st.params(local)) {
+            match (&st.check, st.params()) {
                 (Some(Err(e)), _) => {
                     let e = format!("profile: {e}");
                     self.error(addr, e);
@@ -735,13 +733,12 @@ impl FeroApp {
             );
         }
         if save_as {
-            let name = Path::new(&path)
-                .file_name()
-                .map_or("profile.toml".into(), |n| n.to_string_lossy().into_owned());
+            let kind = self.apps.kind.core();
+            let name = crate::files::save_name(&path, "profile", kind);
             self.files.save(
                 Target::SaveAppProfile,
                 "Save the profile",
-                Kind::Profile,
+                Kind::Of(kind),
                 &path,
                 &name,
             );
@@ -1123,8 +1120,14 @@ mod tests {
             assert!(st.dirty());
             st.check_here();
             assert!(matches!(st.check, Some(Ok(_))), "{f}: {:?}", st.check);
-            let p = st.params(true).unwrap();
-            assert!(p["base_dir"].as_str().unwrap().ends_with("examples"), "{p}");
+            let p = st.params().unwrap();
+            assert!(
+                p[crate::app::LOCAL_DIR]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("examples"),
+                "{p}"
+            );
         }
     }
 

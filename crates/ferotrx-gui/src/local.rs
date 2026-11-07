@@ -63,7 +63,7 @@ pub fn find_server() -> Option<PathBuf> {
 }
 
 /// The folders a local server lets the GUI use when none are set: the
-/// home folder, and the installed examples (Windows installs them next to
+/// home folder, the user's folders of Settings, and the installed examples (Windows installs them next to
 /// the programs).
 pub fn default_folders() -> Vec<PathBuf> {
     let mut v = Vec::new();
@@ -71,6 +71,15 @@ pub fn default_folders() -> Vec<PathBuf> {
         .map(PathBuf::from)
         .filter(|p| p.is_dir());
     v.extend(home);
+    // The user's folders (Settings), when they are not in the home folder
+    // already (another drive, say).
+    let s = crate::settings::Settings::load();
+    for f in [&s.profiles, &s.captures, &s.reports] {
+        let p = PathBuf::from(f.trim());
+        if !f.trim().is_empty() && p.is_dir() && !v.iter().any(|d| p.starts_with(d)) {
+            v.push(p);
+        }
+    }
     if let Some(ex) = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("examples")))

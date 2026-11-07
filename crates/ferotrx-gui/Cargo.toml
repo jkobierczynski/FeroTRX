@@ -27,6 +27,8 @@ skrifa = "0.44"
 egui_plot = "0.37"
 egui-file-dialog = { version = "0.15", default-features = false }
 ron = "0.12"
+# The user's folders: %APPDATA% and Documents on Windows (eframe uses it too).
+directories = "6"
 # The token of a server the GUI starts itself.
 ring.workspace = true
 

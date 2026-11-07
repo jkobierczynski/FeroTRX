@@ -88,7 +88,10 @@ each milestone added and what comes next.
   editable streams and bytes edited in hex, forms for application protocol
   profiles, benchmarks, scenarios and their comparison, runs on several
   servers at once, counters, rate, loss and latency charts, all saved as a
-  workspace. [Guide](docs/gui.md)
+  workspace. A Start page for the first steps, your own folders and
+  settings, a file extension per kind (`.fttcp`, `.ftscenario`, …), and the
+  files a profile names sent along to whichever server runs it.
+  [Guide](docs/gui.md)
 * **IPv4 and IPv6** throughout.
 
 ## Desktop GUI

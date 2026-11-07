@@ -320,6 +320,8 @@ pub fn pseudo_interface(name: &str) -> bool {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Tab {
+    /// Where to start: the first steps.
+    Start,
     #[default]
     Streams,
     Stateful,
@@ -378,6 +380,12 @@ pub struct FeroApp {
     pub pending_layout: Option<String>,
     /// The theme and the Appearance window.
     pub appearance: crate::theme::Appearance,
+    /// The user's settings (folders, Start page).
+    pub settings: crate::settings::Settings,
+    /// The Settings window, while open.
+    pub settings_form: Option<crate::views::SettingsForm>,
+    /// Something was opened from the Start page (its step 3 is done).
+    pub opened_from_start: bool,
     pub ctx: egui::Context,
 }
 
@@ -398,6 +406,8 @@ pub struct Options {
     pub workspace: Option<String>,
     /// A theme file (TOML) to use instead of the saved theme.
     pub theme: Option<String>,
+    /// Any FeroTRX file, opened in the tab of its kind.
+    pub open: Option<String>,
 }
 
 impl FeroApp {
@@ -423,6 +433,8 @@ impl FeroApp {
         if app.workspace_path.is_none() {
             app.workspace_path = path;
         }
+        app.settings = crate::settings::Settings::load();
+        app.prepare_user_folder();
         app.apply_options(opts);
         app
     }
@@ -453,6 +465,9 @@ impl FeroApp {
             workspace_path: None,
             pending_layout: None,
             appearance: Default::default(),
+            settings: Default::default(),
+            settings_form: None,
+            opened_from_start: false,
             ctx,
         };
         if let Some(last) = app.work.last.clone() {
@@ -550,6 +565,12 @@ impl FeroApp {
             }
             app.tab = Tab::Scenario;
         }
+        if let Some(path) = &opts.open {
+            match app.open_file(std::path::Path::new(path)) {
+                Ok(m) => app.info("", m),
+                Err(e) => app.error("", e),
+            }
+        }
         if let Some(path) = opts.capture {
             app.capture.path = path;
             app.capture.open();
@@ -621,13 +642,34 @@ impl FeroApp {
     }
 
     /// Sends a call to server `i` and remembers what to do with its answer.
-    pub fn call(&mut self, i: usize, method: &str, params: Value, pending: Pending) {
+    /// Calls `method` on server `i`. Params with a profile's text (`toml`)
+    /// and its folder here ([`LOCAL_DIR`]) get the files it names: a server
+    /// the GUI started reads them from that folder; any other server gets
+    /// them sent first ([`ship`]), into its data directory.
+    pub fn call(&mut self, i: usize, method: &str, mut params: Value, pending: Pending) {
         let tag = self.next_tag;
         self.next_tag += 1;
+        let uploads = match ship(&mut params, self.servers[i].settings.local) {
+            Ok(u) => u,
+            Err(e) => {
+                let name = self.servers[i].settings.addr.clone();
+                self.error(&name, format!("{method}: {e}"));
+                return;
+            }
+        };
         let s = &mut self.servers[i];
         match &s.conn {
             Some(c) if s.status == Status::Connected => {
-                c.call(method, params, tag);
+                if uploads.is_empty() {
+                    c.call(method, params, tag);
+                } else {
+                    c.send(Request::UploadThenCall {
+                        uploads,
+                        method: method.into(),
+                        params,
+                        tag,
+                    });
+                }
                 s.pending.insert(tag, pending);
             }
             _ => {
@@ -989,7 +1031,7 @@ impl FeroApp {
         }
         let name = port.profile_name();
         let params = start_params(port, &work.config, &name, &self.work.file_out);
-        let load = self.load_params(i, &name, &work);
+        let load = self.load_params(&name, &work);
         self.call(
             i,
             "profile.load",
@@ -1001,17 +1043,16 @@ impl FeroApp {
     pub fn check_port(&mut self, i: usize, port: &PortKind) {
         let key = self.port_key(i, port);
         let work = self.port_work(i, port).clone();
-        let load = self.load_params(i, &port.profile_name(), &work);
+        let load = self.load_params(&port.profile_name(), &work);
         self.call(i, "profile.load", load, Pending::Checked { port: key });
     }
 
-    /// `profile.load` with the port's streams. A server on this computer
-    /// reads relative pcap paths from the folder the profile file was in, as
-    /// `ferotrx run` does; a server elsewhere from its data directory.
-    fn load_params(&self, i: usize, name: &str, work: &PortWork) -> Value {
+    /// `profile.load` with the port's streams, and the folder their
+    /// relative pcap paths start from ([`LOCAL_DIR`]).
+    fn load_params(&self, name: &str, work: &PortWork) -> Value {
         let mut load = serde_json::json!({ "name": name, "toml": work.profile.to_toml(true) });
-        if self.servers[i].is_local() && !work.base_dir.is_empty() {
-            load["base_dir"] = work.base_dir.clone().into();
+        if !work.base_dir.is_empty() {
+            load[LOCAL_DIR] = work.base_dir.clone().into();
         }
         load
     }
@@ -1076,6 +1117,75 @@ impl eframe::App for FeroApp {
         }
     }
 }
+
+/// Where the GUI puts the files of profiles it sends, in a server's data
+/// directory: `gui/<user>-<computer>/`.
+pub fn upload_root() -> String {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let user = var("USERNAME")
+        .or_else(|| var("USER"))
+        .unwrap_or_else(|| "user".into());
+    let host = var("COMPUTERNAME")
+        .or_else(|| var("HOSTNAME"))
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|h| h.trim().to_string())
+        })
+        .unwrap_or_default();
+    let who = if host.is_empty() {
+        user
+    } else {
+        format!("{user}-{host}")
+    };
+    format!("gui/{}", ferotrx_core::bundle::folder_name(&who))
+}
+
+/// Takes [`LOCAL_DIR`] out of `params`. For a server the GUI started
+/// (`gui_started`) it becomes `base_dir`: that server reads this
+/// computer's folders. For any other, the files the profile (`toml`)
+/// names are returned to send first (path on the server, bytes), and
+/// `base_dir` is their folder there.
+pub fn ship(params: &mut Value, gui_started: bool) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let Some(dir) = params
+        .as_object_mut()
+        .and_then(|m| m.remove(LOCAL_DIR))
+        .and_then(|d| d.as_str().map(str::to_string))
+    else {
+        return Ok(Vec::new());
+    };
+    if dir.is_empty() {
+        return Ok(Vec::new());
+    }
+    if gui_started {
+        params["base_dir"] = dir.into();
+        return Ok(Vec::new());
+    }
+    let Some(text) = params.get("toml").and_then(|t| t.as_str()) else {
+        return Ok(Vec::new());
+    };
+    let dir = std::path::Path::new(&dir);
+    let last = dir
+        .file_name()
+        .map(|n| ferotrx_core::bundle::folder_name(&n.to_string_lossy()))
+        .unwrap_or_else(|| "files".into());
+    let bundle = ferotrx_core::bundle::Bundle::of(text, dir, &format!("{}/{last}", upload_root()));
+    if bundle.files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for (local, remote) in &bundle.files {
+        let data =
+            std::fs::read(local).map_err(|e| format!("cannot read {}: {e}", local.display()))?;
+        out.push((remote.clone(), data));
+    }
+    params["base_dir"] = bundle.base_dir.into();
+    Ok(out)
+}
+
+/// The key of the start parameters that holds a profile's folder on this
+/// computer, until [`FeroApp::call`] decides what the server gets.
+pub const LOCAL_DIR: &str = "_local_dir";
 
 /// True for the server's "outside the data directories" answer
 /// (`RpcError::FORBIDDEN`, shown as `... (code -32004)`).

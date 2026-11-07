@@ -536,37 +536,6 @@ fn substitute_known(text: &str, vars: &BTreeMap<String, String>) -> String {
     out
 }
 
-/// The files a profile names by relative paths that exist here: every
-/// string value that is the path of a file in `dir`.
-fn files_named(table: &toml::Table, dir: &Path) -> Vec<PathBuf> {
-    fn walk(v: &toml::Value, dir: &Path, out: &mut Vec<PathBuf>) {
-        match v {
-            toml::Value::String(s) => {
-                let p = Path::new(s);
-                if s.is_empty() || s.len() > 1024 || s.contains('\n') || p.is_absolute() {
-                    return;
-                }
-                let full = dir.join(p);
-                if full.is_file() {
-                    if let Ok(c) = full.canonicalize() {
-                        if !out.contains(&c) {
-                            out.push(c);
-                        }
-                    }
-                }
-            }
-            toml::Value::Array(a) => a.iter().for_each(|v| walk(v, dir, out)),
-            toml::Value::Table(t) => t.values().for_each(|v| walk(v, dir, out)),
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    for v in table.values() {
-        walk(v, dir, &mut out);
-    }
-    out
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPlan {
@@ -881,7 +850,7 @@ impl RawRun {
             instances.push(FleetInstance {
                 agent: n.clone(),
                 text,
-                files: files_named(&table, &dir),
+                files: crate::bundle::files_named_in(&table, &dir),
                 dir: dir.clone(),
                 file_name: file_name.clone(),
                 iface,

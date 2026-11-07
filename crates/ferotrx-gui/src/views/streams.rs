@@ -155,16 +155,21 @@ impl FeroApp {
             Some(Action::Check) => self.check_port(i, &port),
             Some(Action::Open) => {
                 let dir = self.port_work(i, &port).base_dir.clone();
-                self.files
-                    .pick(Target::OpenProfile, "Open a profile", Kind::Profile, &dir);
+                self.files.pick(
+                    Target::OpenProfile,
+                    "Open a stream profile",
+                    Kind::Of(ferotrx_core::check::FileKind::Traffic),
+                    &dir,
+                );
             }
             Some(Action::Save) => {
                 let dir = self.port_work(i, &port).base_dir.clone();
-                let name = format!("{}.toml", port.profile_name());
+                let kind = ferotrx_core::check::FileKind::Traffic;
+                let name = format!("{}.{}", port.profile_name(), kind.extension());
                 self.files.save(
                     Target::SaveProfile,
                     "Save the streams as a profile",
-                    Kind::Profile,
+                    Kind::Of(kind),
                     &dir,
                     &name,
                 );
@@ -382,7 +387,24 @@ impl FeroApp {
         };
         let shown = path.display().to_string();
         let i = self.sel_server;
+        if self.open_elsewhere(&target, &path) {
+            return;
+        }
         match target {
+            Target::OpenAny => match self.open_file(&path) {
+                Ok(m) => self.info("", m),
+                Err(e) => self.error("", e),
+            },
+            Target::Folder(kind) => {
+                if let Some(f) = &mut self.settings_form {
+                    let field = match kind {
+                        crate::settings::FolderKind::Profiles => &mut f.settings.profiles,
+                        crate::settings::FolderKind::Captures => &mut f.settings.captures,
+                        crate::settings::FolderKind::Reports => &mut f.settings.reports,
+                    };
+                    *field = shown;
+                }
+            }
             Target::Capture => {
                 self.capture.path = shown;
                 self.capture.open();
