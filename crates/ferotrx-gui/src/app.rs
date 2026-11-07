@@ -642,7 +642,7 @@ impl FeroApp {
                         .map(|r| format!(", role {}", r.as_str()))
                         .unwrap_or_default()
                 );
-                s.info = Some(info);
+                s.info = Some(*info);
                 s.interfaces = interfaces;
                 s.status = Status::Connected;
                 self.info(&name, what);

@@ -159,7 +159,7 @@ pub struct Snapshot {
 #[derive(Debug)]
 pub enum Event {
     Connected {
-        info: ServerInfo,
+        info: Box<ServerInfo>,
         interfaces: Vec<InterfaceEntry>,
         /// The server's clock minus this machine's, in seconds (servers
         /// from 0.31.0 tell the time).
@@ -249,7 +249,7 @@ fn worker(
     }) {
         Ok((c, info, interfaces, clock_offset)) => {
             if !send(Event::Connected {
-                info,
+                info: Box::new(info),
                 interfaces,
                 clock_offset,
             }) {
