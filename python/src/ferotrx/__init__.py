@@ -64,7 +64,7 @@ from .types import (
     Y1564RunInfo,
 )
 
-__version__ = "0.38.0"
+__version__ = "0.39.0"
 
 __all__ = [
     "__version__",

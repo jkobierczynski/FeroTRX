@@ -52,7 +52,7 @@ fn agent(name: &str, cables: &Cables) -> (SocketAddr, PathBuf) {
         })
         .with_capture_opener({
             // cap-east: e, cap-west: w.
-            let tag = name.bytes().nth(4).unwrap_or(b'x');
+            let tag = name.as_bytes().get(4).copied().unwrap_or(b'x');
             move |iface, _| {
                 if iface != "cap0" {
                     return Err(format!("no interface {iface}").into());

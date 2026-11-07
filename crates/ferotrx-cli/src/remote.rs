@@ -1258,50 +1258,6 @@ pub fn cmd_certs(args: CertsArgs) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn serve_arguments_parse_on_their_own() {
-        let a = parse_serve_args(&[
-            "--listen".into(),
-            "127.0.0.1:0".into(),
-            "--port-file".into(),
-            "port".into(),
-            "--parent".into(),
-            "42".into(),
-        ])
-        .unwrap();
-        assert_eq!(a.listen, "127.0.0.1:0");
-        assert_eq!(a.parent, Some(42));
-        assert!(parse_serve_args(&["--bogus".into()]).is_err());
-    }
-
-    #[test]
-    fn a_server_writes_its_port_file() {
-        let dir = std::env::temp_dir().join(format!("ftrx-port-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("port");
-        let args = parse_serve_args(&[
-            "-l".into(),
-            "127.0.0.1:0".into(),
-            "--data-dir".into(),
-            dir.display().to_string(),
-            "--port-file".into(),
-            f.display().to_string(),
-        ])
-        .unwrap();
-        let server = start_server(args).unwrap();
-        let addr = server.local_addr().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&f).unwrap().trim(),
-            addr.to_string()
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-}
-
 fn print_capture(i: &CaptureInfo) {
     let filter = i
         .filter
@@ -1365,4 +1321,48 @@ fn remote_capture(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serve_arguments_parse_on_their_own() {
+        let a = parse_serve_args(&[
+            "--listen".into(),
+            "127.0.0.1:0".into(),
+            "--port-file".into(),
+            "port".into(),
+            "--parent".into(),
+            "42".into(),
+        ])
+        .unwrap();
+        assert_eq!(a.listen, "127.0.0.1:0");
+        assert_eq!(a.parent, Some(42));
+        assert!(parse_serve_args(&["--bogus".into()]).is_err());
+    }
+
+    #[test]
+    fn a_server_writes_its_port_file() {
+        let dir = std::env::temp_dir().join(format!("ftrx-port-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("port");
+        let args = parse_serve_args(&[
+            "-l".into(),
+            "127.0.0.1:0".into(),
+            "--data-dir".into(),
+            dir.display().to_string(),
+            "--port-file".into(),
+            f.display().to_string(),
+        ])
+        .unwrap();
+        let server = start_server(args).unwrap();
+        let addr = server.local_addr().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap().trim(),
+            addr.to_string()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

@@ -147,6 +147,7 @@ pub struct Controller {
     open_receiver: Arc<ReceiverOpener>,
     open_capture: Arc<CaptureOpener>,
     captures: Mutex<BTreeMap<u64, Arc<CaptureRun>>>,
+    capture_abandoned_after: Duration,
     /// Whether `lab.start` may build a lab, and the one running.
     lab_allowed: bool,
     lab: Mutex<Option<ferotrx_io::Lab>>,
@@ -195,6 +196,7 @@ impl Controller {
             open_receiver: Arc::new(ferotrx_io::open_receiver),
             open_capture: Arc::new(ferotrx_io::open_capture),
             captures: Mutex::default(),
+            capture_abandoned_after: crate::capture::ABANDONED_AFTER,
             lab_allowed: false,
             lab: Mutex::default(),
         }
@@ -283,6 +285,13 @@ impl Controller {
 
     /// Opens the interfaces captures run on (`capture.start`) with `open`
     /// instead of libpcap/Npcap, e.g. frames from memory in tests.
+    /// How long a capture that only streams (no file) runs without a
+    /// client reading it (default [`crate::capture::ABANDONED_AFTER`]).
+    pub fn with_capture_abandoned_after(mut self, after: Duration) -> Self {
+        self.capture_abandoned_after = after;
+        self
+    }
+
     pub fn with_capture_opener(
         mut self,
         open: impl Fn(
@@ -634,7 +643,17 @@ impl Controller {
             stopped_by_request: Default::default(),
             file: p.file,
             started: ferotrx_core::unix_seconds(std::time::SystemTime::now()),
+            last_read: std::sync::Mutex::new(std::time::Instant::now()),
+            abandoned: Default::default(),
         });
+        if stream && run.file.is_none() {
+            let watched = run.clone();
+            let after = self.capture_abandoned_after;
+            std::thread::Builder::new()
+                .name(format!("capture-{id}-readers"))
+                .spawn(move || watched.watch_readers(after))
+                .map_err(|e| RpcError::failed(e.to_string()))?;
+        }
         let info = run.info();
         lock(&self.captures).insert(id, run);
         Ok(info)

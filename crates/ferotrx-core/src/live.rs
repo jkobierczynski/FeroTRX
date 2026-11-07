@@ -323,7 +323,7 @@ impl<W: Write> PcapngWriter<W> {
 }
 
 fn pad4(b: &mut Vec<u8>) {
-    while b.len() % 4 != 0 {
+    while !b.len().is_multiple_of(4) {
         b.push(0);
     }
 }

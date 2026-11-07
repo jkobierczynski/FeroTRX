@@ -170,12 +170,9 @@ fn live_loop(
                 let mut ok = false;
                 if let Some(stdin) = child.stdin.as_mut() {
                     let mut header = Vec::new();
-                    if let Ok(w) = ferotrx_core::PcapStreamWriter::new(
-                        &mut header,
-                        info.linktype,
-                        info.snaplen,
-                    ) {
-                        drop(w);
+                    if ferotrx_core::PcapStreamWriter::new(&mut header, info.linktype, info.snaplen)
+                        .is_ok()
+                    {
                         ok = stdin.write_all(&header).is_ok();
                     }
                 }

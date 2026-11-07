@@ -30,6 +30,11 @@ each milestone added and what comes next.
   ranges and checksum checks; build Ethernet, VLAN, ARP, IPv4, IPv6 (with
   extension headers), TCP, UDP, ICMP/ICMPv6 and DNS packets from one line of
   text. [Guide](docs/packets.md)
+* **Capture and monitor**: capture with BPF filters, decoded on screen or
+  as pcap to files, rings or straight into Wireshark
+  (`ferotrx capture -i eth0 -w - udp | wireshark -k -i -`), on this machine,
+  a remote server or every agent of a fleet (collected and merged).
+  [Guide](docs/capture.md)
 * **Traffic models**: Poisson arrivals, bursts, ramps and rate shapes for
   streams, connections and transactions. [Guide](docs/traffic-models.md)
 * **Stateful TCP**: real connections with handshakes, retransmits, window
@@ -158,6 +163,7 @@ The manual is in [docs/](docs/README.md):
 | [Host emulation](docs/host-emulation.md) | `host`, DHCP, SLAAC, IGMP/MLD |
 | [TCP and UDP over AF_XDP and DPDK](docs/fast-ports.md) | fast ports for stateful runs |
 | [One run on several cores](docs/multi-core.md) | `--workers`, splitting streams and flows |
+| [Capturing traffic](docs/capture.md) | `capture`, BPF filters, Wireshark, remote and fleet captures |
 | [Loss and latency](docs/loss-latency.md) | signatures, `--rx`, `rx` |
 | [Benchmarking](docs/benchmarking.md) | `bench`, RFC 2544 |
 | [Y.1564 service activation](docs/y1564.md) | `y1564`, CIR/EIR, policing, availability |

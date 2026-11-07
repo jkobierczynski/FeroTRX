@@ -47,6 +47,9 @@ The [README](../README.md) has the overview and a quickstart.
   duplicates, reordering, corruption, rate limits and MTU on streams, on
   TCP/UDP/host ports and in a two-port bridge (`ferotrx impair`), without
   netem.
+* [Capturing traffic](capture.md): `ferotrx capture` with BPF filters,
+  pcap to files, rings or Wireshark, captures on remote servers and fleet
+  agents, `inspect -f`.
 * [Benchmarking](benchmarking.md): `ferotrx bench`, RFC 2544, IMIX.
 * [Y.1564 service activation](y1564.md): `ferotrx y1564`, services with a
   CIR and EIR, configuration steps, policing, the performance test.
