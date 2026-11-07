@@ -93,7 +93,8 @@ you watch; the button next to it switches between following the system,
 light and dark.
 
 * **Theme:** a built-in theme to start from (FeroTRX, egui's own, High
-  contrast, Compact), its name, and **Open…**/**Save as…** for theme files.
+  contrast, Compact, Graphite, Ocean, Forest, Ember, Lavender, Terminal),
+  its name, and **Open…**/**Save as…** for theme files.
 * **Mode:** follow the system, or always light or dark.
 * **Colours**, separately for light and dark mode: accent (links, hovered
   outlines, the cursor, the text of selected items), selection, background,
@@ -103,8 +104,12 @@ light and dark.
 * **Widgets:** corner radius of widgets and of windows, border width,
   density (spacing and widget heights), borders on buttons and fields,
   shadows, animations, scroll bars beside the content instead of floating.
-* **Text:** zoom of the whole window (Ctrl + and Ctrl - change it too) and
-  the sizes of body, monospace, heading and small text.
+* **Text:** zoom of the whole window (Ctrl + and Ctrl - change it too),
+  the font for text and the one for monospace text (packets, profiles,
+  logs): built-in, one of the fonts installed on this computer, or a
+  `.ttf`/`.otf` file typed in; and the sizes of body, monospace, heading
+  and small text. A file that is not a font is refused with a message, and
+  the built-in fonts stay behind the chosen one for characters it lacks.
 * **Preview:** buttons, fields, a striped table and the status colours in
   the current style.
 
@@ -128,7 +133,8 @@ background = "#101418"
 
 The keys are those of the window: `mode`, `zoom`, `corner_radius`,
 `window_radius`, `border_width`, `outlined`, `density`, `body_size`,
-`monospace_size`, `heading_size`, `small_size`, `shadows`, `animations`,
+`monospace_size`, `heading_size`, `small_size`, `text_font`,
+`monospace_font` (font file paths), `shadows`, `animations`,
 `solid_scrollbars` under `[style]`, and `accent`, `selection`,
 `background`, `window`, `input`, `stripe`, `widget`, `hovered`, `border`,
 `text`, `good`, `running`, `warn`, `error` (as `"#rrggbb"`) under `[light]`
@@ -214,8 +220,10 @@ outcome (`complete`, `blocked`) and conditions on their counters.
   checks; untick a check to leave it out of the run.
 * **Run it on the server.** "▶ Run on the server" sends the scenario. A
   server on this computer reads the profiles from the scenario's folder; a
-  server elsewhere gets them put into the scenario (captures they replay
-  are read on the server, from "Server folder" or its data directory).
+  server elsewhere, or one on this computer that may not read that folder
+  (the Windows service, with its own data directory), gets them put into
+  the scenario (captures they replay are read on the server, from "Server
+  folder" or its data directory).
   Without the tick the server reads a scenario file of its own.
 * **Read the report.** Each check shows waiting, running with its live
   counters, then ✔, ✘ or ⚠ with its summary. Pick a check for its
@@ -225,8 +233,10 @@ outcome (`complete`, `blocked`) and conditions on their counters.
 
 `ferotrx-gui --scenario examples/lab-scenario.toml` opens a scenario in the
 tab at start. A scenario that names the lab router it needs (`[lab]`, as the
-lab scenario does) gets it built by the server before the run (a server
-started with `--lab`); untick "Build the lab it names" to run on the lab as
+lab scenario does) gets it built by the server before the run (a Linux
+server started with `--lab`, as root; on any other server the tab says it
+can't build one, and such a scenario only runs there with its interfaces
+changed to real ones); untick "Build the lab it names" to run on the lab as
 it is, after you changed it in "Lab router…" on purpose.
 
 **Compare…** sets two runs side by side, as `ferotrx scenario compare`
