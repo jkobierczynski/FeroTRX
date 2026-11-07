@@ -201,6 +201,25 @@ class ServerInfo(Record):
     #: ``macos``); servers before 0.34.0 leave them out.
     host: str | None = None
     os: str | None = None
+    #: Connections and ``stats`` subscriptions open on the server now
+    #: (servers from 0.35.0).
+    connections: int | None = None
+    subscriptions: int | None = None
+    #: The audit log's health, when the server keeps one (servers from 0.35.0).
+    audit: AuditHealth | None = None
+
+
+@dataclass(kw_only=True)
+class AuditHealth(Record):
+    """Whether the server's audit log is being written."""
+
+    #: False while the last write failed.
+    ok: bool = True
+    #: Writes that failed since the server started.
+    failures: int = 0
+    last_error: str | None = None
+    #: True when operator calls are refused while the log cannot be written.
+    required: bool = False
 
 
 @dataclass(kw_only=True)

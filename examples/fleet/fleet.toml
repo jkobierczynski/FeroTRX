@@ -27,7 +27,7 @@ connections = 50         # per client machine
 [[agent]]
 name = "east"
 address = "${east}"
-token_env = "FEROTRX_TOKEN"   # or token = "...", or ca/cert/key for TLS
+token_env = "FEROTRX_TOKEN"   # or token = "..."; agents beyond loopback need TLS: ca = "...", and cert/key to log in by certificate
 iface = "d0"                  # the agent's interface for runs that name none
 vars = { client_ip = "10.98.0.100" }
 

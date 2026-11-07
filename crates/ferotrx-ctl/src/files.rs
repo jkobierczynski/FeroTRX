@@ -14,12 +14,17 @@ pub const DEFAULT_MAX_FILE: u64 = 256 * 1024 * 1024;
 /// Where the files that clients name may be: profiles, the pcaps they play,
 /// and the pcap files runs write.
 ///
-/// [`FilePolicy::unrestricted`] (what [`Controller::new`](crate::Controller::new)
-/// uses) allows any path the process can open, relative paths from the
-/// current directory. With [`FilePolicy::dirs`], every path must be inside
-/// one of the directories once symbolic links are followed, and relative
-/// paths start from the first one. `ferotrx serve` always restricts, to the
-/// directory it was started in unless `--data-dir` says otherwise.
+/// [`FilePolicy::none`] (what [`Controller::new`](crate::Controller::new)
+/// and `FilePolicy::default()` use) allows no paths at all: clients can still
+/// send profiles as text, but not name files. With [`FilePolicy::dirs`], every
+/// path must be inside one of the directories once symbolic links are
+/// followed, and relative paths start from the first one.
+/// [`FilePolicy::unrestricted`] allows any path the process can open,
+/// relative paths from the current directory; a [`Server`](crate::Server)
+/// refuses to listen beyond loopback with it unless
+/// [`ServerConfig::unrestricted_files`](crate::ServerConfig::unrestricted_files)
+/// says so. `ferotrx serve` always restricts, to the directory it was started
+/// in unless `--data-dir` says otherwise.
 #[derive(Clone, Debug)]
 pub struct FilePolicy {
     dirs: Option<Vec<PathBuf>>,
@@ -29,12 +34,24 @@ pub struct FilePolicy {
 
 impl Default for FilePolicy {
     fn default() -> Self {
-        Self::unrestricted()
+        Self::none()
     }
 }
 
 impl FilePolicy {
-    /// Any path, uploads up to [`DEFAULT_MAX_UPLOAD`] bytes.
+    /// No paths: every file a client names is refused. Profiles sent as
+    /// text still work as long as they name no files.
+    pub fn none() -> Self {
+        Self {
+            dirs: Some(Vec::new()),
+            max_upload: DEFAULT_MAX_UPLOAD,
+            max_file: DEFAULT_MAX_FILE,
+        }
+    }
+
+    /// Any path the process can open, uploads up to [`DEFAULT_MAX_UPLOAD`]
+    /// bytes. Give it only to a server on loopback, or one whose operators
+    /// may read and write anything the process can.
     pub fn unrestricted() -> Self {
         Self {
             dirs: None,
@@ -79,8 +96,29 @@ impl FilePolicy {
     }
 
     /// The directories paths must be in (canonical), or `None` for anywhere.
+    /// Empty for [`FilePolicy::none`].
     pub fn allowed_dirs(&self) -> Option<&[PathBuf]> {
         self.dirs.as_deref()
+    }
+
+    /// True for [`FilePolicy::unrestricted`].
+    pub fn is_unrestricted(&self) -> bool {
+        self.dirs.is_none()
+    }
+
+    /// True for [`FilePolicy::none`].
+    pub fn is_none(&self) -> bool {
+        self.dirs.as_ref().is_some_and(Vec::is_empty)
+    }
+
+    fn no_files(&self, p: &Path) -> Result<(), RpcError> {
+        if self.is_none() {
+            return Err(RpcError::forbidden(format!(
+                "{}: this server has no data directories and takes no file names",
+                p.display()
+            )));
+        }
+        Ok(())
     }
 
     pub fn max_upload(&self) -> usize {
@@ -135,6 +173,7 @@ impl FilePolicy {
                 self.max_file
             )));
         }
+        self.no_files(p)?;
         let path = self.put_path(p)?;
         let fail = |e: io::Error| RpcError::failed(format!("cannot write {}: {e}", p.display()));
         let mut file = if offset == 0 {
@@ -190,7 +229,7 @@ impl FilePolicy {
     /// A path as the client gave it, relative ones from the first directory.
     fn resolve(&self, p: &Path) -> PathBuf {
         match &self.dirs {
-            Some(dirs) if p.is_relative() => dirs[0].join(p),
+            Some(dirs) if p.is_relative() && !dirs.is_empty() => dirs[0].join(p),
             _ => p.to_path_buf(),
         }
     }
@@ -221,6 +260,7 @@ impl FilePolicy {
         if self.dirs.is_none() {
             return Ok(p.to_path_buf());
         }
+        self.no_files(p)?;
         let path = self.resolve(p);
         let canonical = path
             .canonicalize()
@@ -234,6 +274,14 @@ impl FilePolicy {
     /// Checks a directory that relative paths in uploaded text start from
     /// (`base_dir`); `None` is the first data directory (or `.`).
     pub fn base_dir(&self, p: Option<&Path>) -> Result<PathBuf, RpcError> {
+        if self.is_none() {
+            // Relative paths in the text still have to pass `readable`,
+            // which refuses them all.
+            return match p {
+                None => Ok(PathBuf::from(".")),
+                Some(p) => self.no_files(p).map(|_| PathBuf::new()),
+            };
+        }
         let p = p.unwrap_or(Path::new("."));
         if self.dirs.is_none() {
             return Ok(p.to_path_buf());
@@ -254,6 +302,7 @@ impl FilePolicy {
         if self.dirs.is_none() {
             return Ok(p.to_path_buf());
         }
+        self.no_files(p)?;
         let path = self.resolve(p);
         if path.exists() {
             let c = path

@@ -14,7 +14,9 @@
 # nothing on the host (udev giving new links other MACs, Docker's bridge
 # netfilter) touches them.
 #
-# Each agent is `ferotrx serve` with a token and its own data directory.
+# Each agent is `ferotrx serve` over TLS (a lab CA from `ferotrx certs`)
+# with a token and its own data directory; the controller uses a copy of
+# the plan that names the CA (`ca = ...` per agent).
 # `ferotrx fleet run` sends the profiles and http.pcap to the agents,
 # starts the server, the clients on both client agents (500 ms later) and
 # a probe stream from east received on srv at one instant, and adds up
@@ -80,6 +82,17 @@ trap cleanup EXIT
 cleanup
 WORK=$(mktemp -d)
 
+# Tokens must travel over TLS beyond loopback: one server certificate for
+# the three agent addresses, and a copy of the plan that trusts its CA.
+"$BIN" certs "$WORK/pki" --server 10.99.0.11,10.99.0.12,10.99.0.13 >/dev/null
+mkdir -p "$WORK/plan/fleet"
+cp "$HERE"/examples/fleet/*.toml "$WORK/plan/fleet/"
+cp "$HERE/examples/http.pcap" "$WORK/plan/"
+sed "s|^token_env = .*|&\nca = \"$WORK/pki/ca.pem\"|" "$HERE/examples/fleet/fleet.toml" \
+    >"$WORK/plan/fleet/fleet.toml"
+grep -q '^ca = ' "$WORK/plan/fleet/fleet.toml" || { echo "FAILED: no CA in the plan copy" >&2; exit 1; }
+PLAN=$WORK/plan/fleet/fleet.toml
+
 LAB="ip netns exec ftrx-lab"
 ip netns add ftrx-lab
 $LAB ip link set lo up
@@ -104,6 +117,7 @@ for a in $AGENTS; do
     ip netns exec $ns ip addr add 10.99.0.$host/24 dev m0
     mkdir -p "$WORK/$n"
     ip netns exec $ns "$BIN" serve --listen 10.99.0.$host:4510 --token "$FEROTRX_TOKEN" \
+        --tls-cert "$WORK/pki/server.pem" --tls-key "$WORK/pki/server-key.pem" \
         --data-dir "$WORK/$n" 2>"$WORK/$n.log" &
     PIDS="$PIDS $!"
 done
@@ -112,7 +126,7 @@ done
 for a in $AGENTS; do
     host=${a##*:}
     i=0
-    until $LAB "$BIN" ctl -c 10.99.0.$host:4510 info >/dev/null 2>&1; do
+    until $LAB "$BIN" ctl -c 10.99.0.$host:4510 --ca "$WORK/pki/ca.pem" info >/dev/null 2>&1; do
         i=$((i + 1))
         if [ $i -gt 100 ]; then
             echo "FAILED: agent at 10.99.0.$host:4510 does not answer" >&2

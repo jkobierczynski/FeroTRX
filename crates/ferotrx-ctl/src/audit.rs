@@ -3,10 +3,13 @@
 
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
+
+use crate::protocol::AuditHealth;
 
 /// Where the control server writes its audit records.
 ///
@@ -21,10 +24,27 @@ use serde_json::{Map, Value};
 /// Events: `connect`, `refused` (too many connections), `tls_error`,
 /// `login`, `login_failed`, `denied` (a method the role may not call),
 /// `call` (every operator method, with its parameters, an uploaded profile
-/// shown by its size), `disconnect` (with the reason).
+/// shown by its size), `disconnect` (with the reason), `login_throttled`
+/// (wrong tokens from one address, or from everywhere, over the limit),
+/// `audit_refused` (an operator call refused while the log could not be
+/// written, with `--audit-required`), `cleartext_tokens` (the server was told
+/// to accept tokens without TLS beyond loopback). Tokens are never written.
+///
+/// A failed write does not stop the server: it is counted, reported once on
+/// standard error (and again when writing works again), and shown in
+/// [`health`](AuditLog::health) and `server.info`.
 #[derive(Clone)]
 pub struct AuditLog {
     out: Arc<Mutex<Box<dyn Write + Send>>>,
+    state: Arc<State>,
+}
+
+#[derive(Default)]
+struct State {
+    /// The last write failed.
+    failing: AtomicBool,
+    failures: AtomicU64,
+    last_error: Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for AuditLog {
@@ -53,23 +73,62 @@ impl AuditLog {
     pub fn to_writer(w: impl Write + Send + 'static) -> Self {
         Self {
             out: Arc::new(Mutex::new(Box::new(w))),
+            state: Arc::default(),
         }
     }
 
-    /// Writes one record. Errors writing it are ignored: a full disk must
-    /// not stop the server answering.
-    pub fn record(&self, event: &str, fields: Map<String, Value>) {
+    /// True while the last write worked (or nothing has been written yet).
+    pub fn ok(&self) -> bool {
+        !self.state.failing.load(Ordering::Relaxed)
+    }
+
+    /// The log's state for `server.info`.
+    pub fn health(&self) -> AuditHealth {
+        AuditHealth {
+            ok: self.ok(),
+            failures: self.state.failures.load(Ordering::Relaxed),
+            last_error: self
+                .state
+                .last_error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            required: false,
+        }
+    }
+
+    /// Writes one record and tells whether that worked. A failure does not
+    /// stop the server answering (a full disk); it is counted and reported.
+    pub fn record(&self, event: &str, fields: Map<String, Value>) -> bool {
         let mut rec = Map::new();
         rec.insert("time".into(), Value::String(now_rfc3339()));
         rec.insert("event".into(), Value::String(event.into()));
         rec.extend(fields);
         let Ok(mut line) = serde_json::to_vec(&Value::Object(rec)) else {
-            return;
+            return false;
         };
         line.push(b'\n');
-        let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = out.write_all(&line);
-        let _ = out.flush();
+        let written = {
+            let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
+            out.write_all(&line).and_then(|_| out.flush())
+        };
+        let s = &self.state;
+        match written {
+            Ok(()) => {
+                if s.failing.swap(false, Ordering::Relaxed) {
+                    eprintln!("audit log: writing works again");
+                }
+                true
+            }
+            Err(e) => {
+                s.failures.fetch_add(1, Ordering::Relaxed);
+                *s.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
+                if !s.failing.swap(true, Ordering::Relaxed) {
+                    eprintln!("error: audit log: cannot write: {e}; records are being lost");
+                }
+                false
+            }
+        }
     }
 }
 
@@ -106,6 +165,40 @@ fn rfc3339(secs: i64, millis: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Broken(Arc<AtomicBool>);
+
+    impl Write for Broken {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.0.load(Ordering::Relaxed) {
+                Err(io::Error::other("disk full"))
+            } else {
+                Ok(buf.len())
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_failures_are_counted_and_recover() {
+        let broken = Arc::new(AtomicBool::new(false));
+        let log = AuditLog::to_writer(Broken(broken.clone()));
+        assert!(log.record("connect", Map::new()));
+        assert!(log.ok());
+        broken.store(true, Ordering::Relaxed);
+        assert!(!log.record("connect", Map::new()));
+        assert!(!log.record("connect", Map::new()));
+        let h = log.health();
+        assert!(!h.ok);
+        assert_eq!(h.failures, 2);
+        assert_eq!(h.last_error.as_deref(), Some("disk full"));
+        broken.store(false, Ordering::Relaxed);
+        assert!(log.record("connect", Map::new()));
+        assert!(log.ok());
+        assert_eq!(log.health().failures, 2);
+    }
 
     #[test]
     fn formats_utc_times() {

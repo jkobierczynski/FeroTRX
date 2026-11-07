@@ -107,9 +107,10 @@ transactions, failures, error answers, protocol errors, `codes`,
 `response_time`, and over TLS `tls` (handshakes, failures, resumed sessions,
 what was negotiated, handshake times). Error codes are the JSON-RPC ones plus -32001 (log in first),
 -32002 (no such profile, run or subscription), -32003 (could not be done,
-e.g. a profile that does not parse or an interface that will not open) and
+e.g. a profile that does not parse or an interface that will not open),
 -32004 (forbidden: a read-only login changing something, or a path outside
-the data directories).
+the data directories) and -32005 (a limit: too many `stats` subscriptions,
+or too many wrong tokens; try again later).
 
 ## Servers that programs start
 
@@ -204,15 +205,40 @@ pcaps to the agents with it.
 The run opens its interfaces at once and waits for that time; a time gone
 by starts at once, one more than an hour ahead is refused.
 
-**Limits.** `--max-connections` (64), `--idle-timeout` (5m; connections
-watching stats are never idle), 30 s to log in, half a second after each
-wrong token and the connection closed after five.
+**Tokens need TLS beyond loopback.** A server that listens on anything but
+127.0.0.1 or ::1 refuses to start with tokens and no `--tls-cert`: a token
+sent in clear text can be copied by anyone who can watch the network. Make a
+certificate with `ferotrx certs`, or, on an isolated lab network only, give
+`--allow-cleartext-token` (the server then warns, and writes
+`cleartext_tokens` to the audit log at start). Client certificates alone and
+`--insecure` (no login at all) are not affected.
+
+**Limits.** `--max-connections` (64), of which at most 16 may be waiting to
+log in (so clients without a token cannot keep everyone else out);
+`--idle-timeout` (5m; connections watching stats are never idle); 10 s to
+log in; half a second after each wrong token and the connection closed
+after five; and per minute at most 20 wrong tokens from one address and 200
+from all together, after which logins from there (or from everywhere) are
+refused unchecked, with -32005 (`login_throttled` in the audit log), until
+the minute has passed. A connection may run `--max-subscriptions` (16)
+`stats` subscriptions, the server 256 in all; more answer -32005. A closed
+connection ends its subscriptions. `server.info` shows the connections and
+subscriptions open.
 
 **Audit log.** JSON lines on standard error, or appended to `--audit-log
 FILE`: `connect`, `refused`, `tls_error`, `login` (by token or certificate,
 with the certificate's SHA-256), `login_failed`, `denied`, `call` (every
 operator method with its parameters, uploaded profiles and `file.put` data by size, and whether
-it worked) and `disconnect` (with the reason). Tokens are never written.
+it worked), `disconnect` (with the reason), `login_throttled`,
+`cleartext_tokens` and `audit_refused`. Tokens are never written.
+
+A write that fails (a full disk) does not stop the server: it says so once
+on standard error (and again when writing works), and `server.info` shows
+`audit` with `ok`, the number of `failures` and the `last_error`. With
+`--audit-required`, operator calls are refused (-32004) while the log cannot
+be written; read calls still work, and each refusal tries the log again, so
+changes work again as soon as writing does. The server does not rotate the
+file: use logrotate with `copytruncate`.
 
 ```json
 {"by":"certificate","cert_sha256":"f265cc3d…","conn":3,"event":"login","peer":"192.168.56.1:43846","role":"operator","time":"2026-11-03T18:13:04.415Z","user":"alice"}

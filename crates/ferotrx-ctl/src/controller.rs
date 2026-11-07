@@ -183,7 +183,7 @@ impl Controller {
             rx_runs: Mutex::default(),
             next_run: Arc::new(AtomicU64::new(1)),
             auth_required: false,
-            files: FilePolicy::unrestricted(),
+            files: FilePolicy::none(),
             scenario_runs: Mutex::default(),
             bench_runs: Mutex::default(),
             y1564_runs: Mutex::default(),
@@ -311,8 +311,9 @@ impl Controller {
         self
     }
 
-    /// Restricts the files clients may name (see [`FilePolicy`]). Profiles
-    /// added with [`add_profile`](Controller::add_profile) are not checked.
+    /// Sets the files clients may name (see [`FilePolicy`]); without it they
+    /// may name none. Profiles added with
+    /// [`add_profile`](Controller::add_profile) are not checked.
     pub fn with_file_policy(mut self, files: FilePolicy) -> Self {
         self.files = files;
         self
@@ -484,6 +485,9 @@ impl Controller {
             max_file: Some(self.files.max_file()),
             host: ferotrx_io::hostname(),
             os: Some(std::env::consts::OS.to_string()),
+            connections: None,
+            subscriptions: None,
+            audit: None,
         }
     }
 

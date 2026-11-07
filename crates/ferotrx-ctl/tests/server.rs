@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use ferotrx_core::Capture;
 use ferotrx_ctl::protocol::*;
-use ferotrx_ctl::{Client, ClientError, Controller, RpcError, Server};
+use ferotrx_ctl::{Client, ClientError, Controller, FilePolicy, RpcError, Server};
 
 const PROFILE: &str = r#"
 [[stream]]
@@ -22,7 +22,9 @@ vary = ["ip_src=192.168.20.100..192.168.20.199", "port_src=1024..65535,random"]
 "#;
 
 fn server(token: Option<&str>) -> SocketAddr {
-    Server::bind("127.0.0.1:0", Controller::new(), token.map(String::from))
+    // Tests name files anywhere (temporary directories, the examples).
+    let controller = Controller::new().with_file_policy(FilePolicy::unrestricted());
+    Server::bind("127.0.0.1:0", controller, token.map(String::from))
         .unwrap()
         .spawn()
         .unwrap()

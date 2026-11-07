@@ -253,7 +253,332 @@ fn refuses_an_open_listener_on_the_network() {
         },
     )
     .unwrap();
-    Server::bind("0.0.0.0:0", Controller::new(), Some("t".into())).unwrap();
+}
+
+#[test]
+fn refuses_cleartext_tokens_on_the_network() {
+    let token = || vec![Token::new("op", Role::Operator, "t")];
+    // A token without TLS beyond loopback: refused.
+    let e = Server::bind("0.0.0.0:0", Controller::new(), Some("t".into()))
+        .err()
+        .unwrap();
+    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(e.to_string().contains("--allow-cleartext-token"), "{e}");
+    let e = Server::with_config(
+        "0.0.0.0:0",
+        Controller::new(),
+        ServerConfig {
+            tokens: token(),
+            ..Default::default()
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+
+    // On loopback it is fine.
+    Server::bind("127.0.0.1:0", Controller::new(), Some("t".into())).unwrap();
+
+    // With TLS, with client certificates only, or when told to.
+    let pki = pki("cleartext");
+    Server::with_config(
+        "0.0.0.0:0",
+        Controller::new(),
+        ServerConfig {
+            tokens: token(),
+            tls: Some(server_tls(&pki)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    Server::with_config(
+        "0.0.0.0:0",
+        Controller::new(),
+        ServerConfig {
+            tls: Some(
+                server_tls(&pki)
+                    .with_client_ca_file(Role::Operator, &pki.path("ca.pem"))
+                    .unwrap(),
+            ),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let log = Buf::default();
+    Server::with_config(
+        "0.0.0.0:0",
+        Controller::new(),
+        ServerConfig {
+            tokens: token(),
+            allow_cleartext_tokens: true,
+            audit: Some(AuditLog::to_writer(log.clone())),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(log
+        .records()
+        .iter()
+        .any(|r| r["event"] == "cleartext_tokens"));
+}
+
+#[test]
+fn no_files_by_default_and_unrestricted_only_when_said() {
+    // A default controller names no files at all.
+    let mut c = Client::connect(spawn(Controller::new(), ServerConfig::default())).unwrap();
+    let e = c
+        .load_profile(&LoadProfileParams {
+            path: Some("/etc/passwd".into()),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_eq!(rpc_code(e), RpcError::FORBIDDEN);
+    let e = c
+        .load_profile(&LoadProfileParams {
+            name: Some("p".into()),
+            toml: Some("[[stream]]\npcap = \"/etc/passwd\"\n".into()),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_eq!(rpc_code(e), RpcError::FORBIDDEN);
+    let e = c.file_stat(Path::new("x")).unwrap_err();
+    assert_eq!(rpc_code(e), RpcError::FORBIDDEN);
+    // Profiles that name no files still load.
+    load(&mut c).unwrap();
+
+    // Unrestricted beyond loopback needs saying so.
+    let open = || Controller::new().with_file_policy(FilePolicy::unrestricted());
+    let token = || vec![Token::new("op", Role::Operator, "t")];
+    let pki = pki("unrestricted");
+    let config = || ServerConfig {
+        tokens: token(),
+        tls: Some(server_tls(&pki)),
+        ..Default::default()
+    };
+    let e = Server::with_config("0.0.0.0:0", open(), config())
+        .err()
+        .unwrap();
+    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+    Server::with_config(
+        "0.0.0.0:0",
+        open(),
+        ServerConfig {
+            unrestricted_files: true,
+            ..config()
+        },
+    )
+    .unwrap();
+    Server::with_config("127.0.0.1:0", open(), ServerConfig::default()).unwrap();
+}
+
+fn subscribe(c: &mut Client) -> Result<serde_json::Value, ClientError> {
+    c.call_value("stats.subscribe", serde_json::json!({"interval_ms": 1000}))
+}
+
+fn server_subscriptions(addr: SocketAddr) -> usize {
+    let mut c = Client::connect(addr).unwrap();
+    c.info().unwrap().subscriptions.unwrap()
+}
+
+fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
+    for _ in 0..100 {
+        if ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[test]
+fn limits_stats_subscriptions() {
+    let addr = spawn(
+        Controller::new(),
+        ServerConfig {
+            max_subscriptions: 2,
+            max_total_subscriptions: 3,
+            ..Default::default()
+        },
+    );
+    let mut a = Client::connect(addr).unwrap();
+    let first = subscribe(&mut a).unwrap();
+    subscribe(&mut a).unwrap();
+    // A third on the same connection: refused.
+    assert_eq!(rpc_code(subscribe(&mut a).unwrap_err()), RpcError::LIMIT);
+    // Unsubscribing frees a place.
+    a.call_value("stats.unsubscribe", first).unwrap();
+    subscribe(&mut a).unwrap();
+
+    // The server's limit counts all connections.
+    let mut b = Client::connect(addr).unwrap();
+    subscribe(&mut b).unwrap();
+    assert_eq!(rpc_code(subscribe(&mut b).unwrap_err()), RpcError::LIMIT);
+    wait_for("3 subscriptions", || server_subscriptions(addr) == 3);
+
+    // Closing a connection ends its subscriptions.
+    drop(a);
+    wait_for("1 subscription", || server_subscriptions(addr) == 1);
+    subscribe(&mut b).unwrap();
+
+    // Many rounds leave nothing behind.
+    drop(b);
+    let mut c = Client::connect(addr).unwrap();
+    for _ in 0..200 {
+        let s = subscribe(&mut c).unwrap();
+        c.call_value("stats.unsubscribe", s).unwrap();
+    }
+    wait_for("no subscriptions", || server_subscriptions(addr) == 0);
+}
+
+fn send_line(s: &mut TcpStream, r: &mut BufReader<TcpStream>, line: &str) -> String {
+    s.write_all(line.as_bytes()).unwrap();
+    s.write_all(b"\n").unwrap();
+    read_line(r)
+}
+
+#[test]
+fn clients_without_a_login_cannot_take_every_slot() {
+    let addr = spawn(
+        Controller::new(),
+        ServerConfig {
+            tokens: vec![Token::new("op", Role::Operator, "t")],
+            max_connections: 10,
+            max_unauthenticated: 2,
+            ..Default::default()
+        },
+    );
+    let info = r#"{"jsonrpc":"2.0","id":1,"method":"server.info"}"#;
+    let (mut s1, mut r1) = raw(addr);
+    assert!(send_line(&mut s1, &mut r1, info).contains("result"));
+    let (mut s2, mut r2) = raw(addr);
+    assert!(send_line(&mut s2, &mut r2, info).contains("result"));
+    // Two wait to log in: a third is turned away.
+    let (_s3, mut r3) = raw(addr);
+    assert!(read_line(&mut r3).contains("waiting to log in"));
+    // One logs in, which makes room.
+    let auth = r#"{"jsonrpc":"2.0","id":2,"method":"auth","params":{"token":"t"}}"#;
+    assert!(send_line(&mut s1, &mut r1, auth).contains("true"));
+    let (mut s4, mut r4) = raw(addr);
+    assert!(send_line(&mut s4, &mut r4, info).contains("result"));
+}
+
+#[test]
+fn wrong_tokens_from_one_address_are_throttled() {
+    let log = Buf::default();
+    let addr = spawn(
+        Controller::new(),
+        ServerConfig {
+            tokens: vec![Token::new("op", Role::Operator, "right")],
+            max_login_failures_per_ip: 3,
+            audit: Some(AuditLog::to_writer(log.clone())),
+            ..Default::default()
+        },
+    );
+    // Three wrong tokens, over two connections.
+    let mut a = Client::connect(addr).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            rpc_code(a.auth("wrong").unwrap_err()),
+            RpcError::UNAUTHORIZED
+        );
+    }
+    let mut b = Client::connect(addr).unwrap();
+    assert_eq!(
+        rpc_code(b.auth("wrong").unwrap_err()),
+        RpcError::UNAUTHORIZED
+    );
+    // Now even the right one is refused unchecked, on a new connection too.
+    assert_eq!(rpc_code(b.auth("right").unwrap_err()), RpcError::LIMIT);
+    let mut c = Client::connect(addr).unwrap();
+    assert_eq!(rpc_code(c.auth("right").unwrap_err()), RpcError::LIMIT);
+    assert!(log
+        .records()
+        .iter()
+        .any(|r| r["event"] == "login_throttled"));
+    assert!(
+        !String::from_utf8(log.0.lock().unwrap().clone())
+            .unwrap()
+            .contains("right"),
+        "tokens never reach the audit log"
+    );
+}
+
+/// An audit log that fails while `broken` is set.
+#[derive(Clone)]
+struct Flaky {
+    buf: Buf,
+    broken: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Write for Flaky {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if self.broken.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(std::io::Error::other("no space left on device"));
+        }
+        self.buf.write(b)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn audit_required_refuses_changes_while_the_log_fails() {
+    let flaky = Flaky {
+        buf: Buf::default(),
+        broken: Arc::default(),
+    };
+    let broken = flaky.broken.clone();
+    let addr = spawn(
+        Controller::new(),
+        ServerConfig {
+            audit: Some(AuditLog::to_writer(flaky.clone())),
+            audit_required: true,
+            ..Default::default()
+        },
+    );
+    let mut c = Client::connect(addr).unwrap();
+    load(&mut c).unwrap();
+    let health = c.info().unwrap().audit.unwrap();
+    assert!(health.ok && health.required);
+
+    broken.store(true, std::sync::atomic::Ordering::Relaxed);
+    // The first change after the disk filled up goes through, unlogged; the
+    // log now knows it fails.
+    load(&mut c).unwrap();
+    assert_eq!(rpc_code(load(&mut c).unwrap_err()), RpcError::FORBIDDEN);
+    // Reading still works, and says why.
+    let health = c.info().unwrap().audit.unwrap();
+    assert!(!health.ok);
+    assert!(health.failures >= 1);
+    assert_eq!(
+        health.last_error.as_deref(),
+        Some("no space left on device")
+    );
+    c.profiles().unwrap();
+
+    // Once writing works again, so do changes.
+    broken.store(false, std::sync::atomic::Ordering::Relaxed);
+    load(&mut c).unwrap();
+    assert!(c.info().unwrap().audit.unwrap().ok);
+    assert!(flaky
+        .buf
+        .records()
+        .iter()
+        .any(|r| r["event"] == "audit_refused"));
+
+    // Without an audit log, audit_required makes no sense.
+    let e = Server::with_config(
+        "127.0.0.1:0",
+        Controller::new(),
+        ServerConfig {
+            audit_required: true,
+            ..Default::default()
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
 }
 
 fn raw(addr: SocketAddr) -> (TcpStream, BufReader<TcpStream>) {
