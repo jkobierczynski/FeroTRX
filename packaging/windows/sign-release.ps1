@@ -12,7 +12,12 @@
 #   3. builds the .msi again from the signed programs (build-msi.ps1) and
 #      signs the .msi,
 #   4. zips the signed programs again, fixes SHA256SUMS and replaces the three
-#      files on the release.
+#      files on the release,
+#   5. starts the "Attest signed Windows packages" workflow, which attests the
+#      signed files (signing changed them, so the Release workflow's
+#      attestations no longer match).
+# Before signing it checks that the .zip was built by the Release workflow
+# (`gh attestation verify`).
 #
 # -From DIR takes the .zip from a folder instead of a release and -NoUpload
 # leaves the results in -Out; CI uses both with a throwaway certificate.
@@ -75,6 +80,11 @@ try {
     } else {
         gh release download $Tag --repo $Repo --dir $download --pattern "*-x86_64-windows.zip" --pattern "SHA256SUMS"
         if ($LASTEXITCODE -ne 0) { throw "could not download release $Tag" }
+        # Sign only what the Release workflow built.
+        foreach ($f in Get-ChildItem -Path $download -Filter "*-x86_64-windows.zip") {
+            gh attestation verify $f.FullName --repo $Repo --signer-workflow "$Repo/.github/workflows/release.yml"
+            if ($LASTEXITCODE -ne 0) { throw "$($f.Name) has no attestation from the Release workflow; not signing it" }
+        }
     }
     $zip = @(Get-ChildItem -Path $download -Filter "*-x86_64-windows.zip")
     if ($zip.Count -ne 1) { throw "expected one *-x86_64-windows.zip in $download, found $($zip.Count)" }
@@ -148,6 +158,12 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "uploading to release $Tag failed" }
         Write-Host "release $Tag now has the signed packages:"
         $files | ForEach-Object { Write-Host "  $([IO.Path]::GetFileName($_))" }
+        # Signing changed the files, so the Release workflow's attestations no
+        # longer match them: this workflow checks the signatures and attests
+        # the signed files and the new SHA256SUMS.
+        gh workflow run attest-signed.yml --repo $Repo -f "tag=$Tag"
+        if ($LASTEXITCODE -ne 0) { throw "could not start the attest-signed workflow; run it from the Actions tab for $Tag" }
+        Write-Host "started 'Attest signed Windows packages' for $Tag (Actions tab, or: gh run list --repo $Repo --workflow attest-signed.yml)"
     }
 } finally {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $work

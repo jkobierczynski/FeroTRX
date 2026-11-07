@@ -219,11 +219,18 @@ SDK (for WiX).
    packaging\windows\sign-release.ps1 -Tag vX.Y.Z
    ```
 
-The script downloads the release's `.zip` and `SHA256SUMS`, signs
+The script downloads the release's `.zip` and `SHA256SUMS`, checks with
+`gh attestation verify` that the `.zip` was built by the Release workflow,
+signs
 `ferotrx.exe` and `ferotrx-gui.exe` with a time stamp from Certum (so the
 signatures stay valid after the certificate expires), builds the `.msi`
 again from the signed programs and signs it too, and replaces the `.zip`,
-the `.msi` and `SHA256SUMS` on the release. signtool picks your code signing
+the `.msi` and `SHA256SUMS` on the release. Signing changes the files, so
+their attestations from the Release workflow no longer match: the script then
+starts the **Attest signed Windows packages** workflow, which checks the
+signatures and attests the signed files and the new `SHA256SUMS` (see
+[checking a release](../RELEASING.md#checking-a-release)). Watch it under the
+repository's Actions tab. signtool picks your code signing
 certificate by itself; with more than one, name it with `-Subject "..."` or
 `-Thumbprint ...`. `-NoUpload` leaves the signed files in `dist\signed`
 instead. Pushing the tag again rebuilds the release unsigned, so sign it again

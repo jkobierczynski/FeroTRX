@@ -9,9 +9,13 @@ when a version tag `vX.Y.Z` is pushed. The release gets:
 | `ferotrx-vX.Y.Z-x86_64-linux.tar.gz` | Other Linux distributions (x86_64, glibc 2.36+, libpcap) |
 | `ferotrx-vX.Y.Z-aarch64-macos.tar.gz` | macOS on Apple silicon |
 | `ferotrx-vX.Y.Z-x86_64-macos.tar.gz` | macOS on Intel |
-| `ferotrx-vX.Y.Z-x86_64-windows.zip` | Windows x86_64; needs [Npcap](https://npcap.com/) |
+| `ferotrx-vX.Y.Z-x86_64-windows.msi`, `ferotrx-vX.Y.Z-x86_64-windows.zip` | Windows x86_64 (installer and archive); needs [Npcap](https://npcap.com/) |
 | `ferotrx-X.Y.Z-py3-none-any.whl`, `ferotrx-X.Y.Z.tar.gz` | The Python client (`pip install ferotrx-X.Y.Z-py3-none-any.whl`), any OS |
+| `ferotrx-vX.Y.Z-ferotrx-cli.cdx.json`, `ferotrx-vX.Y.Z-ferotrx-gui.cdx.json` | SBOM (CycloneDX JSON): every crate in `ferotrx` and `ferotrx-gui`, with version, license and checksum |
 | `SHA256SUMS` | Checksums of all of the above |
+
+Every file also has a signed build provenance attestation, stored with
+GitHub (see [Checking a release](#checking-a-release)).
 
 Each archive holds the `ferotrx` binary, `README.md`, `LICENSE`, `examples/` and the manual in `docs/`.
 The packages are built with the default features (libpcap, AF_XDP on Linux).
@@ -65,6 +69,53 @@ the same commit and replaces the release as well.
 
 The workflow that runs is the one in the tagged commit, so a tag must point at
 a commit that has `.github/workflows/release.yml`.
+
+Moving a tag publishes new files with new attestations. Attestations of the
+replaced files stay valid for those files: they still say which commit and
+workflow run built them, so a download from before the move can still be
+traced.
+
+## Checking a release
+
+With the [GitHub CLI](https://cli.github.com/), check that a downloaded file
+was built by this repository's release workflow:
+
+```sh
+gh attestation verify ferotrx_0.38.0-1_amd64.deb --repo jkobierczynski/FeroTRX
+```
+
+It prints the workflow, commit and tag that built the file, and fails for a
+file that was changed or built anywhere else.
+
+The Windows `.zip` and `.msi` are code signed after the release is published
+(see [signing a release](docs/windows.md#signing-a-release)), which changes
+them. Their attestation then comes from the **Attest signed Windows
+packages** workflow (`attest-signed.yml`), which checks the Authenticode
+signatures and `SHA256SUMS` first; the same `gh attestation verify` command
+passes and names that workflow. The unsigned originals keep their attestation
+from the release workflow. On Windows, **Properties**, **Digital Signatures**
+shows the signature itself. Without `gh`, compare the file
+with `SHA256SUMS` (`sha256sum -c SHA256SUMS --ignore-missing`); that shows it
+is the file on the release page, not who built it.
+
+The SBOM files list every Rust crate compiled into the programs, for all
+targets, with its version and license. Feed them to a scanner such as
+`grype sbom:ferotrx-v0.38.0-ferotrx-cli.cdx.json` or `osv-scanner --sbom=...`.
+The Python client has no dependencies, so it has no SBOM.
+
+## How the build is protected
+
+* Every action in `.github/workflows` is pinned to a commit, with its
+  version in a comment; Dependabot (`.github/dependabot.yml`) proposes
+  updates each week, as it does for `Cargo.lock` and the Python tools.
+* Workflows get a read-only token; only the publish job may write (to
+  create the release) and sign attestations.
+* Builds use `--locked`, so they compile exactly what `Cargo.lock` says.
+* CI's **Dependencies** job runs `cargo deny check` (RustSec advisories,
+  licenses, crate sources; settings in `deny.toml`) and, on pull requests,
+  GitHub's dependency review of what the change adds. It is not a required
+  check: an advisory published today should not block an unrelated merge,
+  but it shows red until it is fixed or listed in `deny.toml` with a reason.
 
 ## Trying the packaging without releasing
 
