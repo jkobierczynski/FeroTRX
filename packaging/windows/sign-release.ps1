@@ -62,7 +62,7 @@ if ($cargo -notmatch '(?ms)^\[workspace\.package\].*?^version = "(\d+\.\d+\.\d+)
 }
 $version = $Matches[1]
 if ($Tag -and $Tag -ne "v$version") {
-    throw "this checkout is version $version, not $Tag: run 'git checkout $Tag' first"
+    throw "this checkout is version $version, not ${Tag}: run 'git checkout $Tag' first"
 }
 
 $work = Join-Path ([IO.Path]::GetTempPath()) ("ferotrx-sign-" + [guid]::NewGuid().ToString("N"))
