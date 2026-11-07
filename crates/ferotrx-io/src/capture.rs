@@ -31,11 +31,18 @@ mod imp {
                     .immediate_mode(true)
                     .snaplen(snaplen as i32)
                     .buffer_size(o.buffer.min(i32::MAX as u32) as i32);
-                Ok(if nano {
+                // The pcap crate offers precision only where it found
+                // libpcap 1.5 or later when built, which it does on Linux
+                // (not for Npcap's SDK), so only Linux asks.
+                #[cfg(target_os = "linux")]
+                let c = if nano {
                     c.precision(pcap::Precision::Nano)
                 } else {
                     c
-                })
+                };
+                #[cfg(not(target_os = "linux"))]
+                let _ = nano;
+                Ok(c)
             };
             // Nanosecond time stamps where the system has them (Linux);
             // libpcap says so by accepting the setting, which the pcap crate
