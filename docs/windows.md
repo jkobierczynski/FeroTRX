@@ -25,8 +25,10 @@ A newer installer replaces an older version in place; **Apps** in Windows
 settings removes it. For a silent install:
 `msiexec /i ferotrx-vX.Y.Z-x86_64-windows.msi /qn` (and `/x` to remove).
 
-The installer is not signed yet, so SmartScreen may warn about an
-unknown publisher (**More info**, **Run anyway**).
+The programs and the installer of a release are signed once it has been
+published (see [signing a release](#signing-a-release)). Until then, and for
+builds from pull requests, SmartScreen may warn about an unknown publisher
+(**More info**, **Run anyway**).
 
 ## Npcap
 
@@ -195,3 +197,44 @@ checks what it installed (programs, examples, `PATH`, the Start menu entry,
 the `*.ferotrx` association), runs `ferotrx.exe` from it without Npcap,
 installs, uses and removes the service, starts the GUI's own server, and
 uninstalls it.
+
+## Signing a release
+
+CI can't sign: the certificate (Certum SimplySign) lives in the cloud and
+its login needs a code from a phone. So the Release workflow publishes
+unsigned Windows packages, and `packaging\windows\sign-release.ps1` signs
+them afterwards on a Windows PC. It needs
+[`gh`](https://cli.github.com/) (logged in with `gh auth login`),
+`signtool.exe` (from the Windows SDK, "Signing Tools for Desktop Apps"; the
+script finds it under `Windows Kits` when it isn't on `PATH`) and the .NET
+SDK (for WiX).
+
+1. Log in to SimplySign Desktop, so the certificate shows up in your
+   certificate store.
+2. In a checkout of the repository, `git checkout vX.Y.Z` (the installer
+   takes its version, examples and docs from it).
+3. Run:
+
+   ```powershell
+   packaging\windows\sign-release.ps1 -Tag vX.Y.Z
+   ```
+
+The script downloads the release's `.zip` and `SHA256SUMS`, checks with
+`gh attestation verify` that the `.zip` was built by the Release workflow,
+signs
+`ferotrx.exe` and `ferotrx-gui.exe` with a time stamp from Certum (so the
+signatures stay valid after the certificate expires), builds the `.msi`
+again from the signed programs and signs it too, and replaces the `.zip`,
+the `.msi` and `SHA256SUMS` on the release. Signing changes the files, so
+their attestations from the Release workflow no longer match: the script then
+starts the **Attest signed Windows packages** workflow, which checks the
+signatures and attests the signed files and the new `SHA256SUMS` (see
+[checking a release](../RELEASING.md#checking-a-release)). Watch it under the
+repository's Actions tab. signtool picks your code signing
+certificate by itself; with more than one, name it with `-Subject "..."` or
+`-Thumbprint ...`. `-NoUpload` leaves the signed files in `dist\signed`
+instead. Pushing the tag again rebuilds the release unsigned, so sign it again
+after that.
+
+To check a signature: **Properties**, **Digital Signatures** in Explorer, or
+`Get-AuthenticodeSignature ferotrx.exe` in PowerShell.
