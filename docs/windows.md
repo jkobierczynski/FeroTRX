@@ -76,7 +76,7 @@ ferotrx replay examples\web.pcap -i "Ethernet 2" -t -l 0 --duration 10s --batch 
 
 On one Windows PC with a Realtek 5GbE adapter this gave about 10,000 packets
 per second packet by packet, 61,000 in batches of 64 and 67,000 in batches of
-512. Bigger batches help less and less; the adapter's driver sets the limit.
+512. Bigger batches help less and less.
 
 The receive side (`--rx`, `--latency`, `ferotrx rx`, benchmarks) asks Npcap
 for precise system time stamps (`KeQuerySystemTimePrecise`). Npcap's default
