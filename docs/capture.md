@@ -25,7 +25,10 @@ libpcap's reason. Other options: `-s` (bytes kept of each frame, default
 default 32), `--print` (show frames while writing them), `-q`.
 
 `--rotate` takes a size (`512k`, `100M`, `1G`) or a time (`30s`, `5m`);
-`--files N` keeps only the newest N files. On Linux, time stamps are in
+`--files N` keeps only the newest N files. FeroTRX leaves its own control traffic out of every capture: TCP on the
+control port (4510; `--ctl-port` for a `ferotrx serve` on another port) is
+added to the filter as `and not tcp port 4510`. `--ctl-traffic` keeps it.
+On Linux, time stamps are in
 nanoseconds (the pcap files use the nanosecond magic, which Wireshark and
 tcpdump read). Npcap cannot choose a direction, so `--direction` is refused
 on Windows.
@@ -95,7 +98,9 @@ ferotrx ctl -c lab:4510 capture -i enp0s8 -w here.pcap -d 1m tcp port 80
 ferotrx ctl -c lab:4510 capture -i enp0s8 --save caps/web.pcap tcp port 80   # a copy stays on the server
 ```
 
-The server keeps up to 20000 frames (32 MiB) for a client that reads them.
+The server leaves its own control connections out (TCP on the port it
+listens on), so the capture does not capture itself being read;
+`--ctl-traffic` keeps them. The server keeps up to 20000 frames (32 MiB) for a client that reads them.
 A client that falls behind (a slow link) loses the oldest, and the summary
 says how many it missed; the server's copy (`--save`) has them all. The
 capture ends with Ctrl-C, `-c` or `-d`, and is removed from the server. If
@@ -136,8 +141,10 @@ controller measured, so the frames line up.
 
 The Capture tab has a **Live** row: a server (this computer or one you
 connected), an interface, a BPF filter and **Start**. Frames fill the
-packet list as they come, decoded as for a file. **Also open Wireshark**
-starts `wireshark -k -i -` and feeds it the same frames. **Save…** writes
+packet list as they come, decoded as for a file. **Wireshark** also
+starts `wireshark -k -i -` and feeds it the same frames. **Control
+traffic** keeps the server's own control connections, which are left out
+otherwise. **Save…** writes
 what was captured as pcap. See [the GUI](gui.md#live-captures).
 
 ## From programs

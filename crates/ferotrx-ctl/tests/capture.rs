@@ -31,7 +31,7 @@ fn server_with(dir: &PathBuf, count: u8, controller: Controller) -> SocketAddr {
             if name != "mem0" {
                 return Err(format!("no interface {name}").into());
             }
-            if options.filter.as_deref() == Some("bad") {
+            if options.filter.as_deref().is_some_and(|f| f.contains("bad")) {
                 return Err("filter 'bad': syntax error".into());
             }
             Ok(Box::new(VecFrameSource::new(1, frames(count))))
@@ -242,5 +242,50 @@ fn a_capture_nobody_reads_stops() {
     std::thread::sleep(Duration::from_millis(800));
     assert_eq!(c.capture_get(file).unwrap().state, RunState::Running);
     c.capture_stop(file).unwrap();
+    std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn the_control_connection_is_left_out() {
+    // The opener records the filter it was given.
+    let d = dir("ctl");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
+    let log = seen.clone();
+    let controller = Controller::new()
+        .with_file_policy(FilePolicy::dirs([&d]).unwrap())
+        .with_capture_opener(move |_, options| {
+            log.lock().unwrap().push(options.filter.clone());
+            Ok(Box::new(VecFrameSource::new(1, frames(1))))
+        });
+    let addr = Server::bind("127.0.0.1:0", controller, None)
+        .unwrap()
+        .spawn()
+        .unwrap();
+    let mut c = client(addr);
+    let port = addr.port();
+    let start = |c: &mut Client, filter: Option<&str>, ctl_traffic: Option<bool>| {
+        let i = c
+            .capture_start(&CaptureStartParams {
+                iface: "mem0".into(),
+                filter: filter.map(Into::into),
+                ctl_traffic,
+                ..Default::default()
+            })
+            .unwrap();
+        c.capture_remove(i.id).unwrap();
+        i
+    };
+    let i = start(&mut c, Some("udp"), None);
+    assert_eq!(i.filter.as_deref(), Some("udp"), "reported as given");
+    start(&mut c, None, None);
+    start(&mut c, Some("udp"), Some(true));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            Some(format!("(udp) and not tcp port {port}")),
+            Some(format!("not tcp port {port}")),
+            Some("udp".to_string()),
+        ]
+    );
     std::fs::remove_dir_all(d).unwrap();
 }

@@ -73,3 +73,11 @@ def test_capture_on_loopback(server: Server) -> None:
         # The same frames, streamed and saved (both nanosecond pcap).
         assert out.getvalue()[24:] == saved[24:]
         c.capture_remove(info.id)
+
+
+def test_control_traffic_is_asked_for_by_name() -> None:
+    from ferotrx import _wire
+
+    call = _wire.capture_start("eth0", filter="udp", ctl_traffic=True)
+    assert call.params == {"iface": "eth0", "filter": "udp", "ctl_traffic": True}
+    assert "ctl_traffic" not in _wire.capture_start("eth0").params

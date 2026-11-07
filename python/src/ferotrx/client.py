@@ -656,7 +656,9 @@ class Client:
         ``snaplen``, ``promisc``, ``direction`` ("in", "out", "both"),
         ``count``, ``duration`` ("30s"), ``file`` (a pcap in the data
         directory), ``rotate`` ("100M", "5m"), ``files``, ``stream`` (keep
-        frames for :meth:`capture_read`, default True)."""
+        frames for :meth:`capture_read`, default True), ``ctl_traffic``
+        (keep the server's own control connections, default False: left
+        out)."""
         return self._run(_wire.capture_start(iface, **kw))
 
     def capture_read(

@@ -148,6 +148,8 @@ pub struct Controller {
     open_capture: Arc<CaptureOpener>,
     captures: Mutex<BTreeMap<u64, Arc<CaptureRun>>>,
     capture_abandoned_after: Duration,
+    /// The port the server listens on, left out of captures.
+    ctl_port: Option<u16>,
     /// Whether `lab.start` may build a lab, and the one running.
     lab_allowed: bool,
     lab: Mutex<Option<ferotrx_io::Lab>>,
@@ -197,6 +199,7 @@ impl Controller {
             open_capture: Arc::new(ferotrx_io::open_capture),
             captures: Mutex::default(),
             capture_abandoned_after: crate::capture::ABANDONED_AFTER,
+            ctl_port: None,
             lab_allowed: false,
             lab: Mutex::default(),
         }
@@ -285,6 +288,17 @@ impl Controller {
 
     /// Opens the interfaces captures run on (`capture.start`) with `open`
     /// instead of libpcap/Npcap, e.g. frames from memory in tests.
+    /// The port the control server listens on: captures leave TCP on it
+    /// out unless asked (`ctl_traffic`). [`Server`](crate::Server) sets it.
+    pub fn with_ctl_port(mut self, port: u16) -> Self {
+        self.ctl_port = Some(port);
+        self
+    }
+
+    pub(crate) fn set_ctl_port(&mut self, port: u16) {
+        self.ctl_port = Some(port);
+    }
+
     /// How long a capture that only streams (no file) runs without a
     /// client reading it (default [`crate::capture::ABANDONED_AFTER`]).
     pub fn with_capture_abandoned_after(mut self, after: Duration) -> Self {
@@ -602,8 +616,15 @@ impl Controller {
             }
             None => None,
         };
+        let mut filter = p.filter.clone().filter(|f| !f.trim().is_empty());
+        if let (Some(port), false) = (self.ctl_port, p.ctl_traffic.unwrap_or(false)) {
+            filter = Some(ferotrx_core::live::without_tcp_port(
+                filter.as_deref(),
+                port,
+            ));
+        }
         let options = ferotrx_core::CaptureOptions {
-            filter: p.filter.clone().filter(|f| !f.trim().is_empty()),
+            filter,
             snaplen: p.snaplen.unwrap_or(ferotrx_core::live::DEFAULT_SNAPLEN),
             promisc: p.promisc.unwrap_or(true),
             direction: p.direction.unwrap_or_default(),
@@ -638,7 +659,8 @@ impl Controller {
         let run = Arc::new(CaptureRun {
             id,
             iface: p.iface,
-            filter: options.filter,
+            // As the client gave it, without the control port.
+            filter: p.filter.filter(|f| !f.trim().is_empty()),
             job,
             stopped_by_request: Default::default(),
             file: p.file,

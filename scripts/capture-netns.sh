@@ -13,7 +13,8 @@
 # 3. A ring: --rotate 2K --files 3 keeps the newest three files.
 # 4. --direction in: pings from b, only the replies.
 # 5. A capture on the server in b, from a: frames piped to tcpdump here;
-#    then a capture into a file on the server, fetched here.
+#    then a capture into a file on the server, fetched here; the server's
+#    own control traffic is left out unless --ctl-traffic.
 # 6. --capture on a run: what the run sent, in a pcap.
 # 7. inspect -f: the same filter on a file.
 #
@@ -182,6 +183,14 @@ if $INA "$BIN" ctl -c 10.9.4.2 fetch ../etc/passwd -o "$WORK/no" 2>/dev/null; th
 else
     ok "files outside the data directory are refused"
 fi
+# Without a filter, the server leaves its own control traffic out; with
+# --ctl-traffic it is in (the capture then sees itself being read).
+$INA "$BIN" ctl -c 10.9.4.2 capture -i b0 -d 2s -q -w "$WORK/noctl.pcap" 2>/dev/null
+$INA "$BIN" ctl -c 10.9.4.2 capture -i b0 -d 2s -q --ctl-traffic -w "$WORK/ctl.pcap" 2>/dev/null
+[ -s "$WORK/noctl.pcap" ] || bad "no pcap from the capture without control traffic"
+expect "the control connection is left out of a capture" "$(count "$WORK/noctl.pcap" tcp port 4510)" 0
+n=$(count "$WORK/ctl.pcap" tcp port 4510)
+if [ "$n" -gt 0 ]; then ok "--ctl-traffic keeps it: $n frames"; else bad "--ctl-traffic: no control frames"; fi
 
 echo "== 6. --capture next to a run"
 $INA "$BIN" run "$WORK/two.toml" -i a0 -q --capture "$WORK/run.pcap" --capture-filter udp >/dev/null 2>&1

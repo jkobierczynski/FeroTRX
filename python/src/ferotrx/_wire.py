@@ -332,6 +332,7 @@ def capture_start(
     rotate: str | None = None,
     files: int | None = None,
     stream: bool | None = None,
+    ctl_traffic: bool | None = None,
 ) -> Call[CaptureInfo]:
     params: dict[str, Any] = {"iface": iface}
     for k, v in (
@@ -345,6 +346,7 @@ def capture_start(
         ("rotate", rotate),
         ("files", files),
         ("stream", stream),
+        ("ctl_traffic", ctl_traffic),
     ):
         if v is not None:
             params[k] = v

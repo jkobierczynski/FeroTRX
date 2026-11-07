@@ -258,7 +258,9 @@ fn a_live_capture_fills_the_capture_tab() {
         if iface != "mem0" {
             return Err(format!("no interface {iface}").into());
         }
-        assert_eq!(options.filter.as_deref(), Some("udp"));
+        // The filter as typed, trimmed, with the server's control port left out.
+        let f = options.filter.as_deref().unwrap_or_default();
+        assert!(f.starts_with("(udp) and not tcp port "), "{f}");
         let frames = (0..5u8).map(|i| ferotrx_core::Frame {
             ts: Duration::from_millis(u64::from(i)),
             len: 60,
@@ -281,6 +283,7 @@ fn a_live_capture_fills_the_capture_tab() {
         iface: "mem0".into(),
         filter: " udp ".into(),
         wireshark: false,
+        ctl_traffic: false,
     };
     let live =
         ferotrx_gui::views::LiveCapture::start(app.servers[i].settings.clone(), &form, || {});
