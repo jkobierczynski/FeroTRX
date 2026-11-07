@@ -26,11 +26,13 @@
 #    the server saw them all, the runs started within SPREAD ms of their
 #    planned times, the probe arrived on the other agent without loss, and
 #    the files are on the agents. A second deploy sends nothing new.
+#    Captures on east and srv (`[[capture]]`, BPF "tcp port 80") are
+#    collected (`--collect`) and merged into one pcapng (`--merge`).
 # 2. With west cut off the LAN, the fleet fails: west's clients do not
 #    complete, east's still do, and the sums show it.
 #
 # Usage: sudo scripts/fleet-netns.sh [path/to/ferotrx] [extra ferotrx fleet run options]
-# Needs root, ip (iproute2) and jq. Removes the lab when done.
+# Needs root, ip (iproute2), jq and tcpdump. Removes the lab when done.
 #
 # SPREAD=100   most milliseconds between the planned and actual starts
 # KEEP=DIR     keep the reports and the agents' data directories in DIR
@@ -90,6 +92,13 @@ cp "$HERE"/examples/fleet/*.toml "$WORK/plan/fleet/"
 cp "$HERE/examples/http.pcap" "$WORK/plan/"
 sed "s|^token_env = .*|&\nca = \"$WORK/pki/ca.pem\"|" "$HERE/examples/fleet/fleet.toml" \
     >"$WORK/plan/fleet/fleet.toml"
+cat >>"$WORK/plan/fleet/fleet.toml" <<'EOT'
+
+[[capture]]
+agents = ["east", "srv"]
+iface = "d0"
+filter = "tcp port 80"
+EOT
 grep -q '^ca = ' "$WORK/plan/fleet/fleet.toml" || { echo "FAILED: no CA in the plan copy" >&2; exit 1; }
 PLAN=$WORK/plan/fleet/fleet.toml
 
@@ -159,7 +168,8 @@ fi
 
 echo "== 1. three agents together: everything passes"
 set +e
-$LAB "$BIN" fleet run "$PLAN" --duration 8s --report "$WORK/pass.json" "$@"
+$LAB "$BIN" fleet run "$PLAN" --duration 8s --report "$WORK/pass.json" \
+    --collect "$WORK/collected" --merge "$WORK/merged.pcapng" "$@"
 status=$?
 set -e
 [ $status -eq 0 ] && echo "ok: ferotrx fleet run passed" || { echo "FAILED: ferotrx fleet run exited with $status"; fail=1; }
@@ -184,6 +194,31 @@ if grep -q '10.98.0.110/24' "$WORK/west/fleet/web-lab/web-clients/fleet/web-clie
 else
     echo "FAILED: the deployed files on west"
     find "$WORK/west" -type f
+    fail=1
+fi
+check "two captures, both collected, no errors" \
+    '(.captures | length) == 2 and all(.captures[]; .collected != null and .error == null)' "$j"
+check "srv captured every web connection (at least 100 SYNs worth of frames)" \
+    '.captures[] | select(.agent == "srv") | .frames >= 1000 and .dropped == 0' "$j"
+check "the report names the merged file" '.merged != null' "$j"
+for c in east srv; do
+    f="$WORK/collected/$c-d0.pcap"
+    n=$(tcpdump -nr "$f" 2>/dev/null | wc -l)
+    want=$(jq ".captures[] | select(.agent == \"$c\") | .frames" "$j")
+    if [ "$n" -gt 0 ] && [ "$n" -eq "$want" ]; then
+        echo "ok: $c's capture was collected: $n frames, as counted"
+    else
+        echo "FAILED: $c's collected capture has $n frames, the agent counted $want"
+        fail=1
+    fi
+done
+all=$(jq '[.captures[].frames] | add' "$j")
+n=$(tcpdump -nr "$WORK/merged.pcapng" 2>/dev/null | wc -l)
+other=$(tcpdump -nr "$WORK/merged.pcapng" 'not tcp port 80' 2>/dev/null | wc -l)
+if [ "$n" -eq "$all" ] && [ "$other" -eq 0 ]; then
+    echo "ok: the merged pcapng has all $n frames, all tcp port 80"
+else
+    echo "FAILED: the merged pcapng has $n frames ($other not port 80), the captures $all"
     fail=1
 fi
 out=$($LAB "$BIN" fleet deploy "$PLAN" 2>&1)
