@@ -1413,6 +1413,7 @@ dependencies = [
  "ron",
  "serde",
  "serde_json",
+ "skrifa",
  "toml 0.8.23",
  "windows-sys 0.61.2",
  "winresource",

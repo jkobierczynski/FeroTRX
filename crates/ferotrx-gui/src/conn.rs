@@ -142,8 +142,12 @@ impl ConnSettings {
             if self.ca.trim().is_empty() {
                 return Err("TLS needs the CA certificate that signed the server's".into());
             }
-            let mut tls = ClientTls::from_ca_file(Path::new(self.ca.trim()))
-                .map_err(|e| format!("CA certificate: {e}"))?;
+            // A relative path starts from the GUI's working folder, which
+            // depends on how it was started (Documents from the Start menu):
+            // name the file it tried.
+            let ca = std::path::absolute(self.ca.trim()).unwrap_or_else(|_| self.ca.trim().into());
+            let mut tls = ClientTls::from_ca_file(&ca)
+                .map_err(|e| format!("CA certificate {}: {e}", ca.display()))?;
             if !self.cert.trim().is_empty() {
                 tls = tls
                     .with_client_cert_files(Path::new(self.cert.trim()), Path::new(self.key.trim()))

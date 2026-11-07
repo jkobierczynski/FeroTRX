@@ -203,6 +203,10 @@ pub struct WidgetStyle {
     pub monospace_size: f32,
     pub heading_size: f32,
     pub small_size: f32,
+    /// Font file (.ttf, .otf) for text, and for monospace text (packets,
+    /// profiles, logs); empty uses the built-in font.
+    pub text_font: String,
+    pub monospace_font: String,
     /// Shadows under windows and menus.
     pub shadows: bool,
     /// Animated opening and closing.
@@ -225,6 +229,8 @@ impl Default for WidgetStyle {
             monospace_size: 12.0,
             heading_size: 18.0,
             small_size: 9.0,
+            text_font: String::new(),
+            monospace_font: String::new(),
             shadows: true,
             animations: true,
             solid_scrollbars: false,
@@ -292,14 +298,26 @@ pub enum Preset {
     Egui,
     HighContrast,
     Compact,
+    Graphite,
+    Ocean,
+    Forest,
+    Ember,
+    Lavender,
+    Terminal,
 }
 
 impl Preset {
-    pub const ALL: [Preset; 4] = [
+    pub const ALL: [Preset; 10] = [
         Preset::FeroTrx,
         Preset::Egui,
         Preset::HighContrast,
         Preset::Compact,
+        Preset::Graphite,
+        Preset::Ocean,
+        Preset::Forest,
+        Preset::Ember,
+        Preset::Lavender,
+        Preset::Terminal,
     ];
 
     pub fn name(self) -> &'static str {
@@ -308,6 +326,12 @@ impl Preset {
             Preset::Egui => "egui",
             Preset::HighContrast => "High contrast",
             Preset::Compact => "Compact",
+            Preset::Graphite => "Graphite",
+            Preset::Ocean => "Ocean",
+            Preset::Forest => "Forest",
+            Preset::Ember => "Ember",
+            Preset::Lavender => "Lavender",
+            Preset::Terminal => "Terminal",
         }
     }
 
@@ -432,7 +456,136 @@ impl Preset {
                 light: fero_light,
                 dark: fero_dark,
             },
+            Preset::Graphite => Theme {
+                format: FORMAT_VERSION,
+                name,
+                style: WidgetStyle {
+                    corner_radius: 3.0,
+                    window_radius: 6.0,
+                    ..Default::default()
+                },
+                light: pal([
+                    0xc2410c, 0xfde2cf, 0xf4f4f5, 0xfafafa, 0xffffff, 0xececee, 0xe4e4e7, 0xd4d4d8,
+                    0xc8c8cd, 0x15803d, 0x2563eb, 0xb45309, 0xdc2626,
+                ]),
+                dark: pal([
+                    0xfb923c, 0x5a3418, 0x18181b, 0x1f1f23, 0x0f0f11, 0x232327, 0x2e2e33, 0x3f3f46,
+                    0x3a3a40, 0x4ade80, 0x60a5fa, 0xfbbf24, 0xf87171,
+                ]),
+            },
+            Preset::Ocean => Theme {
+                format: FORMAT_VERSION,
+                name,
+                style: WidgetStyle {
+                    corner_radius: 6.0,
+                    window_radius: 10.0,
+                    ..Default::default()
+                },
+                light: pal([
+                    0x0e7490, 0xcdeef5, 0xeef6f9, 0xf7fbfc, 0xffffff, 0xe3f0f4, 0xd5e8ee, 0xbfdce6,
+                    0xb3cfd9, 0x047857, 0x1d4ed8, 0xb45309, 0xbe123c,
+                ]),
+                dark: pal([
+                    0x22d3ee, 0x0f4a5c, 0x0a1622, 0x0e1d2b, 0x06101a, 0x112233, 0x16304a, 0x1e3f5e,
+                    0x1d3a52, 0x34d399, 0x60a5fa, 0xfbbf24, 0xfb7185,
+                ]),
+            },
+            Preset::Forest => Theme {
+                format: FORMAT_VERSION,
+                name,
+                style: WidgetStyle {
+                    corner_radius: 4.0,
+                    window_radius: 8.0,
+                    ..Default::default()
+                },
+                light: pal([
+                    0x2f6b3a, 0xd3ead6, 0xf2f5ef, 0xfafcf8, 0xffffff, 0xe8eee3, 0xdde6d6, 0xc9d7c0,
+                    0xbccab2, 0x1a7f37, 0x2f6fb5, 0xa16207, 0xb91c1c,
+                ]),
+                dark: pal([
+                    0x86c98f, 0x264d2c, 0x121a14, 0x172119, 0x0b120d, 0x1b261d, 0x243328, 0x2f4434,
+                    0x2e3f31, 0x9be26b, 0x7cb7f0, 0xe0b04a, 0xf08a7e,
+                ]),
+            },
+            Preset::Ember => Theme {
+                format: FORMAT_VERSION,
+                name,
+                style: WidgetStyle {
+                    corner_radius: 5.0,
+                    window_radius: 8.0,
+                    ..Default::default()
+                },
+                light: pal([
+                    0xb4421b, 0xf8dccd, 0xfaf4ee, 0xfffbf7, 0xffffff, 0xf3e9df, 0xeaddd0, 0xdcc8b6,
+                    0xd2bda9, 0x3f7d20, 0x2b6cb0, 0xb7791f, 0xc53030,
+                ]),
+                dark: pal([
+                    0xf6895a, 0x5e2a17, 0x1c1512, 0x241b17, 0x120d0b, 0x2a201b, 0x352820, 0x47362b,
+                    0x433328, 0x9ad36a, 0x7fb3e8, 0xf2b84b, 0xf47a6b,
+                ]),
+            },
+            Preset::Lavender => Theme {
+                format: FORMAT_VERSION,
+                name,
+                style: WidgetStyle {
+                    corner_radius: 8.0,
+                    window_radius: 12.0,
+                    ..Default::default()
+                },
+                light: pal([
+                    0x6d28d9, 0xe6dcfb, 0xf6f4fb, 0xfcfbfe, 0xffffff, 0xeeeaf6, 0xe4def1, 0xd3cae8,
+                    0xcac0e0, 0x15803d, 0x2563eb, 0xb45309, 0xbe123c,
+                ]),
+                dark: pal([
+                    0xb79cff, 0x3d2a6b, 0x15131d, 0x1b1826, 0x0e0c14, 0x201d2c, 0x2a2639, 0x39334d,
+                    0x363048, 0x6ee7a0, 0x7fb0ff, 0xfcd34d, 0xfb7185,
+                ]),
+            },
+            Preset::Terminal => Theme {
+                format: FORMAT_VERSION,
+                name,
+                style: WidgetStyle {
+                    mode: Mode::Dark,
+                    corner_radius: 0.0,
+                    window_radius: 0.0,
+                    outlined: true,
+                    shadows: false,
+                    animations: false,
+                    ..Default::default()
+                },
+                light: pal([
+                    0x00702a, 0xc9efd2, 0xf5f7f5, 0xfbfcfb, 0xffffff, 0xebefeb, 0xe0e6e0, 0xccd6cc,
+                    0x9fb09f, 0x00702a, 0x0050a0, 0x8a5a00, 0xb00020,
+                ]),
+                dark: Palette {
+                    text: Some(Rgb::hex(0xb8f5c4)),
+                    ..pal([
+                        0x39ff7a, 0x0f4a22, 0x050806, 0x070b08, 0x000000, 0x0a110c, 0x0f1a12,
+                        0x17291c, 0x1f4d2b, 0x39ff7a, 0x5cc8ff, 0xffd166, 0xff5c5c,
+                    ])
+                },
+            },
         }
+    }
+}
+
+/// A palette from its colours in field order (text follows the mode).
+fn pal(c: [u32; 13]) -> Palette {
+    Palette {
+        accent: Rgb::hex(c[0]),
+        selection: Rgb::hex(c[1]),
+        background: Rgb::hex(c[2]),
+        window: Rgb::hex(c[3]),
+        input: Rgb::hex(c[4]),
+        stripe: Rgb::hex(c[5]),
+        widget: Rgb::hex(c[6]),
+        hovered: Rgb::hex(c[7]),
+        border: Rgb::hex(c[8]),
+        text: None,
+        good: Rgb::hex(c[9]),
+        running: Rgb::hex(c[10]),
+        warn: Rgb::hex(c[11]),
+        error: Rgb::hex(c[12]),
     }
 }
 
@@ -617,6 +770,11 @@ pub struct Appearance {
     pub status: Option<Result<String, String>>,
     /// What was last applied, to apply again only after a change.
     applied: Option<Theme>,
+    /// The fonts last set (text, monospace), and why one could not be used.
+    fonts_applied: Option<(String, String)>,
+    pub font_error: Option<String>,
+    /// The font files on this computer, read when the window first shows them.
+    system_fonts: Option<Vec<(String, std::path::PathBuf)>>,
 }
 
 impl Appearance {
@@ -640,6 +798,14 @@ impl Appearance {
                     a.style.zoom = z;
                 }
             }
+        }
+        let fonts = (
+            self.theme.style.text_font.trim().to_string(),
+            self.theme.style.monospace_font.trim().to_string(),
+        );
+        if self.fonts_applied.as_ref() != Some(&fonts) {
+            self.font_error = crate::fonts::apply(ctx, &fonts.0, &fonts.1).err();
+            self.fonts_applied = Some(fonts);
         }
         if self.applied.as_ref() == Some(&self.theme) {
             return;
@@ -855,6 +1021,22 @@ impl Appearance {
                         ui.add(egui::Slider::new(&mut s.zoom, 0.6..=2.0).step_by(0.05))
                             .on_hover_text("The whole window; Ctrl + and Ctrl - too");
                         ui.end_row();
+                        let list = self
+                            .system_fonts
+                            .get_or_insert_with(crate::fonts::system_fonts);
+                        for (label, v, salt) in [
+                            ("Text font", &mut s.text_font, "font-text"),
+                            ("Monospace font", &mut s.monospace_font, "font-mono"),
+                        ] {
+                            ui.label(label);
+                            ui.horizontal(|ui| font_picker(ui, salt, v, list));
+                            ui.end_row();
+                        }
+                        if let Some(e) = &self.font_error {
+                            ui.label("");
+                            ui.colored_label(ui.visuals().error_fg_color, e);
+                            ui.end_row();
+                        }
                         for (label, v) in [
                             ("Body", &mut s.body_size),
                             ("Monospace", &mut s.monospace_size),
@@ -874,6 +1056,49 @@ impl Appearance {
         });
         file
     }
+}
+
+/// A font: built-in, one of this computer's, or a file typed in.
+fn font_picker(
+    ui: &mut egui::Ui,
+    salt: &str,
+    v: &mut String,
+    list: &[(String, std::path::PathBuf)],
+) {
+    let shown = if v.trim().is_empty() {
+        "Built-in".to_string()
+    } else {
+        std::path::Path::new(v.trim())
+            .file_stem()
+            .map_or_else(|| v.clone(), |n| n.to_string_lossy().into_owned())
+    };
+    egui::ComboBox::from_id_salt(salt)
+        .selected_text(shown)
+        .width(180.0)
+        .height(400.0)
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(v.trim().is_empty(), "Built-in")
+                .clicked()
+            {
+                v.clear();
+            }
+            for (name, path) in list {
+                let p = path.display().to_string();
+                if ui
+                    .selectable_label(*v == p, name)
+                    .on_hover_text(&p)
+                    .clicked()
+                {
+                    *v = p;
+                }
+            }
+        });
+    ui.add(
+        egui::TextEdit::singleline(v)
+            .hint_text("or a .ttf/.otf file")
+            .desired_width(200.0),
+    );
 }
 
 /// A few widgets in the current style.

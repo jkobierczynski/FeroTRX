@@ -83,8 +83,11 @@ pub enum Pending {
     Interfaces,
     /// `scenario.check` of a file on the server.
     ScenarioChecked,
-    /// `scenario.start`: show the run.
-    ScenarioStarted,
+    /// `scenario.start`: show the run. `inline` is the same start with the
+    /// profiles put into the scenario, for when a server on this computer
+    /// may not read the scenario's folder (a service with its own data
+    /// directory): sent again with it when the server refuses the folder.
+    ScenarioStarted { inline: Option<Value> },
     /// `bench.start`: show the run.
     BenchStarted,
     /// `y1564.start`: show the run.
@@ -906,7 +909,22 @@ impl FeroApp {
                     (Pending::ScenarioChecked, Err(e)) => {
                         self.scenario.checked = Some(Err(e.to_string()));
                     }
-                    (Pending::ScenarioStarted, Ok(v)) => {
+                    (Pending::ScenarioStarted { inline: Some(p) }, Err(e)) if is_forbidden(&e) => {
+                        self.info(
+                            &name,
+                            format!(
+                                "the server may not read the scenario's folder ({e}): \
+                                 sending the scenario with its profiles in it"
+                            ),
+                        );
+                        self.call(
+                            i,
+                            "scenario.start",
+                            p,
+                            Pending::ScenarioStarted { inline: None },
+                        );
+                    }
+                    (Pending::ScenarioStarted { .. }, Ok(v)) => {
                         match serde_json::from_value::<ferotrx_ctl::protocol::ScenarioRunInfo>(v) {
                             Ok(r) => {
                                 self.scenario.run = Some(r.id);
@@ -935,7 +953,7 @@ impl FeroApp {
                             Pending::Interfaces => format!("interfaces.list: {e}"),
                             Pending::BenchStarted => format!("benchmark: {e}"),
                             Pending::Y1564Started => format!("Y.1564: {e}"),
-                            Pending::ScenarioChecked | Pending::ScenarioStarted => {
+                            Pending::ScenarioChecked | Pending::ScenarioStarted { .. } => {
                                 format!("scenario: {e}")
                             }
                             Pending::GroupLoaded { .. } | Pending::GroupStarted { .. } => {
@@ -1057,4 +1075,13 @@ impl eframe::App for FeroApp {
             s.local = None;
         }
     }
+}
+
+/// True for the server's "outside the data directories" answer
+/// (`RpcError::FORBIDDEN`, shown as `... (code -32004)`).
+fn is_forbidden(e: &str) -> bool {
+    e.ends_with(&format!(
+        "(code {})",
+        ferotrx_ctl::protocol::RpcError::FORBIDDEN
+    ))
 }
