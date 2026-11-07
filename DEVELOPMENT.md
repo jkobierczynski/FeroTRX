@@ -81,6 +81,16 @@ The priorities come from an outside review (November 2026, kept in
 [docs/priorities-report-2026-11.md](docs/priorities-report-2026-11.md)),
 checked against 0.4.0. Each issue has the full checklist.
 
+**Next, first priority (Jurgen, 2026-11-07)**
+
+- [ ] **M48, capture and monitor (0.39.0)**, [#94](https://github.com/jkobierczynski/FeroTRX/issues/94):
+      `ferotrx capture` with BPF filters, live decoded lines, pcap to a file
+      or to stdout for `wireshark -k -i -`; `capture.*` and `file.get` in the
+      control API, so a remote server's capture streams to a local Wireshark;
+      fleet plans capture on every agent and collect (and merge) the pcaps
+      after the run; a live capture view in the GUI; captures next to runs;
+      optionally copies from AF_XDP/DPDK ports. Goes before M45 to M47.
+
 **P0: correctness and security**
 
 - [x] **M12, TCP maturity (0.5.0)**, [#15](https://github.com/jkobierczynski/FeroTRX/issues/15):
@@ -202,7 +212,8 @@ checked against 0.4.0. Each issue has the full checklist.
 The [security review](docs/reviews/2026-11-06-security-review.md), each
 finding [checked against 0.34.0](docs/reviews/2026-11-06-review-check.md),
 and [the plan](docs/reviews/2026-11-security-plan.md) with its order: M43
-and M44 first, then M41 and M42, then M45 to M47.
+and M44 first, then M41 and M42, then M45 to M47 (after M48,
+capture, which Jurgen put first on 2026-11-07).
 
 - [x] **M43, control-plane hardening (0.35.0)**, [#71](https://github.com/jkobierczynski/FeroTRX/issues/71):
       no cleartext tokens off loopback, bounded `stats.subscribe`, no file
@@ -211,13 +222,13 @@ and M44 first, then M41 and M42, then M45 to M47.
 - [x] **M44, CI and release supply chain (0.38.0)**, [#72](https://github.com/jkobierczynski/FeroTRX/issues/72):
       actions pinned by SHA, least-privilege tokens, `cargo deny`, dependency
       review, SBOM, provenance attestations, `SECURITY.md` (SEC-07)
-- [ ] **M45, fuzzing and hostile-input tests (0.39.0)**, [#73](https://github.com/jkobierczynski/FeroTRX/issues/73):
+- [ ] **M45, fuzzing and hostile-input tests (0.40.0)**, [#73](https://github.com/jkobierczynski/FeroTRX/issues/73):
       `cargo-fuzz` targets for the control server, profiles, packet decoding
       and every application protocol, in CI and nightly
-- [ ] **M46, certificate revocation and safe file access (0.40.0)**, [#74](https://github.com/jkobierczynski/FeroTRX/issues/74):
+- [ ] **M46, certificate revocation and safe file access (0.41.0)**, [#74](https://github.com/jkobierczynski/FeroTRX/issues/74):
       CRLs, a fingerprint deny list, reload, shorter lab certificates; file
       opens without symbolic-link races (SEC-05, SEC-03)
-- [ ] **M47, traffic guardrails (0.41.0)**, [#75](https://github.com/jkobierczynski/FeroTRX/issues/75):
+- [ ] **M47, traffic guardrails (0.42.0)**, [#75](https://github.com/jkobierczynski/FeroTRX/issues/75):
       server-side limits on interfaces, destinations, rates, duration and
       runs that remote operators cannot exceed
 
