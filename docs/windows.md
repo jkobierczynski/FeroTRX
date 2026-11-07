@@ -78,6 +78,14 @@ On one Windows PC with a Realtek 5GbE adapter this gave about 10,000 packets
 per second packet by packet, 61,000 in batches of 64 and 67,000 in batches of
 512. Bigger batches help less and less.
 
+Other software bound to the adapter costs speed too, because Npcap's packets
+pass through every filter driver on the adapter and are copied to every
+protocol that listens to all traffic. On that PC, unticking the VirtualBox
+bridged networking driver and the Siemens PROFINET/SIMATIC protocols in the
+adapter's properties (Network Connections, the adapter, Properties) doubled
+batches of 512 to 136,000 packets per second. Tick them back afterwards if
+the software that installed them needs them.
+
 The receive side (`--rx`, `--latency`, `ferotrx rx`, benchmarks) asks Npcap
 for precise system time stamps (`KeQuerySystemTimePrecise`). Npcap's default
 time stamps count from the performance counter and drift away from the
