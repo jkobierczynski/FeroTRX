@@ -322,6 +322,8 @@ impl FeroApp {
         let ifaces: Vec<String> = server.interfaces.iter().map(|x| x.name.clone()).collect();
         let runs: Vec<ScenarioRunInfo> = server.snap.scenarios.clone();
         let lab_running = server.lab.as_ref().is_some_and(|l| l.running);
+        // Lab routers need Linux and `ferotrx serve --lab` (as root).
+        let can_build_lab = server.info.as_ref().is_some_and(|i| i.lab);
         let st = &mut self.scenario;
         if st.run.is_none_or(|id| !runs.iter().any(|r| r.id == id)) {
             st.run = runs.last().map(|r| r.id);
@@ -425,13 +427,26 @@ impl FeroApp {
                 .as_ref()
                 .map(|c| c.as_ref().map(|i| i.lab.as_ref()))
             {
-                ui.checkbox(&mut st.build_lab, "Build the lab it names")
+                if can_build_lab {
+                    ui.checkbox(&mut st.build_lab, "Build the lab it names")
+                        .on_hover_text(format!(
+                            "The scenario is written for {} ([lab]): the server builds it first \
+                         (it needs ferotrx serve --lab). Untick to run on the lab as it is, \
+                         e.g. one you changed on purpose.",
+                            lab.describe()
+                        ));
+                } else {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "⚠ written for a lab router, which this server can't build",
+                    )
                     .on_hover_text(format!(
-                        "The scenario is written for {} ([lab]): the server builds it first \
-                     (it needs ferotrx serve --lab). Untick to run on the lab as it is, \
-                     e.g. one you changed on purpose.",
+                        "The scenario wants {} ([lab]). Lab routers are network namespaces: \
+                         only a Linux server started with ferotrx serve --lab (as root) builds \
+                         them. Run it there, or change the checks' interfaces to real ones.",
                         lab.describe()
                     ));
+                }
             }
             if let Some(r) = runs
                 .iter()
@@ -536,7 +551,15 @@ impl FeroApp {
                     self.error(&addr, format!("scenario: {e}"));
                 }
                 _ => match st.params(local) {
-                    Ok(p) => self.call(i, "scenario.start", p, Pending::ScenarioStarted),
+                    Ok(p) => {
+                        // A server on this computer gets the scenario's folder;
+                        // if it may not read it, the same run with the
+                        // profiles in the scenario goes instead.
+                        let inline = (local && st.upload)
+                            .then(|| st.params(false).ok())
+                            .flatten();
+                        self.call(i, "scenario.start", p, Pending::ScenarioStarted { inline })
+                    }
                     Err(e) => self.error(&addr, e),
                 },
             }
