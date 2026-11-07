@@ -776,10 +776,10 @@ fn profile_editor(ui: &mut egui::Ui, registry: &Registry, st: &mut AppsState) {
     let transport = st.kind.transport();
     let mut changed = false;
     let w = ui.available_width();
-    egui::SidePanel::left("apps-tree")
+    egui::Panel::left("apps-tree")
         .resizable(true)
-        .default_width((w * 0.22).clamp(170.0, 280.0))
-        .show_inside(ui, |ui| {
+        .default_size((w * 0.22).clamp(170.0, 280.0))
+        .show(ui, |ui| {
             ui.set_min_height(ui.available_height());
             let Some(t) = table.as_mut() else {
                 ui.selectable_value(&mut st.node, Node::Text, "Text");
@@ -888,7 +888,7 @@ fn profile_editor(ui: &mut egui::Ui, registry: &Registry, st: &mut AppsState) {
             ui.add_space(4.0);
             ui.selectable_value(&mut st.node, Node::Text, "Text");
         });
-    egui::CentralPanel::default().show_inside(ui, |ui| {
+    egui::CentralPanel::default().show(ui, |ui| {
         if st.node == Node::Text {
             if let Err(e) = &parsed {
                 ui.colored_label(ui.visuals().error_fg_color, format!("not valid TOML: {e}"));

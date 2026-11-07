@@ -176,12 +176,12 @@ impl FeroApp {
         let mut clicked = None;
         // The packet list above the packet; the line between them drags.
         let h = ui.available_height();
-        egui::TopBottomPanel::top("capture-list")
+        egui::Panel::top("capture-list")
             .resizable(true)
             .frame(egui::Frame::NONE)
-            .default_height((h * 0.45).max(120.0))
-            .height_range(80.0..=(h - 80.0).max(90.0))
-            .show_inside(ui, |ui| {
+            .default_size((h * 0.45).max(120.0))
+            .size_range(80.0..=(h - 80.0).max(90.0))
+            .show(ui, |ui| {
                 // Keep the panel's height: the table alone would shrink it.
                 ui.set_min_height(ui.available_height());
                 // Clicks on a row select it, rather than starting a text selection.
@@ -270,12 +270,12 @@ impl FeroApp {
                 .map(|c| c.packets[n].data.clone())
                 .unwrap_or_default();
             let w = ui.available_width();
-            egui::SidePanel::left("capture-tree")
+            egui::Panel::left("capture-tree")
                 .resizable(true)
                 .frame(egui::Frame::NONE)
-                .default_width(w * 0.45)
-                .width_range(200.0..=(w - 200.0).max(220.0))
-                .show_inside(ui, |ui| {
+                .default_size(w * 0.45)
+                .size_range(200.0..=(w - 200.0).max(220.0))
+                .show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("cap-tree")
                         .auto_shrink([false, false])

@@ -12,10 +12,9 @@
 //! (`egui-file-dialog`), which needs no desktop portal or GTK.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use eframe::egui;
-use egui_file_dialog::FileDialog;
+use egui_file_dialog::{FileDialog, Filter};
 
 /// What a picked path is for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,13 +182,13 @@ impl Dialogs {
             .initial_directory(self.start_dir(current))
             .add_file_filter(
                 label,
-                Arc::new(move |p: &Path| {
+                Filter::new(move |p: &Path| {
                     p.extension()
                         .and_then(|e| e.to_str())
                         .is_some_and(|e| exts.iter().any(|x| x.eq_ignore_ascii_case(e)))
                 }),
             )
-            .add_file_filter("All files", Arc::new(|_: &Path| true))
+            .add_file_filter("All files", Filter::new(|_: &Path| true))
             .default_file_filter(label)
             .default_size([720.0, 440.0])
     }

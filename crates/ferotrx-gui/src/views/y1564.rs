@@ -467,11 +467,11 @@ impl FeroApp {
 
         let width = ui.available_width();
         if st.upload {
-            egui::SidePanel::left("y1564-editor")
+            egui::Panel::left("y1564-editor")
                 .resizable(true)
-                .default_width(width * 0.35)
-                .min_width(200.0)
-                .show_inside(ui, |ui| {
+                .default_size(width * 0.35)
+                .min_size(200.0)
+                .show(ui, |ui| {
                     ui.set_min_height(ui.available_height());
                     let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, _wrap: f32| {
                         let job = egui::text::LayoutJob::simple(
@@ -496,7 +496,7 @@ impl FeroApp {
                         });
                 });
         }
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             results(ui, st, &runs, &mut a);
         });
 

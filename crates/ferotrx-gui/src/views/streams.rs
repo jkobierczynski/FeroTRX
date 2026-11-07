@@ -129,12 +129,12 @@ impl FeroApp {
         ed.server_local = self.servers[i].is_local();
         // The table and the editor share the tab; the line between them drags.
         let h = ui.available_height();
-        egui::TopBottomPanel::top("stream-table")
+        egui::Panel::top("stream-table")
             .resizable(true)
             .frame(egui::Frame::NONE)
-            .default_height((h * 0.3).clamp(110.0, 260.0))
-            .height_range(70.0..=(h - 120.0).max(80.0))
-            .show_inside(ui, |ui| {
+            .default_size((h * 0.3).clamp(110.0, 260.0))
+            .size_range(70.0..=(h - 120.0).max(80.0))
+            .show(ui, |ui| {
                 // Keep the panel's height: the table alone would shrink it.
                 ui.set_min_height(ui.available_height());
                 stream_table(ui, streams, ed, &mut action)
@@ -775,12 +775,12 @@ fn protocols_page(
     let spec = &mut s.packets[ed.packet];
     // Layers on the left, the packet view on the right; the line between drags.
     let w = ui.available_width();
-    egui::SidePanel::left("layer-editor")
+    egui::Panel::left("layer-editor")
         .resizable(true)
         .frame(egui::Frame::NONE)
-        .default_width((w * 0.5).max(300.0))
-        .width_range(240.0..=(w - 240.0).max(260.0))
-        .show_inside(ui, |ui| {
+        .default_size((w * 0.5).max(300.0))
+        .size_range(240.0..=(w - 240.0).max(260.0))
+        .show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("layers")
                 .auto_shrink([false, false])
@@ -990,12 +990,12 @@ fn packet_pane(ui: &mut egui::Ui, ed: &mut EditorState, spec: &mut String) {
             }
             // The tree above the bytes; the line between them drags.
             let h = ui.available_height();
-            egui::TopBottomPanel::top("packet-tree")
+            egui::Panel::top("packet-tree")
                 .resizable(true)
                 .frame(egui::Frame::NONE)
-                .default_height(h * 0.55)
-                .height_range(60.0..=(h - 60.0).max(70.0))
-                .show_inside(ui, |ui| {
+                .default_size(h * 0.55)
+                .size_range(60.0..=(h - 60.0).max(70.0))
+                .show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("tree")
                         .auto_shrink([false, false])

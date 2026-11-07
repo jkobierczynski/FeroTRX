@@ -999,11 +999,13 @@ mod tests {
             ctx.style_of(egui::Theme::Dark).visuals.panel_fill,
             Color32::BLACK
         );
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 assert_eq!(good(ui), a.theme.dark.good.0);
                 assert_eq!(running(ui), a.theme.dark.running.0);
             });
         });
+        // Nothing paints here: egui 0.36 asserts the font atlas was handled.
+        out.textures_delta.clear();
     }
 }

@@ -574,12 +574,12 @@ impl FeroApp {
             t
         };
         let h = ui.available_height();
-        egui::TopBottomPanel::top("group-members")
+        egui::Panel::top("group-members")
             .resizable(true)
-            .default_height(h * 0.5)
-            .min_height(120.0)
+            .default_size(h * 0.5)
+            .min_size(120.0)
             .frame(egui::Frame::NONE)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.set_min_height(ui.available_height());
                 egui::ScrollArea::both().id_salt("group-scroll").show(ui, |ui| {
                     egui::Grid::new("group-grid")
