@@ -129,7 +129,8 @@ fn files_outside_the_data_directory_are_refused() {
     let e = c
         .capture_start(&CaptureStartParams {
             iface: "mem0".into(),
-            file: Some("/tmp/elsewhere.pcap".into()),
+            // A folder that exists on every system, outside the data directory.
+            file: Some(std::env::temp_dir().join("elsewhere.pcap")),
             ..Default::default()
         })
         .unwrap_err();
