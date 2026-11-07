@@ -101,13 +101,39 @@ mod pcap_receiver {
     impl PcapReceiver {
         pub fn open(name: &str) -> Result<Self, SinkError> {
             let dev = crate::pcap_device(name)?;
-            let capture = pcap::Capture::from_device(dev.as_str())?
-                .promisc(true)
-                .immediate_mode(true)
-                .snaplen(65535)
-                .buffer_size(16 << 20)
-                .open()
-                .map_err(|e| format!("cannot open {name}: {e}"))?;
+            let inactive = || -> Result<pcap::Capture<pcap::Inactive>, SinkError> {
+                Ok(pcap::Capture::from_device(dev.as_str())?
+                    .promisc(true)
+                    .immediate_mode(true)
+                    .snaplen(65535)
+                    .buffer_size(16 << 20))
+            };
+            // Windows: Npcap's default time stamps count from the
+            // performance counter and drift away from the system clock that
+            // the sender stamps its signatures with; the precise system
+            // time (KeQuerySystemTimePrecise) does not. Older Npcap without
+            // it opens with the default.
+            #[cfg(windows)]
+            let capture = {
+                let precise = inactive()?;
+                // The pcap crate offers tstamp_type only when its build
+                // found a new enough wpcap.dll; call Npcap directly.
+                extern "C" {
+                    fn pcap_set_tstamp_type(
+                        p: *mut std::ffi::c_void,
+                        t: std::ffi::c_int,
+                    ) -> std::ffi::c_int;
+                }
+                const PCAP_TSTAMP_HOST_HIPREC: std::ffi::c_int = 2;
+                // SAFETY: the handle of a capture not yet activated.
+                unsafe { pcap_set_tstamp_type(precise.as_ptr().cast(), PCAP_TSTAMP_HOST_HIPREC) };
+                precise
+                    .open()
+                    .or_else(|_| inactive()?.open().map_err(SinkError::from))
+            };
+            #[cfg(not(windows))]
+            let capture = inactive()?.open();
+            let capture = capture.map_err(|e| format!("cannot open {name}: {e}"))?;
             let _ = capture.direction(pcap::Direction::In);
             // Non-blocking, with short naps when nothing is waiting: read
             // timeouts are not honoured in immediate mode everywhere (Linux

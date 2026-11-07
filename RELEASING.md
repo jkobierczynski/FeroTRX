@@ -81,7 +81,7 @@ With the [GitHub CLI](https://cli.github.com/), check that a downloaded file
 was built by this repository's release workflow:
 
 ```sh
-gh attestation verify ferotrx_0.37.0-1_amd64.deb --repo jkobierczynski/FeroTRX
+gh attestation verify ferotrx_0.38.0-1_amd64.deb --repo jkobierczynski/FeroTRX
 ```
 
 It prints the workflow, commit and tag that built the file, and fails for a
@@ -91,7 +91,7 @@ is the file on the release page, not who built it.
 
 The SBOM files list every Rust crate compiled into the programs, for all
 targets, with its version and license. Feed them to a scanner such as
-`grype sbom:ferotrx-v0.37.0-ferotrx-cli.cdx.json` or `osv-scanner --sbom=...`.
+`grype sbom:ferotrx-v0.38.0-ferotrx-cli.cdx.json` or `osv-scanner --sbom=...`.
 The Python client has no dependencies, so it has no SBOM.
 
 ## How the build is protected
