@@ -49,6 +49,25 @@ fn agent(name: &str, cables: &Cables) -> (SocketAddr, PathBuf) {
                 "b" => Ok(Box::new(own.take().ok_or("open a first")?)),
                 other => Err(format!("no interface {other}").into()),
             }
+        })
+        .with_capture_opener({
+            // cap-east: e, cap-west: w.
+            let tag = name.bytes().nth(4).unwrap_or(b'x');
+            move |iface, _| {
+                if iface != "cap0" {
+                    return Err(format!("no interface {iface}").into());
+                }
+                // Three frames, 10 ms apart, marked with the agent's initial.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap();
+                let frames = (0..3u64).map(move |i| ferotrx_core::Frame {
+                    ts: now + Duration::from_millis(10 * i),
+                    len: 60,
+                    data: vec![tag; 60],
+                });
+                Ok(Box::new(ferotrx_core::live::VecFrameSource::new(1, frames)))
+            }
         });
     let addr = Server::bind("127.0.0.1:0", controller, None)
         .unwrap()
@@ -382,4 +401,69 @@ fn files_go_where_they_may() {
         })
         .unwrap_err();
     assert!(e.to_string().contains("more than an hour ahead"), "{e}");
+}
+
+#[test]
+fn captures_on_every_agent_are_collected_and_merged() {
+    let cables = Cables::default();
+    let (east, _) = agent("cap-east", &cables);
+    let (west, _) = agent("cap-west", &cables);
+    let d = plans("captures");
+    let text = format!(
+        r#"
+name = "captures"
+start_delay = "300ms"
+interval = "200ms"
+
+[[agent]]
+name = "east"
+address = "{east}"
+iface = "cap0"
+
+[[agent]]
+name = "west"
+address = "{west}"
+
+[[run]]
+agent = "east"
+tcp = "pair.toml"
+duration = "1s"
+
+[[capture]]
+filter = "tcp"
+iface = "cap0"
+"#
+    );
+    let plan = FleetPlan::from_toml(&text, &d.join("plans"), &[]).unwrap();
+    let out = d.join("collected");
+    let merged = out.join("all.pcapng");
+    let options = FleetOptions {
+        collect: Some(out.clone()),
+        merge: Some(merged.clone()),
+        ..Default::default()
+    };
+    let report = run_fleet(&plan, &options, &mut |_| {}).unwrap();
+    assert_eq!(report.captures.len(), 2, "{:?}", report.notes);
+    for c in &report.captures {
+        assert_eq!(c.error, None);
+        assert_eq!(c.frames, 3);
+        assert_eq!(
+            c.file,
+            format!("fleet/captures/captures/{}-cap0.pcap", c.agent)
+        );
+        let local = out.join(format!("{}-cap0.pcap", c.agent));
+        assert_eq!(c.collected.as_deref(), Some(local.to_str().unwrap()));
+        assert_eq!(ferotrx_core::Capture::from_path(&local).unwrap().len(), 3);
+    }
+    assert_eq!(report.merged.as_deref(), Some(merged.to_str().unwrap()));
+    let all = ferotrx_core::Capture::from_path(&merged).unwrap();
+    assert_eq!(all.len(), 6);
+    let mut tags: Vec<u8> = all.packets.iter().map(|p| p.data[0]).collect();
+    assert!(all
+        .packets
+        .windows(2)
+        .all(|w| w[0].timestamp <= w[1].timestamp));
+    tags.sort();
+    assert_eq!(tags, b"eeewww".to_vec());
+    assert!(report.text().contains("Captures:"));
 }

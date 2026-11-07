@@ -64,6 +64,16 @@ struct RunArgs {
     #[arg(long)]
     keep: bool,
 
+    /// Fetch the plan's captures (`[[capture]]`) from the agents into this
+    /// folder after the run, one pcap per agent and interface.
+    #[arg(long, value_name = "DIR")]
+    collect: Option<PathBuf>,
+
+    /// With --collect: also merge them into this pcapng, one interface per
+    /// capture, times moved onto this machine's clock.
+    #[arg(long, value_name = "FILE", requires = "collect")]
+    merge: Option<PathBuf>,
+
     /// Print no line per interval, only the final report.
     #[arg(short, long)]
     quiet: bool,
@@ -179,6 +189,8 @@ fn run(args: RunArgs) -> Result<()> {
         duration: args.duration,
         keep: args.keep,
         deploy_only: false,
+        collect: args.collect.clone(),
+        merge: args.merge.clone(),
     };
     let quiet = args.quiet;
     let report = run_fleet(&plan, &options, &mut |e| {

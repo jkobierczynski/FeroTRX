@@ -56,18 +56,7 @@ fn a_capture_streams_frames_writes_a_file_and_the_file_can_be_fetched() {
     let d = dir("stream");
     let addr = server(&d, 30);
     let mut c = client(addr);
-    let info = c
-        .capture_start(&CaptureStartParams {
-            iface: "mem0".into(),
-            filter: Some("udp".into()),
-            file: Some("caps/a.pcap".into()),
-            ..Default::default()
-        })
-        .unwrap_err();
-    // The folder must exist: captures write into the data directory, they
-    // make no folders.
-    assert!(matches!(info, ClientError::Rpc(_)), "{info}");
-    std::fs::create_dir_all(d.join("caps")).unwrap();
+    // Folders on the way are made, as file.put makes them.
     let info = c
         .capture_start(&CaptureStartParams {
             iface: "mem0".into(),

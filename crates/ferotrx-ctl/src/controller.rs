@@ -587,7 +587,10 @@ impl Controller {
             )));
         }
         let file = match &p.file {
-            Some(f) => Some(self.files.writable(f)?),
+            Some(f) => {
+                self.files.make_folders(f)?;
+                Some(self.files.writable(f)?)
+            }
             None => None,
         };
         let options = ferotrx_core::CaptureOptions {
