@@ -395,11 +395,13 @@ fn a_stream_with_a_max_lag_skips_what_a_stall_held_up() {
     assert!(caught_up >= 225, "sent {caught_up}");
     assert!(burst >= 30, "burst {burst}");
     // With 5 ms of lag: at least the 55 held up left out, and no burst of
-    // more than 5 ms' worth. (Where sleeps overshoot by more than 5 ms, as on
-    // macOS runners, more are left out: the lower bound is loose.)
+    // more than 5 ms' worth. Where a pacing sleep overshoots by more than
+    // 5 ms (often on macOS runners, by tens of ms) that wait's packets are
+    // left out too, so only check the stream kept going after the stall: the
+    // 20 before it plus at least 10 of the 190 ms after it.
     let (sent, burst) = run_stalled(Some(Duration::from_millis(5)));
     assert!(
-        (50..=caught_up - 45).contains(&sent),
+        (30..=caught_up - 45).contains(&sent),
         "sent {sent} of {caught_up}"
     );
     assert!(burst <= 12, "burst {burst}");
