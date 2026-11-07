@@ -25,7 +25,8 @@ The milestone's pull request bumps `version` under `[workspace.package]` in
 `[workspace.dependencies]`, then runs `cargo build` so `Cargo.lock` follows.
 The Python client's version goes up with it: `version` in
 `python/pyproject.toml` and `__version__` in `python/src/ferotrx/__init__.py`
-(a test checks that the three agree).
+(a test checks that the three agree). Update the "current version" line in
+`README.md` as well.
 
 The workflow refuses a tag that does not match the workspace version
 (tag `v0.2.0` needs `version = "0.2.0"`), and a Python client whose version

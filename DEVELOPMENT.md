@@ -193,6 +193,30 @@ checked against 0.4.0. Each issue has the full checklist.
       (`bench.*`), scenario comparison, runs across several servers at once
       and Y.1564 tests (not done: MOS charts after M32)
 
+**Security, from the outside review of 6 November 2026**
+
+The [security review](docs/reviews/2026-11-06-security-review.md), each
+finding [checked against 0.34.0](docs/reviews/2026-11-06-review-check.md),
+and [the plan](docs/reviews/2026-11-security-plan.md) with its order: M43
+and M44 first, then M41 and M42, then M45 to M47.
+
+- [ ] **M43, control-plane hardening (0.35.0)**, [#71](https://github.com/jkobierczynski/FeroTRX/issues/71):
+      no cleartext tokens off loopback, bounded `stats.subscribe`, no file
+      access by default in the library, separate slots and rate limits for
+      logins, audit health and a fail-closed option (SEC-01, 02, 04, 06)
+- [ ] **M44, CI and release supply chain (0.36.0)**, [#72](https://github.com/jkobierczynski/FeroTRX/issues/72):
+      actions pinned by SHA, least-privilege tokens, `cargo deny`, dependency
+      review, SBOM, provenance attestations, `SECURITY.md` (SEC-07)
+- [ ] **M45, fuzzing and hostile-input tests (0.39.0)**, [#73](https://github.com/jkobierczynski/FeroTRX/issues/73):
+      `cargo-fuzz` targets for the control server, profiles, packet decoding
+      and every application protocol, in CI and nightly
+- [ ] **M46, certificate revocation and safe file access (0.40.0)**, [#74](https://github.com/jkobierczynski/FeroTRX/issues/74):
+      CRLs, a fingerprint deny list, reload, shorter lab certificates; file
+      opens without symbolic-link races (SEC-05, SEC-03)
+- [ ] **M47, traffic guardrails (0.41.0)**, [#75](https://github.com/jkobierczynski/FeroTRX/issues/75):
+      server-side limits on interfaces, destinations, rates, duration and
+      runs that remote operators cannot exceed
+
 **P3: when the engine is stable**
 
 - [x] **M22, desktop GUI (0.15.0)**, from [#21](https://github.com/jkobierczynski/FeroTRX/issues/21):
@@ -216,10 +240,10 @@ checked against 0.4.0. Each issue has the full checklist.
       clear message; the GUI's Appearance window (themes, colours, widget
       style, text sizes); [docs/windows.md](docs/windows.md) (not done:
       code signing)
-- [ ] **M41, a local server built into the GUI (0.35.0)**, [#69](https://github.com/jkobierczynski/FeroTRX/issues/69):
+- [ ] **M41, a local server built into the GUI (0.37.0)**, [#69](https://github.com/jkobierczynski/FeroTRX/issues/69):
       "This computer" started by the GUI, elevation only when Npcap needs
       it, `ferotrx serve` as a Windows service
-- [ ] **M42, Npcap for real use (0.36.0)**, [#69](https://github.com/jkobierczynski/FeroTRX/issues/69):
+- [ ] **M42, Npcap for real use (0.38.0)**, [#69](https://github.com/jkobierczynski/FeroTRX/issues/69):
       batched sending, high-precision timestamps, measured on a Windows host
 
 **Not planned for now:** a packet-analysis suite (use Wireshark), a long
