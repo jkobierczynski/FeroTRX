@@ -53,6 +53,46 @@ started as administrator. The GUI's own server ("This computer", below)
 asks for that itself, with a UAC prompt, and only then; the Windows service
 runs as LocalSystem and may always use Npcap.
 
+## Sending fast
+
+Npcap needs a trip into its driver for every packet sent on its own, which
+limits a run to a few hundred thousand packets per second at most. FeroTRX
+hands Npcap 64 packets at a time instead (`pcap_sendqueue_transmit`), one
+trip for the lot. Paced streams lose nothing by it: whatever is queued goes
+out before the engine waits for the next packet's time, so only runs faster
+than the batch can fill (top speed, high rates) are batched at all.
+`--batch N` (or `batch = N` in a profile's `[output]`) changes the size, up to
+4096; `--batch 1` sends packet by packet as before. The line printed at the
+start says which: `sending with pcap on Ethernet 2, batches of 64 (Npcap send queue)`.
+
+To see what batching gives on your machine (send to a switch port or another
+machine, not to anything that minds a flood):
+
+```powershell
+ferotrx replay examples\web.pcap -i "Ethernet 2" -t -l 0 --duration 10s --batch 1
+ferotrx replay examples\web.pcap -i "Ethernet 2" -t -l 0 --duration 10s
+ferotrx replay examples\web.pcap -i "Ethernet 2" -t -l 0 --duration 10s --batch 512
+```
+
+On one Windows PC with a Realtek 5GbE adapter this gave about 10,000 packets
+per second packet by packet, 61,000 in batches of 64 and 67,000 in batches of
+512. Bigger batches help less and less.
+
+Other software bound to the adapter costs speed too, because Npcap's packets
+pass through every filter driver on the adapter and are copied to every
+protocol that listens to all traffic. On that PC, unticking the VirtualBox
+bridged networking driver and the Siemens PROFINET/SIMATIC protocols in the
+adapter's properties (Network Connections, the adapter, Properties) doubled
+batches of 512 to 136,000 packets per second. Tick them back afterwards if
+the software that installed them needs them.
+
+The receive side (`--rx`, `--latency`, `ferotrx rx`, benchmarks) asks Npcap
+for precise system time stamps (`KeQuerySystemTimePrecise`). Npcap's default
+time stamps count from the performance counter and drift away from the
+system clock the sender stamps its signatures with, which shows up as
+latency that creeps up or down over a long run. Npcap releases without
+precise time stamps fall back to the default.
+
 ## Interface names
 
 Npcap names an interface `\Device\NPF_{GUID}`. FeroTRX also takes the name

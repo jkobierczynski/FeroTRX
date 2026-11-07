@@ -95,6 +95,16 @@ jobs:
           $env:FEROTRX_TOKEN = 'ci-secret'
           & "$dir\ferotrx.exe" ctl info
           if ($LASTEXITCODE -ne 0) { throw "ferotrx ctl info through the service failed" }
+          # Runs through the service on the ports that need no Npcap: null, and
+          # file (a pcap written in the service's data directory).
+          Copy-Item examples\lab-built-packets.toml "$env:ProgramData\FeroTRX\data\"
+          & "$dir\ferotrx.exe" ctl load lab-built-packets.toml
+          if ($LASTEXITCODE -ne 0) { throw "ctl load through the service failed" }
+          & "$dir\ferotrx.exe" ctl start lab-built-packets --null --duration 1s --watch
+          if ($LASTEXITCODE -ne 0) { throw "a null run through the service failed" }
+          & "$dir\ferotrx.exe" ctl start lab-built-packets --out service-out.pcap --duration 1s --watch
+          if ($LASTEXITCODE -ne 0) { throw "a file run through the service failed" }
+          if ((Get-Item "$env:ProgramData\FeroTRX\data\service-out.pcap").Length -le 24) { throw "the file port wrote no packets" }
           Remove-Item Env:FEROTRX_TOKEN
           $image = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\FeroTRX').ImagePath
           Write-Host "service command: $image"
