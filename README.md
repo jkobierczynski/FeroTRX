@@ -86,6 +86,19 @@ each milestone added and what comes next.
   workspace. [Guide](docs/gui.md)
 * **IPv4 and IPv6** throughout.
 
+## Desktop GUI
+
+A capture opened in the GUI: the packet list, each layer decoded and the
+bytes. Tick packets to turn them into a stream.
+
+![A capture in ferotrx-gui: packet list, decoded layers and hex bytes](docs/assets/gui-capture.png)
+
+The packet editor: a stream made from that capture, its packet as one line of
+text and layer by layer, with the IPv4 fields open and the built packet
+decoded next to it.
+
+![The packet editor in ferotrx-gui: protocol layers, IPv4 fields and the packet view](docs/assets/gui-packet-editor.png)
+
 ## Install
 
 Every release on the [Releases page](https://github.com/jkobierczynski/FeroTRX/releases)
