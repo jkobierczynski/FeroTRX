@@ -1,0 +1,53 @@
+# cargo-deny: checks the dependency tree on every pull request (the
+# "Dependencies" job in .github/workflows/ci.yml). Run it locally with
+# `cargo deny check`.
+
+[graph]
+all-features = true
+
+[advisories]
+# Every RustSec vulnerability or unsoundness advisory fails the check,
+# wherever the crate sits in the tree. "Unmaintained" fails only for crates
+# we depend on directly: deeper ones (today ttf-parser and zbus' zvariant
+# crates, under egui) can only be replaced by their parents, and Dependabot
+# brings those updates. An advisory we cannot fix yet goes in `ignore` with
+# the reason and the issue that tracks it.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# FeroTRX is GPL-3.0-or-later; every license here can be combined with it.
+# OFL-1.1 and Ubuntu-font-1.0 cover the fonts egui embeds (epaint_default_fonts),
+# which are data, not code linked into ours.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "GPL-3.0-or-later",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

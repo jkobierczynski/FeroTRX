@@ -1,0 +1,35 @@
+# Weekly update pull requests, grouped so each ecosystem gives one pull
+# request a week. Security updates come as soon as an advisory appears
+# (turned on under Settings > Code security > Dependabot security updates).
+version: 2
+updates:
+  # The actions in .github/workflows, pinned by commit: Dependabot moves the
+  # commit and the version in the comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Cargo.lock: compatible updates in one pull request. Updates that need a
+  # change to Cargo.toml (a new major version) come one by one.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-compatible:
+        update-types: [minor, patch]
+
+  # The Python client has no runtime dependencies; this keeps the test and
+  # lint tools (pytest, mypy, ruff) current.
+  - package-ecosystem: pip
+    directory: /python
+    schedule:
+      interval: weekly
+    groups:
+      python-dev:
+        patterns: ["*"]

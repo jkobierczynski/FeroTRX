@@ -13,7 +13,7 @@ macOS and Windows. Its engine is a library you can use from your own
 programs, and a control server lets scripts and the Python client drive it
 remotely.
 
-The current version is 0.36.0; see [DEVELOPMENT.md](DEVELOPMENT.md) for what
+The current version is 0.37.0; see [DEVELOPMENT.md](DEVELOPMENT.md) for what
 each milestone added and what comes next.
 
 ## Features
@@ -187,7 +187,8 @@ More in [docs/library.md](docs/library.md).
 
 [DEVELOPMENT.md](DEVELOPMENT.md) has the design, the milestones done and the
 open work (linked to GitHub issues); [RELEASING.md](RELEASING.md) says how
-releases are made.
+releases are made and how to check a download. To report a security problem,
+see [SECURITY.md](SECURITY.md).
 
 ## License
 
