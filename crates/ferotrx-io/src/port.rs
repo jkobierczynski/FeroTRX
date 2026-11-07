@@ -114,10 +114,23 @@ mod pcap_receiver {
             // time (KeQuerySystemTimePrecise) does not. Older Npcap without
             // it opens with the default.
             #[cfg(windows)]
-            let capture = inactive()?
-                .tstamp_type(pcap::TimestampType::HostHighPrec)
-                .open()
-                .or_else(|_| inactive()?.open().map_err(SinkError::from));
+            let capture = {
+                let precise = inactive()?;
+                // The pcap crate offers tstamp_type only when its build
+                // found a new enough wpcap.dll; call Npcap directly.
+                extern "C" {
+                    fn pcap_set_tstamp_type(
+                        p: *mut std::ffi::c_void,
+                        t: std::ffi::c_int,
+                    ) -> std::ffi::c_int;
+                }
+                const PCAP_TSTAMP_HOST_HIPREC: std::ffi::c_int = 2;
+                // SAFETY: the handle of a capture not yet activated.
+                unsafe { pcap_set_tstamp_type(precise.as_ptr().cast(), PCAP_TSTAMP_HOST_HIPREC) };
+                precise
+                    .open()
+                    .or_else(|_| inactive()?.open().map_err(SinkError::from))
+            };
             #[cfg(not(windows))]
             let capture = inactive()?.open();
             let capture = capture.map_err(|e| format!("cannot open {name}: {e}"))?;
