@@ -68,6 +68,9 @@ jobs:
         run: |
           cargo build -p ferotrx-cli -p ferotrx-gui
           if ($LASTEXITCODE -ne 0) { throw "build failed" }
+          # The GUI's own server ("This computer"), now that ferotrx.exe is built.
+          cargo test -p ferotrx-gui --test local -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "the GUI's local server test failed" }
           packaging\windows\build-msi.ps1 -BinDir target\debug -Out dist
           $msi = (Get-ChildItem dist\*.msi).FullName
           $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /l*v msi-install.log" -Wait -PassThru
@@ -84,6 +87,24 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "ferotrx.exe --version failed" }
           & "$dir\ferotrx.exe" run examples\lab-built-packets.toml --null --duration 1s
           if ($LASTEXITCODE -ne 0) { throw "ferotrx.exe run --null failed" }
+          # The Windows service: install it from the installed ferotrx.exe, log
+          # in through it, check the token is not on its command line, remove it.
+          & "$dir\ferotrx.exe" service install -- --token ci-secret
+          if ($LASTEXITCODE -ne 0) { Get-Content "$env:ProgramData\FeroTRX\service.log" -ErrorAction SilentlyContinue; throw "service install failed" }
+          & "$dir\ferotrx.exe" service status
+          $env:FEROTRX_TOKEN = 'ci-secret'
+          & "$dir\ferotrx.exe" ctl info
+          if ($LASTEXITCODE -ne 0) { throw "ferotrx ctl info through the service failed" }
+          Remove-Item Env:FEROTRX_TOKEN
+          $image = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\FeroTRX').ImagePath
+          Write-Host "service command: $image"
+          if ($image -like '*ci-secret*') { throw "the token is on the service's command line" }
+          & "$dir\ferotrx.exe" service remove
+          if ($LASTEXITCODE -ne 0) { throw "service remove failed" }
+          if (Get-Service FeroTRX -ErrorAction SilentlyContinue) { throw "the service is still there" }
+          # Installed again (not started): the uninstaller must remove it.
+          & "$dir\ferotrx.exe" service install --manual --no-start
+          if ($LASTEXITCODE -ne 0) { throw "second service install failed" }
           if (-not (Test-Path "$env:SystemRoot\System32\Npcap\wpcap.dll") -and -not (Test-Path "$env:SystemRoot\System32\wpcap.dll")) {
             # This call is meant to fail: don't let its exit code end the step.
             $PSNativeCommandUseErrorActionPreference = $false
@@ -97,6 +118,7 @@ jobs:
           $p = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" /qn" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "uninstall failed: $($p.ExitCode)" }
           if (Test-Path "$dir\ferotrx.exe") { throw "the uninstaller left ferotrx.exe" }
+          if (Get-Service FeroTRX -ErrorAction SilentlyContinue) { throw "the uninstaller left the service" }
           # The runner ends the step with the last native exit code, which is
           # the expected failure of `ferotrx interfaces` above.
           exit 0

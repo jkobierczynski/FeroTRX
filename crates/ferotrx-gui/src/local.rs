@@ -145,6 +145,11 @@ impl LocalServer {
                 std::env::consts::EXE_SUFFIX
             )
         })?;
+        Self::start_with(&exe, folders)
+    }
+
+    /// [`start`](Self::start) with this `ferotrx` program.
+    pub fn start_with(exe: &Path, folders: &[PathBuf]) -> Result<LocalServer, String> {
         let token = new_token()?;
         let dir = session_dir()?;
         std::fs::write(dir.join("tokens.toml"), tokens_toml(&token))
@@ -164,14 +169,14 @@ impl LocalServer {
                 // Nothing to redirect standard error to: log the audit trail.
                 args.push("--audit-log".into());
                 args.push(log.display().to_string());
-                Process::Elevated(elevate::run(&exe, &args)?)
+                Process::Elevated(elevate::run(exe, &args)?)
             }
             #[cfg(not(windows))]
             unreachable!("only Windows elevates")
         } else {
             let out = std::fs::File::create(&log)
                 .map_err(|e| format!("cannot write {}: {e}", log.display()))?;
-            let mut cmd = Command::new(&exe);
+            let mut cmd = Command::new(exe);
             cmd.args(&args)
                 .current_dir(&dir)
                 .stdin(Stdio::null())

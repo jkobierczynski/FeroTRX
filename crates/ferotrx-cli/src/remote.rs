@@ -122,17 +122,19 @@ pub struct ServeArgs {
     parent: Option<u32>,
 }
 
-impl ServeArgs {
-    /// The Windows service fills in its defaults (folders under ProgramData).
-    #[cfg(windows)]
-    pub fn data_dirs_mut(&mut self) -> &mut Vec<PathBuf> {
-        &mut self.data_dirs
+/// Parses `ferotrx serve` arguments (without `serve`), as the Windows
+/// service gets them.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn parse_serve_args(args: &[String]) -> Result<ServeArgs, clap::Error> {
+    #[derive(clap::Parser)]
+    #[command(name = "ferotrx serve")]
+    struct Serve {
+        #[command(flatten)]
+        args: ServeArgs,
     }
-
-    #[cfg(windows)]
-    pub fn audit_log_mut(&mut self) -> &mut Option<PathBuf> {
-        &mut self.audit_log
-    }
+    use clap::Parser;
+    let all = std::iter::once("serve".to_string()).chain(args.iter().cloned());
+    Ok(Serve::try_parse_from(all)?.args)
 }
 
 fn env_or(arg: Option<String>, env: &str) -> Option<String> {
@@ -1113,4 +1115,48 @@ pub fn cmd_certs(args: CertsArgs) -> Result<()> {
     }
     println!("Keep the *-key.pem files private; copy only ca.pem and a client's own pair to it.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serve_arguments_parse_on_their_own() {
+        let a = parse_serve_args(&[
+            "--listen".into(),
+            "127.0.0.1:0".into(),
+            "--port-file".into(),
+            "port".into(),
+            "--parent".into(),
+            "42".into(),
+        ])
+        .unwrap();
+        assert_eq!(a.listen, "127.0.0.1:0");
+        assert_eq!(a.parent, Some(42));
+        assert!(parse_serve_args(&["--bogus".into()]).is_err());
+    }
+
+    #[test]
+    fn a_server_writes_its_port_file() {
+        let dir = std::env::temp_dir().join(format!("ftrx-port-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("port");
+        let args = parse_serve_args(&[
+            "-l".into(),
+            "127.0.0.1:0".into(),
+            "--data-dir".into(),
+            dir.display().to_string(),
+            "--port-file".into(),
+            f.display().to_string(),
+        ])
+        .unwrap();
+        let server = start_server(args).unwrap();
+        let addr = server.local_addr().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap().trim(),
+            addr.to_string()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
