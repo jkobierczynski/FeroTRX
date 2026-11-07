@@ -233,6 +233,8 @@ pub struct ServerState {
     pub lab: Option<LabInfo>,
     /// Why the last `lab.start` or `lab.stop` failed.
     pub lab_error: Option<String>,
+    /// The server process, for a server the GUI started ("This computer").
+    pub local: Option<crate::local::LocalServer>,
 }
 
 impl ServerState {
@@ -264,7 +266,17 @@ impl ServerState {
             port_runs: BTreeMap::new(),
             lab: None,
             lab_error: None,
+            local: None,
         }
+    }
+
+    /// Can this server build the lab router? Not on Windows or macOS, where
+    /// there are no network namespaces: there the GUI doesn't offer it.
+    pub fn lab_possible(&self) -> bool {
+        self.info
+            .as_ref()
+            .and_then(|i| i.os.as_deref())
+            .is_none_or(|os| os == "linux")
     }
 
     /// The ports to show: interfaces, then the file and null outputs.
@@ -469,7 +481,13 @@ impl FeroApp {
             app.open_workspace(std::path::Path::new(path));
         }
         if app.servers.is_empty() && opts.connect.is_empty() {
-            app.servers.push(ServerState::new(ConnSettings::default()));
+            // A first start: this computer, when the server program is here.
+            app.servers
+                .push(ServerState::new(if crate::local::find_server().is_some() {
+                    ConnSettings::this_computer()
+                } else {
+                    ConnSettings::default()
+                }));
         }
         for s in opts.connect {
             let i = match app
@@ -478,7 +496,10 @@ impl FeroApp {
                 .position(|x| x.settings.address() == s.address())
             {
                 Some(i) => {
-                    app.servers[i].settings = s;
+                    // A local server keeps its folders.
+                    if !s.local {
+                        app.servers[i].settings = s;
+                    }
                     i
                 }
                 None => {
@@ -552,11 +573,36 @@ impl FeroApp {
 
     pub fn connect(&mut self, i: usize) {
         let ctx = self.ctx.clone();
+        let mut settings = self.servers[i].settings.clone();
+        if settings.local {
+            // Start this computer's server first; the worker waits for it.
+            self.servers[i].local = None;
+            let folders = crate::local::parse_folders(&settings.folders);
+            match crate::local::LocalServer::start(&folders) {
+                Ok(l) => {
+                    settings.token = l.token.clone();
+                    settings.launch = Some(l.port_file.clone());
+                    let what = if l.elevated {
+                        "starting the local server as administrator (Npcap is for administrators only)"
+                    } else {
+                        "starting the local server"
+                    };
+                    self.info(&settings.addr, what);
+                    self.servers[i].local = Some(l);
+                }
+                Err(e) => {
+                    let s = &mut self.servers[i];
+                    s.status = Status::Failed(e.clone());
+                    self.error(&settings.addr, e);
+                    return;
+                }
+            }
+        }
         let s = &mut self.servers[i];
         s.status = Status::Connecting;
         s.pending.clear();
         s.conn = Some(Connection::open(
-            s.settings.clone(),
+            settings,
             Duration::from_millis(1000),
             move || ctx.request_repaint(),
         ));
@@ -567,6 +613,8 @@ impl FeroApp {
         s.conn = None;
         s.status = Status::Disconnected;
         s.pending.clear();
+        // A server the GUI started stops with the connection.
+        s.local = None;
     }
 
     /// Sends a call to server `i` and remembers what to do with its answer.
@@ -611,6 +659,16 @@ impl FeroApp {
     pub fn poll(&mut self) {
         let now = self.started.elapsed().as_secs_f64();
         for i in 0..self.servers.len() {
+            if let Some(why) = self.servers[i].local.as_mut().and_then(|l| l.ended()) {
+                let s = &mut self.servers[i];
+                s.local = None;
+                s.conn = None;
+                s.pending.clear();
+                s.status = Status::Failed(why.clone());
+                let name = s.settings.addr.clone();
+                self.error(&name, why);
+                continue;
+            }
             let events = match &self.servers[i].conn {
                 Some(c) => c.events(),
                 None => continue,
@@ -651,6 +709,7 @@ impl FeroApp {
             Event::Closed(err) => {
                 let s = &mut self.servers[i];
                 s.conn = None;
+                s.local = None;
                 s.pending.clear();
                 s.status = Status::Failed(err.clone());
                 self.error(&name, err);
@@ -986,5 +1045,13 @@ impl eframe::App for FeroApp {
         eframe::set_value(storage, FORMS_KEY, &w);
         eframe::set_value(storage, WORKSPACE_KEY, &self.workspace_path);
         eframe::set_value(storage, THEME_KEY, &self.appearance.theme);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Stop the servers the GUI started (they would also notice it end).
+        for s in &mut self.servers {
+            s.conn = None;
+            s.local = None;
+        }
     }
 }

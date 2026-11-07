@@ -47,7 +47,7 @@ mod port;
 pub mod windows;
 #[cfg(feature = "dpdk")]
 pub use dpdk::{DpdkConfig, DpdkPort, DpdkSink};
-pub use host::{describe_host, describe_interface, hostname};
+pub use host::{describe_host, describe_interface, hostname, process_alive};
 pub use lab::{
     lab_unavailable, remove_lab, Lab, LabConfig, LAB_INTERFACE, LAB_NAMESPACE, LAB_RECEIVER_IP,
     LAB_RECEIVER_IP6, LAB_RECEIVER_MAC, LAB_ROUTER_MAC,

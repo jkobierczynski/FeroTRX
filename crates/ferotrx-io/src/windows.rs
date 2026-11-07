@@ -12,8 +12,6 @@
 //! call, so a missing Npcap is an error message, not a program that won't
 //! start.
 
-use std::sync::OnceLock;
-
 /// What to tell someone without Npcap.
 pub const NPCAP_MISSING: &str = "Npcap is not installed (wpcap.dll not found): install it from https://npcap.com to use network interfaces; the file and null outputs work without it";
 
@@ -35,7 +33,7 @@ pub struct Adapter {
 pub fn load_npcap() -> Result<(), String> {
     use windows_sys::Win32::System::LibraryLoader::{LoadLibraryW, SetDllDirectoryW};
     use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
-    static LOADED: OnceLock<Result<(), String>> = OnceLock::new();
+    static LOADED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
     LOADED
         .get_or_init(|| {
             let mut buf = [0u16; 512];
@@ -59,6 +57,80 @@ pub fn load_npcap() -> Result<(), String> {
             }
         })
         .clone()
+}
+
+/// True when Npcap was installed with "Restrict Npcap driver's access to
+/// Administrators only": then only an elevated process can send or capture.
+pub fn npcap_admin_only() -> bool {
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD,
+    };
+    let key: Vec<u16> = "SYSTEM\\CurrentControlSet\\Services\\npcap\\Parameters\0"
+        .encode_utf16()
+        .collect();
+    let name: Vec<u16> = "AdminOnly\0".encode_utf16().collect();
+    let mut value: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: NUL-terminated wide strings; a DWORD buffer of `size` bytes.
+    let r = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            &mut value as *mut u32 as *mut _,
+            &mut size,
+        )
+    };
+    r == 0 && value != 0
+}
+
+/// True when this process runs elevated (as administrator).
+pub fn is_elevated() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: the pseudo handle of this process; `token` receives a handle.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return false;
+    }
+    let mut e = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut len = 0u32;
+    // SAFETY: a TOKEN_ELEVATION buffer of the size given.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            &mut e as *mut TOKEN_ELEVATION as *mut _,
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        )
+    };
+    // SAFETY: the handle OpenProcessToken gave.
+    unsafe { CloseHandle(token) };
+    ok != 0 && e.TokenIsElevated != 0
+}
+
+/// True while process `pid` runs.
+pub fn process_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+    // SAFETY: plain calls; the handle is closed below.
+    unsafe {
+        let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let r = WaitForSingleObject(h, 0);
+        CloseHandle(h);
+        r == WAIT_TIMEOUT
+    }
 }
 
 /// Every network adapter Windows knows, with its name and MAC address.
@@ -202,6 +274,13 @@ mod tests {
         assert_eq!(resolve_in(&a, "Wi-Fi"), "Wi-Fi");
         assert_eq!(adapter_of(&a, dev).unwrap().friendly_name, "Ethernet 2");
         assert_eq!(guid_of("\\Device\\NPF_Loopback"), None);
+    }
+
+    #[test]
+    fn this_process_is_alive() {
+        assert!(process_alive(std::process::id()));
+        let _ = is_elevated();
+        let _ = npcap_admin_only();
     }
 
     #[test]

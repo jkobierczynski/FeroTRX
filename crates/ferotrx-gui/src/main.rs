@@ -11,15 +11,18 @@ use ferotrx_gui::{FeroApp, Options};
 /// FeroTRX GUI: build streams, send them through `ferotrx serve` servers,
 /// and watch the counters.
 ///
-/// Without --connect it connects to the servers of the last session (or
-/// offers 127.0.0.1:4510). FEROTRX_CTL, FEROTRX_CA, FEROTRX_CERT, FEROTRX_KEY
+/// Without --connect it shows the servers of the last session (or, the
+/// first time, "This computer": a server the GUI starts itself). FEROTRX_CTL, FEROTRX_CA, FEROTRX_CERT, FEROTRX_KEY
 /// and FEROTRX_TOKEN work as for `ferotrx ctl`.
 #[derive(Parser)]
 #[command(name = "ferotrx-gui", version)]
 struct Args {
     /// Server to connect to at start (host[:port], port 4510 by default).
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "local")]
     connect: Option<String>,
+    /// Start a server on this computer and connect to it ("This computer").
+    #[arg(long)]
+    local: bool,
     /// CA certificate (PEM) of the server: connect over TLS.
     #[arg(long, value_name = "FILE")]
     ca: Option<String>,
@@ -95,6 +98,8 @@ fn main() -> eframe::Result {
             s.token = t;
         }
         connect.push(s);
+    } else if args.local {
+        connect.push(ConnSettings::this_computer());
     } else if let Some(s) = env {
         connect.push(s);
     }

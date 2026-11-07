@@ -109,6 +109,30 @@ pub struct ServeArgs {
     /// Load this profile at start, under its file name (or NAME=PATH). Repeatable.
     #[arg(short, long = "profile", value_name = "[NAME=]PATH")]
     profiles: Vec<String>,
+
+    /// Write the address the server listens on (useful with port 0) to
+    /// this file once it listens, and stop when the file is removed. For
+    /// programs that start a server of their own, like the GUI.
+    #[arg(long, value_name = "FILE")]
+    port_file: Option<PathBuf>,
+
+    /// Stop when the process with this id ends (the program that started
+    /// the server).
+    #[arg(long, value_name = "PID")]
+    parent: Option<u32>,
+}
+
+impl ServeArgs {
+    /// The Windows service fills in its defaults (folders under ProgramData).
+    #[cfg(windows)]
+    pub fn data_dirs_mut(&mut self) -> &mut Vec<PathBuf> {
+        &mut self.data_dirs
+    }
+
+    #[cfg(windows)]
+    pub fn audit_log_mut(&mut self) -> &mut Option<PathBuf> {
+        &mut self.audit_log
+    }
 }
 
 fn env_or(arg: Option<String>, env: &str) -> Option<String> {
@@ -117,6 +141,24 @@ fn env_or(arg: Option<String>, env: &str) -> Option<String> {
 }
 
 pub fn cmd_serve(args: ServeArgs) -> Result<()> {
+    let server = start_server(args)?;
+    {
+        let controller = server.controller().clone();
+        ctrlc::set_handler(move || {
+            eprintln!("stopping runs");
+            controller.stop_all();
+            controller.lab_stop();
+            std::process::exit(0);
+        })
+        .context("cannot install Ctrl-C handler")?;
+    }
+    server.serve()?;
+    Ok(())
+}
+
+/// Builds the server `args` describe and binds its address, ready to
+/// [`Server::serve`]; `ferotrx serve` and the Windows service share it.
+pub fn start_server(args: ServeArgs) -> Result<Server> {
     let mut tokens = Vec::new();
     if let Some(t) = env_or(args.token, TOKEN_ENV) {
         tokens.push(Token::new("operator", Role::Operator, t));
@@ -206,16 +248,6 @@ pub fn cmd_serve(args: ServeArgs) -> Result<()> {
             );
         }
     }
-    {
-        let controller = server.controller().clone();
-        ctrlc::set_handler(move || {
-            eprintln!("stopping runs");
-            controller.stop_all();
-            controller.lab_stop();
-            std::process::exit(0);
-        })
-        .context("cannot install Ctrl-C handler")?;
-    }
     let mut notes = Vec::new();
     if tls_on {
         notes.push("TLS");
@@ -238,8 +270,49 @@ pub fn cmd_serve(args: ServeArgs) -> Result<()> {
         .map(|d| d.display().to_string())
         .collect();
     eprintln!("data directories: {}", dirs.join(", "));
-    server.serve()?;
-    Ok(())
+    if let Some(f) = &args.port_file {
+        // Write it whole, then rename, so a reader never sees half of it.
+        let tmp = f.with_extension("tmp");
+        std::fs::write(&tmp, format!("{addr}\n"))
+            .and_then(|_| std::fs::rename(&tmp, f))
+            .with_context(|| format!("cannot write {}", f.display()))?;
+    }
+    if args.port_file.is_some() || args.parent.is_some() {
+        watch_owner(
+            server.controller().clone(),
+            args.port_file.clone(),
+            args.parent,
+        );
+    }
+    Ok(server)
+}
+
+/// Stops the server when its port file is removed or its parent ends.
+fn watch_owner(
+    controller: std::sync::Arc<Controller>,
+    port_file: Option<PathBuf>,
+    parent: Option<u32>,
+) {
+    std::thread::Builder::new()
+        .name("owner".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(500));
+            let why = if port_file.as_ref().is_some_and(|f| !f.exists()) {
+                "the port file was removed"
+            } else if parent.is_some_and(|p| !ferotrx_io::process_alive(p)) {
+                "the program that started it ended"
+            } else {
+                continue;
+            };
+            eprintln!("stopping: {why}");
+            controller.stop_all();
+            controller.lab_stop();
+            if let Some(f) = &port_file {
+                let _ = std::fs::remove_file(f);
+            }
+            std::process::exit(0);
+        })
+        .expect("spawn owner thread");
 }
 
 #[derive(Args)]
