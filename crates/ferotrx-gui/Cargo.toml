@@ -24,11 +24,24 @@ egui_extras = "0.33"
 egui_plot = "0.34"
 egui-file-dialog = { version = "0.12", default-features = false }
 ron = "0.11"
+# The token of a server the GUI starts itself.
+ring.workspace = true
 
-# Explorer's file dialogs, and attaching to the console --help prints to.
+# Explorer's file dialogs, attaching to the console --help prints to, and
+# starting a local server as administrator (Npcap for administrators only).
 [target.'cfg(windows)'.dependencies]
 rfd = { version = "0.15", default-features = false }
-windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+ferotrx-io.workspace = true
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 # Icon, version information and manifest in ferotrx-gui.exe.
 [target.'cfg(windows)'.build-dependencies]

@@ -7,6 +7,8 @@ mod lab;
 mod latency;
 mod remote;
 mod scenario;
+#[cfg(windows)]
+mod service;
 mod tcp;
 mod udp;
 mod y1564;
@@ -103,6 +105,10 @@ enum Command {
     /// Make TLS certificates for `ferotrx serve` and `ferotrx ctl`: a small
     /// lab certificate authority, a server certificate and client certificates.
     Certs(remote::CertsArgs),
+    /// The control server as a Windows service: install, remove, start,
+    /// stop, status. Runs at boot as LocalSystem, without anyone logged in.
+    #[cfg(windows)]
+    Service(service::ServiceArgs),
     /// Build a lab router on this machine (Linux, root): a network namespace
     /// that routes and masquerades between VLAN 10 (clients, 192.168.10.0/24)
     /// and VLAN 20 (servers, 192.168.20.0/24), reached on the link ftrx-lab.
@@ -589,6 +595,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Serve(args) => remote::cmd_serve(args),
         Command::Ctl(args) => remote::cmd_ctl(args),
         Command::Certs(args) => remote::cmd_certs(args),
+        #[cfg(windows)]
+        Command::Service(args) => service::cmd_service(args),
         Command::Lab(args) => lab::cmd_lab(args),
     }
 }

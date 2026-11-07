@@ -124,6 +124,32 @@ pub struct ServeArgs {
     /// Load this profile at start, under its file name (or NAME=PATH). Repeatable.
     #[arg(short, long = "profile", value_name = "[NAME=]PATH")]
     profiles: Vec<String>,
+
+    /// Write the address the server listens on (useful with port 0) to
+    /// this file once it listens, and stop when the file is removed. For
+    /// programs that start a server of their own, like the GUI.
+    #[arg(long, value_name = "FILE")]
+    port_file: Option<PathBuf>,
+
+    /// Stop when the process with this id ends (the program that started
+    /// the server).
+    #[arg(long, value_name = "PID")]
+    parent: Option<u32>,
+}
+
+/// Parses `ferotrx serve` arguments (without `serve`), as the Windows
+/// service gets them.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn parse_serve_args(args: &[String]) -> Result<ServeArgs, clap::Error> {
+    #[derive(clap::Parser)]
+    #[command(name = "ferotrx serve")]
+    struct Serve {
+        #[command(flatten)]
+        args: ServeArgs,
+    }
+    use clap::Parser;
+    let all = std::iter::once("serve".to_string()).chain(args.iter().cloned());
+    Ok(Serve::try_parse_from(all)?.args)
 }
 
 fn env_or(arg: Option<String>, env: &str) -> Option<String> {
@@ -132,6 +158,24 @@ fn env_or(arg: Option<String>, env: &str) -> Option<String> {
 }
 
 pub fn cmd_serve(args: ServeArgs) -> Result<()> {
+    let server = start_server(args)?;
+    {
+        let controller = server.controller().clone();
+        ctrlc::set_handler(move || {
+            eprintln!("stopping runs");
+            controller.stop_all();
+            controller.lab_stop();
+            std::process::exit(0);
+        })
+        .context("cannot install Ctrl-C handler")?;
+    }
+    server.serve()?;
+    Ok(())
+}
+
+/// Builds the server `args` describe and binds its address, ready to
+/// [`Server::serve`]; `ferotrx serve` and the Windows service share it.
+pub fn start_server(args: ServeArgs) -> Result<Server> {
     let mut tokens = Vec::new();
     if let Some(t) = env_or(args.token, TOKEN_ENV) {
         tokens.push(Token::new("operator", Role::Operator, t));
@@ -225,16 +269,6 @@ pub fn cmd_serve(args: ServeArgs) -> Result<()> {
             );
         }
     }
-    {
-        let controller = server.controller().clone();
-        ctrlc::set_handler(move || {
-            eprintln!("stopping runs");
-            controller.stop_all();
-            controller.lab_stop();
-            std::process::exit(0);
-        })
-        .context("cannot install Ctrl-C handler")?;
-    }
     let mut notes = Vec::new();
     if tls_on {
         notes.push("TLS");
@@ -257,8 +291,49 @@ pub fn cmd_serve(args: ServeArgs) -> Result<()> {
         .map(|d| d.display().to_string())
         .collect();
     eprintln!("data directories: {}", dirs.join(", "));
-    server.serve()?;
-    Ok(())
+    if let Some(f) = &args.port_file {
+        // Write it whole, then rename, so a reader never sees half of it.
+        let tmp = f.with_extension("tmp");
+        std::fs::write(&tmp, format!("{addr}\n"))
+            .and_then(|_| std::fs::rename(&tmp, f))
+            .with_context(|| format!("cannot write {}", f.display()))?;
+    }
+    if args.port_file.is_some() || args.parent.is_some() {
+        watch_owner(
+            server.controller().clone(),
+            args.port_file.clone(),
+            args.parent,
+        );
+    }
+    Ok(server)
+}
+
+/// Stops the server when its port file is removed or its parent ends.
+fn watch_owner(
+    controller: std::sync::Arc<Controller>,
+    port_file: Option<PathBuf>,
+    parent: Option<u32>,
+) {
+    std::thread::Builder::new()
+        .name("owner".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(500));
+            let why = if port_file.as_ref().is_some_and(|f| !f.exists()) {
+                "the port file was removed"
+            } else if parent.is_some_and(|p| !ferotrx_io::process_alive(p)) {
+                "the program that started it ended"
+            } else {
+                continue;
+            };
+            eprintln!("stopping: {why}");
+            controller.stop_all();
+            controller.lab_stop();
+            if let Some(f) = &port_file {
+                let _ = std::fs::remove_file(f);
+            }
+            std::process::exit(0);
+        })
+        .expect("spawn owner thread");
 }
 
 #[derive(Args)]
@@ -1059,4 +1134,48 @@ pub fn cmd_certs(args: CertsArgs) -> Result<()> {
     }
     println!("Keep the *-key.pem files private; copy only ca.pem and a client's own pair to it.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serve_arguments_parse_on_their_own() {
+        let a = parse_serve_args(&[
+            "--listen".into(),
+            "127.0.0.1:0".into(),
+            "--port-file".into(),
+            "port".into(),
+            "--parent".into(),
+            "42".into(),
+        ])
+        .unwrap();
+        assert_eq!(a.listen, "127.0.0.1:0");
+        assert_eq!(a.parent, Some(42));
+        assert!(parse_serve_args(&["--bogus".into()]).is_err());
+    }
+
+    #[test]
+    fn a_server_writes_its_port_file() {
+        let dir = std::env::temp_dir().join(format!("ftrx-port-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("port");
+        let args = parse_serve_args(&[
+            "-l".into(),
+            "127.0.0.1:0".into(),
+            "--data-dir".into(),
+            dir.display().to_string(),
+            "--port-file".into(),
+            f.display().to_string(),
+        ])
+        .unwrap();
+        let server = start_server(args).unwrap();
+        let addr = server.local_addr().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap().trim(),
+            addr.to_string()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

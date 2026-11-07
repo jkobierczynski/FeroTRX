@@ -108,7 +108,11 @@ impl FeroApp {
     pub fn streams_tab(&mut self, ui: &mut egui::Ui) {
         let i = self.sel_server;
         let Some(port) = self.sel_port.clone() else {
-            welcome(ui, self.servers.get(i).map(|s| &s.status));
+            welcome(
+                ui,
+                self.servers.get(i).map(|s| &s.status),
+                self.servers.get(i).is_some_and(|s| s.settings.local),
+            );
             return;
         };
         if i >= self.servers.len() {
@@ -475,7 +479,7 @@ impl FeroApp {
     }
 }
 
-fn welcome(ui: &mut egui::Ui, status: Option<&Status>) {
+fn welcome(ui: &mut egui::Ui, status: Option<&Status>, local: bool) {
     ui.vertical_centered(|ui| {
         ui.add_space(40.0);
         ui.heading("Pick a port on the left");
@@ -483,6 +487,10 @@ fn welcome(ui: &mut egui::Ui, status: Option<&Status>) {
         match status {
             Some(Status::Connected) => {
                 ui.label("Each interface of the server is a port. “file” writes a pcap on the server, “null” only counts: both need no privileges.");
+            }
+            _ if local => {
+                ui.label("Click Start under “This computer”: the GUI starts a server on this computer and stops it when you stop it or close the GUI.");
+                ui.label("To send from another machine, add its server with Add server… (docs: remote control).");
             }
             _ => {
                 ui.label("Connect to a FeroTRX control server first. On the machine that sends:");

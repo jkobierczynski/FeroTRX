@@ -38,6 +38,16 @@ pub struct ConnSettings {
     pub server_name: String,
     #[serde(skip)]
     pub token: String,
+    /// A server the GUI starts on this computer ([`crate::local`]); `addr`
+    /// is then its name, "This computer".
+    pub local: bool,
+    /// The folders a local server lets the GUI use, one per line or
+    /// separated by `;`; empty: the home folder (and installed examples).
+    pub folders: String,
+    /// The port file of the local server just started: the worker reads
+    /// the address there.
+    #[serde(skip)]
+    pub launch: Option<std::path::PathBuf>,
 }
 
 impl Default for ConnSettings {
@@ -50,14 +60,30 @@ impl Default for ConnSettings {
             key: String::new(),
             server_name: String::new(),
             token: String::new(),
+            local: false,
+            folders: String::new(),
+            launch: None,
         }
     }
 }
 
 impl ConnSettings {
-    /// The address with the default port added when it has none.
+    /// A server the GUI starts on this computer.
+    pub fn this_computer() -> Self {
+        Self {
+            addr: crate::local::LOCAL_NAME.into(),
+            local: true,
+            ..Default::default()
+        }
+    }
+
+    /// The address with the default port added when it has none; a local
+    /// server's name as it is (its port changes from start to start).
     pub fn address(&self) -> String {
         let a = self.addr.trim();
+        if self.local {
+            return a.to_string();
+        }
         let has_port = match a.rsplit_once(':') {
             // `[::1]:4510` or `host:4510`; a bare IPv6 address has several colons.
             Some((h, p)) => p.parse::<u16>().is_ok() && (!h.contains(':') || h.ends_with(']')),
@@ -75,6 +101,9 @@ impl ConnSettings {
     /// True when the server runs on this computer (a loopback address), so
     /// paths on it can be picked with this computer's file dialog.
     pub fn is_local(&self) -> bool {
+        if self.local {
+            return true;
+        }
         let a = self.address();
         let host = a.rsplit_once(':').map(|(h, _)| h).unwrap_or(&a);
         let host = host.trim_start_matches('[').trim_end_matches(']');
@@ -99,11 +128,16 @@ impl ConnSettings {
             token: var("FEROTRX_TOKEN")
                 .or_else(|| var("FEROTRX_READ_TOKEN"))
                 .unwrap_or_default(),
+            ..Default::default()
         })
     }
 
     fn connect(&self) -> Result<Client, String> {
-        let addr = self.address();
+        let addr = match &self.launch {
+            // A local server may wait for a UAC prompt to be answered.
+            Some(f) => crate::local::wait_for_address(f, Duration::from_secs(60))?,
+            None => self.address(),
+        };
         let client = if self.tls {
             if self.ca.trim().is_empty() {
                 return Err("TLS needs the CA certificate that signed the server's".into());
@@ -371,5 +405,7 @@ mod tests {
         assert!(l("[::1]:4600"));
         assert!(!l("192.168.56.10"));
         assert!(!l("lab-vm:4510"));
+        assert!(ConnSettings::this_computer().is_local());
+        assert_eq!(ConnSettings::this_computer().address(), "This computer");
     }
 }

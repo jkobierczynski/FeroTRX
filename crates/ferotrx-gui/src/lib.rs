@@ -12,6 +12,7 @@
 //!
 //! * [`model`]: streams, ports and the profiles they become;
 //! * [`conn`]: a connection worker per server, polling run lists;
+//! * [`local`]: the server the GUI starts on this computer;
 //! * [`protocols`]: the protocol editor registry, where new protocols and
 //!   application layers plug in;
 //! * [`theme`]: themes (colours per mode, widget style, text sizes) and how
@@ -21,6 +22,7 @@ pub mod app;
 pub mod conn;
 pub mod files;
 pub mod fonts;
+pub mod local;
 pub mod model;
 pub mod packet_view;
 pub mod protocols;

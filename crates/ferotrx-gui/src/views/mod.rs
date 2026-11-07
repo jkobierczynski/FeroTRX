@@ -156,13 +156,18 @@ impl FeroApp {
                         if r.clicked() {
                             action = Some(PanelAction::SelectServer(i));
                         }
+                        let (connect, disconnect) = if s.settings.local {
+                            ("Start", "Stop")
+                        } else {
+                            ("Connect", "Disconnect")
+                        };
                         r.context_menu(|ui| {
                             if s.conn.is_some() {
-                                if ui.button("Disconnect").clicked() {
+                                if ui.button(disconnect).clicked() {
                                     action = Some(PanelAction::Disconnect(i));
                                     ui.close();
                                 }
-                            } else if ui.button("Connect").clicked() {
+                            } else if ui.button(connect).clicked() {
                                 action = Some(PanelAction::Connect(i));
                                 ui.close();
                             }
@@ -179,7 +184,14 @@ impl FeroApp {
                     .body(|ui| {
                         if s.status != Status::Connected {
                             ui.horizontal(|ui| {
-                                if s.conn.is_none() && ui.button("Connect").clicked() {
+                                let (label, tip) = if s.settings.local {
+                                    ("Start", "Start a server on this computer and connect to it; it stops when you stop it or close the GUI")
+                                } else {
+                                    ("Connect", "Connect to the server")
+                                };
+                                if s.conn.is_none()
+                                    && ui.button(label).on_hover_text(tip).clicked()
+                                {
                                     action = Some(PanelAction::Connect(i));
                                 }
                                 if ui.small_button("Edit…").clicked() {
@@ -207,6 +219,9 @@ impl FeroApp {
                                 .small()
                                 .weak(),
                             );
+                        }
+                        if let Some(hint) = s.local.as_ref().and_then(|l| l.hint.as_ref()) {
+                            ui.label(RichText::new(hint).small().color(ui.visuals().warn_fg_color));
                         }
                         for port in s.ports() {
                             let running = self.port_running(s, i, &port);
@@ -242,7 +257,7 @@ impl FeroApp {
                                 }
                             });
                         }
-                        if let Some(lab) = &s.lab {
+                        if let Some(lab) = s.lab.as_ref().filter(|_| s.lab_possible()) {
                             let (text, tip) = if lab.running {
                                 (
                                     "Lab router: running",
@@ -411,6 +426,33 @@ impl FeroApp {
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
+                    ui.checkbox(&mut s.local, "This computer: start a server here")
+                        .on_hover_text("The GUI starts ferotrx serve on this computer with a token of its own, and stops it when you stop it or close the GUI");
+                    if s.local {
+                        s.addr = crate::local::LOCAL_NAME.into();
+                        ui.label("Folders the server may use (one per line); empty: your home folder");
+                        ui.add(
+                            egui::TextEdit::multiline(&mut s.folders)
+                                .desired_rows(3)
+                                .desired_width(360.0)
+                                .hint_text(
+                                    crate::local::default_folders()
+                                        .iter()
+                                        .map(|p| p.display().to_string())
+                                        .collect::<Vec<_>>()
+                                        .join("\n"),
+                                ),
+                        );
+                        if crate::local::find_server().is_none() {
+                            ui.label(
+                                RichText::new("ferotrx is not next to the GUI or on PATH")
+                                    .color(ui.visuals().error_fg_color),
+                            );
+                        }
+                    } else if s.addr == crate::local::LOCAL_NAME {
+                        s.addr = ConnSettings::default().addr;
+                    }
+                    if !s.local {
                     egui::Grid::new("server-form").num_columns(2).show(ui, |ui| {
                         ui.label("Address");
                         ui.add(egui::TextEdit::singleline(&mut s.addr).hint_text("host:4510"));
@@ -452,8 +494,9 @@ impl FeroApp {
                             .small()
                             .weak(),
                     );
+                    }
                     ui.horizontal(|ui| {
-                        if ui.button("Connect").clicked() {
+                        if ui.button(if s.local { "Start" } else { "Connect" }).clicked() {
                             connect = Some(s.clone());
                             close = true;
                         }

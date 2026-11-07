@@ -10,6 +10,26 @@ pub fn hostname() -> Option<String> {
     info.hostname
 }
 
+/// True while process `pid` runs (a server started by the GUI watches the
+/// GUI with it).
+pub fn process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only checks that the process exists.
+        let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(windows)]
+    {
+        crate::windows::process_alive(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 /// Fills in the kernel, host name and CPU model of `info`, where the system
 /// tells them simply (Linux: `/proc`; macOS: `sysctl`; Windows: environment).
 pub fn describe_host(info: &mut RunInfo) {

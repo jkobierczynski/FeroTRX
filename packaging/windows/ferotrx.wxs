@@ -71,6 +71,9 @@
         <!-- ferotrx in any new terminal. -->
         <Environment Id="PathEntry" Name="PATH" Value="[INSTALLFOLDER]" Action="set"
                      Part="last" System="yes" Permanent="no" />
+        <!-- The service `ferotrx service install` adds: stopped while
+             ferotrx.exe is replaced, and removed with it. -->
+        <ServiceControl Id="FeroTRXService" Name="FeroTRX" Stop="both" Remove="uninstall" Wait="yes" />
       </Component>
       <Component Id="Readme">
         <File Id="ReadmeMd" Source="$(SrcDir)\README.md" KeyPath="yes" />

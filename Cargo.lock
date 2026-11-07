@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-cli"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1344,12 +1344,13 @@ dependencies = [
  "ferotrx-packet",
  "serde",
  "serde_json",
+ "windows-service",
  "winresource",
 ]
 
 [[package]]
 name = "ferotrx-core"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "ferotrx-packet",
  "pcap-file",
@@ -1364,7 +1365,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-ctl"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "base64 0.22.1",
  "ferotrx-core",
@@ -1381,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-gui"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "clap",
  "eframe",
@@ -1390,8 +1391,11 @@ dependencies = [
  "egui_plot",
  "ferotrx-core",
  "ferotrx-ctl",
+ "ferotrx-io",
  "ferotrx-packet",
+ "libc",
  "rfd",
+ "ring",
  "ron",
  "serde",
  "serde_json",
@@ -1402,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-io"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "cc",
  "ferotrx-core",
@@ -1414,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-packet"
-version = "0.35.0"
+version = "0.36.0"
 dependencies = [
  "ferotrx-core",
 ]
@@ -3083,7 +3087,7 @@ dependencies = [
  "errno 0.3.14",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4168,6 +4172,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4295,6 +4305,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56f42bd332cc6c8eac5af113fc0c1fd6a8fd2aa08a0119358686e5160d0586c6"
 dependencies = [
  "windows-link 0.1.3",
+]
+
+[[package]]
+name = "windows-service"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "857224b3b211c6f3616921f081ee54721ee3ad2ace2fac6a6337e032f7b4dcf2"
+dependencies = [
+ "bitflags 2.13.2",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
