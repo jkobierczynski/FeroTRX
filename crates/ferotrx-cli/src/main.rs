@@ -181,6 +181,9 @@ struct ReplayArgs {
 
     #[command(flatten)]
     common: CommonArgs,
+
+    #[command(flatten)]
+    capture: capture::RunCaptureArgs,
 }
 
 #[derive(Args)]
@@ -351,6 +354,9 @@ struct RunArgs {
 
     #[command(flatten)]
     common: CommonArgs,
+
+    #[command(flatten)]
+    capture: capture::RunCaptureArgs,
 }
 
 #[derive(Args)]
@@ -1084,8 +1090,12 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
         stream
     };
     let rx = args.rx.open()?;
+    let capture = args.capture.start(args.output.iface.as_deref())?;
     let (job, detail) = spawn_stream(make, &args.output, &args.send, linktype, &args.common, rx)?;
     let (stats, report) = watch(job, &args.common)?;
+    if let Some(c) = capture {
+        c.finish(args.common.quiet)?;
+    }
     print_line(done_label(&stats.total), &stats.total);
     if let Some(mut r) = report {
         r.print();
@@ -1149,6 +1159,7 @@ fn cmd_run(args: RunArgs) -> Result<()> {
         profile.output.workers = Some(w);
     }
     let rx = args.rx.open()?;
+    let capture = args.capture.start(args.output.iface.as_deref())?;
     // The same function starts `run.start` runs on the control server.
     let started =
         ferotrx_ctl::start_run_with_rx(&profile, &output, None, run_config(&args.common)?, rx)
@@ -1159,6 +1170,9 @@ fn cmd_run(args: RunArgs) -> Result<()> {
     let job = started.job;
     let names = job.stream_names().to_vec();
     let (stats, report) = watch(job, &args.common)?;
+    if let Some(c) = capture {
+        c.finish(args.common.quiet)?;
+    }
     for (name, st) in names.iter().zip(&stats.streams) {
         print_line(&format!("  {name}"), st);
     }

@@ -499,3 +499,94 @@ impl FrameSource for RemoteSource<'_> {
         self.done && self.queue.is_empty()
     }
 }
+
+/// `--capture` on runs: what the run's interface carries, both ways,
+/// written to a pcap while the run goes.
+#[derive(Args, Clone, Debug, Default)]
+pub struct RunCaptureArgs {
+    /// Capture on the run's interface while it goes (both directions) into
+    /// this pcap file. Frames sent through AF_XDP or DPDK skip the kernel's
+    /// taps and are not in it; the frames received are.
+    #[arg(long, value_name = "FILE")]
+    pub capture: Option<PathBuf>,
+
+    /// The interface for --capture, when it is not the run's.
+    #[arg(long, value_name = "IFACE", requires = "capture")]
+    pub capture_iface: Option<String>,
+
+    /// A BPF filter for --capture.
+    #[arg(long, value_name = "BPF", requires = "capture")]
+    pub capture_filter: Option<String>,
+}
+
+/// A capture running next to a run.
+pub struct RunCapture {
+    job: ferotrx_core::CaptureJob,
+    iface: String,
+}
+
+impl RunCaptureArgs {
+    /// Starts the capture, before the run starts.
+    pub fn start(&self, run_iface: Option<&str>) -> Result<Option<RunCapture>> {
+        let Some(path) = &self.capture else {
+            return Ok(None);
+        };
+        let Some(iface) = self.capture_iface.as_deref().or(run_iface) else {
+            bail!("--capture: give --capture-iface, this run has no single interface");
+        };
+        let options = CaptureOptions {
+            filter: self.capture_filter.clone(),
+            ..Default::default()
+        };
+        let source = ferotrx_io::open_capture(iface, &options)
+            .map_err(|e| anyhow::anyhow!("--capture: {e}"))?;
+        let files = CaptureFiles::create(
+            path,
+            source.linktype(),
+            source.snaplen(),
+            Rotate::Never,
+            None,
+        )
+        .with_context(|| format!("cannot write {}", path.display()))?;
+        let job = ferotrx_core::CaptureJob::spawn(
+            source,
+            ferotrx_core::CaptureJobConfig {
+                files: Some(files),
+                buffer_frames: 0,
+                buffer_bytes: 0,
+                ..Default::default()
+            },
+        )?;
+        Ok(Some(RunCapture {
+            job,
+            iface: iface.to_string(),
+        }))
+    }
+}
+
+impl RunCapture {
+    /// Stops the capture once the run has ended, after a moment for the
+    /// last frames, and says what it took.
+    pub fn finish(self, quiet: bool) -> Result<()> {
+        std::thread::sleep(Duration::from_millis(200));
+        self.job.stop();
+        self.job.wait(Some(Duration::from_secs(5)));
+        if let ferotrx_core::JobState::Failed(e) = self.job.state() {
+            bail!("the capture on {} failed: {e}", self.iface);
+        }
+        if !quiet {
+            let c = self.job.counters();
+            let file = self
+                .job
+                .files()
+                .first()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            eprintln!(
+                "captured {} frames on {} into {file} ({} dropped by the kernel)",
+                c.frames, self.iface, c.source.dropped
+            );
+        }
+        Ok(())
+    }
+}
