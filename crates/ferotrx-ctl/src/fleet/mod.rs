@@ -445,10 +445,15 @@ fn start_captures(plan: &FleetPlan, agents: &mut [Agent]) -> Result<Vec<Capturin
     let mut out: Vec<Capturing> = Vec::new();
     for c in &plan.captures {
         let a = agent_index(agents, &c.agent);
-        let file = plan
+        // With `/` whatever the controller's system: the agent may be another.
+        let mut parts: Vec<String> = plan
             .deploy_dir
-            .join("captures")
-            .join(format!("{}.pcap", c.name));
+            .components()
+            .map(|p| p.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        parts.push("captures".into());
+        parts.push(format!("{}.pcap", c.name));
+        let file = std::path::PathBuf::from(parts.join("/"));
         let got = agents[a].client.capture_start(&CaptureStartParams {
             iface: c.iface.clone(),
             filter: c.filter.clone(),
