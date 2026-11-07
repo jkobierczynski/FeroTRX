@@ -176,6 +176,15 @@ pub enum Request {
         params: Value,
         tag: u64,
     },
+    /// Send files into the server's data directory (`file.put`, skipping
+    /// those it has already), then call a method as [`Request::Call`].
+    UploadThenCall {
+        /// Path on the server (relative, with `/`), and the bytes.
+        uploads: Vec<(String, Vec<u8>)>,
+        method: String,
+        params: Value,
+        tag: u64,
+    },
     /// Poll the run lists now instead of at the next tick.
     Refresh,
     Disconnect,
@@ -296,7 +305,7 @@ fn worker(
             c
         }
         Err(e) => {
-            send(Event::Closed(e));
+            send(Event::Closed(explain(e, settings.tls)));
             return;
         }
     };
@@ -311,6 +320,38 @@ fn worker(
         };
         match req {
             Some(Request::Disconnect) => return,
+            Some(Request::UploadThenCall {
+                uploads,
+                method,
+                params,
+                tag,
+            }) => {
+                let mut failed = None;
+                for (path, data) in &uploads {
+                    if let Err(e) = client.upload(path, data) {
+                        if broken(&e) {
+                            send(Event::Closed(e.to_string()));
+                            return;
+                        }
+                        failed = Some(format!("sending {path} to the server: {e}"));
+                        break;
+                    }
+                }
+                let result = match failed {
+                    Some(e) => Err(e),
+                    None => match client.call_value(&method, params) {
+                        Err(e) if broken(&e) => {
+                            send(Event::Closed(e.to_string()));
+                            return;
+                        }
+                        r => r.map_err(|e| e.to_string()),
+                    },
+                };
+                if !send(Event::Reply { tag, result }) {
+                    return;
+                }
+                next_poll = Instant::now();
+            }
             Some(Request::Call {
                 method,
                 params,
@@ -347,6 +388,27 @@ fn worker(
             }
         }
     }
+}
+
+/// What a failed first exchange means when TLS is on at one end only:
+/// rustls reads a JSON answer as a corrupt record, and the client sees a
+/// TLS record where it expects JSON.
+pub fn explain(e: String, tls: bool) -> String {
+    let lower = e.to_ascii_lowercase();
+    if tls
+        && (lower.contains("invalidcontenttype")
+            || lower.contains("corrupt message")
+            || lower.contains("record overflow")
+            || lower.contains("invalid message"))
+    {
+        return format!(
+            "{e}: the server answered without TLS. It runs without TLS (as `ferotrx serve` and the Windows service do unless given --tls-cert): untick TLS for it (Edit…)"
+        );
+    }
+    if !tls && lower.contains("speaks tls") {
+        return "the server uses TLS: tick TLS for it (Edit…) and give the CA certificate that signed its certificate".into();
+    }
+    e
 }
 
 /// The connection is gone, as opposed to a call that failed.

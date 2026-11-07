@@ -65,6 +65,47 @@
             <Verb Id="open" Command="Open" TargetFile="GuiExe" Argument="&quot;%1&quot;" />
           </Extension>
         </ProgId>
+        <!-- Profiles open in the GUI, in the tab of their kind. -->
+        <ProgId Id="FeroTRX.Streams" Description="FeroTRX stream profile" Icon="GuiExe" IconIndex="0">
+          <Extension Id="ftstream" ContentType="application/x-ferotrx-ftstream">
+            <Verb Id="open" Command="Open" TargetFile="GuiExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+        <ProgId Id="FeroTRX.Tcp" Description="FeroTRX TCP profile" Icon="GuiExe" IconIndex="0">
+          <Extension Id="fttcp" ContentType="application/x-ferotrx-fttcp">
+            <Verb Id="open" Command="Open" TargetFile="GuiExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+        <ProgId Id="FeroTRX.Udp" Description="FeroTRX UDP profile" Icon="GuiExe" IconIndex="0">
+          <Extension Id="ftudp" ContentType="application/x-ferotrx-ftudp">
+            <Verb Id="open" Command="Open" TargetFile="GuiExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+        <ProgId Id="FeroTRX.Hosts" Description="FeroTRX host profile" Icon="GuiExe" IconIndex="0">
+          <Extension Id="fthost" ContentType="application/x-ferotrx-fthost">
+            <Verb Id="open" Command="Open" TargetFile="GuiExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+        <ProgId Id="FeroTRX.Scenario" Description="FeroTRX scenario" Icon="GuiExe" IconIndex="0">
+          <Extension Id="ftscenario" ContentType="application/x-ferotrx-ftscenario">
+            <Verb Id="open" Command="Open" TargetFile="GuiExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+        <ProgId Id="FeroTRX.Bench" Description="FeroTRX benchmark profile" Icon="GuiExe" IconIndex="0">
+          <Extension Id="ftbench" ContentType="application/x-ferotrx-ftbench">
+            <Verb Id="open" Command="Open" TargetFile="GuiExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+        <ProgId Id="FeroTRX.Y1564" Description="FeroTRX Y.1564 profile" Icon="GuiExe" IconIndex="0">
+          <Extension Id="fty1564" ContentType="application/x-ferotrx-fty1564">
+            <Verb Id="open" Command="Open" TargetFile="GuiExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+        <ProgId Id="FeroTRX.Fleet" Description="FeroTRX fleet plan" Icon="GuiExe" IconIndex="0">
+          <Extension Id="ftfleet" ContentType="application/x-ferotrx-ftfleet">
+            <Verb Id="open" Command="Open" TargetFile="GuiExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
       </Component>
       <Component Id="Cli">
         <File Id="CliExe" Source="$(BinDir)\ferotrx.exe" KeyPath="yes" />

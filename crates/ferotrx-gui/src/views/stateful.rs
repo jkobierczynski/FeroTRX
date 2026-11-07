@@ -58,13 +58,13 @@ enum Browse {
 }
 
 impl StatefulState {
-    /// `tcp.start` / `udp.start` parameters; reads the file when uploading.
-    /// A server on this computer (`local`) reads the relative paths of an
-    /// uploaded profile from the profile's own folder, as `ferotrx tcp` does.
-    pub fn params_for(&self, local: bool) -> Result<Value, String> {
+    /// `tcp.start` / `udp.start` parameters; reads the file when uploading,
+    /// and gives its folder ([`crate::app::LOCAL_DIR`]) for the files it
+    /// names, as `ferotrx tcp` reads them.
+    pub fn params_for(&self) -> Result<Value, String> {
         let mut p = self.params()?;
-        if local && self.upload {
-            p["base_dir"] = crate::files::folder_of(Path::new(self.path.trim())).into();
+        if self.upload {
+            p[crate::app::LOCAL_DIR] = crate::files::folder_of(Path::new(self.path.trim())).into();
         }
         Ok(p)
     }
@@ -271,7 +271,7 @@ impl FeroApp {
         }
         if start {
             let method = format!("{}.start", st.kind.method());
-            match st.params_for(local) {
+            match st.params_for() {
                 Ok(p) => {
                     let what = format!("{method} sent");
                     self.call(i, &method, p, Pending::Done(what));
@@ -288,7 +288,10 @@ impl FeroApp {
             self.files.pick(
                 crate::files::Target::StatefulProfile,
                 title,
-                crate::files::Kind::Profile,
+                crate::files::Kind::Of(match self.stateful.kind {
+                    Kind::Tcp => ferotrx_core::check::FileKind::Tcp,
+                    Kind::Udp => ferotrx_core::check::FileKind::Udp,
+                }),
                 &current,
             );
         }

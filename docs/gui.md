@@ -29,6 +29,10 @@ ferotrx-gui --connect 192.168.56.10 --ca ca.pem --cert alice.pem --key alice-key
 ferotrx-gui --port enp0s3 --profile examples/lab-two-vlans.toml
 ferotrx-gui examples/web.pcap
 
+# Any FeroTRX file opens in the tab of its kind (what double-clicking it
+# does on Windows):
+ferotrx-gui lab-tcp.fttcp
+
 # Open a workspace saved earlier (or give the file on its own, as Windows
 # does when you double-click one):
 ferotrx-gui --workspace lab.ferotrx
@@ -41,6 +45,80 @@ ferotrx-gui --theme lab-theme.toml
 `FEROTRX_TOKEN` work as for `ferotrx ctl`. Tokens are never saved; the rest
 (servers, every port's streams and settings, the forms of every tab, the
 last port open) is kept between sessions.
+
+## Where to start
+
+The **Start** tab (first in the top bar, shown when the GUI opens until you
+untick "Show this page when FeroTRX starts") walks through four steps, each
+ticked off as it is done:
+
+1. **Choose where traffic is sent from**: This computer (Start) or a server
+   elsewhere (Add another server…).
+2. **Pick a port** in the list on the left: an interface, or `null` and
+   `file` for a first try that needs nothing on the wire.
+3. **Choose what to do**: Send packets, TCP and UDP sessions, Application
+   traffic, Check a network or Measure a device each open an example from
+   your folder in its tab; **Open a file…** opens any FeroTRX file in the
+   tab of its kind.
+4. **Start it, and watch** Statistics, Charts and Log. Once something ran,
+   the page suggests a next step: a scenario to check it again, a
+   workspace to keep it.
+
+## Your folders and settings
+
+The GUI keeps your settings in a file of your own, never in a folder shared
+by every user:
+
+| System | Settings |
+| --- | --- |
+| Windows | `%APPDATA%\FeroTRX\settings.toml` |
+| macOS | `~/Library/Application Support/FeroTRX/settings.toml` |
+| Linux | `~/.config/ferotrx/settings.toml` (`$XDG_CONFIG_HOME`) |
+
+The window layout, the servers and the forms of the last session are kept
+by the window library (eframe) in its own data folder, on Windows
+`%APPDATA%\FeroTRX\data`. `FEROTRX_GUI_CONFIG` names another folder for
+`settings.toml`.
+
+**Settings…** (top right) sets three folders: **Profiles** (open and save
+dialogs for profiles, scenarios, workspaces and themes start there),
+**Captures** and **Reports**. They default to `Documents\FeroTRX`
+(`~/Documents/FeroTRX`, or `~/FeroTRX` without a Documents folder). A dialog
+starts in the folder of the path in its field, else where the last dialog of
+the same kind picked something, else in that folder.
+
+The first time (and once after each upgrade, for examples it adds) the GUI
+copies the examples that came with FeroTRX to the `examples` folder of
+Profiles, under the extensions of their kinds, so you can change and save
+them without administrator rights; files already there are never
+overwritten. **Copy the examples** in Settings does it again.
+
+## Kinds of files
+
+Every FeroTRX file is TOML inside, but each kind has an extension of its
+own, so a TCP profile is not mistaken for a scenario:
+
+| Kind | Extension | Opens in |
+| --- | --- | --- |
+| Stream profile | `.ftstream` | Streams |
+| TCP profile | `.fttcp` | Stateful (Applications when it has `app =`) |
+| UDP profile | `.ftudp` | Stateful (Applications when it has `app =`) |
+| Host profile | `.fthost` | (`ferotrx host`) |
+| Scenario | `.ftscenario` | Scenario |
+| Benchmark profile | `.ftbench` | Benchmark |
+| Y.1564 profile | `.fty1564` | Y.1564 |
+| Fleet plan | `.ftfleet` | (`ferotrx fleet`) |
+| Theme | `.fttheme` | Appearance |
+| Workspace | `.ferotrx` (JSON) | everything |
+
+`.toml` files are still read everywhere: their kind is found from what they
+hold, as `ferotrx check` does. Every tab's Open… lists its own kind (and
+`.toml`); a file of another kind picked there opens in its own tab instead
+("lab-tcp.toml: TCP profile, opened in the Stateful tab"). Save as…
+suggests the kind's extension. The Windows installer registers the
+extensions, so double-clicking a file opens it in the GUI, in its tab. The
+command line programs read any of them: `ferotrx check` takes the kind from
+the extension, else from what the file holds.
 
 ## This computer
 
@@ -188,10 +266,33 @@ as a VirtualBox NAT port forward to 127.0.0.1:4510) counts as elsewhere.
 
 Relative paths inside a profile start at the profile's own folder, as with
 `ferotrx run`: open `examples/lab-two-vlans.toml` and its `pcap = "dns.pcap"`
-means `examples/dns.pcap`. The GUI remembers that folder for each port and
-sends it with the streams when the server is on this computer (the folder
-must be inside the server's data directory). A capture picked with
-**Browse…** is written relative to that folder when it is inside it.
+means `examples/dns.pcap`. The GUI remembers that folder for each port. A
+capture picked with **Browse…** is written relative to that folder when it
+is inside it.
+
+**What a server gets.** Whenever the GUI sends a profile from this computer
+(streams, a Stateful or Applications run, a scenario, a group member), the
+files it names go with it:
+
+* [This computer](#this-computer), the server the GUI starts, reads them
+  where they are (it is given your folders).
+* Any other server (one elsewhere, a `ferotrx serve` you started, the
+  [Windows service](windows.md#the-windows-service)) gets them sent first,
+  into its data directory under `gui/<user>-<computer>/<folder>/`, keeping
+  their places relative to the profile (`../captures/a.pcap` still works);
+  files it already has, by SHA-256, are not sent again. A scenario takes its
+  profiles and the captures they replay along. The server must take files
+  (`--max-file`, on by default) and you need the operator role.
+
+So you never type a path on the server or copy files into
+`%ProgramData%` by hand; "Server folder" in the Scenario tab is only for
+captures that are already on the server.
+
+**TLS on one end only.** A server entry with TLS ticked for a server
+without TLS (as `ferotrx serve` and the Windows service run unless given
+`--tls-cert`) fails with "the server answered without TLS … untick TLS for
+it"; rustls alone calls this "received corrupt message of type
+InvalidContentType". The other way round says to tick TLS.
 
 The lines between the stream table and the editor, the layers and the
 packet view, the decode tree and the bytes, and the capture list and the
@@ -221,12 +322,12 @@ outcome (`complete`, `blocked`) and conditions on their counters.
   lab router; Save writes it back. Check reads it, and every profile it
   names, on this computer, as `ferotrx scenario show` does, and lists the
   checks; untick a check to leave it out of the run.
-* **Run it on the server.** "▶ Run on the server" sends the scenario. A
-  server on this computer reads the profiles from the scenario's folder; a
-  server elsewhere, or one on this computer that may not read that folder
-  (the Windows service, with its own data directory), gets them put into
-  the scenario (captures they replay are read on the server, from "Server
-  folder" or its data directory).
+* **Run it on the server.** "▶ Run on the server" sends the scenario.
+  This computer's server reads the profiles from the scenario's folder;
+  any other server gets the scenario's profiles and the captures they
+  replay sent first ([what a server gets](#files-and-paths)). With "Server
+  folder" filled in, the profiles go inside the scenario instead and the
+  captures are read there, on the server.
   Without the tick the server reads a scenario file of its own.
 * **Read the report.** Each check shows waiting, running with its live
   counters, then ✔, ✘ or ⚠ with its summary. Pick a check for its

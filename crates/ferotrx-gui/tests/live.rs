@@ -251,3 +251,114 @@ fn a_benchmark_runs_on_the_server_and_its_report_is_saved() {
         .contains("Throughput"));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A server on another computer has none of this computer's files: the
+/// GUI sends a profile's capture along, into the server's data directory,
+/// and the run finds it there (the http.pcap of lab-tcp, which a server
+/// started elsewhere could not read before).
+#[test]
+fn a_profiles_files_go_to_a_server_elsewhere() {
+    use ferotrx_ctl::FilePolicy;
+    let data = std::env::temp_dir().join(format!("ftrx-gui-ship-{}", std::process::id()));
+    std::fs::create_dir_all(&data).unwrap();
+    let ctl = Controller::new().with_file_policy(FilePolicy::dirs([&data]).unwrap());
+    let addr = Server::bind("127.0.0.1:0", ctl, None)
+        .unwrap()
+        .spawn()
+        .unwrap()
+        .to_string();
+    let mut app = app(&addr, "");
+    let i = app.servers.len() - 1;
+    until(&mut app, "connect", |a| {
+        a.servers[i].status == Status::Connected
+    });
+    let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let text = std::fs::read_to_string(examples.join("lab-tcp.toml")).unwrap();
+    let params = serde_json::json!({
+        "toml": text,
+        "iface": "nonexistent0",
+        ferotrx_gui::app::LOCAL_DIR: examples.canonicalize().unwrap().display().to_string(),
+    });
+    app.call(
+        i,
+        "tcp.start",
+        params,
+        ferotrx_gui::app::Pending::Done("tcp.start sent".into()),
+    );
+    until(&mut app, "the answer", |a| {
+        a.log.iter().any(|l| l.text.contains("tcp.start"))
+    });
+    let shipped = data
+        .join(ferotrx_gui::app::upload_root())
+        .join("examples/http.pcap");
+    assert!(
+        shipped.is_file(),
+        "{} missing; log: {:?}",
+        shipped.display(),
+        app.log
+    );
+    assert_eq!(
+        std::fs::read(&shipped).unwrap(),
+        std::fs::read(examples.join("http.pcap")).unwrap()
+    );
+    // Whatever the run did with the made-up interface, it did not miss the capture.
+    assert!(
+        !app.log.iter().any(|l| l.text.contains("http.pcap")),
+        "{:?}",
+        app.log
+    );
+    std::fs::remove_dir_all(&data).ok();
+}
+
+/// TLS ticked for a server without TLS, and the other way round: the error
+/// says which, instead of rustls' "corrupt message of type InvalidContentType".
+#[test]
+fn tls_and_plain_mixed_up_say_so() {
+    use ferotrx_ctl::{LabPki, Role, ServerConfig, ServerTls};
+    let dir = std::env::temp_dir().join(format!("ftrx-gui-tls-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let pki = LabPki::new(&dir);
+    pki.issue_server(&["127.0.0.1".into()]).unwrap();
+    pki.issue_client("me", Role::Operator).unwrap();
+
+    // TLS to a plain server.
+    let plain = server(None);
+    let mut app1 = app(&plain, "");
+    let i = app1.servers.len() - 1;
+    app1.servers[i].settings.tls = true;
+    app1.servers[i].settings.ca = pki.path("ca.pem").display().to_string();
+    app1.connect(i);
+    until(&mut app1, "failure", |a| {
+        matches!(a.servers[i].status, Status::Failed(_))
+    });
+    let Status::Failed(e) = &app1.servers[i].status else {
+        unreachable!()
+    };
+    assert!(e.contains("without TLS"), "{e}");
+
+    // Plain to a TLS server.
+    let tls = ServerTls::from_files(&pki.path("server.pem"), &pki.path("server-key.pem")).unwrap();
+    let addr = Server::with_config(
+        "127.0.0.1:0",
+        Controller::new(),
+        ServerConfig {
+            tls: Some(tls),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .spawn()
+    .unwrap()
+    .to_string();
+    let mut app2 = app(&addr, "");
+    let i = app2.servers.len() - 1;
+    until(&mut app2, "failure", |a| {
+        matches!(a.servers[i].status, Status::Failed(_))
+    });
+    let Status::Failed(e) = &app2.servers[i].status else {
+        unreachable!()
+    };
+    assert!(e.contains("tick TLS"), "{e}");
+    std::fs::remove_dir_all(&dir).ok();
+}

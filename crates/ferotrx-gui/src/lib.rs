@@ -15,6 +15,7 @@
 //! * [`local`]: the server the GUI starts on this computer;
 //! * [`protocols`]: the protocol editor registry, where new protocols and
 //!   application layers plug in;
+//! * [`settings`]: the user's settings file and default folders;
 //! * [`theme`]: themes (colours per mode, widget style, text sizes) and how
 //!   they become egui styles.
 
@@ -26,6 +27,7 @@ pub mod local;
 pub mod model;
 pub mod packet_view;
 pub mod protocols;
+pub mod settings;
 pub mod theme;
 pub mod views;
 pub mod workspace;

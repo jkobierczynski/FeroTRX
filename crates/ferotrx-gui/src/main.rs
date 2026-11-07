@@ -44,8 +44,10 @@ struct Args {
     /// A scenario to open in the Scenario tab.
     #[arg(long, value_name = "FILE")]
     scenario: Option<String>,
-    /// A capture to open in the Capture tab, or a workspace (*.ferotrx) to
-    /// open (how Windows opens workspace files with the GUI).
+    /// A file to open: a workspace (*.ferotrx), a profile or scenario
+    /// (*.ftstream, *.fttcp, *.ftudp, *.ftscenario, *.ftbench, *.fty1564,
+    /// *.toml) in the tab of its kind, else a capture (how Windows opens
+    /// these files with the GUI).
     file: Option<String>,
     /// A workspace file (*.ferotrx) to open: servers, streams, forms, layout.
     #[arg(short, long, value_name = "FILE")]
@@ -72,11 +74,15 @@ fn main() -> eframe::Result {
     #[cfg(windows)]
     attach_console();
     let mut args = Args::parse();
-    // A file given on its own: a workspace by its extension, else a capture.
+    // A file given on its own: a workspace or a profile by its extension,
+    // else a capture.
     let mut capture = args.file.take();
+    let mut open = None;
     if let Some(f) = capture.as_deref() {
         if f.to_ascii_lowercase().ends_with(".ferotrx") && args.workspace.is_none() {
             args.workspace = capture.take();
+        } else if ferotrx_core::check::FileKind::is_profile_path(std::path::Path::new(f)) {
+            open = capture.take();
         }
     }
     let mut connect = Vec::new();
@@ -111,6 +117,7 @@ fn main() -> eframe::Result {
         scenario: args.scenario,
         workspace: args.workspace,
         theme: args.theme,
+        open,
     };
     let native = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

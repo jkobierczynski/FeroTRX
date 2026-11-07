@@ -52,6 +52,75 @@ impl FileKind {
             FileKind::Fleet => "fleet",
         }
     }
+
+    /// Every kind, in the order a person meets them.
+    pub const ALL: [FileKind; 8] = [
+        FileKind::Traffic,
+        FileKind::Tcp,
+        FileKind::Udp,
+        FileKind::Hosts,
+        FileKind::Scenario,
+        FileKind::Bench,
+        FileKind::Y1564,
+        FileKind::Fleet,
+    ];
+
+    /// The file extension of this kind (without the dot). Every kind is
+    /// TOML inside; `.toml` files are read too, their kind found from what
+    /// they hold ([`detect_kind`]).
+    pub fn extension(self) -> &'static str {
+        match self {
+            FileKind::Traffic => "ftstream",
+            FileKind::Tcp => "fttcp",
+            FileKind::Udp => "ftudp",
+            FileKind::Hosts => "fthost",
+            FileKind::Bench => "ftbench",
+            FileKind::Y1564 => "fty1564",
+            FileKind::Scenario => "ftscenario",
+            FileKind::Fleet => "ftfleet",
+        }
+    }
+
+    /// What a person calls it: "TCP profile".
+    pub fn label(self) -> &'static str {
+        match self {
+            FileKind::Traffic => "stream profile",
+            FileKind::Tcp => "TCP profile",
+            FileKind::Udp => "UDP profile",
+            FileKind::Hosts => "host profile",
+            FileKind::Bench => "benchmark profile",
+            FileKind::Y1564 => "Y.1564 profile",
+            FileKind::Scenario => "scenario",
+            FileKind::Fleet => "fleet plan",
+        }
+    }
+
+    /// The kind a file's extension names; `None` for `.toml` and anything
+    /// else (look inside with [`detect_kind`]).
+    pub fn from_path(path: &Path) -> Option<FileKind> {
+        let ext = path.extension()?.to_str()?;
+        FileKind::ALL
+            .into_iter()
+            .find(|k| k.extension().eq_ignore_ascii_case(ext))
+    }
+
+    /// True for a file that may be a FeroTRX profile: `.toml` or one of
+    /// the kinds' own extensions.
+    pub fn is_profile_path(path: &Path) -> bool {
+        Self::from_path(path).is_some()
+            || path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("toml"))
+    }
+}
+
+/// The kind of a file: by its extension, else by what it holds.
+pub fn kind_of(path: &Path, text: &str) -> Result<FileKind> {
+    match FileKind::from_path(path) {
+        Some(k) => Ok(k),
+        None => detect_kind(text),
+    }
 }
 
 impl fmt::Display for FileKind {
@@ -170,7 +239,7 @@ pub fn detect_kind(text: &str) -> Result<FileKind> {
     Ok(FileKind::Tcp)
 }
 
-fn blank(text: &str) -> String {
+pub(crate) fn blank(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(i) = rest.find("${") {
@@ -202,7 +271,10 @@ pub fn check_file(
         .map_err(|e| Error::Profile(format!("cannot read {}: {e}", path.display())))?;
     let kind = match kind {
         Some(k) => k,
-        None => detect_kind(&text)?,
+        None => match FileKind::from_path(path) {
+            Some(k) => k,
+            None => detect_kind(&text)?,
+        },
     };
     if kind == FileKind::Scenario {
         let mut out = FileCheck {

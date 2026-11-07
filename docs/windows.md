@@ -117,8 +117,14 @@ either form.
 `ferotrx-gui.exe` is a window, not a console program. Started from a
 terminal, its `--help` and errors still print there. It uses Explorer's own
 file dialogs (set `FEROTRX_GUI_DIALOGS=egui` for the ones drawn in the
-window), and keeps its state, theme and window layout in
-`%APPDATA%\FeroTRX`.
+window), and keeps its settings (`settings.toml`: your folders), state,
+theme and window layout in `%APPDATA%\FeroTRX`. Your files go in
+`Documents\FeroTRX`, where the first start copies the examples (see
+[your folders](gui.md#your-folders-and-settings)); nothing you change needs
+`Program Files` or `ProgramData`. FeroTRX files open in the GUI when you
+double-click them, in the tab of their kind (`.ftstream`, `.fttcp`,
+`.ftudp`, `.ftscenario`, `.ftbench`, `.fty1564`, `.fthost`, `.ftfleet`; see
+[kinds of files](gui.md#kinds-of-files)).
 
 It draws with OpenGL, which needs a graphics driver: on a virtual machine
 or remote desktop without one, it may not start.
@@ -169,7 +175,7 @@ without starting it) and runs as LocalSystem. Its folder is
 
 | File | What |
 | --- | --- |
-| `data\` | The data directory, when `--data-dir` is not given: profiles, pcaps and output files clients name. |
+| `data\` | The data directory, when `--data-dir` is not given: profiles, pcaps and output files clients name. The GUI sends the files of the profiles it runs here itself (`data\gui\<user>-<computer>\`), so nobody needs to write to this folder by hand. |
 | `audit.log` | The audit log (logins, refusals, runs), when `--audit-log` is not given. |
 | `tokens.toml` | Tokens given with `--token` and `--read-token`, as SHA-256 only: a service's command line can be read by every user, so the tokens are not left on it. |
 | `service.log` | When the service started, stopped, and why it could not start. |

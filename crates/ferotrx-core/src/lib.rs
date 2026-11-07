@@ -99,6 +99,7 @@
 
 pub mod app;
 mod bench;
+pub mod bundle;
 mod capture;
 #[cfg(feature = "profile")]
 pub mod check;
