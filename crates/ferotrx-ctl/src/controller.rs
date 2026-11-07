@@ -16,6 +16,7 @@ use ferotrx_core::{
 use ferotrx_io::Output;
 
 use crate::bench::{open_bench_sinks, BenchJob, BenchRun, BenchSinkOpener};
+use crate::capture::{CaptureOpener, CaptureRun, MAX_CAPTURES};
 use crate::files::FilePolicy;
 use crate::protocol::*;
 use crate::scenario::{scenario_info, LabRunner, RunLists, ScenarioRun};
@@ -144,6 +145,11 @@ pub struct Controller {
     open_bench_sinks: Arc<BenchSinkOpener>,
     open_port: Arc<PortOpener>,
     open_receiver: Arc<ReceiverOpener>,
+    open_capture: Arc<CaptureOpener>,
+    captures: Mutex<BTreeMap<u64, Arc<CaptureRun>>>,
+    capture_abandoned_after: Duration,
+    /// The port the server listens on, left out of captures.
+    ctl_port: Option<u16>,
     /// Whether `lab.start` may build a lab, and the one running.
     lab_allowed: bool,
     lab: Mutex<Option<ferotrx_io::Lab>>,
@@ -190,6 +196,10 @@ impl Controller {
             open_bench_sinks: Arc::new(open_bench_sinks),
             open_port: Arc::new(ferotrx_io::open_port_with),
             open_receiver: Arc::new(ferotrx_io::open_receiver),
+            open_capture: Arc::new(ferotrx_io::open_capture),
+            captures: Mutex::default(),
+            capture_abandoned_after: crate::capture::ABANDONED_AFTER,
+            ctl_port: None,
             lab_allowed: false,
             lab: Mutex::default(),
         }
@@ -273,6 +283,40 @@ impl Controller {
         open: impl Fn(&str) -> Result<Box<dyn PacketReceiver>, SinkError> + Send + Sync + 'static,
     ) -> Self {
         self.open_receiver = Arc::new(open);
+        self
+    }
+
+    /// Opens the interfaces captures run on (`capture.start`) with `open`
+    /// instead of libpcap/Npcap, e.g. frames from memory in tests.
+    /// The port the control server listens on: captures leave TCP on it
+    /// out unless asked (`ctl_traffic`). [`Server`](crate::Server) sets it.
+    pub fn with_ctl_port(mut self, port: u16) -> Self {
+        self.ctl_port = Some(port);
+        self
+    }
+
+    pub(crate) fn set_ctl_port(&mut self, port: u16) {
+        self.ctl_port = Some(port);
+    }
+
+    /// How long a capture that only streams (no file) runs without a
+    /// client reading it (default [`crate::capture::ABANDONED_AFTER`]).
+    pub fn with_capture_abandoned_after(mut self, after: Duration) -> Self {
+        self.capture_abandoned_after = after;
+        self
+    }
+
+    pub fn with_capture_opener(
+        mut self,
+        open: impl Fn(
+                &str,
+                &ferotrx_core::CaptureOptions,
+            ) -> Result<Box<dyn ferotrx_core::FrameSource>, SinkError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.open_capture = Arc::new(open);
         self
     }
 
@@ -456,6 +500,28 @@ impl Controller {
                 let p: FileStatParams = parse(params)?;
                 to_value(self.files.stat(&p.path)?)
             }
+            "file.get" => to_value(self.file_get(parse(params)?)?),
+            "capture.start" => to_value(self.capture_start(parse(params)?)?),
+            "capture.get" => {
+                let p: RunId = parse(params)?;
+                to_value(self.capture(p.id)?.info())
+            }
+            "capture.list" => to_value(self.captures()),
+            "capture.read" => {
+                let p: CaptureReadParams = parse(params)?;
+                let wait = p.wait_ms.map(Duration::from_millis);
+                to_value(self.capture(p.id)?.read(p.after, p.max, wait))
+            }
+            "capture.stop" => {
+                let p: StopParams = parse(params)?;
+                to_value(self.capture_stop(p.id, p.wait)?)
+            }
+            "capture.remove" => {
+                let p: RunId = parse(params)?;
+                let info = self.capture_stop(p.id, true)?;
+                lock(&self.captures).remove(&p.id);
+                to_value(info)
+            }
             "lab.get" => to_value(self.lab_info()),
             "lab.start" => to_value(self.lab_start(parse(params)?)?),
             "lab.stop" => to_value(self.lab_stop()),
@@ -499,6 +565,145 @@ impl Controller {
             .decode(p.data.as_bytes())
             .map_err(|e| RpcError::invalid_params(format!("data is not base64: {e}")))?;
         self.files.put(&p.path, &data, p.offset)
+    }
+
+    /// Reads a piece of a file in the data directories (`file.get`), such
+    /// as a capture a client fetches.
+    pub fn file_get(&self, p: FileGetParams) -> Result<FileChunk, RpcError> {
+        use base64::Engine;
+        let length = p.length.unwrap_or(FILE_GET_PIECE).min(FILE_GET_PIECE);
+        let (data, size) = self.files.get(&p.path, p.offset, length)?;
+        let eof = p.offset + data.len() as u64 >= size;
+        Ok(FileChunk {
+            path: p.path,
+            offset: p.offset,
+            data: base64::engine::general_purpose::STANDARD.encode(&data),
+            size,
+            eof,
+        })
+    }
+
+    /// Starts a live capture (`capture.start`).
+    pub fn capture_start(&self, p: CaptureStartParams) -> Result<CaptureInfo, RpcError> {
+        let duration = p
+            .duration
+            .as_deref()
+            .map(parse_duration)
+            .transpose()
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let rotate = p
+            .rotate
+            .as_deref()
+            .map(str::parse::<ferotrx_core::Rotate>)
+            .transpose()
+            .map_err(RpcError::invalid_params)?;
+        if rotate.is_some() && p.file.is_none() {
+            return Err(RpcError::invalid_params("rotate needs a file"));
+        }
+        let running = lock(&self.captures)
+            .values()
+            .filter(|c| c.job.is_running())
+            .count();
+        if running >= MAX_CAPTURES {
+            return Err(RpcError::limit(format!(
+                "{running} captures are running, the most this server runs at once"
+            )));
+        }
+        let file = match &p.file {
+            Some(f) => {
+                self.files.make_folders(f)?;
+                Some(self.files.writable(f)?)
+            }
+            None => None,
+        };
+        let mut filter = p.filter.clone().filter(|f| !f.trim().is_empty());
+        if let (Some(port), false) = (self.ctl_port, p.ctl_traffic.unwrap_or(false)) {
+            filter = Some(ferotrx_core::live::without_tcp_port(
+                filter.as_deref(),
+                port,
+            ));
+        }
+        let options = ferotrx_core::CaptureOptions {
+            filter,
+            snaplen: p.snaplen.unwrap_or(ferotrx_core::live::DEFAULT_SNAPLEN),
+            promisc: p.promisc.unwrap_or(true),
+            direction: p.direction.unwrap_or_default(),
+            ..Default::default()
+        };
+        let source = (self.open_capture)(&p.iface, &options)
+            .map_err(|e| RpcError::failed(format!("cannot capture on {}: {e}", p.iface)))?;
+        let files = match &file {
+            Some(path) => Some(
+                ferotrx_core::CaptureFiles::create(
+                    path,
+                    source.linktype(),
+                    source.snaplen(),
+                    rotate.unwrap_or_default(),
+                    p.files,
+                )
+                .map_err(|e| RpcError::failed(format!("cannot write the capture: {e}")))?,
+            ),
+            None => None,
+        };
+        let stream = p.stream.unwrap_or(true);
+        let config = ferotrx_core::CaptureJobConfig {
+            count: p.count,
+            duration,
+            files,
+            buffer_frames: if stream { 20_000 } else { 0 },
+            buffer_bytes: if stream { 32 << 20 } else { 0 },
+            stop: None,
+        };
+        let job = ferotrx_core::CaptureJob::spawn(source, config).map_err(RpcError::failed)?;
+        let id = self.next_run.fetch_add(1, Ordering::Relaxed);
+        let run = Arc::new(CaptureRun {
+            id,
+            iface: p.iface,
+            // As the client gave it, without the control port.
+            filter: p.filter.filter(|f| !f.trim().is_empty()),
+            job,
+            stopped_by_request: Default::default(),
+            file: p.file,
+            started: ferotrx_core::unix_seconds(std::time::SystemTime::now()),
+            last_read: std::sync::Mutex::new(std::time::Instant::now()),
+            abandoned: Default::default(),
+        });
+        if stream && run.file.is_none() {
+            let watched = run.clone();
+            let after = self.capture_abandoned_after;
+            std::thread::Builder::new()
+                .name(format!("capture-{id}-readers"))
+                .spawn(move || watched.watch_readers(after))
+                .map_err(|e| RpcError::failed(e.to_string()))?;
+        }
+        let info = run.info();
+        lock(&self.captures).insert(id, run);
+        Ok(info)
+    }
+
+    /// Stops a capture. With `wait`, answers once it has ended (or after 10 s).
+    pub fn capture_stop(&self, id: u64, wait: bool) -> Result<CaptureInfo, RpcError> {
+        let run = self.capture(id)?;
+        if run.job.is_running() {
+            run.stopped_by_request.store(true, Ordering::Relaxed);
+        }
+        run.job.stop();
+        if wait {
+            run.job.wait(Some(STOP_TIMEOUT));
+        }
+        Ok(run.info())
+    }
+
+    pub fn captures(&self) -> Vec<CaptureInfo> {
+        let runs: Vec<Arc<CaptureRun>> = lock(&self.captures).values().cloned().collect();
+        runs.iter().map(|r| r.info()).collect()
+    }
+
+    pub(crate) fn capture(&self, id: u64) -> Result<Arc<CaptureRun>, RpcError> {
+        lock(&self.captures)
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| RpcError::not_found(format!("no capture {id}")))
     }
 
     pub fn interfaces(&self) -> Result<Vec<InterfaceEntry>, RpcError> {

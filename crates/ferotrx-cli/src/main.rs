@@ -1,4 +1,5 @@
 mod bench;
+mod capture;
 mod check;
 mod fleet;
 mod host;
@@ -45,6 +46,10 @@ enum Command {
     Inspect(InspectArgs),
     /// Build packets from a description of their layers; show, save or send them.
     Build(BuildArgs),
+    /// Capture on an interface with a BPF filter: show the frames decoded,
+    /// or write them as pcap to a file, a ring of files, or standard output
+    /// for Wireshark (`ferotrx capture -i eth0 -w - | wireshark -k -i -`).
+    Capture(capture::CaptureArgs),
     /// Stateful TCP: replay a TCP session from a capture as real connections,
     /// playing the client, the server or both (handshakes, sequence and
     /// acknowledgement tracking, retransmits), e.g. through a NAT router.
@@ -176,6 +181,9 @@ struct ReplayArgs {
 
     #[command(flatten)]
     common: CommonArgs,
+
+    #[command(flatten)]
+    capture: capture::RunCaptureArgs,
 }
 
 #[derive(Args)]
@@ -203,6 +211,11 @@ struct InspectArgs {
     /// Only list packets with problems (bad checksums, truncated headers).
     #[arg(long)]
     problems: bool,
+
+    /// Only packets a BPF filter takes, as tcpdump and Wireshark's capture
+    /// filters ('udp port 53', 'host 10.0.0.1'); numbers stay those of the file.
+    #[arg(short, long, value_name = "BPF")]
+    filter: Option<String>,
 
     /// Apply rewrites before decoding, to preview what `replay -r` would send.
     #[arg(short, long = "rewrite", value_name = "SPEC")]
@@ -341,6 +354,9 @@ struct RunArgs {
 
     #[command(flatten)]
     common: CommonArgs,
+
+    #[command(flatten)]
+    capture: capture::RunCaptureArgs,
 }
 
 #[derive(Args)]
@@ -580,6 +596,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Info { file } => cmd_info(&file),
         Command::Inspect(args) => cmd_inspect(args),
         Command::Build(args) => cmd_build(args),
+        Command::Capture(args) => capture::cmd_capture(args),
         Command::Tcp(args) => tcp::cmd_tcp(args),
         Command::Udp(args) => udp::cmd_udp(args),
         Command::Host(args) => host::cmd_host(args),
@@ -651,6 +668,7 @@ fn cmd_inspect(args: InspectArgs) -> Result<()> {
     }
     let first_ts = cap.packets.first().map_or(Duration::ZERO, |p| p.timestamp);
     let chosen = |n: usize| args.packets.iter().any(|r| (r.0..=r.1).contains(&n));
+    let taken = filter_packets(&cap, args.filter.as_deref())?;
     let detail_only = !args.packets.is_empty();
 
     let mut shown = 0usize;
@@ -662,8 +680,13 @@ fn cmd_inspect(args: InspectArgs) -> Result<()> {
             "No.", "Time", "Source", "Destination", "Protocol", "Len"
         );
     }
+    let mut matched = 0usize;
     for (i, p) in cap.packets.iter().enumerate() {
         let n = i + 1;
+        if !taken[i] {
+            continue;
+        }
+        matched += 1;
         let d = ferotrx_packet::decode(cap.linktype, &p.data);
         if !d.problems.is_empty() {
             with_problems += 1;
@@ -715,12 +738,30 @@ fn cmd_inspect(args: InspectArgs) -> Result<()> {
     }
     protocols.sort_by_key(|p| std::cmp::Reverse(p.1));
     let list: Vec<String> = protocols.iter().map(|(p, c)| format!("{p} {c}")).collect();
+    let of = match &args.filter {
+        Some(f) => format!(" of {} matched '{f}'", cap.len()),
+        None => String::new(),
+    };
     eprintln!(
-        "{} packets ({}), {with_problems} with problems",
-        cap.len(),
+        "{matched} packets{of} ({}), {with_problems} with problems",
         list.join(", ")
     );
     Ok(())
+}
+
+/// Which packets of a capture a BPF filter takes (all without one).
+fn filter_packets(cap: &Capture, filter: Option<&str>) -> Result<Vec<bool>> {
+    let Some(expr) = filter.filter(|f| !f.trim().is_empty()) else {
+        return Ok(vec![true; cap.len()]);
+    };
+    #[cfg(feature = "pcap")]
+    {
+        let f =
+            ferotrx_io::FrameFilter::new(cap.linktype, expr).map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(cap.packets.iter().map(|p| f.matches(&p.data)).collect())
+    }
+    #[cfg(not(feature = "pcap"))]
+    bail!("filter '{expr}': this build has no libpcap/Npcap support (feature `pcap`)")
 }
 
 /// Reads packet descriptions from a file: one per line, '#' comments, and a
@@ -1049,8 +1090,12 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
         stream
     };
     let rx = args.rx.open()?;
+    let capture = args.capture.start(args.output.iface.as_deref())?;
     let (job, detail) = spawn_stream(make, &args.output, &args.send, linktype, &args.common, rx)?;
     let (stats, report) = watch(job, &args.common)?;
+    if let Some(c) = capture {
+        c.finish(args.common.quiet)?;
+    }
     print_line(done_label(&stats.total), &stats.total);
     if let Some(mut r) = report {
         r.print();
@@ -1114,6 +1159,7 @@ fn cmd_run(args: RunArgs) -> Result<()> {
         profile.output.workers = Some(w);
     }
     let rx = args.rx.open()?;
+    let capture = args.capture.start(args.output.iface.as_deref())?;
     // The same function starts `run.start` runs on the control server.
     let started =
         ferotrx_ctl::start_run_with_rx(&profile, &output, None, run_config(&args.common)?, rx)
@@ -1124,6 +1170,9 @@ fn cmd_run(args: RunArgs) -> Result<()> {
     let job = started.job;
     let names = job.stream_names().to_vec();
     let (stats, report) = watch(job, &args.common)?;
+    if let Some(c) = capture {
+        c.finish(args.common.quiet)?;
+    }
     for (name, st) in names.iter().zip(&stats.streams) {
         print_line(&format!("  {name}"), st);
     }

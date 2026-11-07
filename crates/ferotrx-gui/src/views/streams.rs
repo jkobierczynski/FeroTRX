@@ -409,6 +409,9 @@ impl FeroApp {
                 self.capture.path = shown;
                 self.capture.open();
             }
+            Target::SaveCapture => {
+                self.capture.save(&path);
+            }
             Target::StatefulProfile => {
                 self.stateful.path = shown;
                 self.stateful.check = None;

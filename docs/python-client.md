@@ -215,6 +215,28 @@ first data directory. `start`, `tcp_start` and `udp_start` take
 `start_at`, Unix seconds by the server's clock; the run's `started_at` says
 when it began. [Fleets](fleet.md) do all this from one plan.
 
+## Captures and files
+
+```python
+cap = c.capture_start("enp0s8", filter="udp port 53", duration="30s")
+r = c.capture_read(cap.id, 0, wait=1.0)        # CaptureRead: frames, next, missed, more
+for f in r.frames:
+    print(f.n, f.ts_ns, len(f.bytes))
+
+cap = c.capture_start("enp0s8", filter="tcp port 80")
+with open("web.pcap", "wb") as out:            # or a pipe into Wireshark
+    c.capture_pcap(cap.id, out)                # until the capture ends
+c.capture_remove(cap.id)
+
+c.capture_start("enp0s8", file="caps/night.pcap", rotate="1G", files=8, stream=False)
+data = c.download("caps/night-00001.pcap")     # file_get in pieces, checked by SHA-256
+```
+
+`capture_start` takes the parameters of `capture.start`
+([remote control](remote-control.md#the-protocol)); `captures`,
+`capture_get`, `capture_stop` and `capture_remove` work as for runs. The
+asyncio client has the same methods. More in [capturing](capture.md).
+
 ## Errors
 
 | Exception | Code | When |

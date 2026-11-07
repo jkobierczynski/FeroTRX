@@ -28,6 +28,8 @@ pub enum Target {
     SaveProfile,
     /// A capture for the Capture tab.
     Capture,
+    /// Where to save the capture shown (a live one).
+    SaveCapture,
     /// The profile of a TCP or UDP run.
     StatefulProfile,
     /// The capture stream `n` of the selected port replays (on the server).

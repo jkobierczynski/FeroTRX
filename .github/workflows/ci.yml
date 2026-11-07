@@ -525,12 +525,24 @@ jobs:
 
       # Three agents (ferotrx serve) in namespaces, driven by `ferotrx fleet
       # run`: deployed, started together, counters added up; then one agent
-      # cut off, which must fail.
+      # cut off, which must fail. Captures on two agents are collected and
+      # merged (read back with tcpdump).
       - name: Fleet of agents started together (Linux)
         if: runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
+          sudo apt-get install -y tcpdump
           sudo SPREAD=200 scripts/fleet-netns.sh ./target/debug/ferotrx
+
+      # Live captures with BPF filters: to files, ring files, stdout into
+      # tcpdump (the way Wireshark reads it), on a remote agent over ctl,
+      # next to a run, and `inspect -f`.
+      - name: Capture with BPF filters (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo apt-get install -y tcpdump
+          sudo scripts/capture-netns.sh ./target/debug/ferotrx
 
       # A regression scenario (examples/scenario-nat.toml) against the NAT
       # router: web and DNS pass, TCP 8080 and NTP are blocked, a voice

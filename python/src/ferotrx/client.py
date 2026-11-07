@@ -14,6 +14,9 @@ from . import _wire
 from ._wire import Address, Call, PathLike
 from .errors import ConnectionClosed, NotFound, ProtocolError
 from .types import (
+    CaptureInfo,
+    CaptureRead,
+    FileChunk,
     FileInfo,
     InterfaceEntry,
     Notification,
@@ -318,6 +321,25 @@ class Client:
             self.file_put(path, piece, offset=offset)
             offset += len(piece)
         return True
+
+    def file_get(self, path: PathLike, *, offset: int = 0, length: int | None = None) -> FileChunk:
+        """A piece of a file in the server's data directory."""
+        return self._run(_wire.file_get(path, offset, length))
+
+    def download(self, path: PathLike) -> bytes:
+        """A whole file from the server's data directory (a capture, a
+        report), fetched in pieces and checked against its SHA-256."""
+        data = bytearray()
+        while True:
+            piece = self.file_get(path, offset=len(data))
+            chunk = piece.bytes
+            data += chunk
+            if piece.eof or not chunk:
+                break
+        stat = self.file_stat(path)
+        if stat.sha256 != _wire.sha256(bytes(data)):
+            raise ProtocolError(f"{path} changed while it was fetched; try again")
+        return bytes(data)
 
     # ----- profiles -----
 
@@ -626,6 +648,56 @@ class Client:
 
     def y1564_wait(self, id: int, timeout: float | None = None, poll: float = 0.5) -> Y1564RunInfo:
         return self._wait(self.y1564_get, id, timeout, poll)
+
+    # ----- capture.* -----
+
+    def capture_start(self, iface: str, **kw: Any) -> CaptureInfo:
+        """Captures on ``iface`` of the server. Keywords: ``filter`` (BPF),
+        ``snaplen``, ``promisc``, ``direction`` ("in", "out", "both"),
+        ``count``, ``duration`` ("30s"), ``file`` (a pcap in the data
+        directory), ``rotate`` ("100M", "5m"), ``files``, ``stream`` (keep
+        frames for :meth:`capture_read`, default True), ``ctl_traffic``
+        (keep the server's own control connections, default False: left
+        out)."""
+        return self._run(_wire.capture_start(iface, **kw))
+
+    def capture_read(
+        self, id: int, after: int = 0, *, max: int | None = None, wait: float | None = None
+    ) -> CaptureRead:
+        """Frames numbered after ``after``, waiting up to ``wait`` seconds
+        (at most 2) for one."""
+        wait_ms = None if wait is None else int(wait * 1000)
+        return self._run(_wire.capture_read(id, after, max, wait_ms))
+
+    def capture_get(self, id: int) -> CaptureInfo:
+        return self._run(_wire.capture_get(id))
+
+    def captures(self) -> list[CaptureInfo]:
+        return self._run(_wire.runs(CaptureInfo, "capture"))
+
+    def capture_stop(self, id: int, *, wait: bool = True) -> CaptureInfo:
+        return self._run(_wire.stop(CaptureInfo, "capture", id, wait))
+
+    def capture_remove(self, id: int) -> CaptureInfo:
+        return self._run(_wire.remove(CaptureInfo, "capture", id))
+
+    def capture_pcap(self, id: int, out: Any, *, wait: float = 0.5) -> int:
+        """Writes a capture's frames as a pcap stream to ``out`` (a binary
+        file, or a pipe such as Wireshark's standard input) until the
+        capture ends; returns the frames written."""
+        info = self.capture_get(id)
+        out.write(_wire.pcap_header(info.linktype, info.snaplen))
+        after = 0
+        n = 0
+        while True:
+            r = self.capture_read(id, after, wait=wait)
+            for f in r.frames:
+                out.write(_wire.pcap_record(f))
+                n += 1
+            out.flush()
+            after = r.next
+            if not r.more:
+                return n
 
     # ----- rx.* -----
 

@@ -243,7 +243,7 @@ next to the profiles it uses.
 | **Streams** tab | The selected port: Start, Stop and Check (load on the server without sending), Open…/Save… of profile files on this computer, the port settings, the stream table and the stream editor. |
 | **Stateful** tab | Start a TCP or UDP run from a profile, on the server or uploaded from here, with the usual overrides (rate, count, concurrency, duration, workers, backend). **Check** runs `ferotrx check` on a local file. |
 | **Applications** tab | Edit TCP and UDP profiles with forms for their application protocols (HTTP, HTTP/2, HTTP/3, DNS, NTP, MQTT, SSH, SIP/RTP, SMB, TLS), check and run them. See [application profiles](#application-profiles). |
-| **Capture** tab | Open a pcap or pcapng file on this computer: packet list, decode tree and hex. Tick packets (or select one) and **Make a stream** to edit them in the Streams tab. |
+| **Capture** tab | Open a pcap or pcapng file on this computer, or capture live on a server's interface with a BPF filter (see [live captures](#live-captures)): packet list, decode tree and hex. Tick packets (or select one) and **Make a stream** to edit them in the Streams tab. **Save…** writes the capture as pcap. |
 | **Scenario** tab | Write, check and run [scenarios](#scenarios), read their verdicts and compare two runs. |
 | **Benchmark** tab | RFC 2544 benchmarks run by the server, every trial as it ends. See [benchmarks](#benchmarks). |
 | **Multi-server** tab | Runs on several servers started and stopped together, with combined counters. See [several servers at once](#several-servers-at-once). |
@@ -514,6 +514,23 @@ system toolkit to install, quick to draw tables, trees, hex views and
 charts that change many times a second, and it builds with the rest of the
 workspace (`cargo build`). The control API stays the only way in, so the
 GUI can drive a server across the lab as easily as the local one.
+
+## Live captures
+
+The Capture tab's **Live** row captures on an interface of any connected
+server (or this computer's): pick the server and the interface, type a BPF
+filter (`udp port 53`, `host 10.0.0.1 and not arp`) and press **Start**.
+The frames come over the server's control connection and fill the packet
+list as they arrive, decoded as for a file; the status line shows frames,
+bytes, drops and frames missed when the connection could not keep up.
+**Stop** ends it, and the server removes it. A filter that does not compile
+shows libpcap's reason in the log.
+
+The server's own control connections are left out unless **Control
+traffic** is ticked. **Wireshark** also starts `wireshark -k -i -` and feeds it the same
+frames as pcap, live. Wireshark must be on the PATH (on Windows, add
+`C:\Program Files\Wireshark`). The GUI keeps the newest 200000 frames;
+**Save…** writes what it holds as pcap. More in [capturing](capture.md).
 
 ## Not done yet
 

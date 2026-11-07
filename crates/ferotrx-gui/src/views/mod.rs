@@ -17,7 +17,7 @@ use eframe::egui::{self, RichText};
 
 pub use apps::{app_section, AppsState, ProfileKind};
 pub use bench::BenchState;
-pub use capture::CaptureState;
+pub use capture::{CaptureState, LiveCapture, LiveForm, LIVE_MAX_FRAMES};
 pub use compare::{CompareForm, Side as CompareSide};
 pub use groups::{GroupsState, Member, MemberKind};
 pub use lab::LabForm;

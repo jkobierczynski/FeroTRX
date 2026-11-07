@@ -147,12 +147,25 @@ impl FilePolicy {
                 p.display()
             )));
         }
+        self.make_folders(p)?;
+        self.writable(p)
+    }
+
+    /// Makes the folders on the way to a relative path without `..` in the
+    /// first data directory, as `file.put` and captures that write files
+    /// need. Other paths are left as they are.
+    pub fn make_folders(&self, p: &Path) -> Result<(), RpcError> {
+        let plain =
+            !p.as_os_str().is_empty() && p.components().all(|c| matches!(c, Component::Normal(_)));
+        if !plain || self.is_none() {
+            return Ok(());
+        }
         let path = self.resolve(p);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| RpcError::failed(format!("cannot write {}: {e}", p.display())))?;
         }
-        self.writable(p)
+        Ok(())
     }
 
     /// Writes a piece of a file (`file.put`): offset 0 starts it afresh,
@@ -224,6 +237,34 @@ impl FilePolicy {
             size: data.len() as u64,
             sha256: Some(sha256_hex(&data)),
         })
+    }
+
+    /// A piece of a file (`file.get`): at most `length` bytes from
+    /// `offset`, and the file's size.
+    pub fn get(&self, p: &Path, offset: u64, length: u64) -> Result<(Vec<u8>, u64), RpcError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let path = self.readable(p)?;
+        let fail = |e: io::Error| RpcError::failed(format!("cannot read {}: {e}", p.display()));
+        let mut file = std::fs::File::open(&path).map_err(fail)?;
+        let meta = file.metadata().map_err(fail)?;
+        if !meta.is_file() {
+            return Err(RpcError::invalid_params(format!(
+                "{} is not a file",
+                p.display()
+            )));
+        }
+        let size = meta.len();
+        if offset > size {
+            return Err(RpcError::invalid_params(format!(
+                "{} is {size} bytes long; offset {offset} is beyond its end",
+                p.display()
+            )));
+        }
+        file.seek(SeekFrom::Start(offset)).map_err(fail)?;
+        let want = length.min(size - offset);
+        let mut data = Vec::with_capacity(want as usize);
+        file.take(want).read_to_end(&mut data).map_err(fail)?;
+        Ok((data, size))
     }
 
     /// A path as the client gave it, relative ones from the first directory.

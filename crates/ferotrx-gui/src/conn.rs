@@ -132,6 +132,16 @@ impl ConnSettings {
         })
     }
 
+    /// A connection of its own, logged in: for work that holds a
+    /// connection for a long time, such as a live capture.
+    pub fn open_client(&self) -> Result<Client, String> {
+        let mut c = self.connect()?;
+        if !self.token.is_empty() {
+            c.auth(&self.token).map_err(|e| format!("login: {e}"))?;
+        }
+        Ok(c)
+    }
+
     fn connect(&self) -> Result<Client, String> {
         let addr = match &self.launch {
             // A local server may wait for a UAC prompt to be answered.

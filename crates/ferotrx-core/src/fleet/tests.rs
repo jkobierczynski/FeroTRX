@@ -240,3 +240,59 @@ fn known_vars_only() {
     assert_eq!(substitute_known("${a}-${b}-${ a }", &vars), "1-${b}-1");
     assert_eq!(substitute_known("x ${a", &vars), "x ${a");
 }
+
+#[test]
+fn captures_on_the_agents() {
+    let d = lab("captures");
+    let dir = d.join("plans");
+    let base = "[[agent]]\nname = \"a\"\naddress = \"h:1\"\niface = \"e0\"\n\
+                [[agent]]\nname = \"b\"\naddress = \"h:2\"\n\
+                [[run]]\nagent = \"a\"\ntcp = \"plain.toml\"\n";
+    let plan = FleetPlan::from_toml(
+        &format!(
+            "{base}[[capture]]\nagent = \"a\"\nfilter = \"tcp port 80\"\nsnaplen = 128\n\
+                  [[capture]]\nagent = \"b\"\niface = \"Ethernet 2\"\n"
+        ),
+        &dir,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        plan.captures,
+        vec![
+            FleetCapture {
+                agent: "a".into(),
+                iface: "e0".into(),
+                filter: Some("tcp port 80".into()),
+                snaplen: Some(128),
+                name: "a-e0".into(),
+            },
+            FleetCapture {
+                agent: "b".into(),
+                iface: "Ethernet 2".into(),
+                filter: None,
+                snaplen: None,
+                name: "b-ethernet-2".into(),
+            },
+        ]
+    );
+    assert!(plan
+        .summary()
+        .iter()
+        .any(|l| l.contains("capture on e0 of a")));
+    let err = |t: &str| {
+        FleetPlan::from_toml(&format!("{base}{t}"), &dir, &[])
+            .unwrap_err()
+            .to_string()
+    };
+    // Every agent by default; b has no interface.
+    assert!(err("[[capture]]\n").contains("agent 'b' has no iface"));
+    assert!(err("[[capture]]\nagent = \"c\"\n").contains("no agent called 'c'"));
+    assert!(
+        err("[[capture]]\nagent = \"a\"\n[[capture]]\nagent = \"a\"\n")
+            .contains("two captures on e0")
+    );
+    let all =
+        FleetPlan::from_toml(&format!("{base}[[capture]]\niface = \"x\"\n"), &dir, &[]).unwrap();
+    assert_eq!(all.captures.len(), 2);
+}

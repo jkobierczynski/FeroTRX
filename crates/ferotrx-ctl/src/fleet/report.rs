@@ -40,6 +40,27 @@ pub struct DeployRecord {
     pub bytes_sent: u64,
 }
 
+/// A capture on one agent during the fleet run (`[[capture]]`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CaptureRecord {
+    pub agent: String,
+    pub iface: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    /// The pcap on the agent, relative to its data directory.
+    pub file: String,
+    pub frames: u64,
+    pub bytes: u64,
+    /// Frames the agent's kernel or interface dropped.
+    pub dropped: u64,
+    pub if_dropped: u64,
+    /// Where the controller saved it (`--collect`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collected: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// One run on one agent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstanceRecord {
@@ -121,6 +142,12 @@ pub struct FleetReport {
     pub samples: Vec<FleetSample>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// The captures on the agents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub captures: Vec<CaptureRecord>,
+    /// The captures merged into one pcapng (`--merge`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged: Option<String>,
 }
 
 /// The few metrics a line shows for a kind.
@@ -276,6 +303,29 @@ impl FleetReport {
             }
             for c in &self.conditions {
                 line(condition_line(c));
+            }
+        }
+        if !self.captures.is_empty() {
+            line(String::new());
+            line("Captures:".into());
+            for c in &self.captures {
+                let mut l = format!(
+                    "  {:<12} {:<10} {:>8} frames {:>12} bytes, {} dropped",
+                    c.agent,
+                    c.iface,
+                    c.frames,
+                    c.bytes,
+                    c.dropped + c.if_dropped
+                );
+                match (&c.collected, &c.error) {
+                    (_, Some(e)) => l.push_str(&format!("  error: {e}")),
+                    (Some(f), None) => l.push_str(&format!("  -> {f}")),
+                    (None, None) => l.push_str(&format!("  on the agent: {}", c.file)),
+                }
+                line(l);
+            }
+            if let Some(m) = &self.merged {
+                line(format!("  merged into {m}"));
             }
         }
         line(String::new());

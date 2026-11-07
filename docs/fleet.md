@@ -116,6 +116,34 @@ kind. A condition on a kind no run has fails.
 fills in every agent's copy of every profile, reads them all, and warns
 about absolute paths, which are not sent along.
 
+## Captures
+
+`[[capture]]` captures on agents for the length of the fleet run, with a
+[BPF filter](capture.md):
+
+```toml
+[[capture]]
+agents = ["east", "srv"]   # or agent = "srv"; default: every agent
+iface = "d0"               # required
+filter = "tcp port 80"     # optional
+snaplen = 128              # optional, bytes kept of each frame
+```
+
+The controller's connections to the agents are not in the captures (an
+agent leaves its control port out). Each capture starts before the runs and stops after them, into
+`deploy_dir/captures/AGENT-IFACE.pcap` on its agent. `fleet run --collect
+DIR` fetches them (`file.get`, checked by SHA-256) into `DIR/AGENT-IFACE.pcap`;
+`--merge FILE` also writes one pcapng with an interface per capture, named
+`agent:iface`, and every time stamp moved onto the controller's clock by
+that agent's offset, so frames from different agents sort into the order
+they happened (as well as the clocks were read). The report lists each
+capture with its frames, bytes, drops and where it was collected.
+
+```sh
+ferotrx fleet run plan.toml --collect caps --merge caps/all.pcapng
+wireshark caps/all.pcapng
+```
+
 ## What happens
 
 1. **Connect.** The controller logs in to every agent (token, or TLS with
@@ -171,6 +199,7 @@ means the latency figures of a run with `rx_agent` are off by that much.
 
 ```text
 ferotrx fleet run PLAN [--set NAME=VALUE]... [--duration TIME] [--report FILE] [--keep] [-q]
+                      [--collect DIR [--merge FILE]]
 ferotrx fleet check PLAN [--set NAME=VALUE]...
 ferotrx fleet deploy PLAN [--set NAME=VALUE]...
 ```
@@ -209,7 +238,9 @@ use the same calls ([remote control](remote-control.md)):
   of base64. The path must be relative, without `..`, and the file at most
   `--max-file` bytes (256M; 0 refuses files). `file.stat` gives a file's
   size and SHA-256. The audit log records how many bytes came, not the
-  bytes.
+  bytes. `file.get` reads a file back in pieces (captures, reports).
+* `capture.start` captures on the agent's interface into a file in its
+  data directory ([capturing](capture.md#on-a-remote-server)).
 
 In Rust these are `ferotrx_ctl::fleet` (`run_fleet`, `connect_all`,
 `deploy`) and `ferotrx_core::fleet::FleetPlan`. In Python they are
@@ -225,7 +256,9 @@ other. The script runs `examples/fleet/fleet.toml`: a web server on one
 agent, web clients on two, and a probe stream from one client agent to the
 server's agent. Everything must pass: 100 connections, the probe without
 loss, starts within `SPREAD` ms (100), the files on the agents, and nothing
-sent again by a second deploy. Then the script cuts one client agent off
+sent again by a second deploy. Captures on two agents (`tcp port 80`) are
+collected and merged, and tcpdump must read back every frame the agents
+counted. Then the script cuts one client agent off
 the LAN, and the fleet must fail on that agent's part. CI runs it.
 
 ```sh
@@ -236,6 +269,7 @@ sudo KEEP=/tmp/fleet scripts/fleet-netns.sh   # keep the reports and the agents'
 ## Not done
 
 * Agents do not find each other; the plan lists them.
+* Captures are collected after the run; there is no live, merged feed.
 * Runs of other kinds (benchmarks, Y.1564, scenarios, host emulation) are
   not in plans yet; each agent can run them on its own.
 * The controller talks to the agents one after the other. With hundreds

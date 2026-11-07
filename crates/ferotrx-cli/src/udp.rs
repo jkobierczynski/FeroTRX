@@ -148,6 +148,9 @@ pub struct UdpArgs {
     /// Print no progress lines, only the final summary.
     #[arg(short, long)]
     quiet: bool,
+
+    #[command(flatten)]
+    capture: crate::capture::RunCaptureArgs,
 }
 
 fn sessions(file: &PathBuf) -> Result<()> {
@@ -327,6 +330,12 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
         ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed))
             .context("cannot install Ctrl-C handler")?;
     }
+    let capture_iface = args
+        .iface
+        .clone()
+        .or_else(|| profile.client.as_ref().and_then(|h| h.iface.clone()))
+        .or_else(|| profile.server.as_ref().and_then(|h| h.iface.clone()));
+    let capture = args.capture.start(capture_iface.as_deref())?;
     let started = ferotrx_ctl::start_udp(
         &profile,
         args.iface.as_deref(),
@@ -394,6 +403,9 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
         }
     }
     let stats = job.join()?;
+    if let Some(c) = capture {
+        c.finish(args.quiet)?;
+    }
     print_summary(&stats);
     crate::host::print_hosts(&stats.hosts, "  ");
     let c = &stats.client;
