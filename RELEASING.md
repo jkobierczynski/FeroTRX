@@ -85,7 +85,16 @@ gh attestation verify ferotrx_0.38.0-1_amd64.deb --repo jkobierczynski/FeroTRX
 ```
 
 It prints the workflow, commit and tag that built the file, and fails for a
-file that was changed or built anywhere else. Without `gh`, compare the file
+file that was changed or built anywhere else.
+
+The Windows `.zip` and `.msi` are code signed after the release is published
+(see [signing a release](docs/windows.md#signing-a-release)), which changes
+them. Their attestation then comes from the **Attest signed Windows
+packages** workflow (`attest-signed.yml`), which checks the Authenticode
+signatures and `SHA256SUMS` first; the same `gh attestation verify` command
+passes and names that workflow. The unsigned originals keep their attestation
+from the release workflow. On Windows, **Properties**, **Digital Signatures**
+shows the signature itself. Without `gh`, compare the file
 with `SHA256SUMS` (`sha256sum -c SHA256SUMS --ignore-missing`); that shows it
 is the file on the release page, not who built it.
 

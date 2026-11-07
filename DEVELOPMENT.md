@@ -242,8 +242,9 @@ and M44 first, then M41 and M42, then M45 to M47.
       MSI installer, icon and version information, no console window,
       Explorer dialogs, Windows adapter names, Npcap loaded late with a
       clear message; the GUI's Appearance window (themes, colours, widget
-      style, text sizes); [docs/windows.md](docs/windows.md) (not done:
-      code signing)
+      style, text sizes); [docs/windows.md](docs/windows.md); releases are
+      signed afterwards on Jurgen's PC with `sign-release.ps1` (Certum
+      SimplySign; [docs/windows.md](docs/windows.md#signing-a-release))
 - [x] **M41, a local server built into the GUI (0.36.0)**, [#69](https://github.com/jkobierczynski/FeroTRX/issues/69):
       "This computer" started by the GUI, elevation only when Npcap needs
       it, `ferotrx serve` as a Windows service (`ferotrx service`); the
