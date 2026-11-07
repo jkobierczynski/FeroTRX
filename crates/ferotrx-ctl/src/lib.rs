@@ -99,7 +99,8 @@
 //!
 //! * **TLS** ([`ServerTls`], rustls): the server's certificate and key; the
 //!   client checks it against a CA ([`ClientTls`], [`Client::connect_tls`]).
-//!   Tokens then no longer travel in clear text.
+//!   Tokens then no longer travel in clear text; beyond loopback the server
+//!   refuses tokens without TLS unless `allow_cleartext_tokens` is set.
 //! * **Logins**: [`Token`]s sent with `auth`, or client certificates (mutual
 //!   TLS) from a CA given per role. With neither, every connection may do
 //!   everything, and the server refuses to listen on a non-loopback address
@@ -108,13 +109,18 @@
 //!   `interfaces.list`, the `*.get`, `*.list` and `*.stats` methods and
 //!   `stats.subscribe`; `operator` may also load profiles and start, stop and
 //!   remove runs. Anything else answers `FORBIDDEN` (-32004).
-//! * **Files** ([`FilePolicy`], set on the [`Controller`]): profiles, the
-//!   pcaps they name and pcap outputs only inside the data directories;
-//!   uploaded profiles size-limited.
-//! * **Limits**: connections at once, request size, idle and login timeouts,
-//!   a pause and in the end a closed connection after wrong tokens.
+//! * **Files** ([`FilePolicy`], set on the [`Controller`]): none by default;
+//!   with [`FilePolicy::dirs`], profiles, the pcaps they name and pcap
+//!   outputs only inside the data directories; uploaded profiles
+//!   size-limited. [`FilePolicy::unrestricted`] beyond loopback needs
+//!   `unrestricted_files`.
+//! * **Limits**: connections at once, and of those waiting to log in;
+//!   `stats` subscriptions per connection and in total; request size; idle
+//!   and login timeouts; a pause and in the end a closed connection after
+//!   wrong tokens, and wrong tokens per address and in total per minute.
 //! * **Audit log** ([`AuditLog`]): logins, refusals and every operator call,
-//!   as JSON lines.
+//!   as JSON lines; its health in `server.info`, and with `audit_required`
+//!   no changes while it cannot be written.
 //!
 //! [`LabPki`] makes the certificates for a lab (`ferotrx certs`). The
 //! threat model and deployment notes are in `docs/remote-control.md`.

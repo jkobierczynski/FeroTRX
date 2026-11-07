@@ -12,8 +12,11 @@ what each agent runs. `ferotrx fleet run` then does four things:
 * judges the plan's conditions on each part and on the sums.
 
 ```sh
-# on each agent (see remote-control.md for TLS and client certificates)
-ferotrx serve --listen 0.0.0.0:4510 --token "$FEROTRX_TOKEN" --data-dir /srv/ferotrx
+# on each agent: TLS (tokens are refused in clear text beyond loopback),
+# with a certificate from `ferotrx certs DIR --server lab-east` (see
+# remote-control.md for client certificates)
+ferotrx serve --listen 0.0.0.0:4510 --token "$FEROTRX_TOKEN" \
+    --tls-cert server.pem --tls-key server-key.pem --data-dir /srv/ferotrx
 
 # on the controller
 FEROTRX_TOKEN=... ferotrx fleet check examples/fleet/fleet.toml
@@ -40,7 +43,8 @@ server_ip = "10.98.0.80"
 [[agent]]
 name = "east"
 address = "10.99.0.11:4510"
-token_env = "FEROTRX_TOKEN"      # or token = "...", or TLS below
+token_env = "FEROTRX_TOKEN"      # or token = "..."; with TLS (below) beyond loopback
+ca = "lab-ca.pem"                # the CA of the agent's certificate
 iface = "enp0s8"                 # for runs that name none
 vars = { client_ip = "10.98.0.100" }   # this agent's ${client_ip}
 

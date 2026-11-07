@@ -15,6 +15,7 @@ from .errors import (
     FerotrxError,
     Forbidden,
     InvalidParams,
+    LimitExceeded,
     MethodNotFound,
     NotFound,
     ProtocolError,
@@ -23,6 +24,7 @@ from .errors import (
 )
 from .types import (
     AppCounters,
+    AuditHealth,
     Counters,
     DhcpLeaseInfo,
     DhcpServerInfo,
@@ -58,7 +60,7 @@ from .types import (
     Y1564RunInfo,
 )
 
-__version__ = "0.34.0"
+__version__ = "0.35.0"
 
 __all__ = [
     "__version__",
@@ -78,9 +80,11 @@ __all__ = [
     "NotFound",
     "Failed",
     "Forbidden",
+    "LimitExceeded",
     "Role",
     "RunState",
     "ServerInfo",
+    "AuditHealth",
     "InterfaceEntry",
     "StreamInfo",
     "ProfileInfo",

@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -29,12 +29,18 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_AUTH_FAILURES: u32 = 5;
 /// Pause after a wrong token, against guessing.
 const AUTH_FAILURE_DELAY: Duration = Duration::from_millis(500);
+/// The window wrong tokens are counted in, per address and in total.
+const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 
 /// How the control server lets clients in, and its limits.
 ///
 /// With no tokens and no client certificate authorities, every connection
 /// may do everything; the server then refuses to listen on anything but a
-/// loopback address unless `insecure` is set.
+/// loopback address unless `insecure` is set. Beyond loopback it also
+/// refuses tokens without TLS (they would travel in clear text) unless
+/// `allow_cleartext_tokens` is set, and a controller with
+/// [`FilePolicy::unrestricted`](crate::FilePolicy::unrestricted) unless
+/// `unrestricted_files` is set.
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     /// Tokens clients log in with (`auth`), each with its role.
@@ -43,6 +49,29 @@ pub struct ServerConfig {
     pub tls: Option<ServerTls>,
     /// Listen on a non-loopback address without any login.
     pub insecure: bool,
+    /// Accept tokens without TLS on a non-loopback address. Anyone who can
+    /// watch the network can then copy a token and log in with it; only for
+    /// an isolated lab network.
+    pub allow_cleartext_tokens: bool,
+    /// Listen on a non-loopback address although the controller lets
+    /// clients name any file the process can open.
+    pub unrestricted_files: bool,
+    /// `stats` subscriptions one connection may run at once.
+    pub max_subscriptions: usize,
+    /// `stats` subscriptions all connections together may run at once.
+    pub max_total_subscriptions: usize,
+    /// Connections that have not logged in yet, at once (when login is
+    /// required). They count towards `max_connections` too; this keeps
+    /// clients without a token from taking every slot.
+    pub max_unauthenticated: usize,
+    /// Wrong tokens one address may send in a minute, over all its
+    /// connections; after that its logins are refused unchecked until the
+    /// minute has passed.
+    pub max_login_failures_per_ip: u32,
+    /// Wrong tokens all addresses together may send in a minute.
+    pub max_login_failures: u32,
+    /// Refuse operator calls while the audit log cannot be written.
+    pub audit_required: bool,
     /// Connections open at once; more are turned away.
     pub max_connections: usize,
     /// Longest request line, in bytes.
@@ -63,10 +92,18 @@ impl Default for ServerConfig {
             tokens: Vec::new(),
             tls: None,
             insecure: false,
+            allow_cleartext_tokens: false,
+            unrestricted_files: false,
+            max_subscriptions: 16,
+            max_total_subscriptions: 256,
+            max_unauthenticated: 16,
+            max_login_failures_per_ip: 20,
+            max_login_failures: 200,
+            audit_required: false,
             max_connections: 64,
             max_request: MAX_LINE,
             idle_timeout: Some(Duration::from_secs(300)),
-            login_timeout: Duration::from_secs(30),
+            login_timeout: Duration::from_secs(10),
             audit: None,
         }
     }
@@ -98,7 +135,19 @@ struct Shared {
     idle_timeout: Option<Duration>,
     login_timeout: Duration,
     audit: Option<AuditLog>,
+    audit_required: bool,
+    max_subscriptions: usize,
+    max_total_subscriptions: usize,
+    max_unauthenticated: usize,
+    max_login_failures_per_ip: u32,
+    max_login_failures: u32,
     open: AtomicUsize,
+    /// Connections that have not logged in yet.
+    unauthenticated: AtomicUsize,
+    /// `stats` subscriptions running.
+    subscriptions: AtomicUsize,
+    /// Wrong tokens of the last minute, oldest first, by address.
+    failures: Mutex<VecDeque<(Instant, Option<IpAddr>)>>,
     next_conn: AtomicU64,
 }
 
@@ -108,11 +157,49 @@ impl Shared {
             log.record(event, m);
         }
     }
+
+    /// Why a token login from `ip` must be refused unchecked now, if it must.
+    fn throttled(&self, ip: Option<IpAddr>) -> Option<&'static str> {
+        let mut f = lock(&self.failures);
+        let now = Instant::now();
+        while f
+            .front()
+            .is_some_and(|(t, _)| now.duration_since(*t) >= FAILURE_WINDOW)
+        {
+            f.pop_front();
+        }
+        if f.len() >= self.max_login_failures as usize {
+            return Some("too many failed logins on this server; try again in a minute");
+        }
+        let from_here = f.iter().filter(|(_, a)| *a == ip).count();
+        (from_here >= self.max_login_failures_per_ip as usize)
+            .then_some("too many failed logins from this address; try again in a minute")
+    }
+
+    fn login_failed(&self, ip: Option<IpAddr>) {
+        lock(&self.failures).push_back((Instant::now(), ip));
+    }
+
+    /// Refuses a connection before it starts: the reason goes to the audit
+    /// log and, without TLS, to the client.
+    fn refuse(&self, stream: &TcpStream, peer: &str, reason: &str) {
+        self.audit("refused", json!({"peer": peer, "reason": reason}));
+        if self.tls.is_none() {
+            let err = RpcError::new(RpcError::FAILED, reason);
+            let mut s = stream;
+            let _ = s.set_write_timeout(Some(Duration::from_secs(1)));
+            if let Ok(mut line) = serde_json::to_vec(&Response::new(Value::Null, Err(err))) {
+                line.push(b'\n');
+                let _ = s.write_all(&line);
+            }
+        }
+    }
 }
 
 impl Server {
     /// Listens on `addr`. With a `token`, every connection must send `auth`
-    /// with it before anything but `server.info`, and may then do everything.
+    /// with it before anything but `server.info`, and may then do everything;
+    /// without TLS that works on loopback addresses only.
     /// See [`with_config`](Server::with_config) for roles, TLS and limits.
     pub fn bind(
         addr: impl ToSocketAddrs,
@@ -132,7 +219,10 @@ impl Server {
     /// Listens on `addr` with logins, TLS and limits from `config`.
     ///
     /// Fails with [`io::ErrorKind::PermissionDenied`] for a non-loopback
-    /// address when `config` has no way to log in and is not `insecure`.
+    /// address when `config` has no way to log in and is not `insecure`,
+    /// when it has tokens but no TLS and not `allow_cleartext_tokens`, or
+    /// when the controller's file policy is unrestricted and `config` is not
+    /// `unrestricted_files`.
     pub fn with_config(
         addr: impl ToSocketAddrs,
         mut controller: Controller,
@@ -141,14 +231,35 @@ impl Server {
         let login_required = config.login_required();
         let listener = TcpListener::bind(addr)?;
         let local = listener.local_addr()?;
-        if !local.ip().is_loopback() && !login_required && !config.insecure {
+        let remote = !local.ip().is_loopback();
+        let refuse = |why: String| Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
+        if remote && !login_required && !config.insecure {
+            return refuse(format!(
+                "refusing to listen on {local} without a token or client certificates: \
+                 anyone who reaches it could send traffic from this machine \
+                 (`ferotrx serve --insecure`, or ServerConfig::insecure, does it anyway)"
+            ));
+        }
+        let cleartext = remote && !config.tokens.is_empty() && config.tls.is_none();
+        if cleartext && !config.allow_cleartext_tokens {
+            return refuse(format!(
+                "refusing tokens without TLS on {local}: anyone who can watch the network \
+                 could copy a token and log in with it. Give --tls-cert and --tls-key \
+                 (`ferotrx certs` makes them), listen on 127.0.0.1, or, on an isolated lab \
+                 network, --allow-cleartext-token (ServerConfig::allow_cleartext_tokens)"
+            ));
+        }
+        if remote && controller.file_policy().is_unrestricted() && !config.unrestricted_files {
+            return refuse(format!(
+                "refusing to listen on {local} with an unrestricted file policy: clients \
+                 could read and write any file this process can. Give the controller \
+                 FilePolicy::dirs, or set ServerConfig::unrestricted_files"
+            ));
+        }
+        if config.audit_required && config.audit.is_none() {
             return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "refusing to listen on {local} without a token or client certificates: \
-                     anyone who reaches it could send traffic from this machine \
-                     (`ferotrx serve --insecure`, or ServerConfig::insecure, does it anyway)"
-                ),
+                io::ErrorKind::InvalidInput,
+                "audit_required needs an audit log",
             ));
         }
         let tls = config
@@ -158,21 +269,34 @@ impl Server {
             .transpose()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         controller.set_auth_required(login_required);
+        let shared = Arc::new(Shared {
+            tokens: config.tokens,
+            tls,
+            login_required,
+            max_connections: config.max_connections.max(1),
+            max_request: config.max_request.max(1024),
+            idle_timeout: config.idle_timeout,
+            login_timeout: config.login_timeout,
+            audit: config.audit,
+            audit_required: config.audit_required,
+            max_subscriptions: config.max_subscriptions,
+            max_total_subscriptions: config.max_total_subscriptions,
+            max_unauthenticated: config.max_unauthenticated.max(1),
+            max_login_failures_per_ip: config.max_login_failures_per_ip.max(1),
+            max_login_failures: config.max_login_failures.max(1),
+            open: AtomicUsize::new(0),
+            unauthenticated: AtomicUsize::new(0),
+            subscriptions: AtomicUsize::new(0),
+            failures: Mutex::default(),
+            next_conn: AtomicU64::new(1),
+        });
+        if cleartext {
+            shared.audit("cleartext_tokens", json!({"listen": local.to_string()}));
+        }
         Ok(Server {
             listener,
             controller: Arc::new(controller),
-            shared: Arc::new(Shared {
-                tokens: config.tokens,
-                tls,
-                login_required,
-                max_connections: config.max_connections.max(1),
-                max_request: config.max_request.max(1024),
-                idle_timeout: config.idle_timeout,
-                login_timeout: config.login_timeout,
-                audit: config.audit,
-                open: AtomicUsize::new(0),
-                next_conn: AtomicU64::new(1),
-            }),
+            shared,
         })
     }
 
@@ -205,20 +329,17 @@ impl Server {
             let shared = self.shared.clone();
             if shared.open.fetch_add(1, Ordering::SeqCst) >= shared.max_connections {
                 shared.open.fetch_sub(1, Ordering::SeqCst);
-                shared.audit(
-                    "refused",
-                    json!({"peer": peer, "reason": "too many connections"}),
-                );
-                if shared.tls.is_none() {
-                    let err = RpcError::new(RpcError::FAILED, "too many connections");
-                    let mut s = &stream;
-                    let _ = s.set_write_timeout(Some(Duration::from_secs(1)));
-                    if let Ok(mut line) = serde_json::to_vec(&Response::new(Value::Null, Err(err)))
-                    {
-                        line.push(b'\n');
-                        let _ = s.write_all(&line);
-                    }
-                }
+                shared.refuse(&stream, &peer, "too many connections");
+                continue;
+            }
+            let pending = shared.login_required;
+            if pending
+                && shared.unauthenticated.fetch_add(1, Ordering::SeqCst)
+                    >= shared.max_unauthenticated
+            {
+                shared.unauthenticated.fetch_sub(1, Ordering::SeqCst);
+                shared.open.fetch_sub(1, Ordering::SeqCst);
+                shared.refuse(&stream, &peer, "too many connections waiting to log in");
                 continue;
             }
             let controller = self.controller.clone();
@@ -226,12 +347,19 @@ impl Server {
                 .name("ferotrx-ctl-conn".into())
                 .spawn(move || {
                     let _guard = OpenGuard(shared.clone());
-                    if let Ok(c) = Connection::new(stream, peer, controller, shared) {
-                        c.run();
+                    match Connection::new(stream, peer, controller, shared.clone()) {
+                        Ok(c) => c.run(),
+                        Err(_) if pending => {
+                            shared.unauthenticated.fetch_sub(1, Ordering::SeqCst);
+                        }
+                        Err(_) => {}
                     }
                 });
             if spawned.is_err() {
                 self.shared.open.fetch_sub(1, Ordering::SeqCst);
+                if pending {
+                    self.shared.unauthenticated.fetch_sub(1, Ordering::SeqCst);
+                }
             }
         }
         Ok(())
@@ -413,6 +541,9 @@ fn is_timeout(e: &io::Error) -> bool {
 struct Connection {
     id: u64,
     peer: String,
+    peer_ip: Option<IpAddr>,
+    /// Counted in `Shared::unauthenticated` until the first login.
+    pending_login: bool,
     reader: BufReader<WireReader>,
     writer: Writer,
     controller: Arc<Controller>,
@@ -456,9 +587,12 @@ impl Connection {
         let writer = Arc::new(wire);
         let open = !shared.login_required;
         let now = Instant::now();
+        let peer_ip = stream.peer_addr().ok().map(|a| a.ip());
         Ok(Self {
             id: shared.next_conn.fetch_add(1, Ordering::Relaxed),
             peer,
+            peer_ip,
+            pending_login: !open,
             reader: BufReader::new(WireReader {
                 sock: stream,
                 wire: writer.clone(),
@@ -520,7 +654,10 @@ impl Connection {
             }
         };
         for cancel in self.subs.values() {
-            cancel.store(true, Ordering::Relaxed);
+            end_subscription(cancel, &self.shared);
+        }
+        if self.pending_login {
+            self.shared.unauthenticated.fetch_sub(1, Ordering::SeqCst);
         }
         self.writer.close();
         self.audit("disconnect", json!({"reason": reason}));
@@ -600,7 +737,32 @@ impl Connection {
         self.cert_login = Some((role, name.clone()));
         self.role = Some(role);
         self.user = Some(name);
+        self.logged_in();
         self.audit("login", json!({"by": "certificate", "cert_sha256": fp}));
+    }
+
+    /// The first login frees the connection's place among those waiting.
+    fn logged_in(&mut self) {
+        if self.pending_login {
+            self.pending_login = false;
+            self.shared.unauthenticated.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// With `audit_required`: why an operator call must be refused now.
+    fn audit_unavailable(&self, method: &str) -> Option<RpcError> {
+        let log = self.shared.audit.as_ref()?;
+        if !self.shared.audit_required || log.ok() {
+            return None;
+        }
+        // Try to write the refusal: if that works, the log is back.
+        self.audit("audit_refused", json!({"method": method}));
+        (!log.ok()).then(|| {
+            RpcError::forbidden(
+                "the audit log cannot be written, and this server refuses changes without it \
+                 (--audit-required)",
+            )
+        })
     }
 
     fn handle_line(&mut self, text: &str) -> io::Result<Next> {
@@ -666,6 +828,13 @@ impl Connection {
                     info.tls = self.shared.tls.is_some();
                     info.role = self.role;
                     info.user = self.user.clone();
+                    info.connections = Some(self.shared.open.load(Ordering::Relaxed));
+                    info.subscriptions = Some(self.shared.subscriptions.load(Ordering::Relaxed));
+                    info.audit = self.shared.audit.as_ref().map(|log| {
+                        let mut h = log.health();
+                        h.required = self.shared.audit_required;
+                        Box::new(h)
+                    });
                     to_value(info)
                 }
                 "stats.subscribe" => {
@@ -675,6 +844,12 @@ impl Connection {
                 }
                 "stats.unsubscribe" => self.unsubscribe(req.params),
                 method if need == Some(Role::Operator) => {
+                    if let Some(e) = self.audit_unavailable(method) {
+                        if let Some(id) = req.id {
+                            send(&self.writer, &Response::new(id, Err(e)))?;
+                        }
+                        return Ok(Next::Continue);
+                    }
                     let logged = audit_params(&req.params);
                     let r = self.controller.call(method, req.params);
                     if self.shared.audit.is_some() {
@@ -706,6 +881,10 @@ impl Connection {
         if !self.shared.login_required {
             return Ok(Value::Bool(true));
         }
+        if let Some(why) = self.shared.throttled(self.peer_ip) {
+            self.audit("login_throttled", json!({"reason": why}));
+            return Err(RpcError::limit(why));
+        }
         // Check every token, so the time taken does not tell which one is close.
         let mut found = None;
         for t in &self.shared.tokens {
@@ -717,6 +896,7 @@ impl Connection {
             Some(t) => {
                 self.role = Some(t.role);
                 self.user = Some(t.name.clone());
+                self.logged_in();
                 self.audit("login", json!({"by": "token"}));
                 Ok(Value::Bool(true))
             }
@@ -732,6 +912,7 @@ impl Connection {
                         self.user = None;
                     }
                 }
+                self.shared.login_failed(self.peer_ip);
                 self.audit("login_failed", json!({"by": "token"}));
                 Err(RpcError::new(RpcError::UNAUTHORIZED, "wrong token"))
             }
@@ -752,25 +933,51 @@ impl Connection {
             .interval_ms
             .map_or(DEFAULT_INTERVAL, Duration::from_millis)
             .max(MIN_INTERVAL);
+        // Subscriptions that ended by themselves (their run ended, or a write
+        // failed) no longer count.
+        self.subs.retain(|_, c| !c.load(Ordering::Relaxed));
+        if self.subs.len() >= self.shared.max_subscriptions {
+            let e = RpcError::limit(format!(
+                "this connection already runs {} stats subscriptions, the most it may",
+                self.subs.len()
+            ));
+            return reply(&self.writer, id, Err(e));
+        }
+        let total = &self.shared.subscriptions;
+        if total.fetch_add(1, Ordering::SeqCst) >= self.shared.max_total_subscriptions {
+            total.fetch_sub(1, Ordering::SeqCst);
+            let e = RpcError::limit("the server runs as many stats subscriptions as it may");
+            return reply(&self.writer, id, Err(e));
+        }
         let sub = self.next_sub;
         self.next_sub += 1;
         let cancel = Arc::new(AtomicBool::new(false));
         self.subs.insert(sub, cancel.clone());
-        reply(
+        if let Err(e) = reply(
             &self.writer,
             id,
             to_value(Subscription { subscription: sub }),
-        )?;
+        ) {
+            end_subscription(&cancel, &self.shared);
+            return Err(e);
+        }
 
         let writer = self.writer.clone();
         let controller = self.controller.clone();
-        std::thread::Builder::new()
+        let shared = self.shared.clone();
+        let spawned = std::thread::Builder::new()
             .name("ferotrx-ctl-stats".into())
             .spawn(move || {
                 publish(sub, p.id, interval, &cancel, &controller, &writer);
                 // Marks the subscription as over, for the idle timeout.
-                cancel.store(true, Ordering::Relaxed);
-            })?;
+                end_subscription(&cancel, &shared);
+            });
+        if let Err(e) = spawned {
+            if let Some(cancel) = self.subs.remove(&sub) {
+                end_subscription(&cancel, &self.shared);
+            }
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -778,7 +985,7 @@ impl Connection {
         let p: Subscription = parse(params)?;
         match self.subs.remove(&p.subscription) {
             Some(cancel) => {
-                cancel.store(true, Ordering::Relaxed);
+                end_subscription(&cancel, &self.shared);
                 Ok(Value::Bool(true))
             }
             None => Err(RpcError::not_found(format!(
@@ -786,6 +993,14 @@ impl Connection {
                 p.subscription
             ))),
         }
+    }
+}
+
+/// Ends a subscription: its publisher stops at its next check, and it stops
+/// counting towards the server's limit (once, whoever ends it first).
+fn end_subscription(cancel: &AtomicBool, shared: &Shared) {
+    if !cancel.swap(true, Ordering::SeqCst) {
+        shared.subscriptions.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

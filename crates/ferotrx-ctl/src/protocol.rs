@@ -111,6 +111,9 @@ impl RpcError {
     /// The connection may not do this: a read-only login calling a method
     /// that changes something, or a path outside the server's data directories.
     pub const FORBIDDEN: i64 = -32004;
+    /// A server limit was reached: too many `stats` subscriptions, or too
+    /// many wrong tokens from this address. Try again later.
+    pub const LIMIT: i64 = -32005;
 
     pub fn new(code: i64, message: impl Into<String>) -> Self {
         Self {
@@ -134,6 +137,10 @@ impl RpcError {
 
     pub fn forbidden(message: impl Into<String>) -> Self {
         Self::new(Self::FORBIDDEN, message)
+    }
+
+    pub fn limit(message: impl Into<String>) -> Self {
+        Self::new(Self::LIMIT, message)
     }
 }
 
@@ -191,6 +198,32 @@ pub struct ServerInfo {
     pub host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os: Option<String>,
+    /// Connections open on the server now (servers from 0.35.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<usize>,
+    /// `stats` subscriptions running on the server now, all connections
+    /// together (servers from 0.35.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscriptions: Option<usize>,
+    /// The audit log's health, when the server keeps one (servers from 0.35.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<Box<AuditHealth>>,
+}
+
+/// Whether the server's audit log is being written (`server.info`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AuditHealth {
+    /// False while the last write failed (a full disk, a removed file).
+    pub ok: bool,
+    /// Writes that failed since the server started.
+    pub failures: u64,
+    /// The last write error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// True when operator calls are refused while the log cannot be written
+    /// (`ferotrx serve --audit-required`).
+    #[serde(default)]
+    pub required: bool,
 }
 
 impl ServerInfo {

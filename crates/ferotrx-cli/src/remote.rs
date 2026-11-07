@@ -100,6 +100,21 @@ pub struct ServeArgs {
     #[arg(long)]
     insecure: bool,
 
+    /// Accept tokens without TLS on a non-loopback address. They travel in
+    /// clear text, so anyone who can watch the network can log in with
+    /// them: only for an isolated lab network.
+    #[arg(long)]
+    allow_cleartext_token: bool,
+
+    /// `stats` subscriptions one connection may run at once.
+    #[arg(long, value_name = "N", default_value_t = 16)]
+    max_subscriptions: usize,
+
+    /// Refuse operator calls (profile loads, run starts) while the audit log
+    /// cannot be written; read-only calls still work.
+    #[arg(long)]
+    audit_required: bool,
+
     /// Let operators build a lab router on this machine from the GUI or
     /// `ferotrx ctl` (`lab.start`: a network namespace routing VLAN 10 to
     /// VLAN 20 on the link ftrx-lab, see `ferotrx lab`). Linux, as root.
@@ -159,6 +174,9 @@ pub fn cmd_serve(args: ServeArgs) -> Result<()> {
         tokens,
         tls,
         insecure: args.insecure,
+        allow_cleartext_tokens: args.allow_cleartext_token,
+        max_subscriptions: args.max_subscriptions,
+        audit_required: args.audit_required,
         max_connections: args.max_connections,
         max_request: parse_size(&args.max_request)? as usize,
         idle_timeout: (idle > Duration::ZERO).then_some(idle),
@@ -202,7 +220,8 @@ pub fn cmd_serve(args: ServeArgs) -> Result<()> {
             eprintln!("warning: listening on {addr} without a token or client certificates (--insecure); anyone who can reach it can send traffic from this machine");
         } else if has_tokens && !tls_on {
             eprintln!(
-                "warning: tokens travel in clear text without TLS; give --tls-cert and --tls-key"
+                "warning: tokens travel in clear text without TLS (--allow-cleartext-token); \
+                 anyone who can watch the network can log in with them"
             );
         }
     }

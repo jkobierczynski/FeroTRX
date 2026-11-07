@@ -126,6 +126,14 @@ class Forbidden(RpcError):
     CODE = -32004
 
 
+class LimitExceeded(RpcError):
+    """A server limit was reached: too many ``stats`` subscriptions on this
+    connection or on the server, or too many wrong tokens from this address.
+    Try again later (servers from 0.35.0)."""
+
+    CODE = -32005
+
+
 _BY_CODE: dict[int, type[RpcError]] = {
     cls.CODE: cls
     for cls in (
@@ -138,5 +146,6 @@ _BY_CODE: dict[int, type[RpcError]] = {
         NotFound,
         Failed,
         Forbidden,
+        LimitExceeded,
     )
 }
