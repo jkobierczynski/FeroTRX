@@ -13,6 +13,10 @@ from typing import Any, Generic, TypeVar
 
 from .errors import ProtocolError, RpcError
 from .types import (
+    CapturedFrame,
+    CaptureInfo,
+    CaptureRead,
+    FileChunk,
     FileInfo,
     InterfaceEntry,
     Notification,
@@ -305,6 +309,74 @@ def file_put(path: PathLike, data: bytes, offset: int) -> Call[FileInfo]:
 
 def file_stat(path: PathLike) -> Call[FileInfo]:
     return Call("file.stat", {"path": _path(path)}, _record(FileInfo))
+
+
+def file_get(path: PathLike, offset: int, length: int | None) -> Call[FileChunk]:
+    return Call(
+        "file.get",
+        _drop_none(path=_path(path), offset=offset, length=length),
+        _record(FileChunk),
+    )
+
+
+def capture_start(
+    iface: str,
+    *,
+    filter: str | None = None,
+    snaplen: int | None = None,
+    promisc: bool | None = None,
+    direction: str | None = None,
+    count: int | None = None,
+    duration: str | None = None,
+    file: PathLike | None = None,
+    rotate: str | None = None,
+    files: int | None = None,
+    stream: bool | None = None,
+) -> Call[CaptureInfo]:
+    params: dict[str, Any] = {"iface": iface}
+    for k, v in (
+        ("filter", filter),
+        ("snaplen", snaplen),
+        ("promisc", promisc),
+        ("direction", direction),
+        ("count", count),
+        ("duration", duration),
+        ("file", _path(file)),
+        ("rotate", rotate),
+        ("files", files),
+        ("stream", stream),
+    ):
+        if v is not None:
+            params[k] = v
+    return Call("capture.start", params, _record(CaptureInfo))
+
+
+def capture_get(id: int) -> Call[CaptureInfo]:
+    return Call("capture.get", {"id": id}, _record(CaptureInfo))
+
+
+def capture_read(id: int, after: int, max: int | None, wait_ms: int | None) -> Call[CaptureRead]:
+    return Call(
+        "capture.read",
+        _drop_none(id=id, after=after, max=max, wait_ms=wait_ms),
+        _record(CaptureRead),
+    )
+
+
+def pcap_header(linktype: int, snaplen: int) -> bytes:
+    """The header of a classic pcap file with nanosecond time stamps."""
+    import struct
+
+    return struct.pack("<IHHiIII", 0xA1B23C4D, 2, 4, 0, 0, snaplen or 262144, linktype)
+
+
+def pcap_record(frame: CapturedFrame) -> bytes:
+    """One frame of ``capture_read`` as a pcap record (nanoseconds)."""
+    import struct
+
+    data = frame.bytes
+    sec, ns = divmod(frame.ts_ns, 1_000_000_000)
+    return struct.pack("<IIII", sec, ns, len(data), max(frame.len, len(data))) + data
 
 
 def sha256(data: bytes) -> str:

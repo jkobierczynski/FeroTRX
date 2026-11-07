@@ -15,6 +15,9 @@
 //! * [`PcapReceiver`] receives on an interface with the kernel's timestamps,
 //!   to measure loss and latency (`ferotrx_core::RxStats`); [`open_receiver`]
 //!   opens one.
+//! * [`open_capture`] captures on an interface with a BPF filter, as a
+//!   `ferotrx_core::FrameSource`; [`FrameFilter`] applies a BPF filter to
+//!   frames already captured.
 //! * [`Output`] names one of these (or [`NullSink`]) and opens it; the CLI and
 //!   the control server both choose outputs this way. Which interface sender is
 //!   used is a [`Backend`], chosen with [`SendSettings`].
@@ -40,11 +43,15 @@ pub use xdp::{XdpPort, XdpPortConfig};
 #[cfg(feature = "dpdk")]
 mod dpdk;
 
+mod capture;
 mod host;
 mod lab;
 mod port;
 #[cfg(windows)]
 pub mod windows;
+pub use capture::{check_filter, open_capture};
+#[cfg(feature = "pcap")]
+pub use capture::{FrameFilter, LiveCapture};
 #[cfg(feature = "dpdk")]
 pub use dpdk::{DpdkConfig, DpdkPort, DpdkSink};
 pub use host::{describe_host, describe_interface, hostname, process_alive};

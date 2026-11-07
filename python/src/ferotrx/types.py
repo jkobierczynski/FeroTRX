@@ -234,6 +234,89 @@ class FileInfo(Record):
 
 
 @dataclass(kw_only=True)
+class FileChunk(Record):
+    """A piece of a file on the server, as ``file_get`` returns it."""
+
+    path: str = ""
+    offset: int = 0
+    #: The bytes, in base64; :attr:`bytes` decodes them.
+    data: str = ""
+    #: The file's whole size.
+    size: int = 0
+    eof: bool = False
+
+    @property
+    def bytes(self) -> bytes:
+        import base64
+
+        return base64.b64decode(self.data)
+
+
+@dataclass(kw_only=True)
+class CaptureInfo(Record):
+    """A live capture on the server (``capture.*``)."""
+
+    id: int = 0
+    iface: str = ""
+    filter: str | None = None
+    #: Link type of the frames (1 = Ethernet).
+    linktype: int = 1
+    snaplen: int = 0
+    state: RunState = RunState.RUNNING
+    error: str | None = None
+    frames: int = 0
+    bytes: int = 0
+    #: What libpcap/Npcap counted.
+    received: int = 0
+    dropped: int = 0
+    if_dropped: int = 0
+    elapsed: float = 0.0
+    #: The pcap files written, in the server's data directory.
+    files: list[str] = field(default_factory=list)
+    #: When it started, Unix seconds by the server's clock.
+    started: float | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.state == RunState.RUNNING
+
+
+@dataclass(kw_only=True)
+class CapturedFrame(Record):
+    """One frame of ``capture_read``."""
+
+    #: Its number in the capture, from 1.
+    n: int = 0
+    #: When it was taken, nanoseconds since the Unix epoch (server's clock).
+    ts_ns: int = 0
+    #: Length on the wire; :attr:`bytes` may be shorter (the snap length).
+    len: int = 0
+    data: str = ""
+
+    @property
+    def bytes(self) -> bytes:
+        import base64
+
+        return base64.b64decode(self.data)
+
+
+@dataclass(kw_only=True)
+class CaptureRead(Record):
+    """Frames read from a capture."""
+
+    id: int = 0
+    linktype: int = 1
+    snaplen: int = 0
+    frames: list[CapturedFrame] = field(default_factory=list)
+    #: Give this as ``after`` next time.
+    next: int = 0
+    #: Frames that left the server's buffer before they were read.
+    missed: int = 0
+    #: False once the capture ended and every frame was read.
+    more: bool = True
+
+
+@dataclass(kw_only=True)
 class InterfaceEntry(Record):
     """One interface the server can send on."""
 

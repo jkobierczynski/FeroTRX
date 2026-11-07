@@ -226,6 +226,34 @@ impl FilePolicy {
         })
     }
 
+    /// A piece of a file (`file.get`): at most `length` bytes from
+    /// `offset`, and the file's size.
+    pub fn get(&self, p: &Path, offset: u64, length: u64) -> Result<(Vec<u8>, u64), RpcError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let path = self.readable(p)?;
+        let fail = |e: io::Error| RpcError::failed(format!("cannot read {}: {e}", p.display()));
+        let mut file = std::fs::File::open(&path).map_err(fail)?;
+        let meta = file.metadata().map_err(fail)?;
+        if !meta.is_file() {
+            return Err(RpcError::invalid_params(format!(
+                "{} is not a file",
+                p.display()
+            )));
+        }
+        let size = meta.len();
+        if offset > size {
+            return Err(RpcError::invalid_params(format!(
+                "{} is {size} bytes long; offset {offset} is beyond its end",
+                p.display()
+            )));
+        }
+        file.seek(SeekFrom::Start(offset)).map_err(fail)?;
+        let want = length.min(size - offset);
+        let mut data = Vec::with_capacity(want as usize);
+        file.take(want).read_to_end(&mut data).map_err(fail)?;
+        Ok((data, size))
+    }
+
     /// A path as the client gave it, relative ones from the first directory.
     fn resolve(&self, p: &Path) -> PathBuf {
         match &self.dirs {

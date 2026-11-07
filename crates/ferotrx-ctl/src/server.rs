@@ -852,7 +852,9 @@ impl Connection {
                     }
                     let logged = audit_params(&req.params);
                     let r = self.controller.call(method, req.params);
-                    if self.shared.audit.is_some() {
+                    // Reading frames is polled many times a second: the
+                    // capture's start, stop and files are what the log keeps.
+                    if self.shared.audit.is_some() && method != "capture.read" {
                         let mut extra =
                             json!({"method": method, "params": logged, "ok": r.is_ok()});
                         match &r {

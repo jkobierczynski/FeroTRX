@@ -7,8 +7,9 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use ferotrx_core::{parse_duration, parse_size, Profile};
 use ferotrx_ctl::protocol::{
-    Counters, LoadProfileParams, OutputSpec, ProfileInfo, RunInfo, RunState, RxRunInfo, RxSpec,
-    RxStartParams, StartParams, TcpStartParams, UdpStartParams, DEFAULT_PORT,
+    CaptureInfo, CaptureStartParams, Counters, LoadProfileParams, OutputSpec, ProfileInfo, RunInfo,
+    RunState, RxRunInfo, RxSpec, RxStartParams, StartParams, TcpStartParams, UdpStartParams,
+    DEFAULT_PORT,
 };
 use ferotrx_ctl::{
     AuditLog, Client, ClientTls, Controller, FilePolicy, LabPki, Role, Server, ServerConfig,
@@ -503,6 +504,61 @@ enum CtlCommand {
     RxStats { id: Option<u64> },
     /// Stop a receiver and show its final counters.
     RxStop { id: u64 },
+    /// Capture on an interface of the server with a BPF filter, and show
+    /// the frames here or write them as pcap to a local file or standard
+    /// output: `ferotrx ctl -c HOST capture -i eth1 -w - udp | wireshark -k -i -`.
+    /// The capture ends with Ctrl-C, -c or -d, and is removed from the server.
+    Capture {
+        #[command(flatten)]
+        capture: crate::capture::CaptureArgs,
+        /// Also write the capture on the server, to this file in its data
+        /// directory, and keep it there.
+        #[arg(long, value_name = "PATH")]
+        save: Option<PathBuf>,
+    },
+    /// Start a capture on the server that writes a pcap file (or a ring of
+    /// them) in its data directory, and return at once; `captures` shows it,
+    /// `capture-stop` ends it and `fetch` copies its files here.
+    CaptureStart {
+        /// The interface of the server.
+        #[arg(short, long)]
+        interface: String,
+        /// A BPF filter.
+        #[arg(short, long, value_name = "BPF")]
+        filter: Option<String>,
+        /// The file in the server's data directory.
+        #[arg(short, long, value_name = "PATH")]
+        write: PathBuf,
+        /// New file at this size (100M) or after this long (5m).
+        #[arg(long, value_name = "SIZE|TIME")]
+        rotate: Option<String>,
+        /// With --rotate: keep the newest N files.
+        #[arg(long, value_name = "N")]
+        files: Option<usize>,
+        /// Stop after this many frames.
+        #[arg(short = 'c', long)]
+        count: Option<u64>,
+        /// Stop after this long, e.g. 10m.
+        #[arg(short, long)]
+        duration: Option<String>,
+        /// Bytes kept of each frame.
+        #[arg(short, long)]
+        snaplen: Option<u32>,
+    },
+    /// List the server's captures.
+    Captures,
+    /// Stop a capture on the server and show its counters.
+    CaptureStop { id: u64 },
+    /// Copy a file from the server's data directory here (a capture, a
+    /// report), checked by SHA-256.
+    Fetch {
+        /// The file on the server.
+        path: PathBuf,
+        /// Where to write it (default: its file name, here; `-` for
+        /// standard output).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     /// Call any method with JSON parameters and print the JSON result.
     Call {
         method: String,
@@ -937,6 +993,72 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
             }
             print_rx_run(&r);
         }
+        CtlCommand::Capture { capture, save } => {
+            return remote_capture(&mut c, capture, save);
+        }
+        CtlCommand::CaptureStart {
+            interface,
+            filter,
+            write,
+            rotate,
+            files,
+            count,
+            duration,
+            snaplen,
+        } => {
+            let i = c.capture_start(&CaptureStartParams {
+                iface: interface,
+                filter,
+                snaplen,
+                count,
+                duration,
+                file: Some(write),
+                rotate,
+                files,
+                stream: Some(false),
+                ..Default::default()
+            })?;
+            if json {
+                return print_json(&i);
+            }
+            println!("started capture {} on {}", i.id, i.iface);
+        }
+        CtlCommand::Captures => {
+            let list = c.captures()?;
+            if json {
+                return print_json(&list);
+            }
+            if list.is_empty() {
+                println!("no captures");
+            }
+            for i in &list {
+                print_capture(i);
+            }
+        }
+        CtlCommand::CaptureStop { id } => {
+            let i = c.capture_stop(id)?;
+            if json {
+                return print_json(&i);
+            }
+            print_capture(&i);
+        }
+        CtlCommand::Fetch { path, output } => {
+            let data = c.download(&path)?;
+            match output.as_deref() {
+                Some(p) if p == std::path::Path::new("-") => {
+                    use std::io::Write;
+                    std::io::stdout().write_all(&data)?;
+                }
+                _ => {
+                    let out = output.unwrap_or_else(|| {
+                        PathBuf::from(path.file_name().unwrap_or(path.as_os_str()))
+                    });
+                    std::fs::write(&out, &data)
+                        .with_context(|| format!("cannot write {}", out.display()))?;
+                    eprintln!("{} bytes to {}", data.len(), out.display());
+                }
+            }
+        }
         CtlCommand::Call { method, params } => {
             let params: Value = match params {
                 Some(p) => serde_json::from_str(&p).context("params are not valid JSON")?,
@@ -1178,4 +1300,69 @@ mod tests {
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+fn print_capture(i: &CaptureInfo) {
+    let filter = i
+        .filter
+        .as_deref()
+        .map_or(String::new(), |f| format!(" '{f}'"));
+    println!(
+        "capture {} on {}{filter}: {:?}, {} frames ({} bytes) in {:.1} s, {} dropped by the kernel, {} by the interface",
+        i.id, i.iface, i.state, i.frames, i.bytes, i.elapsed, i.dropped, i.if_dropped
+    );
+    if let Some(e) = &i.error {
+        println!("  error: {e}");
+    }
+    for f in &i.files {
+        println!("  {}", f.display());
+    }
+}
+
+/// `ferotrx ctl capture`: a capture on the server, its frames shown or
+/// written here.
+fn remote_capture(
+    c: &mut Client,
+    args: crate::capture::CaptureArgs,
+    save: Option<PathBuf>,
+) -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let options = args.options();
+    let info = c.capture_start(&CaptureStartParams {
+        iface: args.interface.clone(),
+        filter: options.filter.clone(),
+        snaplen: Some(options.snaplen),
+        promisc: Some(options.promisc),
+        direction: Some(options.direction),
+        count: args.count,
+        duration: args.duration.map(|d| format!("{}ms", d.as_millis())),
+        file: save.clone(),
+        ..Default::default()
+    })?;
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = stop.clone();
+        ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed))
+            .context("cannot catch Ctrl-C")?;
+    }
+    let mut source = crate::capture::RemoteSource::new(c, &info);
+    let result = crate::capture::capture(&mut source, &args, &options, &stop);
+    let id = source.id;
+    let c = source.client();
+    let end = c.capture_stop(id);
+    if save.is_none() {
+        let _ = c.capture_remove(id);
+    } else if let Ok(i) = &end {
+        if !args.quiet {
+            for f in &i.files {
+                eprintln!(
+                    "kept on the server: {} (ferotrx ctl fetch {})",
+                    f.display(),
+                    f.display()
+                );
+            }
+        }
+    }
+    result
 }

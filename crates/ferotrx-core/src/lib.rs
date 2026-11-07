@@ -111,6 +111,7 @@ mod host;
 mod impair;
 mod job;
 mod latency;
+pub mod live;
 mod net;
 mod pacer;
 #[cfg(feature = "profile")]
@@ -165,6 +166,10 @@ pub use job::{Job, JobState, RxSettings, JOB_STATS_INTERVAL};
 pub use latency::{
     signed_len, wall_clock, FlowReport, FlowStats, IntervalStats, LatencyStats, PacketReceiver,
     PortReceiver, RxConfig, RxJob, RxStats, Signature, SIGNATURE_LEN,
+};
+pub use live::{
+    CaptureCounters, CaptureDirection, CaptureFiles, CaptureJob, CaptureJobConfig, CaptureOptions,
+    CaptureRead, Frame, FrameSource, PcapStreamWriter, PcapngWriter, Rotate, SourceCounters,
 };
 pub use net::{MacAddr, TPID_QINQ, TPID_VLAN};
 pub use pacer::{parse_duration, Pacer, Rate};

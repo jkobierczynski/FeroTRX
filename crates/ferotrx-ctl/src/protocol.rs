@@ -267,9 +267,8 @@ impl Role {
             "interfaces.list" | "profile.get" | "profile.list" | "run.stats" | "run.list"
             | "tcp.stats" | "tcp.list" | "udp.stats" | "udp.list" | "rx.stats" | "rx.list"
             | "lab.get" | "scenario.get" | "scenario.list" | "bench.get" | "bench.list"
-            | "y1564.get" | "y1564.list" | "stats.subscribe" | "stats.unsubscribe" => {
-                Some(Role::Read)
-            }
+            | "y1564.get" | "y1564.list" | "capture.get" | "capture.list" | "stats.subscribe"
+            | "stats.unsubscribe" => Some(Role::Read),
             _ => Some(Role::Operator),
         }
     }
@@ -2058,4 +2057,184 @@ pub struct StatsUpdate {
     pub run: RunInfo,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub last: bool,
+}
+
+// ----- capture.* and file.get -----
+
+/// Parameters of `capture.start`: a live capture on one of the server's
+/// interfaces, with a BPF filter. Its frames are kept for `capture.read`
+/// (a bounded buffer: frames nobody reads in time are counted, not kept)
+/// and, with `file`, written as pcap into the data directory.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureStartParams {
+    pub iface: String,
+    /// A BPF filter, e.g. `udp port 53` or `host 10.0.0.1 and not arp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    /// Bytes kept of each frame (default 262144).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snaplen: Option<u32>,
+    /// Promiscuous mode (default true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promisc: Option<bool>,
+    /// `in`, `out` or `both` (default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<ferotrx_core::CaptureDirection>,
+    /// Stop after this many frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
+    /// Stop after this long, e.g. `60s`; without it (and `count`), until
+    /// `capture.stop`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+    /// Write the frames to this pcap file in the data directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+    /// With `file`: a new file at this size (`100M`) or after this long
+    /// (`5m`), named `NAME-00001.pcap`, ...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotate: Option<String>,
+    /// With `rotate`: keep only the newest this many files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<usize>,
+    /// Keep frames for `capture.read` (default true). A capture that only
+    /// writes a file can say false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+}
+
+/// A capture, as `capture.start`, `capture.get`, `capture.stop` and
+/// `capture.list` report it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CaptureInfo {
+    /// Id; shared with runs, so they never clash.
+    pub id: u64,
+    pub iface: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    /// Link type of the frames (1 = Ethernet).
+    pub linktype: u32,
+    pub snaplen: u32,
+    pub state: RunState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Frames taken, and their bytes on the wire.
+    pub frames: u64,
+    pub bytes: u64,
+    /// What libpcap/Npcap counted: received by the filter, dropped for lack
+    /// of room, dropped by the interface.
+    #[serde(default)]
+    pub received: u64,
+    #[serde(default)]
+    pub dropped: u64,
+    #[serde(default)]
+    pub if_dropped: u64,
+    /// Seconds it has run.
+    #[serde(default)]
+    pub elapsed: f64,
+    /// The pcap files written so far, as paths in the data directory (with
+    /// `rotate`, those still there).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PathBuf>,
+    /// When it started, Unix seconds by the server's clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<f64>,
+}
+
+/// Parameters of `capture.read`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureReadParams {
+    pub id: u64,
+    /// Frames numbered after this one (they count from 1); 0 for the first.
+    #[serde(default)]
+    pub after: u64,
+    /// At most this many frames (default and most 1000, and about 4 MB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<usize>,
+    /// Wait up to this long for a frame if none is there yet (at most 2000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u64>,
+}
+
+/// One frame of `capture.read`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapturedFrame {
+    /// Its number in the capture, from 1.
+    pub n: u64,
+    /// When it was taken: nanoseconds since the Unix epoch, server's clock.
+    pub ts_ns: u64,
+    /// Length on the wire; `data` may be shorter (the snap length).
+    pub len: u32,
+    /// The bytes, in base64.
+    pub data: String,
+}
+
+impl CapturedFrame {
+    pub fn new(n: u64, f: &ferotrx_core::Frame) -> Self {
+        use base64::Engine;
+        Self {
+            n,
+            ts_ns: f.ts.as_nanos() as u64,
+            len: f.len,
+            data: base64::engine::general_purpose::STANDARD.encode(&f.data),
+        }
+    }
+
+    /// The frame back, or `None` if `data` is not base64.
+    pub fn frame(&self) -> Option<ferotrx_core::Frame> {
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(self.data.as_bytes())
+            .ok()?;
+        Some(ferotrx_core::Frame {
+            ts: std::time::Duration::from_nanos(self.ts_ns),
+            len: self.len.max(data.len() as u32),
+            data,
+        })
+    }
+}
+
+/// The result of `capture.read`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CaptureReadResult {
+    pub id: u64,
+    pub linktype: u32,
+    pub snaplen: u32,
+    pub frames: Vec<CapturedFrame>,
+    /// The number to give as `after` next time.
+    pub next: u64,
+    /// Frames after `after` that had left the buffer before this read.
+    pub missed: u64,
+    /// False once the capture has ended and every frame has been read.
+    pub more: bool,
+}
+
+/// Parameters of `file.get`: a piece of a file in the data directories.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileGetParams {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub offset: u64,
+    /// At most this many bytes (default and most [`FILE_GET_PIECE`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
+}
+
+/// Largest piece `file.get` returns.
+pub const FILE_GET_PIECE: u64 = 4 << 20;
+
+/// The result of `file.get`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FileChunk {
+    pub path: PathBuf,
+    pub offset: u64,
+    /// The bytes, in base64.
+    pub data: String,
+    /// The file's whole size now.
+    pub size: u64,
+    /// True if this piece reaches the end of the file.
+    pub eof: bool,
 }
