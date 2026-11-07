@@ -350,7 +350,9 @@ impl FeroApp {
         let mut copy = false;
         egui::Window::new("Settings")
             .open(&mut open)
-            .resizable(false)
+            .resizable(true)
+            .default_width(760.0)
+            .min_width(480.0)
             .collapsible(false)
             .show(ctx, |ui| {
                 ui.label(
@@ -361,25 +363,31 @@ impl FeroApp {
                     .weak(),
                 );
                 ui.add_space(6.0);
-                egui::Grid::new("settings").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
-                    for (label, kind, hover) in [
-                        ("Profiles", FolderKind::Profiles, "Where open and save dialogs for profiles, scenarios, workspaces and themes start. The examples are copied to its examples folder."),
-                        ("Captures", FolderKind::Captures, "Where dialogs for captures (pcap, pcapng) start."),
-                        ("Reports", FolderKind::Reports, "Where dialogs for reports and comparisons start."),
-                    ] {
-                        ui.label(label).on_hover_text(hover);
-                        let field = match kind {
-                            FolderKind::Profiles => &mut form.settings.profiles,
-                            FolderKind::Captures => &mut form.settings.captures,
-                            FolderKind::Reports => &mut form.settings.reports,
-                        };
-                        ui.add(egui::TextEdit::singleline(field).desired_width(380.0));
+                // One row per folder: the field takes what the label and
+                // Browse… leave, so a long path shows whole in a wide window.
+                for (label, kind, hover) in [
+                    ("Profiles", FolderKind::Profiles, "Where open and save dialogs for profiles, scenarios, workspaces and themes start. The examples are copied to its examples folder."),
+                    ("Captures", FolderKind::Captures, "Where dialogs for captures (pcap, pcapng) start."),
+                    ("Reports", FolderKind::Reports, "Where dialogs for reports and comparisons start."),
+                ] {
+                    let field = match kind {
+                        FolderKind::Profiles => &mut form.settings.profiles,
+                        FolderKind::Captures => &mut form.settings.captures,
+                        FolderKind::Reports => &mut form.settings.reports,
+                    };
+                    ui.horizontal(|ui| {
+                        ui.add_sized([80.0, ui.spacing().interact_size.y], egui::Label::new(label))
+                            .on_hover_text(hover);
+                        let browse_w = 90.0;
+                        let w = (ui.available_width() - browse_w).max(200.0);
+                        let shown = field.clone();
+                        ui.add(egui::TextEdit::singleline(field).desired_width(w))
+                            .on_hover_text(shown);
                         if ui.button("Browse…").clicked() {
                             browse = Some((kind, field.clone()));
                         }
-                        ui.end_row();
-                    }
-                });
+                    });
+                }
                 ui.checkbox(&mut form.settings.show_start, "Show the Start page when FeroTRX starts");
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
