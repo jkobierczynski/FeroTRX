@@ -25,9 +25,13 @@ from .errors import (
 from .types import (
     AppCounters,
     AuditHealth,
+    CapturedFrame,
+    CaptureInfo,
+    CaptureRead,
     Counters,
     DhcpLeaseInfo,
     DhcpServerInfo,
+    FileChunk,
     FileInfo,
     FlowCounters,
     HandshakeCounters,
@@ -60,7 +64,7 @@ from .types import (
     Y1564RunInfo,
 )
 
-__version__ = "0.38.0"
+__version__ = "0.39.0"
 
 __all__ = [
     "__version__",
@@ -85,6 +89,9 @@ __all__ = [
     "RunState",
     "ServerInfo",
     "AuditHealth",
+    "CapturedFrame",
+    "CaptureInfo",
+    "CaptureRead",
     "InterfaceEntry",
     "StreamInfo",
     "ProfileInfo",
@@ -94,6 +101,7 @@ __all__ = [
     "LatencyCounters",
     "PortImpairCounters",
     "MediaCounters",
+    "FileChunk",
     "FileInfo",
     "FlowCounters",
     "RxCounters",

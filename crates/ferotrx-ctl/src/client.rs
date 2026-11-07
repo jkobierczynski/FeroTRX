@@ -269,6 +269,96 @@ impl Client {
         Ok(true)
     }
 
+    /// A piece of a file on the server (`file.get`).
+    pub fn file_get(
+        &mut self,
+        path: impl Into<std::path::PathBuf>,
+        offset: u64,
+        length: Option<u64>,
+    ) -> Result<FileChunk, ClientError> {
+        self.call(
+            "file.get",
+            &FileGetParams {
+                path: path.into(),
+                offset,
+                length,
+            },
+        )
+    }
+
+    /// Fetches a whole file from the server in pieces and checks it against
+    /// the server's SHA-256 (`file.get`, `file.stat`).
+    pub fn download(
+        &mut self,
+        path: impl Into<std::path::PathBuf>,
+    ) -> Result<Vec<u8>, ClientError> {
+        use base64::Engine;
+        let path = path.into();
+        let mut data = Vec::new();
+        loop {
+            let piece = self.file_get(&path, data.len() as u64, None)?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(piece.data.as_bytes())
+                .map_err(|e| ClientError::Protocol(format!("file.get data is not base64: {e}")))?;
+            let empty = bytes.is_empty();
+            data.extend_from_slice(&bytes);
+            if piece.eof || empty {
+                break;
+            }
+        }
+        let stat = self.file_stat(&path)?;
+        let sum = crate::files::sha256_hex(&data);
+        if stat.sha256.as_deref() != Some(sum.as_str()) {
+            return Err(ClientError::Protocol(format!(
+                "{} changed while it was fetched (or the copy is damaged): try again",
+                path.display()
+            )));
+        }
+        Ok(data)
+    }
+
+    /// Starts a live capture on the server (`capture.start`).
+    pub fn capture_start(
+        &mut self,
+        params: &CaptureStartParams,
+    ) -> Result<CaptureInfo, ClientError> {
+        self.call("capture.start", params)
+    }
+
+    pub fn capture_get(&mut self, id: u64) -> Result<CaptureInfo, ClientError> {
+        self.call("capture.get", &RunId { id })
+    }
+
+    pub fn captures(&mut self) -> Result<Vec<CaptureInfo>, ClientError> {
+        self.call("capture.list", &Value::Null)
+    }
+
+    /// Frames of a capture numbered after `after`, waiting up to `wait` for one.
+    pub fn capture_read(
+        &mut self,
+        id: u64,
+        after: u64,
+        wait: Option<Duration>,
+    ) -> Result<CaptureReadResult, ClientError> {
+        self.call(
+            "capture.read",
+            &CaptureReadParams {
+                id,
+                after,
+                max: None,
+                wait_ms: wait.map(|w| w.as_millis() as u64),
+            },
+        )
+    }
+
+    pub fn capture_stop(&mut self, id: u64) -> Result<CaptureInfo, ClientError> {
+        self.call("capture.stop", &StopParams { id, wait: true })
+    }
+
+    pub fn capture_remove(&mut self, id: u64) -> Result<CaptureInfo, ClientError> {
+        self.call("capture.remove", &RunId { id })
+    }
+
     pub fn load_profile(&mut self, params: &LoadProfileParams) -> Result<ProfileInfo, ClientError> {
         self.call("profile.load", params)
     }

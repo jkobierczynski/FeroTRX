@@ -773,3 +773,27 @@ fn files_stay_inside_the_data_directories() {
     assert_eq!(rpc_code(e), RpcError::FORBIDDEN);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn large_files_come_down_over_tls() {
+    // rustls takes at most 64 KiB of plaintext at a time; a file.get reply
+    // is far larger and must still arrive whole.
+    let pki = pki("download");
+    let d = tmp("download-data");
+    std::fs::create_dir_all(&d).unwrap();
+    let big: Vec<u8> = (0..3_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    std::fs::write(d.join("big.bin"), &big).unwrap();
+    let addr = spawn(
+        Controller::new().with_file_policy(FilePolicy::dirs([d.clone()]).unwrap()),
+        ServerConfig {
+            tokens: vec![Token::new("ci", Role::Operator, "op-secret-1")],
+            tls: Some(server_tls(&pki)),
+            ..Default::default()
+        },
+    );
+    let mut c = tls_client(addr, &client_tls(&pki, None)).unwrap();
+    c.set_timeout(Some(Duration::from_secs(20))).unwrap();
+    c.auth("op-secret-1").unwrap();
+    assert_eq!(c.download("big.bin").unwrap(), big);
+    assert!(c.info().unwrap().tls);
+}

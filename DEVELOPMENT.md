@@ -64,6 +64,7 @@ the same library.
 | M41, a local server built into the GUI | "This computer" in the GUI (`ferotrx_gui::local`): **Start** runs the `ferotrx` next to the GUI as `serve -l 127.0.0.1:0` with a token made up per session (only its SHA-256 on disk), the port read from `--port-file`, stopped by removing that file or when the GUI ends (`--parent`), folders set per server; `ferotrx-gui --local`; on Windows a UAC prompt only when Npcap is for administrators only (`ferotrx_io::windows::npcap_admin_only`, `is_elevated`), on Linux and macOS a hint for the rights to send; `ferotrx service install\|remove\|start\|stop\|status` (the `windows-service` crate: LocalSystem, tokens moved off the command line into `%ProgramData%\FeroTRX\tokens.toml` as SHA-256, data and audit log there by default; the installer stops it on upgrade and removes it on uninstall); the lab router hidden for servers that are not Linux; CI starts the GUI's server and installs, uses and removes the service on Windows | #77 | 0.36.0 |
 | M42, Npcap for real use | Windows sending in batches through Npcap's send queue (`pcap_sendqueue_transmit`, `InterfaceSink::open_batched`): `--batch`/`[output] batch` now applies to `pcap` on Windows (default 64, 1 = packet by packet), handed over before every paced wait like AF_XDP; the receiver asks Npcap for precise system time stamps (`host_hiprec`, `KeQuerySystemTimePrecise`) so latency does not drift, falling back on older Npcap; Windows CI runs null and file runs through the service; [docs/windows.md](docs/windows.md#sending-fast) (measured on a Windows host with a Realtek 5GbE adapter: 10k pps packet by packet, 61k pps in batches of 64, 67k in batches of 512) | #82 | 0.37.0 |
 | M44, CI and release supply chain | From the security review of 2026-11-06 ([#72](https://github.com/jkobierczynski/FeroTRX/issues/72), SEC-07): every action in `ci.yml` and `release.yml` pinned to a commit with its version in a comment; read-only `GITHUB_TOKEN` by default, the publish job alone may write and sign; `.github/dependabot.yml` (actions, Cargo, the Python tools; weekly, grouped); a **Dependencies** CI job (not required) with `cargo deny check` (`deny.toml`: RustSec advisories, allowed licenses, crates.io only) and GitHub's dependency review on pull requests; releases carry CycloneDX SBOMs of `ferotrx` and `ferotrx-gui` and a build provenance attestation for every file (`gh attestation verify`); `SECURITY.md` (private vulnerability reporting, what is in scope); [RELEASING.md](RELEASING.md) on checking a release | #81 | 0.38.0 |
+| M48, capture and monitor | `ferotrx capture -i IFACE [BPF]` ([#94](https://github.com/jkobierczynski/FeroTRX/issues/94)): BPF filters through libpcap/Npcap (`ferotrx_io::LiveCapture`, `FrameFilter`), decoded lines (`-v`, `-x`), pcap to a file, a ring (`--rotate 100M\|5m --files N`) or standard output for `wireshark -k -i -`, nanosecond stamps on Linux, `--direction`, libpcap's drop counters; `inspect -f BPF`; `--capture FILE` (`--capture-iface`, `--capture-filter`) next to `replay`, `run`, `tcp`, `udp` and `host`; core `live` (`FrameSource`, `CaptureJob`, `PcapStreamWriter`, `PcapngWriter`, `CaptureFiles`); ctl `capture.start/read/get/list/stop/remove` (long-polled reads, bounded buffer with a `missed` count, captures nobody reads stop after a minute) and `file.get`; `ferotrx ctl capture` (a remote capture shown or piped to a local Wireshark, `--save`), `capture-start`, `captures`, `capture-stop`, `fetch`; fleet `[[capture]]` with `fleet run --collect DIR --merge FILE` (one pcapng, times on the controller's clock); Python `capture_*`, `capture_pcap`, `file_get`, `download`; the GUI's live capture (any server, BPF filter, Wireshark alongside, Save…); large replies over TLS fixed (rustls takes 64 KiB at a time); [docs/capture.md](docs/capture.md); `scripts/capture-netns.sh` and fleet captures in CI. Not done: copies of frames AF_XDP/DPDK send, a live merged fleet feed | | 0.39.0 |
 | M32, jitter, latency and call quality | `ferotrx_core::app::quality`: the ITU-T G.107 E-model with G.107's defaults (R from delay, loss, burst ratio and the codec's `Ie`/`Bpl` from G.113; MOS; G.109 bands); RTP receivers that judge packets against a jitter buffer (`jitter_buffer`, late packets), settle the loss pattern behind a 1024-packet window (loss bursts, longest, burst ratio), read the other end's RTCP sender and reception reports (round trip from LSR/DLSR, what it saw of our packets) and fill in their own (peer SSRC, LSR, DLSR); `rtcp_interval`, `ie`, `bpl` in `[sip]`; per call in `MediaReport` (`late`, `loss_bursts`, `max_burst`, `burst_ratio`, `rtt`, `remote_lost`, `remote_jitter`, `delay`, `r_factor`, `mos`), summed in `MediaStats` (mean and worst R and MOS, bands); TCP clients' `connect_time` and `first_byte`; ctl/Python `MediaCounters` and `TcpCounters` fields, CLI and GUI lines; scenario metrics `mos`, `mos_min`, `r_factor`, `r_factor_min`, `rtt_avg`, `rtt_max`, `media_late`, `media_playout_loss_pct`, `max_burst`, `connect_*`, `first_byte_*`; [docs/call-quality.md](docs/call-quality.md); `scripts/sip-netns.sh` checks clean scores and, with netem, 200 ms and 5% loss | | 0.27.0 |
 
 The lab scripts (`scripts/*.sh`) build a NAT router (or, for host
@@ -80,6 +81,16 @@ before and after a firewall change.
 The priorities come from an outside review (November 2026, kept in
 [docs/priorities-report-2026-11.md](docs/priorities-report-2026-11.md)),
 checked against 0.4.0. Each issue has the full checklist.
+
+**Next, first priority (Jurgen, 2026-11-07)**
+
+- [x] **M48, capture and monitor (0.39.0)**, [#94](https://github.com/jkobierczynski/FeroTRX/issues/94):
+      `ferotrx capture` with BPF filters, live decoded lines, pcap to a file
+      or to stdout for `wireshark -k -i -`; `capture.*` and `file.get` in the
+      control API, so a remote server's capture streams to a local Wireshark;
+      fleet plans capture on every agent and collect (and merge) the pcaps
+      after the run; a live capture view in the GUI; captures next to runs
+      (not done: copies from AF_XDP/DPDK ports). Went before M45 to M47.
 
 **P0: correctness and security**
 
@@ -202,7 +213,8 @@ checked against 0.4.0. Each issue has the full checklist.
 The [security review](docs/reviews/2026-11-06-security-review.md), each
 finding [checked against 0.34.0](docs/reviews/2026-11-06-review-check.md),
 and [the plan](docs/reviews/2026-11-security-plan.md) with its order: M43
-and M44 first, then M41 and M42, then M45 to M47.
+and M44 first, then M41 and M42, then M45 to M47 (after M48,
+capture, which Jurgen put first on 2026-11-07).
 
 - [x] **M43, control-plane hardening (0.35.0)**, [#71](https://github.com/jkobierczynski/FeroTRX/issues/71):
       no cleartext tokens off loopback, bounded `stats.subscribe`, no file
@@ -211,13 +223,13 @@ and M44 first, then M41 and M42, then M45 to M47.
 - [x] **M44, CI and release supply chain (0.38.0)**, [#72](https://github.com/jkobierczynski/FeroTRX/issues/72):
       actions pinned by SHA, least-privilege tokens, `cargo deny`, dependency
       review, SBOM, provenance attestations, `SECURITY.md` (SEC-07)
-- [ ] **M45, fuzzing and hostile-input tests (0.39.0)**, [#73](https://github.com/jkobierczynski/FeroTRX/issues/73):
+- [ ] **M45, fuzzing and hostile-input tests (0.40.0)**, [#73](https://github.com/jkobierczynski/FeroTRX/issues/73):
       `cargo-fuzz` targets for the control server, profiles, packet decoding
       and every application protocol, in CI and nightly
-- [ ] **M46, certificate revocation and safe file access (0.40.0)**, [#74](https://github.com/jkobierczynski/FeroTRX/issues/74):
+- [ ] **M46, certificate revocation and safe file access (0.41.0)**, [#74](https://github.com/jkobierczynski/FeroTRX/issues/74):
       CRLs, a fingerprint deny list, reload, shorter lab certificates; file
       opens without symbolic-link races (SEC-05, SEC-03)
-- [ ] **M47, traffic guardrails (0.41.0)**, [#75](https://github.com/jkobierczynski/FeroTRX/issues/75):
+- [ ] **M47, traffic guardrails (0.42.0)**, [#75](https://github.com/jkobierczynski/FeroTRX/issues/75):
       server-side limits on interfaces, destinations, rates, duration and
       runs that remote operators cannot exceed
 

@@ -128,6 +128,7 @@
 mod audit;
 mod auth;
 mod bench;
+mod capture;
 mod client;
 mod controller;
 mod files;

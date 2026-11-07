@@ -167,6 +167,9 @@ pub struct TcpArgs {
     /// Print no progress lines, only the final summary.
     #[arg(short, long)]
     quiet: bool,
+
+    #[command(flatten)]
+    capture: crate::capture::RunCaptureArgs,
 }
 
 #[derive(Args)]
@@ -497,6 +500,12 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
         ctrlc::set_handler(move || stop.store(true, Ordering::Relaxed))
             .context("cannot install Ctrl-C handler")?;
     }
+    let capture_iface = args
+        .iface
+        .clone()
+        .or_else(|| profile.client.as_ref().and_then(|h| h.iface.clone()))
+        .or_else(|| profile.server.as_ref().and_then(|h| h.iface.clone()));
+    let capture = args.capture.start(capture_iface.as_deref())?;
     let started = ferotrx_ctl::start_tcp(
         &profile,
         args.iface.as_deref(),
@@ -565,6 +574,9 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
         }
     }
     let stats = job.join()?;
+    if let Some(c) = capture {
+        c.finish(args.quiet)?;
+    }
     print_summary(&stats);
     crate::host::print_hosts(&stats.hosts, "  ");
     let failed = stats.client.failed() + stats.server.failed();

@@ -157,6 +157,9 @@ pub struct HostArgs {
     /// Print no progress lines, only the hosts at the end.
     #[arg(short, long)]
     quiet: bool,
+
+    #[command(flatten)]
+    capture: crate::capture::RunCaptureArgs,
 }
 
 impl HostArgs {
@@ -384,6 +387,9 @@ pub fn cmd_host(args: HostArgs) -> Result<()> {
             }
         );
     }
+    let capture = args
+        .capture
+        .start((interfaces.len() == 1).then(|| interfaces[0].as_str()))?;
     let job: PortJob<HostStats> = PortJob::spawn(
         engine,
         ports,
@@ -410,6 +416,9 @@ pub fn cmd_host(args: HostArgs) -> Result<()> {
         announce(&stats, args.quiet);
     }
     let stats = job.join()?;
+    if let Some(c) = capture {
+        c.finish(args.quiet)?;
+    }
     announce(&stats, args.quiet);
     eprintln!(
         "{} in {:.3} s: {} of {} hosts ready, {} failed; {} frames sent, {} taken",

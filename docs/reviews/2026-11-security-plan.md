@@ -13,11 +13,13 @@ and pull request, each a minor version.
 | 1 | **M43, control-plane hardening**, [#71](https://github.com/jkobierczynski/FeroTRX/issues/71) | SEC-01, SEC-02, SEC-04, SEC-06, login limits | The only findings a remote client can use: a sniffed token gives operator rights, a read-only login can exhaust threads, a client without a token can take every connection slot. Small, all in `ferotrx-ctl`. M41 (the GUI starting its own server, a Windows service) should be built on these rules, not retrofitted. | 0.35.0 |
 | 2 | **M44, CI and release supply chain**, [#72](https://github.com/jkobierczynski/FeroTRX/issues/72) | SEC-07, `SECURITY.md`, `cargo deny`, SBOM, provenance | No code changes, little risk, protects every later release. | 0.36.0 |
 | 3, 4 | M41, M42 from [#69](https://github.com/jkobierczynski/FeroTRX/issues/69) (Windows) | | Already planned and started; not protocol work, so the review's "no new protocols before the fixes" does not apply. | 0.37.0, 0.38.0 |
-| 5 | **M45, fuzzing and hostile-input tests**, [#73](https://github.com/jkobierczynski/FeroTRX/issues/73) | Section 3 | The largest job; finds panics, unbounded allocations and hangs in the parsers that read traffic and client uploads. | 0.39.0 |
-| 6 | **M46, certificate revocation and safe file access**, [#74](https://github.com/jkobierczynski/FeroTRX/issues/74) | SEC-05, SEC-03, two file bugs found while checking | Needs an operator or a local user to matter. | 0.40.0 |
-| 7 | **M47, traffic guardrails**, [#75](https://github.com/jkobierczynski/FeroTRX/issues/75) | Section 5 safeguards, per-agent quotas | Protects against a careless or malicious operator; opt-in, so nothing changes for benchmarking. | 0.41.0 |
+| 5 | **M45, fuzzing and hostile-input tests**, [#73](https://github.com/jkobierczynski/FeroTRX/issues/73) | Section 3 | The largest job; finds panics, unbounded allocations and hangs in the parsers that read traffic and client uploads. | 0.40.0 |
+| 6 | **M46, certificate revocation and safe file access**, [#74](https://github.com/jkobierczynski/FeroTRX/issues/74) | SEC-05, SEC-03, two file bugs found while checking | Needs an operator or a local user to matter. | 0.41.0 |
+| 7 | **M47, traffic guardrails**, [#75](https://github.com/jkobierczynski/FeroTRX/issues/75) | Section 5 safeguards, per-agent quotas | Protects against a careless or malicious operator; opt-in, so nothing changes for benchmarking. | 0.42.0 |
 
-Versions follow merge order, as before. If M41 and M42 go after all five
+Versions follow merge order, as before. On 2026-11-07 M48 (capture,
+[#94](https://github.com/jkobierczynski/FeroTRX/issues/94)) was put before
+M45 to M47 and takes 0.39.0, so they move to 0.40.0 to 0.42.0. If M41 and M42 go after all five
 security milestones instead, M45 to M47 become 0.37.0 to 0.39.0 and M41/M42
 become 0.40.0/0.41.0.
 

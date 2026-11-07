@@ -34,6 +34,12 @@
 //!
 //! [require]                   # on the sums over every run of a kind
 //! tcp = ["cps > 90"]
+//!
+//! [[capture]]                 # pcaps on the agents while the runs go
+//! agents = ["east", "west"]   # or agent = "east"; default: every agent
+//! iface = "enp0s8"            # default: the agent's iface
+//! filter = "tcp port 80"      # BPF
+//! snaplen = 256
 //! ```
 
 use std::collections::BTreeMap;
@@ -70,6 +76,22 @@ pub struct FleetPlan {
     pub runs: Vec<FleetRun>,
     /// Conditions on the sums over every run of a kind.
     pub require: Vec<(CheckKind, Condition)>,
+    /// Captures on the agents while the runs go, one per agent and interface.
+    pub captures: Vec<FleetCapture>,
+}
+
+/// A capture on one agent's interface for the length of a fleet run
+/// (`[[capture]]`); the controller can fetch the pcaps afterwards and merge
+/// them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FleetCapture {
+    pub agent: String,
+    pub iface: String,
+    pub filter: Option<String>,
+    pub snaplen: Option<u32>,
+    /// `AGENT-IFACE`, unique in the plan: the pcap's name on the agent and
+    /// after collection.
+    pub name: String,
 }
 
 /// An agent: a `ferotrx serve` the controller reaches.
@@ -355,6 +377,48 @@ impl FleetPlan {
             runs.push(run);
         }
 
+        let mut captures: Vec<FleetCapture> = Vec::new();
+        for (i, c) in raw.capture.into_iter().enumerate() {
+            let names: Vec<String> = match (c.agent, c.agents) {
+                (Some(a), None) => vec![a],
+                (None, Some(list)) if !list.is_empty() => list,
+                (None, None) | (None, Some(_)) => agents.iter().map(|a| a.name.clone()).collect(),
+                (Some(_), Some(_)) => {
+                    return Err(Error::Profile(format!(
+                        "capture {}: give agent or agents, not both",
+                        i + 1
+                    )))
+                }
+            };
+            for n in names {
+                let Some(agent) = agents.iter().find(|a| a.name == n) else {
+                    return Err(Error::Profile(format!(
+                        "capture {}: no agent called '{n}'",
+                        i + 1
+                    )));
+                };
+                let Some(iface) = c.iface.clone().or_else(|| agent.iface.clone()) else {
+                    return Err(Error::Profile(format!(
+                        "capture {}: agent '{n}' has no iface; give the capture one",
+                        i + 1
+                    )));
+                };
+                let name = slug(&format!("{n}-{iface}"));
+                if captures.iter().any(|o| o.name == name) {
+                    return Err(Error::Profile(format!(
+                        "two captures on {iface} of agent '{n}'"
+                    )));
+                }
+                captures.push(FleetCapture {
+                    agent: n,
+                    iface,
+                    filter: c.filter.clone().filter(|f| !f.trim().is_empty()),
+                    snaplen: c.snaplen,
+                    name,
+                });
+            }
+        }
+
         let mut require = Vec::new();
         for (kind, list) in [
             (CheckKind::Tcp, raw.require.tcp),
@@ -377,6 +441,7 @@ impl FleetPlan {
             agents,
             runs,
             require,
+            captures,
         })
     }
 
@@ -412,6 +477,17 @@ impl FleetPlan {
                 } else {
                     format!(" ({})", how.join(", "))
                 }
+            ));
+        }
+        for c in &self.captures {
+            lines.push(format!(
+                "  capture on {} of {}{}",
+                c.iface,
+                c.agent,
+                c.filter
+                    .as_deref()
+                    .map(|f| format!(", filter '{f}'"))
+                    .unwrap_or_default()
             ));
         }
         for r in &self.runs {
@@ -510,6 +586,18 @@ struct RawPlan {
     run: Vec<RawRun>,
     #[serde(default)]
     require: RawRequire,
+    #[serde(default)]
+    capture: Vec<RawCapture>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCapture {
+    agent: Option<String>,
+    agents: Option<Vec<String>>,
+    iface: Option<String>,
+    filter: Option<String>,
+    snaplen: Option<u32>,
 }
 
 #[derive(Deserialize, Default)]

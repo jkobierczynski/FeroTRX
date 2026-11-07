@@ -1,10 +1,19 @@
-//! The Capture tab: open a pcap or pcapng file on this computer, list its
-//! packets, look at one in the packet view, and turn packets into an
-//! editable stream for the selected port.
+//! The Capture tab: open a pcap or pcapng file on this computer, or capture
+//! live on an interface of a server with a BPF filter (`capture.*`), list
+//! the packets, look at one in the packet view, save them, hand them to
+//! Wireshark as they come, and turn packets into an editable stream for the
+//! selected port.
+
+use std::io::Write;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
-use ferotrx_core::Capture;
+use ferotrx_core::{Capture, Packet};
+use ferotrx_ctl::protocol::{CaptureInfo, CaptureStartParams};
 use ferotrx_packet::{decode, format_layers, import, Decoded};
 
 use crate::app::{FeroApp, Tab};
@@ -22,6 +31,226 @@ pub struct CaptureState {
     pub sel: Selection,
     /// Which packets to take into a stream.
     pub marked: Vec<bool>,
+    /// The live capture form, and the capture while it runs.
+    pub live_form: LiveForm,
+    pub live: Option<LiveCapture>,
+}
+
+/// What a live capture is asked for.
+#[derive(Clone, Debug, Default)]
+pub struct LiveForm {
+    pub server: usize,
+    pub iface: String,
+    pub filter: String,
+    /// Also start Wireshark on the frames as they come.
+    pub wireshark: bool,
+}
+
+/// Most frames the tab keeps of a live capture.
+pub const LIVE_MAX_FRAMES: usize = 200_000;
+
+/// A live capture on a server, read on a thread of its own over a
+/// connection of its own.
+pub struct LiveCapture {
+    pub label: String,
+    stop: Arc<AtomicBool>,
+    shared: Arc<Mutex<LiveShared>>,
+}
+
+#[derive(Default)]
+struct LiveShared {
+    linktype: Option<u32>,
+    new: Vec<Packet>,
+    info: Option<CaptureInfo>,
+    error: Option<String>,
+    note: Option<String>,
+    done: bool,
+}
+
+impl LiveCapture {
+    /// Starts a capture with `settings`' server; `wake` repaints the window.
+    pub fn start(
+        settings: crate::conn::ConnSettings,
+        form: &LiveForm,
+        wake: impl Fn() + Send + 'static,
+    ) -> LiveCapture {
+        let stop = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new(Mutex::new(LiveShared::default()));
+        let label = format!("{} on {}", form.iface, settings.address());
+        let params = CaptureStartParams {
+            iface: form.iface.clone(),
+            filter: Some(form.filter.trim().to_string()).filter(|f| !f.is_empty()),
+            ..Default::default()
+        };
+        let wireshark = form.wireshark;
+        {
+            let stop = stop.clone();
+            let shared = shared.clone();
+            std::thread::Builder::new()
+                .name("live capture".into())
+                .spawn(move || {
+                    let r = live_loop(&settings, params, wireshark, &stop, &shared, &wake);
+                    let mut s = lock(&shared);
+                    if let Err(e) = r {
+                        s.error = Some(e);
+                    }
+                    s.done = true;
+                    drop(s);
+                    wake();
+                })
+                .expect("spawn the live capture thread");
+        }
+        LiveCapture {
+            label,
+            stop,
+            shared,
+        }
+    }
+
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    pub fn running(&self) -> bool {
+        !lock(&self.shared).done
+    }
+}
+
+impl Drop for LiveCapture {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Wireshark, reading a pcap stream on its standard input.
+fn open_wireshark() -> Result<Child, String> {
+    let mut tried = vec!["wireshark".to_string()];
+    if cfg!(windows) {
+        tried.push(r"C:\Program Files\Wireshark\Wireshark.exe".into());
+    }
+    if cfg!(target_os = "macos") {
+        tried.push("/Applications/Wireshark.app/Contents/MacOS/Wireshark".into());
+    }
+    for exe in &tried {
+        if let Ok(c) = Command::new(exe)
+            .args(["-k", "-i", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            return Ok(c);
+        }
+    }
+    Err(format!(
+        "cannot start Wireshark (tried {})",
+        tried.join(", ")
+    ))
+}
+
+fn live_loop(
+    settings: &crate::conn::ConnSettings,
+    params: CaptureStartParams,
+    wireshark: bool,
+    stop: &AtomicBool,
+    shared: &Mutex<LiveShared>,
+    wake: &dyn Fn(),
+) -> Result<(), String> {
+    let mut c = settings.open_client()?;
+    let info = c.capture_start(&params).map_err(|e| e.to_string())?;
+    let id = info.id;
+    let mut pipe = None;
+    if wireshark {
+        match open_wireshark() {
+            Ok(mut child) => {
+                let mut ok = false;
+                if let Some(stdin) = child.stdin.as_mut() {
+                    let mut header = Vec::new();
+                    if ferotrx_core::PcapStreamWriter::new(&mut header, info.linktype, info.snaplen)
+                        .is_ok()
+                    {
+                        ok = stdin.write_all(&header).is_ok();
+                    }
+                }
+                if ok {
+                    pipe = Some(child);
+                }
+            }
+            Err(e) => lock(shared).note = Some(e),
+        }
+    }
+    {
+        let mut s = lock(shared);
+        s.linktype = Some(info.linktype);
+        s.info = Some(info);
+    }
+    wake();
+    let mut after = 0;
+    let mut last_info = std::time::Instant::now();
+    let result = loop {
+        if stop.load(Ordering::Relaxed) {
+            break Ok(());
+        }
+        let r = match c.capture_read(id, after, Some(Duration::from_millis(250))) {
+            Ok(r) => r,
+            Err(e) => break Err(e.to_string()),
+        };
+        after = r.next;
+        let mut packets = Vec::with_capacity(r.frames.len());
+        for f in &r.frames {
+            let Some(frame) = f.frame() else { continue };
+            if let Some(child) = &mut pipe {
+                let mut rec = Vec::new();
+                let sent = ferotrx_core::PcapStreamWriter::new(&mut rec, 1, u32::MAX)
+                    .and_then(|mut w| w.write(&frame))
+                    .is_ok();
+                // Leave out the header the writer put first.
+                let gone = !sent
+                    || child
+                        .stdin
+                        .as_mut()
+                        .is_none_or(|s| s.write_all(&rec[24..]).and_then(|()| s.flush()).is_err());
+                if gone {
+                    pipe = None;
+                    lock(shared).note =
+                        Some("Wireshark was closed; the capture goes on here".into());
+                }
+            }
+            packets.push(Packet::new(frame.ts, frame.data));
+        }
+        let more = r.more;
+        if !packets.is_empty() || r.missed > 0 || last_info.elapsed() > Duration::from_secs(1) {
+            let info = c.capture_get(id).ok();
+            let mut s = lock(shared);
+            s.new.extend(packets);
+            if let Some(i) = info {
+                s.info = Some(i);
+            }
+            if r.missed > 0 {
+                s.note = Some(format!(
+                    "{} frames left the server's buffer before they were read",
+                    r.missed
+                ));
+            }
+            drop(s);
+            last_info = std::time::Instant::now();
+            wake();
+        }
+        if !more {
+            break Ok(());
+        }
+    };
+    if let Ok(i) = c.capture_stop(id) {
+        lock(shared).info = Some(i);
+    }
+    let _ = c.capture_remove(id);
+    // Wireshark keeps what it has; closing its input ends the live view.
+    drop(pipe.and_then(|mut c| c.stdin.take()));
+    result
 }
 
 impl CaptureState {
@@ -39,6 +268,74 @@ impl CaptureState {
                 self.error = Some(format!("{}: {e}", self.path));
             }
         }
+    }
+
+    /// Saves the capture shown as pcap (`Save…`).
+    pub fn save(&mut self, path: &std::path::Path) {
+        match &self.capture {
+            Some(c) => match c.save(path) {
+                Ok(()) => {
+                    self.path = path.display().to_string();
+                    self.error = None;
+                }
+                Err(e) => self.error = Some(format!("{}: {e}", path.display())),
+            },
+            None => self.error = Some("nothing to save".into()),
+        }
+    }
+
+    /// Starts showing a live capture: the list empties and fills as frames come.
+    pub fn begin_live(&mut self, live: LiveCapture) {
+        self.capture = None;
+        self.decoded.clear();
+        self.marked.clear();
+        self.selected = None;
+        self.error = None;
+        self.path.clear();
+        self.live = Some(live);
+    }
+
+    /// Takes the frames that came since the last frame drawn.
+    pub fn poll_live(&mut self) {
+        let Some(live) = &self.live else {
+            return;
+        };
+        let mut s = lock(&live.shared);
+        if let Some(lt) = s.linktype {
+            let cap = self
+                .capture
+                .get_or_insert_with(|| Capture::new(lt, Vec::new()));
+            let room = LIVE_MAX_FRAMES.saturating_sub(cap.packets.len());
+            let new = std::mem::take(&mut s.new);
+            if new.len() > room && s.note.is_none() {
+                s.note = Some(format!("the tab keeps the first {LIVE_MAX_FRAMES} frames"));
+            }
+            cap.packets.extend(new.into_iter().take(room));
+            let n = cap.packets.len();
+            self.decoded.resize(n, None);
+            self.marked.resize(n, false);
+        }
+        if let Some(e) = s.error.take() {
+            self.error = Some(e);
+        }
+    }
+
+    /// A line on the live capture: counters and notes.
+    fn live_status(&self) -> Option<(String, Option<String>, bool)> {
+        let live = self.live.as_ref()?;
+        let s = lock(&live.shared);
+        let mut line = live.label.clone();
+        if let Some(i) = &s.info {
+            line.push_str(&format!(
+                ": {} frames, {} bytes, {} dropped by the kernel",
+                i.frames,
+                i.bytes,
+                i.dropped + i.if_dropped
+            ));
+        } else if !s.done {
+            line.push_str(": starting…");
+        }
+        Some((line, s.note.clone(), !s.done))
     }
 
     fn decoded(&mut self, n: usize) -> Option<&Decoded> {
@@ -98,7 +395,9 @@ impl CaptureState {
 
 impl FeroApp {
     pub fn capture_tab(&mut self, ui: &mut egui::Ui) {
+        self.capture.poll_live();
         let mut to_stream = false;
+        let mut save = false;
         let mut browse = false;
         let has_port = self.sel_port.is_some();
         let cs = &mut self.capture;
@@ -126,6 +425,8 @@ impl FeroApp {
                 ));
             }
         });
+        self.live_row(ui);
+        let cs = &mut self.capture;
         if browse {
             let current = cs.path.clone();
             self.files.pick(
@@ -140,7 +441,7 @@ impl FeroApp {
             ui.colored_label(ui.visuals().error_fg_color, e);
         }
         let Some(cap) = &cs.capture else {
-            ui.weak("Open a pcap or pcapng file to inspect it. Packets can be taken into a stream and edited layer by layer.");
+            ui.weak("Open a pcap or pcapng file to inspect it, or capture live on a server's interface. Packets can be taken into a stream and edited layer by layer.");
             return;
         };
         let count = cap.len();
@@ -168,6 +469,13 @@ impl FeroApp {
             }
             if ui.small_button("Untick all").clicked() {
                 cs.marked.iter_mut().for_each(|m| *m = false);
+            }
+            if ui
+                .small_button("Save…")
+                .on_hover_text("Write these packets to a pcap file on this computer")
+                .clicked()
+            {
+                save = true;
             }
         });
         ui.separator();
@@ -287,6 +595,113 @@ impl FeroApp {
 
         if to_stream {
             self.capture_to_stream();
+        }
+        if save {
+            let current = self.capture.path.clone();
+            self.files.save(
+                crate::files::Target::SaveCapture,
+                "Save the capture",
+                crate::files::Kind::Capture,
+                &current,
+                "capture.pcap",
+            );
+        }
+    }
+
+    /// The live capture row: server, interface, BPF filter, Wireshark,
+    /// start and stop.
+    fn live_row(&mut self, ui: &mut egui::Ui) {
+        let connected: Vec<(usize, String)> = self
+            .servers
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.info.is_some() && s.conn.is_some())
+            .map(|(i, s)| (i, s.settings.address()))
+            .collect();
+        let running = self.capture.live.as_ref().is_some_and(LiveCapture::running);
+        let mut start = false;
+        ui.horizontal(|ui| {
+            ui.label("Live capture on");
+            let form = &mut self.capture.live_form;
+            if !connected.iter().any(|(i, _)| *i == form.server) {
+                if let Some((i, _)) = connected.first() {
+                    form.server = *i;
+                }
+            }
+            let shown = connected
+                .iter()
+                .find(|(i, _)| *i == form.server)
+                .map(|(_, a)| a.clone())
+                .unwrap_or_else(|| "no server connected".into());
+            ui.add_enabled_ui(!running, |ui| {
+                egui::ComboBox::from_id_salt("live-server")
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        for (i, a) in &connected {
+                            ui.selectable_value(&mut form.server, *i, a);
+                        }
+                    });
+                let ifaces: Vec<String> = self
+                    .servers
+                    .get(form.server)
+                    .map(|s| s.interfaces.iter().map(|i| i.name.clone()).collect())
+                    .unwrap_or_default();
+                if form.iface.is_empty() || !ifaces.contains(&form.iface) {
+                    if let Some(first) = ifaces.first() {
+                        if form.iface.is_empty() {
+                            form.iface = first.clone();
+                        }
+                    }
+                }
+                egui::ComboBox::from_id_salt("live-iface")
+                    .selected_text(if form.iface.is_empty() { "interface" } else { &form.iface })
+                    .show_ui(ui, |ui| {
+                        for n in &ifaces {
+                            ui.selectable_value(&mut form.iface, n.clone(), n);
+                        }
+                    });
+                ui.add(
+                    egui::TextEdit::singleline(&mut form.filter)
+                        .hint_text("BPF filter, e.g. udp port 53")
+                        .desired_width(220.0),
+                )
+                .on_hover_text("A capture filter as tcpdump and Wireshark take them: host 10.0.0.1, tcp port 80 and not arp, vlan 10");
+                ui.checkbox(&mut form.wireshark, "Wireshark")
+                    .on_hover_text("Also start Wireshark on this computer, reading the frames as they come");
+            });
+            if running {
+                if ui.button("Stop").clicked() {
+                    if let Some(l) = &self.capture.live {
+                        l.stop();
+                    }
+                }
+            } else {
+                let ok = !connected.is_empty() && !self.capture.live_form.iface.is_empty();
+                if ui.add_enabled(ok, egui::Button::new("Start")).clicked() {
+                    start = true;
+                }
+            }
+        });
+        if let Some((line, note, live)) = self.capture.live_status() {
+            ui.horizontal(|ui| {
+                if live {
+                    ui.spinner();
+                }
+                ui.weak(line);
+                if let Some(n) = note {
+                    ui.colored_label(ui.visuals().warn_fg_color, n);
+                }
+            });
+        }
+        if start {
+            let form = self.capture.live_form.clone();
+            if let Some(server) = self.servers.get(form.server) {
+                let ctx = self.ctx.clone();
+                let live = LiveCapture::start(server.settings.clone(), &form, move || {
+                    ctx.request_repaint()
+                });
+                self.capture.begin_live(live);
+            }
         }
     }
 

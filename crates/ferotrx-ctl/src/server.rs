@@ -420,7 +420,18 @@ impl Wire {
             }
             Wire::Tls(t) => {
                 let mut t = lock(t);
-                t.conn.writer().write_all(bytes)?;
+                // rustls buffers at most 64 KiB of plaintext before it is
+                // written out, so a large reply (file.get, capture.read)
+                // goes in pieces.
+                let mut rest = bytes;
+                while !rest.is_empty() {
+                    let n = t.conn.writer().write(rest)?;
+                    if n == 0 {
+                        t.flush()?;
+                        continue;
+                    }
+                    rest = &rest[n..];
+                }
                 t.flush()
             }
         }
@@ -852,7 +863,9 @@ impl Connection {
                     }
                     let logged = audit_params(&req.params);
                     let r = self.controller.call(method, req.params);
-                    if self.shared.audit.is_some() {
+                    // Reading frames is polled many times a second: the
+                    // capture's start, stop and files are what the log keeps.
+                    if self.shared.audit.is_some() && method != "capture.read" {
                         let mut extra =
                             json!({"method": method, "params": logged, "ok": r.is_ok()});
                         match &r {
