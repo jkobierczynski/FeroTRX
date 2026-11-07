@@ -69,9 +69,9 @@ To see what batching gives on your machine (send to a switch port or another
 machine, not to anything that minds a flood):
 
 ```powershell
-ferotrx run examples\lab-built-packets.toml -i "Ethernet 2" -t --duration 10s --batch 1
-ferotrx run examples\lab-built-packets.toml -i "Ethernet 2" -t --duration 10s
-ferotrx run examples\lab-built-packets.toml -i "Ethernet 2" -t --duration 10s --batch 512
+ferotrx replay examples\web.pcap -i "Ethernet 2" -t -l 0 --duration 10s --batch 1
+ferotrx replay examples\web.pcap -i "Ethernet 2" -t -l 0 --duration 10s
+ferotrx replay examples\web.pcap -i "Ethernet 2" -t -l 0 --duration 10s --batch 512
 ```
 
 The receive side (`--rx`, `--latency`, `ferotrx rx`, benchmarks) asks Npcap
