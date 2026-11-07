@@ -31,18 +31,19 @@ use crate::model::PortKind;
 use crate::packet_view::state_color;
 
 impl FeroApp {
-    pub fn ui(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("top").show(ctx, |ui| self.top_bar(ui));
-        egui::SidePanel::left("ports")
+    pub fn draw(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
+        egui::Panel::left("ports")
             .resizable(true)
-            .default_width(230.0)
-            .show(ctx, |ui| self.ports_panel(ui));
-        egui::TopBottomPanel::bottom("bottom")
+            .default_size(230.0)
+            .show(ui, |ui| self.ports_panel(ui));
+        egui::Panel::bottom("bottom")
             .resizable(true)
-            .default_height(260.0)
-            .min_height(120.0)
-            .show(ctx, |ui| self.bottom_panel(ui));
-        egui::CentralPanel::default().show(ctx, |ui| match self.tab {
+            .default_size(260.0)
+            .min_size(120.0)
+            .show(ui, |ui| self.bottom_panel(ui));
+        egui::CentralPanel::default().show(ui, |ui| match self.tab {
             Tab::Streams => self.streams_tab(ui),
             Tab::Stateful => self.stateful_tab(ui),
             Tab::Apps => self.apps_tab(ui),
@@ -53,7 +54,7 @@ impl FeroApp {
             Tab::Group => self.groups_tab(ui),
             Tab::Charts => self.charts_tab(ui),
         });
-        self.dialogs(ctx);
+        self.dialogs(&ctx);
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {

@@ -1025,15 +1025,18 @@ impl FeroApp {
 }
 
 impl eframe::App for FeroApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.appearance.update(ctx);
         self.apply_pending_layout(ctx);
         self.poll();
-        self.ui(ctx);
         // Keep the charts moving while something runs.
         if self.servers.iter().any(|s| s.status == Status::Connected) {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

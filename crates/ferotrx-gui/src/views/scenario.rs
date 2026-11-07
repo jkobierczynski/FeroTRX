@@ -457,11 +457,11 @@ impl FeroApp {
         ui.separator();
 
         let width = ui.available_width();
-        egui::SidePanel::left("scn-editor")
+        egui::Panel::left("scn-editor")
             .resizable(true)
-            .default_width(width * 0.45)
-            .min_width(200.0)
-            .show_inside(ui, |ui| {
+            .default_size(width * 0.45)
+            .min_size(200.0)
+            .show(ui, |ui| {
                 ui.set_min_height(ui.available_height());
                 if st.upload {
                     // Long lines scroll rather than wrap, as in a code editor.
@@ -488,7 +488,7 @@ impl FeroApp {
                     ui.weak("The server reads the scenario file, and the profiles it names, from its data directory.");
                 }
             });
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             scenario_results(ui, st, &runs, &mut a);
         });
 
@@ -710,11 +710,11 @@ fn scenario_results(
     }
     ui.add_space(4.0);
     let show_skip = run.is_none();
-    egui::TopBottomPanel::top("scn-checks")
+    egui::Panel::top("scn-checks")
         .resizable(true)
-        .default_height(220.0)
-        .min_height(80.0)
-        .show_inside(ui, |ui| {
+        .default_size(220.0)
+        .min_size(80.0)
+        .show(ui, |ui| {
             ui.set_min_height(ui.available_height());
             egui::ScrollArea::vertical()
                 .id_salt("scn-checks-scroll")
@@ -763,7 +763,7 @@ fn scenario_results(
                         });
                 });
         });
-    egui::CentralPanel::default().show_inside(ui, |ui| {
+    egui::CentralPanel::default().show(ui, |ui| {
         let Some(c) = st
             .sel_check
             .as_ref()

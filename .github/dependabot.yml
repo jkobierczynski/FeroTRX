@@ -21,6 +21,10 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
+      # eframe, egui_extras, egui_plot and egui-file-dialog only build with
+      # the same egui, so they move in one pull request (also new majors).
+      egui:
+        patterns: ["eframe", "egui*"]
       cargo-compatible:
         update-types: [minor, patch]
 
