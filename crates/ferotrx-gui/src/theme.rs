@@ -204,7 +204,8 @@ pub struct WidgetStyle {
     pub heading_size: f32,
     pub small_size: f32,
     /// Font file (.ttf, .otf) for text, and for monospace text (packets,
-    /// profiles, logs); empty uses the built-in font.
+    /// profiles, logs); empty uses this computer's interface font, `builtin`
+    /// egui's own.
     pub text_font: String,
     pub monospace_font: String,
     /// Shadows under windows and menus.
@@ -225,10 +226,10 @@ impl Default for WidgetStyle {
             border_width: 1.0,
             outlined: false,
             density: 1.0,
-            body_size: 12.5,
-            monospace_size: 12.0,
-            heading_size: 18.0,
-            small_size: 9.0,
+            body_size: 13.5,
+            monospace_size: 13.0,
+            heading_size: 19.0,
+            small_size: 10.5,
             text_font: String::new(),
             monospace_font: String::new(),
             shadows: true,
@@ -298,26 +299,24 @@ pub enum Preset {
     Egui,
     HighContrast,
     Compact,
+    Neutral,
+    Paper,
+    Slate,
     Graphite,
-    Ocean,
-    Forest,
-    Ember,
-    Lavender,
-    Terminal,
+    Dim,
 }
 
 impl Preset {
-    pub const ALL: [Preset; 10] = [
+    pub const ALL: [Preset; 9] = [
         Preset::FeroTrx,
-        Preset::Egui,
+        Preset::Neutral,
+        Preset::Paper,
+        Preset::Slate,
+        Preset::Graphite,
+        Preset::Dim,
         Preset::HighContrast,
         Preset::Compact,
-        Preset::Graphite,
-        Preset::Ocean,
-        Preset::Forest,
-        Preset::Ember,
-        Preset::Lavender,
-        Preset::Terminal,
+        Preset::Egui,
     ];
 
     pub fn name(self) -> &'static str {
@@ -326,12 +325,11 @@ impl Preset {
             Preset::Egui => "egui",
             Preset::HighContrast => "High contrast",
             Preset::Compact => "Compact",
+            Preset::Neutral => "Neutral",
+            Preset::Paper => "Paper",
+            Preset::Slate => "Slate",
             Preset::Graphite => "Graphite",
-            Preset::Ocean => "Ocean",
-            Preset::Forest => "Forest",
-            Preset::Ember => "Ember",
-            Preset::Lavender => "Lavender",
-            Preset::Terminal => "Terminal",
+            Preset::Dim => "Dim",
         }
     }
 
@@ -456,6 +454,75 @@ impl Preset {
                 light: fero_light,
                 dark: fero_dark,
             },
+            Preset::Neutral => Theme {
+                format: FORMAT_VERSION,
+                name,
+                style: WidgetStyle {
+                    corner_radius: 3.0,
+                    window_radius: 6.0,
+                    ..Default::default()
+                },
+                light: Palette {
+                    text: Some(Rgb::hex(0x1f2328)),
+                    ..pal([
+                        0x0b5cad, 0xd6e4f5, 0xf5f5f5, 0xfcfcfc, 0xffffff, 0xededed, 0xe4e4e4,
+                        0xd6d6d6, 0xc4c4c4, 0x1a7f37, 0x0b5cad, 0x9a5b00, 0xc62828,
+                    ])
+                },
+                dark: Palette {
+                    text: Some(Rgb::hex(0xe6e6e6)),
+                    ..pal([
+                        0x7ab7ff, 0x2a3f57, 0x1e1e1e, 0x252526, 0x161616, 0x2a2a2a, 0x333333,
+                        0x404040, 0x4a4a4a, 0x73c991, 0x7ab7ff, 0xe5b567, 0xf48771,
+                    ])
+                },
+            },
+            Preset::Paper => Theme {
+                format: FORMAT_VERSION,
+                name,
+                style: WidgetStyle {
+                    corner_radius: 3.0,
+                    window_radius: 6.0,
+                    ..Default::default()
+                },
+                light: Palette {
+                    text: Some(Rgb::hex(0x24211d)),
+                    ..pal([
+                        0x2d5f8a, 0xdde6ee, 0xf7f5f0, 0xfdfcf9, 0xffffff, 0xefece5, 0xe7e3da,
+                        0xd9d3c7, 0xc9c2b4, 0x2e7d32, 0x2d5f8a, 0x8d5a00, 0xb3261e,
+                    ])
+                },
+                dark: Palette {
+                    text: Some(Rgb::hex(0xe8e4dc)),
+                    ..pal([
+                        0x8fb8de, 0x34404c, 0x1f1d1a, 0x262420, 0x181613, 0x2b2824, 0x34302b,
+                        0x433e37, 0x4d4840, 0x8cc98f, 0x8fb8de, 0xe0b46c, 0xec8a7e,
+                    ])
+                },
+            },
+            Preset::Slate => Theme {
+                format: FORMAT_VERSION,
+                name,
+                style: WidgetStyle {
+                    corner_radius: 4.0,
+                    window_radius: 8.0,
+                    ..Default::default()
+                },
+                light: Palette {
+                    text: Some(Rgb::hex(0x1e293b)),
+                    ..pal([
+                        0x2563eb, 0xdbe5f5, 0xf1f4f8, 0xf9fafc, 0xffffff, 0xe9edf2, 0xe0e5ec,
+                        0xcfd7e1, 0xc0c9d4, 0x15803d, 0x2563eb, 0xa16207, 0xc62828,
+                    ])
+                },
+                dark: Palette {
+                    text: Some(Rgb::hex(0xe2e8f0)),
+                    ..pal([
+                        0x8ab4f8, 0x2c3e5c, 0x1a1f26, 0x20262e, 0x13171c, 0x252c35, 0x2e3640,
+                        0x3b4552, 0x46505d, 0x81c995, 0x8ab4f8, 0xe8b86a, 0xf28b82,
+                    ])
+                },
+            },
             Preset::Graphite => Theme {
                 format: FORMAT_VERSION,
                 name,
@@ -464,104 +531,42 @@ impl Preset {
                     window_radius: 6.0,
                     ..Default::default()
                 },
-                light: pal([
-                    0xc2410c, 0xfde2cf, 0xf4f4f5, 0xfafafa, 0xffffff, 0xececee, 0xe4e4e7, 0xd4d4d8,
-                    0xc8c8cd, 0x15803d, 0x2563eb, 0xb45309, 0xdc2626,
-                ]),
-                dark: pal([
-                    0xfb923c, 0x5a3418, 0x18181b, 0x1f1f23, 0x0f0f11, 0x232327, 0x2e2e33, 0x3f3f46,
-                    0x3a3a40, 0x4ade80, 0x60a5fa, 0xfbbf24, 0xf87171,
-                ]),
-            },
-            Preset::Ocean => Theme {
-                format: FORMAT_VERSION,
-                name,
-                style: WidgetStyle {
-                    corner_radius: 6.0,
-                    window_radius: 10.0,
-                    ..Default::default()
+                light: Palette {
+                    text: Some(Rgb::hex(0x18181b)),
+                    ..pal([
+                        0x3f3f46, 0xe0e0e3, 0xf4f4f5, 0xfafafa, 0xffffff, 0xececee, 0xe4e4e7,
+                        0xd4d4d8, 0xc4c4ca, 0x15803d, 0x1d4ed8, 0xa16207, 0xc62828,
+                    ])
                 },
-                light: pal([
-                    0x0e7490, 0xcdeef5, 0xeef6f9, 0xf7fbfc, 0xffffff, 0xe3f0f4, 0xd5e8ee, 0xbfdce6,
-                    0xb3cfd9, 0x047857, 0x1d4ed8, 0xb45309, 0xbe123c,
-                ]),
-                dark: pal([
-                    0x22d3ee, 0x0f4a5c, 0x0a1622, 0x0e1d2b, 0x06101a, 0x112233, 0x16304a, 0x1e3f5e,
-                    0x1d3a52, 0x34d399, 0x60a5fa, 0xfbbf24, 0xfb7185,
-                ]),
-            },
-            Preset::Forest => Theme {
-                format: FORMAT_VERSION,
-                name,
-                style: WidgetStyle {
-                    corner_radius: 4.0,
-                    window_radius: 8.0,
-                    ..Default::default()
+                dark: Palette {
+                    text: Some(Rgb::hex(0xe4e4e7)),
+                    ..pal([
+                        0xd4d4d8, 0x3f3f46, 0x18181b, 0x1f1f23, 0x0f0f11, 0x232327, 0x2e2e33,
+                        0x3f3f46, 0x4a4a52, 0x86c995, 0x8ab4f8, 0xe5b567, 0xf48771,
+                    ])
                 },
-                light: pal([
-                    0x2f6b3a, 0xd3ead6, 0xf2f5ef, 0xfafcf8, 0xffffff, 0xe8eee3, 0xdde6d6, 0xc9d7c0,
-                    0xbccab2, 0x1a7f37, 0x2f6fb5, 0xa16207, 0xb91c1c,
-                ]),
-                dark: pal([
-                    0x86c98f, 0x264d2c, 0x121a14, 0x172119, 0x0b120d, 0x1b261d, 0x243328, 0x2f4434,
-                    0x2e3f31, 0x9be26b, 0x7cb7f0, 0xe0b04a, 0xf08a7e,
-                ]),
             },
-            Preset::Ember => Theme {
-                format: FORMAT_VERSION,
-                name,
-                style: WidgetStyle {
-                    corner_radius: 5.0,
-                    window_radius: 8.0,
-                    ..Default::default()
-                },
-                light: pal([
-                    0xb4421b, 0xf8dccd, 0xfaf4ee, 0xfffbf7, 0xffffff, 0xf3e9df, 0xeaddd0, 0xdcc8b6,
-                    0xd2bda9, 0x3f7d20, 0x2b6cb0, 0xb7791f, 0xc53030,
-                ]),
-                dark: pal([
-                    0xf6895a, 0x5e2a17, 0x1c1512, 0x241b17, 0x120d0b, 0x2a201b, 0x352820, 0x47362b,
-                    0x433328, 0x9ad36a, 0x7fb3e8, 0xf2b84b, 0xf47a6b,
-                ]),
-            },
-            Preset::Lavender => Theme {
-                format: FORMAT_VERSION,
-                name,
-                style: WidgetStyle {
-                    corner_radius: 8.0,
-                    window_radius: 12.0,
-                    ..Default::default()
-                },
-                light: pal([
-                    0x6d28d9, 0xe6dcfb, 0xf6f4fb, 0xfcfbfe, 0xffffff, 0xeeeaf6, 0xe4def1, 0xd3cae8,
-                    0xcac0e0, 0x15803d, 0x2563eb, 0xb45309, 0xbe123c,
-                ]),
-                dark: pal([
-                    0xb79cff, 0x3d2a6b, 0x15131d, 0x1b1826, 0x0e0c14, 0x201d2c, 0x2a2639, 0x39334d,
-                    0x363048, 0x6ee7a0, 0x7fb0ff, 0xfcd34d, 0xfb7185,
-                ]),
-            },
-            Preset::Terminal => Theme {
+            Preset::Dim => Theme {
                 format: FORMAT_VERSION,
                 name,
                 style: WidgetStyle {
                     mode: Mode::Dark,
-                    corner_radius: 0.0,
-                    window_radius: 0.0,
-                    outlined: true,
-                    shadows: false,
-                    animations: false,
+                    corner_radius: 3.0,
+                    window_radius: 6.0,
                     ..Default::default()
                 },
-                light: pal([
-                    0x00702a, 0xc9efd2, 0xf5f7f5, 0xfbfcfb, 0xffffff, 0xebefeb, 0xe0e6e0, 0xccd6cc,
-                    0x9fb09f, 0x00702a, 0x0050a0, 0x8a5a00, 0xb00020,
-                ]),
-                dark: Palette {
-                    text: Some(Rgb::hex(0xb8f5c4)),
+                light: Palette {
+                    text: Some(Rgb::hex(0x1f2328)),
                     ..pal([
-                        0x39ff7a, 0x0f4a22, 0x050806, 0x070b08, 0x000000, 0x0a110c, 0x0f1a12,
-                        0x17291c, 0x1f4d2b, 0x39ff7a, 0x5cc8ff, 0xffd166, 0xff5c5c,
+                        0x0b5cad, 0xd6e4f5, 0xf5f5f5, 0xfcfcfc, 0xffffff, 0xededed, 0xe4e4e4,
+                        0xd6d6d6, 0xc4c4c4, 0x1a7f37, 0x0b5cad, 0x9a5b00, 0xc62828,
+                    ])
+                },
+                dark: Palette {
+                    text: Some(Rgb::hex(0xd4d4d4)),
+                    ..pal([
+                        0x9cc4f0, 0x2f3b4a, 0x2b2b2b, 0x313131, 0x242424, 0x343434, 0x3c3c3c,
+                        0x4a4a4a, 0x555555, 0x8fc79a, 0x9cc4f0, 0xdcb36f, 0xe8918a,
                     ])
                 },
             },
@@ -1066,7 +1071,9 @@ fn font_picker(
     list: &[(String, std::path::PathBuf)],
 ) {
     let shown = if v.trim().is_empty() {
-        "Built-in".to_string()
+        "System default".to_string()
+    } else if v.trim() == crate::fonts::BUILTIN {
+        "Built-in (egui)".to_string()
     } else {
         std::path::Path::new(v.trim())
             .file_stem()
@@ -1078,10 +1085,17 @@ fn font_picker(
         .height(400.0)
         .show_ui(ui, |ui| {
             if ui
-                .selectable_label(v.trim().is_empty(), "Built-in")
+                .selectable_label(v.trim().is_empty(), "System default")
+                .on_hover_text("This computer's interface font: Segoe UI and Consolas on Windows")
                 .clicked()
             {
                 v.clear();
+            }
+            if ui
+                .selectable_label(v.trim() == crate::fonts::BUILTIN, "Built-in (egui)")
+                .clicked()
+            {
+                *v = crate::fonts::BUILTIN.into();
             }
             for (name, path) in list {
                 let p = path.display().to_string();

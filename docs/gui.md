@@ -92,9 +92,9 @@ backends its build has.
 you watch; the button next to it switches between following the system,
 light and dark.
 
-* **Theme:** a built-in theme to start from (FeroTRX, egui's own, High
-  contrast, Compact, Graphite, Ocean, Forest, Ember, Lavender, Terminal),
-  its name, and **Open…**/**Save as…** for theme files.
+* **Theme:** a built-in theme to start from (FeroTRX; the plain grey and
+  white Neutral, Paper, Slate, Graphite and Dim, made for reading; High
+  contrast, Compact and egui's own), its name, and **Open…**/**Save as…** for theme files.
 * **Mode:** follow the system, or always light or dark.
 * **Colours**, separately for light and dark mode: accent (links, hovered
   outlines, the cursor, the text of selected items), selection, background,
@@ -106,7 +106,9 @@ light and dark.
   shadows, animations, scroll bars beside the content instead of floating.
 * **Text:** zoom of the whole window (Ctrl + and Ctrl - change it too),
   the font for text and the one for monospace text (packets, profiles,
-  logs): built-in, one of the fonts installed on this computer, or a
+  logs): System default (this computer's interface fonts: Segoe UI and
+  Consolas on Windows, San Francisco on macOS, Noto or DejaVu on Linux),
+  egui's built-in fonts, one of the fonts installed on this computer, or a
   `.ttf`/`.otf` file typed in; and the sizes of body, monospace, heading
   and small text. A file that is not a font is refused with a message, and
   the built-in fonts stay behind the chosen one for characters it lacks.
@@ -134,7 +136,8 @@ background = "#101418"
 The keys are those of the window: `mode`, `zoom`, `corner_radius`,
 `window_radius`, `border_width`, `outlined`, `density`, `body_size`,
 `monospace_size`, `heading_size`, `small_size`, `text_font`,
-`monospace_font` (font file paths), `shadows`, `animations`,
+`monospace_font` (font file paths; empty for this computer's interface
+font, `"builtin"` for egui's), `shadows`, `animations`,
 `solid_scrollbars` under `[style]`, and `accent`, `selection`,
 `background`, `window`, `input`, `stripe`, `widget`, `hovered`, `border`,
 `text`, `good`, `running`, `warn`, `error` (as `"#rrggbb"`) under `[light]`

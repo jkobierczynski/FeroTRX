@@ -1,5 +1,6 @@
-//! Fonts: the text and monospace fonts the Appearance window picks (egui's
-//! built-in ones by default), plus a system font with wide coverage as a
+//! Fonts: the text and monospace fonts the Appearance window picks (this
+//! computer's interface fonts by default, which read better than egui's
+//! thin built-in one), plus a system font with wide coverage as a
 //! fallback, since egui's built-in fonts lack arrows and some symbols the
 //! decoder and the GUI use.
 
@@ -24,6 +25,46 @@ const FALLBACKS: &[&str] = &[
     "/System/Library/Fonts/Apple Symbols.ttf",
 ];
 
+/// The setting that keeps egui's own fonts.
+pub const BUILTIN: &str = "builtin";
+
+/// The interface fonts tried, in order, when no font is chosen.
+const SYSTEM_TEXT: &[&str] = &[
+    "C:\\Windows\\Fonts\\segoeui.ttf",
+    "/System/Library/Fonts/SFNS.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+];
+const SYSTEM_MONOSPACE: &[&str] = &[
+    "C:\\Windows\\Fonts\\consola.ttf",
+    "C:\\Windows\\Fonts\\CascadiaMono.ttf",
+    "/System/Library/Fonts/SFNSMono.ttf",
+    "/System/Library/Fonts/Menlo.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+];
+
+/// The font a setting means: a file, the first system font found when
+/// empty, or none for egui's own.
+fn chosen(setting: &str, system: &[&str]) -> Option<String> {
+    match setting.trim() {
+        BUILTIN => None,
+        "" => system
+            .iter()
+            .find(|p| load(Path::new(p)).is_ok())
+            .map(|p| p.to_string()),
+        p => Some(p.to_string()),
+    }
+}
+
 /// Reads a font file and checks that it is one egui can use (TrueType or
 /// OpenType, the first font of a collection): egui stops the program on a
 /// file it cannot read as a font.
@@ -34,21 +75,25 @@ pub fn load(path: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// egui's fonts with `text` and `monospace` (font files; empty keeps the
-/// built-in one) in front, and the system fallback behind. A file that
+/// egui's fonts with `text` and `monospace` (font files; empty for this
+/// computer's interface font, [`BUILTIN`] for egui's own) in front, and the system fallback behind. A file that
 /// cannot be used is left out and reported.
 pub fn definitions(text: &str, monospace: &str) -> (FontDefinitions, Vec<String>) {
     let mut fonts = FontDefinitions::default();
     let mut errors = Vec::new();
-    for (key, path, family) in [
-        ("chosen-text", text, FontFamily::Proportional),
-        ("chosen-monospace", monospace, FontFamily::Monospace),
+    for (key, setting, system, family) in [
+        ("chosen-text", text, SYSTEM_TEXT, FontFamily::Proportional),
+        (
+            "chosen-monospace",
+            monospace,
+            SYSTEM_MONOSPACE,
+            FontFamily::Monospace,
+        ),
     ] {
-        let path = path.trim();
-        if path.is_empty() {
+        let Some(path) = chosen(setting, system) else {
             continue;
-        }
-        match load(Path::new(path)) {
+        };
+        match load(Path::new(&path)) {
             Ok(bytes) => {
                 fonts
                     .font_data
@@ -88,7 +133,7 @@ pub fn apply(ctx: &egui::Context, text: &str, monospace: &str) -> Result<(), Str
     }
 }
 
-/// The built-in fonts and the fallback.
+/// The default fonts (this computer's) and the fallback.
 pub fn install(ctx: &egui::Context) {
     let _ = apply(ctx, "", "");
 }
@@ -177,6 +222,14 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert!(!fonts.font_data.contains_key("chosen-text"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn builtin_keeps_eguis_fonts_in_front() {
+        let (fonts, errors) = definitions(BUILTIN, BUILTIN);
+        assert!(errors.is_empty());
+        assert!(!fonts.font_data.contains_key("chosen-text"));
+        assert!(!fonts.font_data.contains_key("chosen-monospace"));
     }
 
     #[test]
