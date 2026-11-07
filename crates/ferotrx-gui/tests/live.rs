@@ -251,3 +251,70 @@ fn a_benchmark_runs_on_the_server_and_its_report_is_saved() {
         .contains("Throughput"));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_live_capture_fills_the_capture_tab() {
+    let controller = Controller::new().with_capture_opener(|iface, options| {
+        if iface != "mem0" {
+            return Err(format!("no interface {iface}").into());
+        }
+        assert_eq!(options.filter.as_deref(), Some("udp"));
+        let frames = (0..5u8).map(|i| ferotrx_core::Frame {
+            ts: Duration::from_millis(u64::from(i)),
+            len: 60,
+            data: vec![i; 60],
+        });
+        Ok(Box::new(ferotrx_core::live::VecFrameSource::new(1, frames)))
+    });
+    let addr = Server::bind("127.0.0.1:0", controller, None)
+        .unwrap()
+        .spawn()
+        .unwrap()
+        .to_string();
+    let mut app = app(&addr, "");
+    let i = app.servers.len() - 1;
+    until(&mut app, "connect", |a| {
+        a.servers[i].status == Status::Connected
+    });
+    let form = ferotrx_gui::views::LiveForm {
+        server: i,
+        iface: "mem0".into(),
+        filter: " udp ".into(),
+        wireshark: false,
+    };
+    let live =
+        ferotrx_gui::views::LiveCapture::start(app.servers[i].settings.clone(), &form, || {});
+    app.capture.begin_live(live);
+    let t = Instant::now();
+    loop {
+        app.capture.poll_live();
+        if app.capture.capture.as_ref().is_some_and(|c| c.len() == 5) {
+            break;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            app.capture.error
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        app.capture.capture.as_ref().unwrap().packets[4].data,
+        vec![4; 60]
+    );
+    assert_eq!(app.capture.marked.len(), 5);
+    app.capture.live.as_ref().unwrap().stop();
+    let t = Instant::now();
+    while app.capture.live.as_ref().unwrap().running() {
+        assert!(t.elapsed() < Duration::from_secs(20));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    app.capture.poll_live();
+    assert_eq!(app.capture.error, None);
+
+    // Saved as pcap.
+    let path = std::env::temp_dir().join(format!("ferotrx-gui-live-{}.pcap", std::process::id()));
+    app.capture.save(&path);
+    assert_eq!(ferotrx_core::Capture::from_path(&path).unwrap().len(), 5);
+    std::fs::remove_file(path).unwrap();
+}
