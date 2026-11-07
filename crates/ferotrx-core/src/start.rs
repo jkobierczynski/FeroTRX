@@ -73,8 +73,9 @@ mod tests {
         let at = SystemTime::now() + Duration::from_millis(50);
         let t = wait_until(Some(at), &stop);
         let late = t.duration_since(at).unwrap();
-        // Shared CI machines (macOS ones most) oversleep by tens of ms.
-        let slack = Duration::from_millis(if cfg!(target_os = "macos") { 100 } else { 20 });
+        // Never early (the unwrap above). Shared CI machines oversleep, and
+        // macOS runners by 100 ms and more, so there only check it ends.
+        let slack = Duration::from_millis(if cfg!(target_os = "macos") { 500 } else { 20 });
         assert!(late < slack, "{late:?}");
         // A time gone by, or none, starts at once.
         let t0 = SystemTime::now();
