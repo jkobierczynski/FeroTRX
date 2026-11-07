@@ -2102,6 +2102,11 @@ pub struct CaptureStartParams {
     /// writes a file can say false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    /// Keep the server's own control traffic (TCP on the port it listens
+    /// on) in the capture. Default false: it is left out, so a capture read
+    /// over the control connection does not capture itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctl_traffic: Option<bool>,
 }
 
 /// A capture, as `capture.start`, `capture.get`, `capture.stop` and

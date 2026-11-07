@@ -544,6 +544,10 @@ enum CtlCommand {
         /// Bytes kept of each frame.
         #[arg(short, long)]
         snaplen: Option<u32>,
+        /// Keep the server's own control traffic in the capture; by default
+        /// it is left out.
+        #[arg(long)]
+        ctl_traffic: bool,
     },
     /// List the server's captures.
     Captures,
@@ -1005,6 +1009,7 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
             count,
             duration,
             snaplen,
+            ctl_traffic,
         } => {
             let i = c.capture_start(&CaptureStartParams {
                 iface: interface,
@@ -1016,6 +1021,7 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                 rotate,
                 files,
                 stream: Some(false),
+                ctl_traffic: Some(ctl_traffic),
                 ..Default::default()
             })?;
             if json {
@@ -1294,6 +1300,7 @@ fn remote_capture(
         count: args.count,
         duration: args.duration.map(|d| format!("{}ms", d.as_millis())),
         file: save.clone(),
+        ctl_traffic: Some(args.ctl_traffic),
         ..Default::default()
     })?;
     let stop = Arc::new(AtomicBool::new(false));

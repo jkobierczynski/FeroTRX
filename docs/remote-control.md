@@ -69,7 +69,7 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 | `file.put` | `path` (relative, in the first data directory), `data` (base64), `offset` (0 starts the file; pieces in order) | the file's `size` so far |
 | `file.stat` | `path` | `exists`, `size`, `sha256` |
 | `file.get` | `path`, optional `offset`, `length` (at most 4 MiB a call) | `data` (base64), `offset`, `size` of the whole file, `eof` |
-| `capture.start` | `iface`, optional `filter` (BPF), `snaplen`, `promisc`, `direction` (`in`, `out`, `both`), `count`, `duration`, `file` (a pcap in the data directory), `rotate` (`100M`, `5m`), `files`, `stream` (default true: keep frames for `capture.read`) | the capture: `id`, `state`, `linktype`, `frames`, `bytes`, libpcap's `received`/`dropped`/`if_dropped`, `files` ([capturing](capture.md)) |
+| `capture.start` | `iface`, optional `filter` (BPF), `snaplen`, `promisc`, `direction` (`in`, `out`, `both`), `count`, `duration`, `file` (a pcap in the data directory), `rotate` (`100M`, `5m`), `files`, `stream` (default true: keep frames for `capture.read`), `ctl_traffic` (default false: TCP on the server's control port is left out) | the capture: `id`, `state`, `linktype`, `frames`, `bytes`, libpcap's `received`/`dropped`/`if_dropped`, `files` ([capturing](capture.md)) |
 | `capture.read` | `id`, `after` (frame number, 0 for the first), optional `max` (1000), `wait_ms` (at most 2000) | `frames` (`n`, `ts_ns`, `len`, base64 `data`), `next`, `missed` (frames gone from the server's buffer), `more` (false once it ended and all was read) |
 | `capture.get`, `capture.stop`, `capture.remove` | `id` (`stop` also `wait`) | the capture |
 | `capture.list` | | every capture |

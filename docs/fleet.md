@@ -129,7 +129,8 @@ filter = "tcp port 80"     # optional
 snaplen = 128              # optional, bytes kept of each frame
 ```
 
-Each capture starts before the runs and stops after them, into
+The controller's connections to the agents are not in the captures (an
+agent leaves its control port out). Each capture starts before the runs and stops after them, into
 `deploy_dir/captures/AGENT-IFACE.pcap` on its agent. `fleet run --collect
 DIR` fetches them (`file.get`, checked by SHA-256) into `DIR/AGENT-IFACE.pcap`;
 `--merge FILE` also writes one pcapng with an interface per capture, named

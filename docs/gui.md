@@ -425,7 +425,8 @@ bytes, drops and frames missed when the connection could not keep up.
 **Stop** ends it, and the server removes it. A filter that does not compile
 shows libpcap's reason in the log.
 
-**Also open Wireshark** starts `wireshark -k -i -` and feeds it the same
+The server's own control connections are left out unless **Control
+traffic** is ticked. **Wireshark** also starts `wireshark -k -i -` and feeds it the same
 frames as pcap, live. Wireshark must be on the PATH (on Windows, add
 `C:\Program Files\Wireshark`). The GUI keeps the newest 200000 frames;
 **Save…** writes what it holds as pcap. More in [capturing](capture.md).

@@ -44,6 +44,8 @@ pub struct LiveForm {
     pub filter: String,
     /// Also start Wireshark on the frames as they come.
     pub wireshark: bool,
+    /// Keep the server's own control traffic (by default left out).
+    pub ctl_traffic: bool,
 }
 
 /// Most frames the tab keeps of a live capture.
@@ -80,6 +82,7 @@ impl LiveCapture {
         let params = CaptureStartParams {
             iface: form.iface.clone(),
             filter: Some(form.filter.trim().to_string()).filter(|f| !f.is_empty()),
+            ctl_traffic: Some(form.ctl_traffic),
             ..Default::default()
         };
         let wireshark = form.wireshark;
@@ -668,6 +671,8 @@ impl FeroApp {
                 .on_hover_text("A capture filter as tcpdump and Wireshark take them: host 10.0.0.1, tcp port 80 and not arp, vlan 10");
                 ui.checkbox(&mut form.wireshark, "Wireshark")
                     .on_hover_text("Also start Wireshark on this computer, reading the frames as they come");
+                ui.checkbox(&mut form.ctl_traffic, "Control traffic")
+                    .on_hover_text("Keep FeroTRX's own control connections (TCP on the server's control port) in the capture; by default they are left out");
             });
             if running {
                 if ui.button("Stop").clicked() {

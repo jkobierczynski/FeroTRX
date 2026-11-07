@@ -87,9 +87,35 @@ pub struct CaptureArgs {
     /// No progress or summary lines.
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Keep FeroTRX's own control traffic (TCP on the control port, 4510)
+    /// in the capture; by default it is left out. With `ctl capture`, the
+    /// port is the one the server listens on.
+    #[arg(long)]
+    pub ctl_traffic: bool,
+
+    /// The control port left out of a capture on this machine, when
+    /// `ferotrx serve` listens on another one.
+    #[arg(long, value_name = "PORT", default_value_t = ferotrx_ctl::protocol::DEFAULT_PORT)]
+    pub ctl_port: u16,
 }
 
 impl CaptureArgs {
+    /// The options for a capture on this machine: those of [`options`],
+    /// with the control port left out unless `--ctl-traffic`.
+    ///
+    /// [`options`]: CaptureArgs::options
+    pub fn local_options(&self) -> CaptureOptions {
+        let mut o = self.options();
+        if !self.ctl_traffic {
+            o.filter = Some(ferotrx_core::live::without_tcp_port(
+                o.filter.as_deref(),
+                self.ctl_port,
+            ));
+        }
+        o
+    }
+
     pub fn options(&self) -> CaptureOptions {
         let filter = match &self.filter {
             Some(f) => Some(f.clone()),
@@ -114,7 +140,7 @@ enum Sink {
 }
 
 pub fn cmd_capture(args: CaptureArgs) -> Result<()> {
-    let options = args.options();
+    let options = args.local_options();
     if let Some(dir) = args.write.as_ref().and_then(|p| p.parent()) {
         if !dir.as_os_str().is_empty()
             && !dir.is_dir()
@@ -386,6 +412,25 @@ mod tests {
         assert_eq!(a.options().filter.as_deref(), Some("udp"));
         assert_eq!(args(&[]).options().filter, None);
         assert!(!args(&["--no-promisc"]).options().promisc);
+        // FeroTRX's control traffic stays out unless asked for.
+        assert_eq!(
+            args(&["tcp"]).local_options().filter.as_deref(),
+            Some("(tcp) and not tcp port 4510")
+        );
+        assert_eq!(
+            args(&["--ctl-port", "9000"])
+                .local_options()
+                .filter
+                .as_deref(),
+            Some("not tcp port 9000")
+        );
+        assert_eq!(
+            args(&["--ctl-traffic", "udp"])
+                .local_options()
+                .filter
+                .as_deref(),
+            Some("udp")
+        );
         assert_eq!(args(&["--buffer", "2"]).options().buffer, 2 << 20);
     }
 

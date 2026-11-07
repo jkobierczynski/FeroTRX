@@ -269,6 +269,8 @@ impl Server {
             .transpose()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         controller.set_auth_required(login_required);
+        // Captures on this server leave its own control traffic out.
+        controller.set_ctl_port(local.port());
         let shared = Arc::new(Shared {
             tokens: config.tokens,
             tls,

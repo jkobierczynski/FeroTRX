@@ -87,6 +87,21 @@ impl std::fmt::Display for CaptureDirection {
     }
 }
 
+/// `filter` with TCP on `port` taken out, as a BPF filter: FeroTRX's own
+/// control traffic (`ferotrx serve`, port 4510) left out of a capture.
+///
+/// ```
+/// use ferotrx_core::live::without_tcp_port;
+/// assert_eq!(without_tcp_port(None, 4510), "not tcp port 4510");
+/// assert_eq!(without_tcp_port(Some("udp or tcp"), 4510), "(udp or tcp) and not tcp port 4510");
+/// ```
+pub fn without_tcp_port(filter: Option<&str>, port: u16) -> String {
+    match filter.map(str::trim).filter(|f| !f.is_empty()) {
+        Some(f) => format!("({f}) and not tcp port {port}"),
+        None => format!("not tcp port {port}"),
+    }
+}
+
 /// How to open a live capture.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureOptions {
