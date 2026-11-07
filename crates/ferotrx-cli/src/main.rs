@@ -488,8 +488,9 @@ pub struct SendArgs {
     #[arg(long, value_name = "MODE")]
     pub xdp_mode: Option<XdpMode>,
 
-    /// Packets handed to the kernel or NIC at once (af_xdp, dpdk; default 64).
-    /// Paced packets are never held back to fill a batch.
+    /// Packets handed to the kernel or NIC at once (af_xdp, dpdk, and pcap on
+    /// Windows through Npcap's send queue; default 64; 1 sends each packet on
+    /// its own). Paced packets are never held back to fill a batch.
     #[arg(long)]
     pub batch: Option<u32>,
 

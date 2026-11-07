@@ -233,10 +233,17 @@ fn open_interface(name: &str, send: &SendSettings) -> Result<Opened, SinkError> 
         |e: SinkError| -> SinkError { format!("cannot open {name} with {backend}: {e}").into() };
     match backend {
         #[cfg(feature = "pcap")]
-        Backend::Pcap => Ok(Opened {
-            sink: Box::new(InterfaceSink::open(name).map_err(fail)?),
-            detail: format!("pcap on {name}"),
-        }),
+        Backend::Pcap => {
+            let sink = InterfaceSink::open_batched(name, send.batch()).map_err(fail)?;
+            let detail = match sink.batch() {
+                1 => format!("pcap on {name}"),
+                b => format!("pcap on {name}, batches of {b} (Npcap send queue)"),
+            };
+            Ok(Opened {
+                sink: Box::new(sink),
+                detail,
+            })
+        }
         #[cfg(all(feature = "af-xdp", target_os = "linux"))]
         Backend::AfXdp => {
             let sink = AfXdpSink::open(
@@ -376,25 +383,147 @@ mod interface {
 
     /// Sends packets on a network interface. Needs root or CAP_NET_RAW on Linux,
     /// access to /dev/bpf* on macOS, and Npcap installed on Windows.
+    ///
+    /// On Windows, packets go to Npcap in batches (`pcap_sendqueue_transmit`):
+    /// one trip into the kernel for up to `batch` packets instead of one each,
+    /// which is what makes Npcap fast. Like AF_XDP, a batch is handed over
+    /// before every wait for a paced packet ([`PacketSink::idle`]), so batching
+    /// never holds a paced packet back; `batch = 1` sends each one on its own.
     pub struct InterfaceSink {
         capture: pcap::Capture<pcap::Active>,
+        #[cfg(windows)]
+        queue: Option<SendQueue>,
+    }
+
+    /// Packets queued for one `pcap_sendqueue_transmit`.
+    #[cfg(windows)]
+    struct SendQueue {
+        queue: pcap::sendqueue::SendQueue,
+        /// Packets in it.
+        queued: u32,
+        /// Packets it holds at most.
+        batch: u32,
+    }
+
+    // SAFETY: the queue is a buffer Npcap allocated, owned by this value and
+    // used by one thread at a time, like the capture handle beside it.
+    #[cfg(windows)]
+    unsafe impl Send for SendQueue {}
+
+    /// Room for a full batch of jumbo frames and their headers, up to 16 MiB;
+    /// a batch of bigger frames is handed over when the queue is full.
+    #[cfg(windows)]
+    fn queue_bytes(batch: u32) -> u32 {
+        batch.saturating_mul(9216 + 32).min(16 << 20)
     }
 
     impl InterfaceSink {
+        /// Opens `name`, sending one packet at a time.
         pub fn open(name: &str) -> Result<Self, SinkError> {
+            Self::open_batched(name, 1)
+        }
+
+        /// Opens `name`; on Windows, hands packets to Npcap `batch` at a time.
+        pub fn open_batched(name: &str, batch: u32) -> Result<Self, SinkError> {
             let dev = crate::pcap_device(name)?;
             let capture = pcap::Capture::from_device(dev.as_str())?
                 .snaplen(65535)
                 .open()
                 .map_err(|e| format!("cannot open {name}: {e}"))?;
-            Ok(Self { capture })
+            #[cfg(windows)]
+            let queue = if batch > 1 {
+                Some(SendQueue {
+                    queue: pcap::sendqueue::SendQueue::new(queue_bytes(batch))?,
+                    queued: 0,
+                    batch,
+                })
+            } else {
+                None
+            };
+            #[cfg(not(windows))]
+            let _ = batch;
+            Ok(Self {
+                capture,
+                #[cfg(windows)]
+                queue,
+            })
+        }
+
+        /// Packets handed to the system at once (1 where nothing is batched).
+        pub fn batch(&self) -> u32 {
+            #[cfg(windows)]
+            if let Some(q) = &self.queue {
+                return q.batch;
+            }
+            1
+        }
+
+        /// Adds a packet to the queue; false when it has no room.
+        #[cfg(windows)]
+        fn queue_one(&mut self, data: &[u8]) -> bool {
+            let Some(q) = &mut self.queue else {
+                return false;
+            };
+            let ok = q.queue.queue(None, data).is_ok();
+            if ok {
+                q.queued += 1;
+            }
+            ok
+        }
+
+        /// Hands the queued packets to Npcap.
+        #[cfg(windows)]
+        fn transmit(&mut self) -> Result<(), SinkError> {
+            if let Some(q) = &mut self.queue {
+                if q.queued > 0 {
+                    q.queued = 0;
+                    q.queue
+                        .transmit(&mut self.capture, pcap::sendqueue::SendSync::Off)?;
+                }
+            }
+            Ok(())
         }
     }
 
     impl PacketSink for InterfaceSink {
         fn send(&mut self, data: &[u8]) -> Result<(), SinkError> {
+            #[cfg(windows)]
+            if self.queue.is_some() {
+                let mut queued = self.queue_one(data);
+                if !queued {
+                    // Full: hand it over, and try again in an empty queue.
+                    self.transmit()?;
+                    queued = self.queue_one(data);
+                }
+                if !queued {
+                    // Bigger than the whole queue.
+                    self.capture.sendpacket(data)?;
+                }
+                if self.queue.as_ref().is_some_and(|q| q.queued >= q.batch) {
+                    self.transmit()?;
+                }
+                return Ok(());
+            }
             self.capture.sendpacket(data)?;
             Ok(())
+        }
+
+        fn idle(&mut self) -> Result<(), SinkError> {
+            #[cfg(windows)]
+            self.transmit()?;
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), SinkError> {
+            #[cfg(windows)]
+            self.transmit()?;
+            Ok(())
+        }
+    }
+
+    impl Drop for InterfaceSink {
+        fn drop(&mut self) {
+            let _ = self.flush();
         }
     }
 }

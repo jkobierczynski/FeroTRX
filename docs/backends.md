@@ -1,7 +1,8 @@
 # Fast send backends: AF_XDP and DPDK
 
-By default packets go out through libpcap (Npcap on Windows), one system call
-per packet, which works everywhere. On Linux two faster senders sit behind the
+By default packets go out through libpcap, one system call per packet, which
+works everywhere. On Windows, Npcap gets them in batches through its send
+queue (see `--batch` below and [Windows](windows.md#sending-fast)). On Linux two faster senders sit behind the
 same engine; pick one with `--backend` (`-B`):
 
 | Backend | What it is | Needs |
@@ -19,7 +20,7 @@ sudo ferotrx replay capture.pcap -B dpdk -i net_af_packet0,iface=enp0s3 \
      --dpdk-args '--no-huge -m 512 --no-pci -l 0' -t              # DPDK without a DPDK NIC
 ```
 
-Options for `af_xdp` and `dpdk`:
+Options for `af_xdp` and `dpdk` (and `--batch` for `pcap` on Windows):
 
 * `--xdp-mode auto|copy|zerocopy` (AF_XDP): `auto` tries zero-copy and falls
   back to copy mode. Copy mode (also called SKB or generic mode) works on every
@@ -28,7 +29,9 @@ Options for `af_xdp` and `dpdk`:
 * `--queue N`: the transmit queue (default 0). One AF_XDP socket per queue.
 * `--batch N`: packets handed to the kernel or NIC at once (default 64). Paced
   streams are never held back to fill a batch: whatever is queued goes out
-  before the engine waits for the next packet's time.
+  before the engine waits for the next packet's time. With `pcap` it applies on
+  Windows only (Npcap's `pcap_sendqueue_transmit`); `--batch 1` sends each
+  packet on its own, as before 0.37.
 * `--dpdk-args '...'` (DPDK): arguments for DPDK's EAL, such as cores (`-l 0-1`),
   memory (`--no-huge -m 512`) or allowed devices (`-a 0000:03:00.0`). With
   `-B dpdk`, `-i` names a DPDK device: a PCI address, a virtual device such

@@ -101,13 +101,26 @@ mod pcap_receiver {
     impl PcapReceiver {
         pub fn open(name: &str) -> Result<Self, SinkError> {
             let dev = crate::pcap_device(name)?;
-            let capture = pcap::Capture::from_device(dev.as_str())?
-                .promisc(true)
-                .immediate_mode(true)
-                .snaplen(65535)
-                .buffer_size(16 << 20)
+            let inactive = || -> Result<pcap::Capture<pcap::Inactive>, SinkError> {
+                Ok(pcap::Capture::from_device(dev.as_str())?
+                    .promisc(true)
+                    .immediate_mode(true)
+                    .snaplen(65535)
+                    .buffer_size(16 << 20))
+            };
+            // Windows: Npcap's default time stamps count from the
+            // performance counter and drift away from the system clock that
+            // the sender stamps its signatures with; the precise system
+            // time (KeQuerySystemTimePrecise) does not. Older Npcap without
+            // it opens with the default.
+            #[cfg(windows)]
+            let capture = inactive()?
+                .tstamp_type(pcap::TimestampType::HostHighPrec)
                 .open()
-                .map_err(|e| format!("cannot open {name}: {e}"))?;
+                .or_else(|_| inactive()?.open().map_err(SinkError::from));
+            #[cfg(not(windows))]
+            let capture = inactive()?.open();
+            let capture = capture.map_err(|e| format!("cannot open {name}: {e}"))?;
             let _ = capture.direction(pcap::Direction::In);
             // Non-blocking, with short naps when nothing is waiting: read
             // timeouts are not honoured in immediate mode everywhere (Linux

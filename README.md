@@ -13,7 +13,7 @@ macOS and Windows. Its engine is a library you can use from your own
 programs, and a control server lets scripts and the Python client drive it
 remotely.
 
-The current version is 0.36.0; see [DEVELOPMENT.md](DEVELOPMENT.md) for what
+The current version is 0.37.0; see [DEVELOPMENT.md](DEVELOPMENT.md) for what
 each milestone added and what comes next.
 
 ## Features
