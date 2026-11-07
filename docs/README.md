@@ -72,3 +72,6 @@ The [README](../README.md) has the overview and a quickstart.
 * [Releasing](../RELEASING.md).
 * [Priorities report, November 2026](priorities-report-2026-11.md): an
   outside review, kept as received.
+* [Outside reviews](reviews/README.md): the project state and security
+  reviews of 6 November 2026, our check of each claim, and the
+  [security plan](reviews/2026-11-security-plan.md).
