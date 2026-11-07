@@ -317,6 +317,21 @@ fn files_go_where_they_may() {
     let info = c.info().unwrap();
     assert!(info.time.is_some());
     assert!(info.max_file.unwrap() > 0);
+    // An in-process server is on this machine; one that names another
+    // host or system (127.0.0.1 forwarded into a VM) is not.
+    assert_eq!(info.os.as_deref(), Some(std::env::consts::OS));
+    if info.host.is_some() {
+        assert_eq!(info.same_machine(), Some(true));
+        let mut vm = info.clone();
+        vm.host = Some("debian-lab-vm".into());
+        assert_eq!(vm.same_machine(), Some(false));
+        vm.host = info.host.clone();
+        vm.os = Some("plan9".into());
+        assert_eq!(vm.same_machine(), Some(false));
+    }
+    let mut old = info.clone();
+    old.host = None;
+    assert_eq!(old.same_machine(), None);
     // In pieces, in order.
     c.file_put("sub/dir/f.bin", b"hello ", 0).unwrap();
     let f = c.file_put("sub/dir/f.bin", b"world", 6).unwrap();

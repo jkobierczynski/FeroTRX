@@ -1,5 +1,9 @@
 //! `ferotrx-gui`: the FeroTRX desktop GUI.
 
+// A window, not a console program, on Windows: no console behind the GUI.
+// Started from a terminal it attaches to that console for --help and errors.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use clap::Parser;
 use ferotrx_gui::conn::ConnSettings;
 use ferotrx_gui::{FeroApp, Options};
@@ -37,15 +41,41 @@ struct Args {
     /// A scenario to open in the Scenario tab.
     #[arg(long, value_name = "FILE")]
     scenario: Option<String>,
-    /// A capture to open in the Capture tab.
-    capture: Option<String>,
+    /// A capture to open in the Capture tab, or a workspace (*.ferotrx) to
+    /// open (how Windows opens workspace files with the GUI).
+    file: Option<String>,
     /// A workspace file (*.ferotrx) to open: servers, streams, forms, layout.
     #[arg(short, long, value_name = "FILE")]
     workspace: Option<String>,
+    /// A theme file (TOML, see the Appearance window) to use.
+    #[arg(long, value_name = "FILE")]
+    theme: Option<String>,
+}
+
+/// The FeroTRX icon, for the window and the task bar.
+const ICON: &[u8] = include_bytes!("../assets/icon-256.png");
+
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    // Only when started from a console; from Explorer there is none, and
+    // nothing to print to.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
 }
 
 fn main() -> eframe::Result {
-    let args = Args::parse();
+    #[cfg(windows)]
+    attach_console();
+    let mut args = Args::parse();
+    // A file given on its own: a workspace by its extension, else a capture.
+    let mut capture = args.file.take();
+    if let Some(f) = capture.as_deref() {
+        if f.to_ascii_lowercase().ends_with(".ferotrx") && args.workspace.is_none() {
+            args.workspace = capture.take();
+        }
+    }
     let mut connect = Vec::new();
     let env = ConnSettings::from_env();
     if let Some(addr) = args.connect {
@@ -70,18 +100,20 @@ fn main() -> eframe::Result {
     }
     let opts = Options {
         connect,
-        capture: args.capture,
+        capture,
         port: args.port,
         profile: args.profile,
         scenario: args.scenario,
         workspace: args.workspace,
+        theme: args.theme,
     };
     let native = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("FeroTRX")
             .with_app_id("ferotrx-gui")
             .with_inner_size([1280.0, 860.0])
-            .with_min_inner_size([800.0, 560.0]),
+            .with_min_inner_size([800.0, 560.0])
+            .with_icon(eframe::icon_data::from_png_bytes(ICON).unwrap_or_default()),
         ..Default::default()
     };
     eframe::run_native(

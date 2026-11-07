@@ -25,5 +25,14 @@ egui_plot = "0.34"
 egui-file-dialog = { version = "0.12", default-features = false }
 ron = "0.11"
 
+# Explorer's file dialogs, and attaching to the console --help prints to.
+[target.'cfg(windows)'.dependencies]
+rfd = { version = "0.15", default-features = false }
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
+# Icon, version information and manifest in ferotrx-gui.exe.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [dev-dependencies]
 ferotrx-ctl = { workspace = true }

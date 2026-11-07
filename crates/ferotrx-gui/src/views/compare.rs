@@ -109,7 +109,7 @@ pub fn change_label(c: Change) -> &'static str {
 fn change_color(ui: &egui::Ui, c: Change) -> Color32 {
     match c {
         Change::Regressed | Change::Worse => ui.visuals().error_fg_color,
-        Change::Fixed => Color32::from_rgb(0x2e, 0xa0, 0x43),
+        Change::Fixed => crate::theme::good(ui),
         Change::Added | Change::Removed => ui.visuals().warn_fg_color,
         Change::Same => ui.visuals().weak_text_color(),
     }
@@ -372,7 +372,7 @@ fn comparison_view(ui: &mut egui::Ui, c: &Compared) {
             if reg > 0 {
                 ui.visuals().error_fg_color
             } else {
-                Color32::from_rgb(0x2e, 0xa0, 0x43)
+                crate::theme::good(ui)
             },
             RichText::new(if reg > 0 {
                 format!("✘ {reg} regressed")
@@ -453,10 +453,9 @@ fn comparison_view(ui: &mut egui::Ui, c: &Compared) {
                                     Some(true) => {
                                         ui.colored_label(ui.visuals().warn_fg_color, t + " worse")
                                     }
-                                    Some(false) => ui.colored_label(
-                                        Color32::from_rgb(0x2e, 0xa0, 0x43),
-                                        t + " better",
-                                    ),
+                                    Some(false) => {
+                                        ui.colored_label(crate::theme::good(ui), t + " better")
+                                    }
                                     None => ui.label(t),
                                 };
                             }

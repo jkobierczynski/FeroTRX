@@ -3,6 +3,13 @@
 
 use ferotrx_core::{InterfaceDetails, RunInfo};
 
+/// This machine's host name, as [`describe_host`] reports it.
+pub fn hostname() -> Option<String> {
+    let mut info = RunInfo::default();
+    describe_host(&mut info);
+    info.hostname
+}
+
 /// Fills in the kernel, host name and CPU model of `info`, where the system
 /// tells them simply (Linux: `/proc`; macOS: `sysctl`; Windows: environment).
 pub fn describe_host(info: &mut RunInfo) {

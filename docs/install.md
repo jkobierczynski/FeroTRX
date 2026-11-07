@@ -9,7 +9,8 @@ has ready-made packages:
   `sudo apt install ./ferotrx_*_amd64.deb`.
 * **Other Linux, macOS:** unpack the `.tar.gz` for your system and put `ferotrx` on your `PATH`
   (Linux needs libpcap: `libpcap0.8` on Debian, `libpcap` elsewhere).
-* **Windows:** unpack the `.zip`; install [Npcap](https://npcap.com/) to send and receive.
+* **Windows:** run the `.msi` installer (or unpack the `.zip`); install
+  [Npcap](https://npcap.com/) to send and receive. See [Windows](windows.md).
 
 The packages have the default backends (libpcap/Npcap, and AF_XDP on Linux).
 For DPDK, build from source. How releases are made: [RELEASING.md](../RELEASING.md).
@@ -20,8 +21,10 @@ You need a stable Rust toolchain and libpcap:
 
 * **Linux:** `sudo apt install libpcap-dev` (or your distribution's package).
 * **macOS:** libpcap ships with the OS.
-* **Windows:** install [Npcap](https://npcap.com/) to run, and put the Npcap SDK's
-  `Lib\x64` folder on the `LIB` path to build.
+* **Windows:** put the Npcap SDK's `Lib\x64` folder on the `LIB` path to
+  build, and install [Npcap](https://npcap.com/) to use interfaces (the
+  programs start without it). `packaging\windows\build-msi.ps1` builds the
+  installer ([Windows](windows.md#building-the-installer)).
 
 ```sh
 cargo build --release

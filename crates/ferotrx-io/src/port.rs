@@ -6,6 +6,17 @@ use ferotrx_core::{MacAddr, SinkError};
 /// The MAC address of a network interface, where the system says it simply
 /// (Linux: `/sys/class/net/<name>/address`). `None` elsewhere or if unknown.
 pub fn interface_mac(name: &str) -> Option<MacAddr> {
+    #[cfg(windows)]
+    {
+        let adapters = crate::windows::adapters();
+        let dev = crate::windows::resolve_in(&adapters, name);
+        crate::windows::adapter_of(&adapters, &dev)?
+            .mac
+            .as_deref()?
+            .parse()
+            .ok()
+    }
+    #[cfg(not(windows))]
     if cfg!(target_os = "linux") && !name.contains('/') {
         let text = std::fs::read_to_string(format!("/sys/class/net/{name}/address")).ok()?;
         text.trim().parse().ok()
@@ -29,7 +40,8 @@ mod pcap_port {
 
     impl PcapPort {
         pub fn open(name: &str) -> Result<Self, SinkError> {
-            let capture = pcap::Capture::from_device(name)?
+            let dev = crate::pcap_device(name)?;
+            let capture = pcap::Capture::from_device(dev.as_str())?
                 .promisc(true)
                 .immediate_mode(true)
                 .snaplen(65535)
@@ -88,7 +100,8 @@ mod pcap_receiver {
 
     impl PcapReceiver {
         pub fn open(name: &str) -> Result<Self, SinkError> {
-            let capture = pcap::Capture::from_device(name)?
+            let dev = crate::pcap_device(name)?;
+            let capture = pcap::Capture::from_device(dev.as_str())?
                 .promisc(true)
                 .immediate_mode(true)
                 .snaplen(65535)

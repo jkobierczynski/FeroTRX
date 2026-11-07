@@ -122,7 +122,7 @@ impl FeroApp {
         let work = self.work.ports.entry(key).or_default();
         let streams = &mut work.profile.streams;
         let ed = &mut self.editor;
-        ed.server_local = self.servers[i].settings.is_local();
+        ed.server_local = self.servers[i].is_local();
         // The table and the editor share the tab; the line between them drags.
         let h = ui.available_height();
         egui::TopBottomPanel::top("stream-table")
@@ -209,7 +209,7 @@ impl FeroApp {
             .collect();
         let run = self.port_run(i, port).cloned();
         let addr = self.servers[i].settings.addr.clone();
-        let local = self.servers[i].settings.is_local();
+        let local = self.servers[i].is_local();
         let file_out = &mut self.work.file_out;
         if let PortKind::File = port {
             let mut browse = false;
@@ -398,6 +398,8 @@ impl FeroApp {
             }
             Target::FileOut => self.work.file_out = shown,
             Target::OpenWorkspace => self.open_workspace(&path),
+            Target::OpenTheme => self.appearance.open_file(&path),
+            Target::SaveTheme => self.appearance.save_file(&path),
             Target::OpenAppProfile | Target::SaveAppProfile => self.apps_file(target, &path),
             Target::OpenBench | Target::SaveBench | Target::BenchReport => {
                 self.bench_file(target, &path)
@@ -1123,7 +1125,7 @@ fn control_page(ui: &mut egui::Ui, s: &mut StreamDraft) {
         });
         ui.add_space(8.0);
         match check_stream(s) {
-            Ok(()) => ui.colored_label(egui::Color32::from_rgb(0x2e, 0xa0, 0x43), "✔ ferotrx reads this stream"),
+            Ok(()) => ui.colored_label(crate::theme::good(ui), "✔ ferotrx reads this stream"),
             Err(e) => ui.colored_label(ui.visuals().error_fg_color, e),
         };
     });
@@ -1162,7 +1164,7 @@ fn variable_page(ui: &mut egui::Ui, s: &mut StreamDraft) {
         string_list(ui, "rewrite", &mut s.rewrite, "vlan_push=10");
         ui.add_space(8.0);
         match check_stream(s) {
-            Ok(()) => ui.colored_label(egui::Color32::from_rgb(0x2e, 0xa0, 0x43), "✔ ferotrx reads this stream"),
+            Ok(()) => ui.colored_label(crate::theme::good(ui), "✔ ferotrx reads this stream"),
             Err(e) => ui.colored_label(ui.visuals().error_fg_color, e),
         };
     });

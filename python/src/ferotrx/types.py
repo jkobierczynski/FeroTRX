@@ -197,6 +197,10 @@ class ServerInfo(Record):
     time: float | None = None
     #: Largest file ``file_put`` takes, in bytes.
     max_file: int | None = None
+    #: The server's host name and operating system (``linux``, ``windows``,
+    #: ``macos``); servers before 0.34.0 leave them out.
+    host: str | None = None
+    os: str | None = None
 
 
 @dataclass(kw_only=True)
@@ -216,6 +220,11 @@ class InterfaceEntry(Record):
 
     name: str = ""
     description: str | None = None
+    #: The name people know it by when that is not ``name`` ("Ethernet 2" on
+    #: Windows); accepted wherever an interface is named.
+    alias: str | None = None
+    mac: str | None = None
+    addresses: list[str] = field(default_factory=list)
 
 
 # ----- profile.* -----

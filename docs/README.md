@@ -60,6 +60,8 @@ The [README](../README.md) has the overview and a quickstart.
 * [Fleets](fleet.md): `ferotrx fleet`, one plan that deploys profiles to
   several agents, starts them together and adds up their counters.
 * [The Python client](python-client.md).
+* [FeroTRX on Windows](windows.md): the installer, Npcap, interface
+  names, the GUI on Windows.
 * [The desktop GUI](gui.md): `ferotrx-gui`, ports, the stream and packet
   editor, captures, live statistics, local or remote servers.
 * [Using FeroTRX as a library](library.md): the Rust API.

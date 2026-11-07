@@ -916,10 +916,20 @@ fn cmd_interfaces() -> Result<()> {
         println!("no interfaces found (you may need more privileges)");
     }
     for i in list {
-        match i.description {
-            Some(d) => println!("{}\t{}", i.name, d),
-            None => println!("{}", i.name),
+        // Windows: "Ethernet 2" first, which -i takes too.
+        let mut line = match &i.alias {
+            Some(a) => format!("{a}\t{}", i.name),
+            None => i.name.clone(),
+        };
+        for x in i.description.iter().chain(&i.mac) {
+            line.push('\t');
+            line.push_str(x);
         }
+        if !i.addresses.is_empty() {
+            line.push('\t');
+            line.push_str(&i.addresses.join(" "));
+        }
+        println!("{line}");
     }
     Ok(())
 }

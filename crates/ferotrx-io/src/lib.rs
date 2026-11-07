@@ -43,9 +43,11 @@ mod dpdk;
 mod host;
 mod lab;
 mod port;
+#[cfg(windows)]
+pub mod windows;
 #[cfg(feature = "dpdk")]
 pub use dpdk::{DpdkConfig, DpdkPort, DpdkSink};
-pub use host::{describe_host, describe_interface};
+pub use host::{describe_host, describe_interface, hostname};
 pub use lab::{
     lab_unavailable, remove_lab, Lab, LabConfig, LAB_INTERFACE, LAB_NAMESPACE, LAB_RECEIVER_IP,
     LAB_RECEIVER_IP6, LAB_RECEIVER_MAC, LAB_ROUTER_MAC,
@@ -313,10 +315,32 @@ impl PacketSink for PcapFileSink {
 }
 
 /// A network interface that packets can be sent on.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InterfaceInfo {
+    /// What to open it by (`\Device\NPF_{GUID}` with Npcap).
     pub name: String,
     pub description: Option<String>,
+    /// The name people know it by, when that is not `name`: "Ethernet 2"
+    /// on Windows, which `-i` takes too.
+    pub alias: Option<String>,
+    /// Its MAC address (`aa:bb:cc:dd:ee:ff`), when known.
+    pub mac: Option<String>,
+    /// Its IP addresses.
+    pub addresses: Vec<String>,
+}
+
+/// The device libpcap/Npcap should open for `name`, once it can be used:
+/// on Windows, Npcap is loaded and an adapter name such as "Ethernet 2"
+/// becomes its `\Device\NPF_{GUID}`.
+#[cfg(feature = "pcap")]
+pub(crate) fn pcap_device(name: &str) -> Result<String, SinkError> {
+    #[cfg(windows)]
+    {
+        windows::load_npcap()?;
+        Ok(windows::resolve(name))
+    }
+    #[cfg(not(windows))]
+    Ok(name.to_string())
 }
 
 #[cfg(feature = "pcap")]
@@ -325,11 +349,27 @@ mod interface {
 
     /// Lists the interfaces libpcap or Npcap can open.
     pub fn list_interfaces() -> Result<Vec<InterfaceInfo>, SinkError> {
+        #[cfg(windows)]
+        crate::windows::load_npcap()?;
+        #[cfg(windows)]
+        let adapters = crate::windows::adapters();
         Ok(pcap::Device::list()?
             .into_iter()
-            .map(|d| InterfaceInfo {
-                name: d.name,
-                description: d.desc,
+            .map(|d| {
+                #[cfg_attr(not(windows), allow(unused_mut))]
+                let mut i = InterfaceInfo {
+                    addresses: d.addresses.iter().map(|a| a.addr.to_string()).collect(),
+                    mac: crate::interface_mac(&d.name).map(|m| m.to_string()),
+                    name: d.name,
+                    description: d.desc,
+                    alias: None,
+                };
+                #[cfg(windows)]
+                if let Some(a) = crate::windows::adapter_of(&adapters, &i.name) {
+                    i.alias = Some(a.friendly_name.clone()).filter(|n| !n.is_empty());
+                    i.mac = a.mac.clone();
+                }
+                i
             })
             .collect())
     }
@@ -342,7 +382,11 @@ mod interface {
 
     impl InterfaceSink {
         pub fn open(name: &str) -> Result<Self, SinkError> {
-            let capture = pcap::Capture::from_device(name)?.snaplen(65535).open()?;
+            let dev = crate::pcap_device(name)?;
+            let capture = pcap::Capture::from_device(dev.as_str())?
+                .snaplen(65535)
+                .open()
+                .map_err(|e| format!("cannot open {name}: {e}"))?;
             Ok(Self { capture })
         }
     }

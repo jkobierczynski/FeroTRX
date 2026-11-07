@@ -158,7 +158,7 @@ impl FeroApp {
             .map(|i| i.backends.clone())
             .unwrap_or_default();
         let addr = server.settings.addr.clone();
-        let local = server.settings.is_local();
+        let local = server.is_local();
         let mut browse = None;
         if let Some(PortKind::Interface(n)) = &self.sel_port {
             if self.stateful.iface.is_empty() {
@@ -261,10 +261,7 @@ impl FeroApp {
         if let Some(c) = &st.check {
             match c {
                 Ok(s) => {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(0x2e, 0xa0, 0x43),
-                        "✔ the profile checks out",
-                    );
+                    ui.colored_label(crate::theme::good(ui), "✔ the profile checks out");
                     ui.monospace(s);
                 }
                 Err(e) => {

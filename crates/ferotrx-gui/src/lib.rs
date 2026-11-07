@@ -13,7 +13,9 @@
 //! * [`model`]: streams, ports and the profiles they become;
 //! * [`conn`]: a connection worker per server, polling run lists;
 //! * [`protocols`]: the protocol editor registry, where new protocols and
-//!   application layers plug in.
+//!   application layers plug in;
+//! * [`theme`]: themes (colours per mode, widget style, text sizes) and how
+//!   they become egui styles.
 
 pub mod app;
 pub mod conn;
@@ -22,6 +24,7 @@ pub mod fonts;
 pub mod model;
 pub mod packet_view;
 pub mod protocols;
+pub mod theme;
 pub mod views;
 pub mod workspace;
 

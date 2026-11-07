@@ -482,6 +482,8 @@ impl Controller {
             lab: self.lab_unavailable().is_none(),
             time: Some(ferotrx_core::unix_seconds(std::time::SystemTime::now())),
             max_file: Some(self.files.max_file()),
+            host: ferotrx_io::hostname(),
+            os: Some(std::env::consts::OS.to_string()),
         }
     }
 
@@ -504,6 +506,9 @@ impl Controller {
                 .map(|i| InterfaceEntry {
                     name: i.name,
                     description: i.description,
+                    alias: i.alias,
+                    mac: i.mac,
+                    addresses: i.addresses,
                 })
                 .collect())
         }

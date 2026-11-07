@@ -222,8 +222,8 @@ pub fn report_json(run: &BenchRunInfo) -> Option<String> {
 fn state_color(ui: &egui::Ui, run: &BenchRunInfo) -> Color32 {
     use ferotrx_ctl::protocol::RunState;
     match run.state {
-        RunState::Running => Color32::from_rgb(0x3a, 0x7b, 0xd5),
-        RunState::Finished => Color32::from_rgb(0x2e, 0xa0, 0x43),
+        RunState::Running => crate::theme::running(ui),
+        RunState::Finished => crate::theme::good(ui),
         RunState::Failed => ui.visuals().error_fg_color,
         _ => ui.visuals().weak_text_color(),
     }
@@ -398,7 +398,7 @@ impl FeroApp {
         });
         match &st.check {
             Some(Ok(s)) => {
-                ui.colored_label(Color32::from_rgb(0x2e, 0xa0, 0x43), format!("✔ {s}"));
+                ui.colored_label(crate::theme::good(ui), format!("✔ {s}"));
             }
             Some(Err(e)) => {
                 ui.colored_label(ui.visuals().error_fg_color, e);
@@ -753,7 +753,7 @@ fn throughput_chart(ui: &mut egui::Ui, report: &BenchReport) {
                 Bar::new(n as f64, t.load_pct)
                     .name(&s.size)
                     .width(0.6)
-                    .fill(Color32::from_rgb(0x3a, 0x7b, 0xd5).gamma_multiply(0.6)),
+                    .fill(crate::theme::running(ui).gamma_multiply(0.6)),
             )
         })
         .collect();
@@ -792,6 +792,7 @@ fn trials_chart(ui: &mut egui::Ui, trials: &[&BenchTrialInfo]) {
             ok.push(p);
         }
     }
+    let (good, lossy) = (crate::theme::good(ui), ui.visuals().error_fg_color);
     Plot::new("bench-trials")
         .height(160.0)
         .include_y(0.0)
@@ -803,16 +804,8 @@ fn trials_chart(ui: &mut egui::Ui, trials: &[&BenchTrialInfo]) {
         .x_axis_label("trial")
         .y_axis_label("offered load, %")
         .show(ui, |p| {
-            p.points(
-                Points::new("no loss", ok)
-                    .radius(4.0_f32)
-                    .color(Color32::from_rgb(0x2e, 0xa0, 0x43)),
-            );
-            p.points(
-                Points::new("loss", bad)
-                    .radius(4.0_f32)
-                    .color(Color32::from_rgb(0xd0, 0x40, 0x40)),
-            );
+            p.points(Points::new("no loss", ok).radius(4.0_f32).color(good));
+            p.points(Points::new("loss", bad).radius(4.0_f32).color(lossy));
         });
 }
 
@@ -858,7 +851,7 @@ fn trials_table(ui: &mut egui::Ui, trials: &[&BenchTrialInfo]) {
                 ui.label(format!("{:.3} %", r.loss_pct));
                 ui.label(opt(r.latency.avg_us, " µs"));
                 match r.passed {
-                    Some(true) => ui.colored_label(Color32::from_rgb(0x2e, 0xa0, 0x43), "✔"),
+                    Some(true) => ui.colored_label(crate::theme::good(ui), "✔"),
                     Some(false) => ui.colored_label(ui.visuals().error_fg_color, "✘"),
                     None => ui.weak("–"),
                 };

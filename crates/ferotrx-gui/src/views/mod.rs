@@ -109,7 +109,14 @@ impl FeroApp {
                     .on_hover_text(hover);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                egui::widgets::global_theme_preference_switch(ui);
+                if ui
+                    .button("Appearance…")
+                    .on_hover_text("Appearance: theme colours, widget style, text sizes")
+                    .clicked()
+                {
+                    self.appearance.open = !self.appearance.open;
+                }
+                self.mode_switch(ui);
                 if ui.button("Add server…").clicked() {
                     self.add_server = Some(ConnSettings::default());
                 }
@@ -126,10 +133,7 @@ impl FeroApp {
             for i in 0..self.servers.len() {
                 let s = &self.servers[i];
                 let (dot, tip) = match &s.status {
-                    Status::Connected => (
-                        egui::Color32::from_rgb(0x2e, 0xa0, 0x43),
-                        "connected".to_string(),
-                    ),
+                    Status::Connected => (crate::theme::good(ui), "connected".to_string()),
                     Status::Connecting => (ui.visuals().warn_fg_color, "connecting".into()),
                     Status::Disconnected => {
                         (ui.visuals().weak_text_color(), "not connected".into())
@@ -216,9 +220,22 @@ impl FeroApp {
                                 let desc = s.interfaces.iter().find(
                                     |x| matches!(&port, PortKind::Interface(n) if *n == x.name),
                                 );
-                                let mut r = ui.selectable_label(selected, port.label());
-                                if let Some(d) = desc.and_then(|d| d.description.as_ref()) {
-                                    r = r.on_hover_text(d);
+                                // Windows: "Ethernet 2", not \Device\NPF_{GUID}.
+                                let label = desc
+                                    .and_then(|d| d.alias.clone())
+                                    .unwrap_or_else(|| port.label());
+                                let mut r = ui.selectable_label(selected, label);
+                                if let Some(d) = desc {
+                                    let mut tip: Vec<String> = Vec::new();
+                                    if d.alias.is_some() {
+                                        tip.push(d.name.clone());
+                                    }
+                                    tip.extend(d.description.clone());
+                                    tip.extend(d.mac.clone());
+                                    tip.extend(d.addresses.iter().cloned());
+                                    if !tip.is_empty() {
+                                        r = r.on_hover_text(tip.join("\n"));
+                                    }
                                 }
                                 if r.clicked() {
                                     action = Some(PanelAction::SelectPort(i, port.clone()));
@@ -244,7 +261,7 @@ impl FeroApp {
                             };
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
-                                let green = egui::Color32::from_rgb(0x2e, 0xa0, 0x43);
+                                let green = crate::theme::good(ui);
                                 let dot = if lab.running {
                                     green
                                 } else {
@@ -353,7 +370,39 @@ impl FeroApp {
         }
     }
 
+    /// Cycles the theme's mode: follow the system, light, dark.
+    fn mode_switch(&mut self, ui: &mut egui::Ui) {
+        use crate::theme::Mode;
+        let mode = &mut self.appearance.theme.style.mode;
+        let (icon, hover, next) = match mode {
+            Mode::System => (
+                "💻",
+                "Following the system's light or dark mode",
+                Mode::Light,
+            ),
+            Mode::Light => ("☀", "Light mode", Mode::Dark),
+            Mode::Dark => ("🌙", "Dark mode", Mode::System),
+        };
+        if ui.button(icon).on_hover_text(hover).clicked() {
+            *mode = next;
+        }
+    }
+
     fn dialogs(&mut self, ctx: &egui::Context) {
+        if let Some(save) = self.appearance.window(ctx) {
+            use crate::files::{Kind, Target};
+            let name = format!(
+                "{}.toml",
+                self.appearance.theme.name.to_lowercase().replace(' ', "-")
+            );
+            if save {
+                self.files
+                    .save(Target::SaveTheme, "Save theme", Kind::Theme, "", &name);
+            } else {
+                self.files
+                    .pick(Target::OpenTheme, "Open theme", Kind::Theme, "");
+            }
+        }
         let mut close = false;
         let mut connect = None;
         let mut browse = None;

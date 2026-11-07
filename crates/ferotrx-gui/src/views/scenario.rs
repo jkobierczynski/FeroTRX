@@ -275,9 +275,9 @@ impl ScenarioState {
 
 fn verdict_color(ui: &egui::Ui, state: &str) -> Color32 {
     match state {
-        "pass" => Color32::from_rgb(0x2e, 0xa0, 0x43),
+        "pass" => crate::theme::good(ui),
         "fail" | "error" => ui.visuals().error_fg_color,
-        "running" => Color32::from_rgb(0x3a, 0x7b, 0xd5),
+        "running" => crate::theme::running(ui),
         _ => ui.visuals().weak_text_color(),
     }
 }
@@ -317,7 +317,7 @@ impl FeroApp {
         };
         let connected = server.status == Status::Connected;
         let can = connected && server.can_operate();
-        let local = server.settings.is_local();
+        let local = server.is_local();
         let addr = server.settings.addr.clone();
         let ifaces: Vec<String> = server.interfaces.iter().map(|x| x.name.clone()).collect();
         let runs: Vec<ScenarioRunInfo> = server.snap.scenarios.clone();
@@ -445,7 +445,7 @@ impl FeroApp {
         match &st.checked {
             Some(Ok(info)) => {
                 ui.colored_label(
-                    Color32::from_rgb(0x2e, 0xa0, 0x43),
+                    crate::theme::good(ui),
                     format!("✔ {}: {} checks", info.name, info.checks.len()),
                 );
             }
@@ -697,7 +697,7 @@ fn scenario_results(
             None => format!("{:?}", r.state).to_lowercase(),
         };
         let color = match &r.report {
-            Some(rep) if rep.passed() => Color32::from_rgb(0x2e, 0xa0, 0x43),
+            Some(rep) if rep.passed() => crate::theme::good(ui),
             Some(_) => ui.visuals().error_fg_color,
             None => ui.visuals().text_color(),
         };
@@ -870,7 +870,7 @@ fn report_details(ui: &mut egui::Ui, r: &CheckReport) {
             .show(ui, |ui| {
                 for cond in &r.conditions {
                     let (sym, color) = if cond.pass {
-                        ("✔", Color32::from_rgb(0x2e, 0xa0, 0x43))
+                        ("✔", crate::theme::good(ui))
                     } else {
                         ("✘", ui.visuals().error_fg_color)
                     };

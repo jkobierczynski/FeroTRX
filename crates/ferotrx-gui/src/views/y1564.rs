@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText};
 use egui_plot::{Legend, Line, Plot, PlotPoints};
 use ferotrx_core::{Color, StepRecord, Y1564Profile, Y1564Test};
 use ferotrx_ctl::protocol::Y1564RunInfo;
@@ -222,13 +222,9 @@ pub fn report_json(run: &Y1564RunInfo) -> Option<String> {
     serde_json::to_string_pretty(&v).ok().map(|s| s + "\n")
 }
 
-fn good() -> Color32 {
-    Color32::from_rgb(0x2e, 0xa0, 0x43)
-}
-
 fn verdict(ui: &egui::Ui, passed: bool) -> RichText {
     if passed {
-        RichText::new("PASS").color(good()).strong()
+        RichText::new("PASS").color(crate::theme::good(ui)).strong()
     } else {
         RichText::new("FAIL")
             .color(ui.visuals().error_fg_color)
@@ -460,7 +456,7 @@ impl FeroApp {
         });
         match &st.check {
             Some(Ok(s)) => {
-                ui.colored_label(good(), format!("✔ {s}"));
+                ui.colored_label(crate::theme::good(ui), format!("✔ {s}"));
             }
             Some(Err(e)) => {
                 ui.colored_label(ui.visuals().error_fg_color, e);
@@ -659,8 +655,8 @@ fn results(ui: &mut egui::Ui, st: &mut Y1564State, runs: &[Y1564RunInfo], a: &mu
     ui.horizontal(|ui| {
         use ferotrx_ctl::protocol::RunState;
         let color = match (&run.state, run.report.as_ref().map(|r| r.passed)) {
-            (RunState::Running, _) => Color32::from_rgb(0x3a, 0x7b, 0xd5),
-            (_, Some(true)) => good(),
+            (RunState::Running, _) => crate::theme::running(ui),
+            (_, Some(true)) => crate::theme::good(ui),
             (RunState::Failed, _) | (_, Some(false)) => ui.visuals().error_fg_color,
             _ => ui.visuals().weak_text_color(),
         };

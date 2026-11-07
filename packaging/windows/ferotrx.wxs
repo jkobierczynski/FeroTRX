@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The FeroTRX Windows installer (WiX Toolset 5). Built by build-msi.ps1:
+    wix build ferotrx.wxs -ext WixToolset.UI.wixext -arch x64
+      -d Version=X.Y.Z -d BinDir=target\release -d SrcDir=<repository>
+
+  Installs ferotrx.exe and ferotrx-gui.exe with the examples and docs in
+  Program Files\FeroTRX, a Start menu entry for the GUI, the folder on the
+  system PATH (for ferotrx in any terminal) and *.ferotrx workspaces opening
+  in the GUI. A newer version replaces an older one in place.
+
+  Npcap is not included: its free licence does not allow it. The GUI and
+  ferotrx.exe say where to get it when an interface is needed.
+
+  Keep UpgradeCode: it is how Windows knows a new version replaces this one.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="FeroTRX"
+           Manufacturer="FeroTRX contributors"
+           Version="$(Version)"
+           UpgradeCode="87ECA69D-B619-4BD1-976A-12D0240169C3"
+           Scope="perMachine"
+           Compressed="yes">
+    <SummaryInformation Description="FeroTRX traffic generator and network tester" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of FeroTRX is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="FeroTRXIcon" SourceFile="$(SrcDir)\packaging\windows\ferotrx.ico" />
+    <Property Id="ARPPRODUCTICON" Value="FeroTRXIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/jkobierczynski/FeroTRX" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/jkobierczynski/FeroTRX/issues" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="FeroTRX">
+        <Directory Id="ExamplesFolder" Name="examples" />
+        <Directory Id="DocsFolder" Name="docs" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="FeroTRX" AllowAbsent="no">
+      <ComponentGroupRef Id="Programs" />
+      <ComponentGroupRef Id="Examples" />
+      <ComponentGroupRef Id="Docs" />
+    </Feature>
+
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(SrcDir)\packaging\windows\license.rtf" />
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="Programs" Directory="INSTALLFOLDER">
+      <Component Id="Gui">
+        <File Id="GuiExe" Source="$(BinDir)\ferotrx-gui.exe" KeyPath="yes">
+          <Shortcut Id="GuiShortcut"
+                    Directory="ProgramMenuFolder"
+                    Name="FeroTRX"
+                    Description="FeroTRX: build, send and measure traffic"
+                    WorkingDirectory="PersonalFolder"
+                    Advertise="no" />
+        </File>
+        <!-- Workspaces (*.ferotrx) open in the GUI. -->
+        <ProgId Id="FeroTRX.Workspace" Description="FeroTRX workspace" Icon="GuiExe" IconIndex="0">
+          <Extension Id="ferotrx" ContentType="application/x-ferotrx-workspace">
+            <Verb Id="open" Command="Open" TargetFile="GuiExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+      </Component>
+      <Component Id="Cli">
+        <File Id="CliExe" Source="$(BinDir)\ferotrx.exe" KeyPath="yes" />
+        <!-- ferotrx in any new terminal. -->
+        <Environment Id="PathEntry" Name="PATH" Value="[INSTALLFOLDER]" Action="set"
+                     Part="last" System="yes" Permanent="no" />
+      </Component>
+      <Component Id="Readme">
+        <File Id="ReadmeMd" Source="$(SrcDir)\README.md" KeyPath="yes" />
+      </Component>
+      <Component Id="License">
+        <File Id="LicenseTxt" Source="$(SrcDir)\LICENSE" Name="LICENSE.txt" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="Examples" Directory="ExamplesFolder">
+      <Files Include="$(SrcDir)\examples\**" />
+    </ComponentGroup>
+    <ComponentGroup Id="Docs" Directory="DocsFolder">
+      <Files Include="$(SrcDir)\docs\**" />
+    </ComponentGroup>
+  </Fragment>
+</Wix>

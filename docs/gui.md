@@ -9,8 +9,9 @@ client of the [control API](remote-control.md), like `ferotrx ctl` and the
 [Python client](python-client.md): whatever it sends is an ordinary profile
 that `ferotrx run` sends the same way.
 
-It runs on Linux (X11 and Wayland), macOS and Windows. It needs no
-privileges itself; the server does the sending.
+It runs on Linux (X11 and Wayland), macOS and Windows (with an installer,
+see [Windows](windows.md)). It needs no privileges itself; the server does
+the sending.
 
 ```sh
 cargo build --release -p ferotrx-gui         # target/release/ferotrx-gui
@@ -25,14 +26,66 @@ ferotrx-gui --connect 192.168.56.10 --ca ca.pem --cert alice.pem --key alice-key
 ferotrx-gui --port enp0s3 --profile examples/lab-two-vlans.toml
 ferotrx-gui examples/web.pcap
 
-# Open a workspace saved earlier:
+# Open a workspace saved earlier (or give the file on its own, as Windows
+# does when you double-click one):
 ferotrx-gui --workspace lab.ferotrx
+
+# With a theme file (see Appearance below):
+ferotrx-gui --theme lab-theme.toml
 ```
 
 `FEROTRX_CTL`, `FEROTRX_CA`, `FEROTRX_CERT`, `FEROTRX_KEY` and
 `FEROTRX_TOKEN` work as for `ferotrx ctl`. Tokens are never saved; the rest
 (servers, every port's streams and settings, the forms of every tab, the
 last port open) is kept between sessions.
+
+## Appearance
+
+**Appearance…** in the top bar opens a window that changes the look while
+you watch; the button next to it switches between following the system,
+light and dark.
+
+* **Theme:** a built-in theme to start from (FeroTRX, egui's own, High
+  contrast, Compact), its name, and **Open…**/**Save as…** for theme files.
+* **Mode:** follow the system, or always light or dark.
+* **Colours**, separately for light and dark mode: accent (links, hovered
+  outlines, the cursor, the text of selected items), selection, background,
+  windows, input fields, table stripes, widgets, hovered widgets, borders,
+  and the colours of passed, running, warnings and errors used in every
+  tab; optionally your own text colour.
+* **Widgets:** corner radius of widgets and of windows, border width,
+  density (spacing and widget heights), borders on buttons and fields,
+  shadows, animations, scroll bars beside the content instead of floating.
+* **Text:** zoom of the whole window (Ctrl + and Ctrl - change it too) and
+  the sizes of body, monospace, heading and small text.
+* **Preview:** buttons, fields, a striped table and the status colours in
+  the current style.
+
+The theme is kept between sessions. A theme file is TOML with
+`format = 1`; anything left out keeps the default, so a lab can share a
+short one:
+
+```toml
+format = 1
+name = "Lab"
+
+[style]
+mode = "dark"
+corner_radius = 0
+density = 0.85
+
+[dark]
+accent = "#ffb000"
+background = "#101418"
+```
+
+The keys are those of the window: `mode`, `zoom`, `corner_radius`,
+`window_radius`, `border_width`, `outlined`, `density`, `body_size`,
+`monospace_size`, `heading_size`, `small_size`, `shadows`, `animations`,
+`solid_scrollbars` under `[style]`, and `accent`, `selection`,
+`background`, `window`, `input`, `stripe`, `widget`, `hovered`, `border`,
+`text`, `good`, `running`, `warn`, `error` (as `"#rrggbb"`) under `[light]`
+and `[dark]`.
 
 ## Workspaces
 
@@ -71,9 +124,11 @@ computer (profiles you open and save, captures, certificates) are always
 picked this way. Files on the server (the capture a stream replays, the pcap
 the `file` port writes, a profile the server reads) can be picked the same
 way when the server runs on this computer (`127.0.0.1`, `::1`,
-`localhost`); for a server elsewhere, type the path, relative to the
+`localhost`, and the server reports this computer's host name and
+system); for a server elsewhere, type the path, relative to the
 server's data directory (where `ferotrx serve` was started, or
-`--data-dir`).
+`--data-dir`). A loopback address forwarded into a virtual machine (such
+as a VirtualBox NAT port forward to 127.0.0.1:4510) counts as elsewhere.
 
 Relative paths inside a profile start at the profile's own folder, as with
 `ferotrx run`: open `examples/lab-two-vlans.toml` and its `pcap = "dns.pcap"`

@@ -271,7 +271,7 @@ impl FeroApp {
                         crate::model::start_params(&port, &work.config, &name, &self.work.file_out);
                     let mut load =
                         serde_json::json!({ "name": name, "toml": work.profile.to_toml(true) });
-                    if s.settings.is_local() && !work.base_dir.is_empty() {
+                    if s.is_local() && !work.base_dir.is_empty() {
                         load["base_dir"] = work.base_dir.clone().into();
                     }
                     loads.push((n, i, load));
@@ -285,7 +285,7 @@ impl FeroApp {
                         Kind::Udp
                     };
                     st.check = None;
-                    match st.params_for(s.settings.is_local()) {
+                    match st.params_for(s.is_local()) {
                         Ok(p) => starts.push((n, format!("{}.start", m.kind.method()), p)),
                         Err(e) => problems.push(format!("member {}: {e}", n + 1)),
                     }
