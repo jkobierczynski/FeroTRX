@@ -345,9 +345,12 @@ EOT
     [ "$(grep -c "^  host 02:dc:00:00:0e:0[12] ready after .* ipv4 10.88.0.10[0-4]/24 via 10.88.0.1 (dhcp from 10.88.0.1" "$tmp/host.log")" = 2 ] \
         || fail "the emulated clients did not get leases from the FeroTRX server"
     # At the end every client has released its lease: udhcpc's and the two
-    # emulated clients'.
-    grep -q "dhcp server 10.88.0.100-10.88.0.104 (0 of 5 leased; [0-9]* discovers, [0-9]* offers, 4 acks, 0 naks, 3 releases)" "$tmp/host.log" \
-        || fail "the server's counters are not as expected (4 acks, 3 releases)"
+    # emulated clients'. At least 4 acks: udhcpc's lease and renewal, and
+    # the emulated clients' leases. udhcpc sends its renewal again as a
+    # broadcast when the unicast answer is slow (a busy CI machine), and the
+    # server acks that too, so 5 is fine.
+    grep -Eq "dhcp server 10.88.0.100-10.88.0.104 \(0 of 5 leased; [0-9]+ discovers, [0-9]+ offers, [45] acks, 0 naks, 3 releases\)" "$tmp/host.log" \
+        || fail "the server's counters are not as expected (4 or 5 acks, 3 releases)"
 else
     echo "== 1. SLAAC and DHCPv6 hosts with an MLD group"
     cat >"$tmp/hosts.toml" <<EOT
