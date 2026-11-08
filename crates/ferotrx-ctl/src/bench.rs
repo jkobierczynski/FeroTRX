@@ -99,7 +99,22 @@ impl BenchRun {
         open_sinks: &BenchSinkOpener,
         open_receiver: &crate::controller::ReceiverOpener,
     ) -> Result<Arc<Self>, String> {
-        let capture = Arc::new(job.profile.capture().map_err(|e| e.to_string())?);
+        let mut capture = job.profile.capture().map_err(|e| e.to_string())?;
+        // The port's own addresses: the gateway's MAC put in the frames once,
+        // the port answered for until the benchmark ends.
+        let output = ferotrx_io::Output::Interface {
+            name: job.iface.clone(),
+            send: job.send.clone(),
+        };
+        let link = crate::controller::start_link(&output, &job.profile.link)
+            .map_err(|e| e.to_string())?;
+        if let Some(svc) = &link {
+            let mut macs = svc.macs();
+            for p in &mut capture.packets {
+                ferotrx_core::Transform::apply(&mut macs, p);
+            }
+        }
+        let capture = Arc::new(capture);
         let workers = job.send.workers();
         let (sinks, detail) = open_sinks(&job.iface, &job.send, capture.linktype, workers)
             .map_err(|e| format!("cannot send on {}: {e}", job.iface))?;
@@ -114,7 +129,10 @@ impl BenchRun {
         info.command = Some("bench.start".into());
         info.profile = Some(job.profile_name.clone());
         info.profile_text = Some(job.profile_text.clone());
-        info.backend = Some(detail);
+        info.backend = Some(match &link {
+            Some(svc) => format!("{detail}; port {}", svc.detail()),
+            None => detail,
+        });
         info.tx_interface = Some(ferotrx_io::describe_interface(&job.iface));
         info.rx_interface = Some(ferotrx_io::describe_interface(&job.rx));
         info.timestamps = Some(
@@ -175,7 +193,10 @@ impl BenchRun {
         let r = run.clone();
         std::thread::Builder::new()
             .name(format!("bench-{id}"))
-            .spawn(move || r.main(job.profile, make_runner()))
+            .spawn(move || {
+                r.main(job.profile, make_runner());
+                drop(link);
+            })
             .map_err(|e| format!("cannot start the benchmark: {e}"))?;
         Ok(run)
     }

@@ -17,6 +17,13 @@ pub struct LinkArgs {
     #[arg(long)]
     pub l1: bool,
 
+    #[command(flatten)]
+    pub addr: AddrArgs,
+}
+
+/// The port's own addresses (TRex's L3 port mode).
+#[derive(Args, Clone, Default)]
+pub struct AddrArgs {
     /// The port's own address, e.g. 10.0.0.2/24 or 2001:db8::2/64 (one per
     /// IP version). With --gateway the gateway's MAC goes into every frame,
     /// and the port answers ARP, neighbor solicitations and pings.
@@ -42,15 +49,11 @@ pub struct LinkArgs {
     pub answer: Vec<IpRange>,
 }
 
-impl LinkArgs {
-    /// The settings given here, the rest from `fallback` (a profile's).
+impl AddrArgs {
+    /// The addresses given here, the rest from `fallback` (a profile's).
     pub fn settings(&self, fallback: &LinkSettings) -> Result<LinkSettings> {
         let link = LinkSettings {
-            line_rate: self
-                .line_rate
-                .as_deref()
-                .map(ferotrx_core::parse_line_rate)
-                .transpose()?,
+            line_rate: None,
             ip: self.ip.clone(),
             gateway: self.gateway.clone(),
             mac: self.mac,
@@ -59,6 +62,18 @@ impl LinkArgs {
         }
         .or(fallback);
         link.validate()?;
+        Ok(link)
+    }
+}
+
+impl LinkArgs {
+    /// The settings given here, the rest from `fallback` (a profile's).
+    pub fn settings(&self, fallback: &LinkSettings) -> Result<LinkSettings> {
+        let mut link = self.addr.settings(fallback)?;
+        if let Some(r) = &self.line_rate {
+            link.line_rate = Some(ferotrx_core::parse_line_rate(r)?);
+            link.validate()?;
+        }
         Ok(link)
     }
 

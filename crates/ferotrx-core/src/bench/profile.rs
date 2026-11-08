@@ -43,6 +43,8 @@ use crate::{
 ///
 /// [output]                     # as in traffic profiles
 /// backend = "af_xdp"
+/// ip = "10.0.0.2/24"           # the port's own address (not line_rate:
+/// gateway = "10.0.0.1"         # that is [benchmark] line_rate)
 /// ```
 #[derive(Clone, Debug)]
 pub struct BenchProfile {
@@ -53,6 +55,8 @@ pub struct BenchProfile {
     /// Time to wait for frames in flight after each trial.
     pub rx_wait: Duration,
     pub output: SendSettings,
+    /// The sending port's own addresses (`[output] ip`, `gateway`, ...).
+    pub link: crate::LinkSettings,
 }
 
 #[derive(Deserialize)]
@@ -199,6 +203,16 @@ impl BenchProfile {
             stop: None,
         };
         config.validate().map_err(ctx)?;
+        let (output, link) = match file.output {
+            Some(o) => o.split()?,
+            None => Default::default(),
+        };
+        if link.line_rate.is_some() {
+            return Err(Error::Profile(
+                "[output]: line_rate goes in [benchmark] in a benchmark profile".into(),
+            ));
+        }
+        link.validate()?;
         let profile = Self {
             config,
             vary: b
@@ -208,9 +222,8 @@ impl BenchProfile {
                 .collect::<Result<_>>()
                 .map_err(ctx)?,
             rx_wait: dur(&b.rx_wait, crate::RxSettings::DEFAULT_WAIT)?,
-            output: file
-                .output
-                .map_or(Ok(SendSettings::default()), OutputFile::settings)?,
+            output,
+            link,
             packets,
         };
         // Build once now so mistakes show up when the profile is read.

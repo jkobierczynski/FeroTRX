@@ -491,6 +491,17 @@ jobs:
           sudo LOSS=0.03 scripts/latency-netns.sh ./target/debug/ferotrx
           sudo IPV6=1 scripts/latency-netns.sh ./target/debug/ferotrx
 
+      # The port's own addresses (ARP/neighbor discovery for the router,
+      # answers to its pings), multi-burst and next streams, a rate that is a
+      # share of the line, and live pause/resume/update through serve.
+      - name: Port addresses and live control through a router (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo scripts/link-netns.sh ./target/debug/ferotrx
+          sudo IPV6=1 scripts/link-netns.sh ./target/debug/ferotrx
+          sudo scripts/link-netns.sh ./target/debug/ferotrx -B af_xdp
+
       # FeroTRX's own impairments, without netem: the two-port bridge
       # between hosts in namespaces, a stream's impairments measured by a
       # receiver, a rate limit; and a TCP run through impaired ports.

@@ -1050,6 +1050,7 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
         }
         CtlCommand::Unload { name } => c.unload_profile(&name)?,
         CtlCommand::Start(s) => {
+            s.link.check_no_l1()?;
             let params = StartParams {
                 profile: s.profile,
                 output: {
@@ -1065,11 +1066,11 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                         dpdk_args: send.dpdk_args,
                         workers: send.workers,
                         line_rate: s.link.line_rate.clone(),
-                        ip: s.link.ip.iter().map(|p| p.to_string()).collect(),
-                        gateway: s.link.gateway.iter().map(|g| g.to_string()).collect(),
-                        mac: s.link.mac.map(|m| m.to_string()),
-                        vlan: s.link.port_vlan,
-                        answer: s.link.answer.iter().map(|r| r.to_string()).collect(),
+                        ip: s.link.addr.ip.iter().map(|p| p.to_string()).collect(),
+                        gateway: s.link.addr.gateway.iter().map(|g| g.to_string()).collect(),
+                        mac: s.link.addr.mac.map(|m| m.to_string()),
+                        vlan: s.link.addr.port_vlan,
+                        answer: s.link.addr.answer.iter().map(|r| r.to_string()).collect(),
                     }
                 },
                 rate: s.rate,
