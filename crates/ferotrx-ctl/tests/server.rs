@@ -194,6 +194,92 @@ fn stop_a_run_from_another_connection() {
 }
 
 #[test]
+fn pause_resume_and_change_the_rate_of_a_run() {
+    let addr = server(None);
+    let mut c = client(addr);
+    load(&mut c);
+    let run = c
+        .start(&StartParams {
+            profile: "lab".into(),
+            output: null_output(),
+            ..Default::default()
+        })
+        .unwrap();
+    let paused = c.pause(run.id, &[]).unwrap();
+    assert!(paused.paused);
+    let held = c.stats(run.id).unwrap().total.packets;
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(c.stats(run.id).unwrap().total.packets <= held + 2);
+    let resumed = c.resume(run.id, &[]).unwrap();
+    assert!(!resumed.paused);
+
+    // One stream paused on its own, the other at half its rate.
+    c.pause(run.id, &["dns".into()]).unwrap();
+    let info = c
+        .update(&RunUpdateParams {
+            id: run.id,
+            multiplier: Some(2.0),
+            streams: vec![StreamUpdate {
+                name: "ping".into(),
+                rate: Some("500pps".into()),
+                ..Default::default()
+            }],
+        })
+        .unwrap();
+    assert_eq!(info.multiplier, 2.0);
+    let dns = info.streams.iter().find(|s| s.name == "dns").unwrap();
+    assert!(dns.paused);
+    let ping = info.streams.iter().find(|s| s.name == "ping").unwrap();
+    assert!((ping.multiplier - 0.25).abs() < 1e-9, "{}", ping.multiplier);
+    let before = c.stats(run.id).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let after = c.stats(run.id).unwrap();
+    let pkts = |r: &RunInfo, n: &str| {
+        r.streams
+            .iter()
+            .find(|s| s.name == n)
+            .unwrap()
+            .counters
+            .packets
+    };
+    // ping: 500 pps asked x 2 = about 500 in 0.5 s; dns held.
+    let sent = pkts(&after, "ping") - pkts(&before, "ping");
+    assert!((250..=800).contains(&sent), "{sent}");
+    assert!(pkts(&after, "dns") <= pkts(&before, "dns") + 1);
+
+    // Errors: a stream nobody has, a rate of another kind.
+    let bad = |c: &mut Client, u: StreamUpdate| {
+        rpc_code(
+            c.update(&RunUpdateParams {
+                id: run.id,
+                streams: vec![u],
+                ..Default::default()
+            })
+            .unwrap_err(),
+        )
+    };
+    let code = bad(
+        &mut c,
+        StreamUpdate {
+            name: "nope".into(),
+            multiplier: Some(1.0),
+            ..Default::default()
+        },
+    );
+    assert_eq!(code, RpcError::NOT_FOUND);
+    let code = bad(
+        &mut c,
+        StreamUpdate {
+            name: "ping".into(),
+            rate: Some("10mbps".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(code, RpcError::INVALID_PARAMS);
+    c.stop(run.id).unwrap();
+}
+
+#[test]
 fn all_runs_subscription_reports_the_end() {
     let addr = server(None);
     let mut c = client(addr);

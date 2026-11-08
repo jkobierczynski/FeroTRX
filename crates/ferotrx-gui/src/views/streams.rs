@@ -8,7 +8,7 @@ use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
 use ferotrx_packet::{decode, format_layers, parse_layers, Decoded, PacketSpec, RawLayer};
 
-use crate::app::{FeroApp, Status};
+use crate::app::{FeroApp, Pending, Status};
 use crate::files::{Kind, Target};
 use crate::model::{Latency, Pacing, PortKind, ProfileDraft, SourceKind, StreamDraft};
 use crate::packet_view::{self, state_color, Selection};
@@ -99,6 +99,10 @@ pub fn check_stream(s: &StreamDraft) -> Result<(), String> {
 enum Action {
     Start,
     Stop(u64),
+    /// Pause (true) or resume a running run.
+    Hold(u64, bool),
+    /// A new rate multiplier for the whole run.
+    Speed(u64, f64),
     Check,
     Open,
     Save,
@@ -152,6 +156,25 @@ impl FeroApp {
         match action {
             Some(Action::Start) => self.start_port(i, &port),
             Some(Action::Stop(id)) => self.stop_run(i, "run", id),
+            Some(Action::Hold(id, pause)) => {
+                let (method, done) = if pause {
+                    ("run.pause", "paused")
+                } else {
+                    ("run.resume", "resumed")
+                };
+                self.call(
+                    i,
+                    method,
+                    serde_json::json!({ "id": id }),
+                    Pending::Done(format!("run {id} {done}")),
+                );
+            }
+            Some(Action::Speed(id, m)) => self.call(
+                i,
+                "run.update",
+                serde_json::json!({ "id": id, "multiplier": m }),
+                Pending::Done(format!("run {id} at x{m}")),
+            ),
             Some(Action::Check) => self.check_port(i, &port),
             Some(Action::Open) => {
                 let dir = self.port_work(i, &port).base_dir.clone();
@@ -265,6 +288,30 @@ impl FeroApp {
                 if ui.button("■ Stop").clicked() {
                     if let Some(r) = &run {
                         *action = Some(Action::Stop(r.id));
+                    }
+                }
+                if let Some(r) = run.as_ref().filter(|_| running) {
+                    let (label, hover) = if r.paused {
+                        ("▶ Resume", "Go on from where the run was held")
+                    } else {
+                        ("⏸ Pause", "Hold every stream where it is")
+                    };
+                    if ui.button(label).on_hover_text(hover).clicked() {
+                        *action = Some(Action::Hold(r.id, !r.paused));
+                    }
+                    let mut m = r.multiplier;
+                    let resp = ui
+                        .add(
+                            egui::DragValue::new(&mut m)
+                                .range(0.01..=100.0)
+                                .speed(0.01)
+                                .prefix("rate x"),
+                        )
+                        .on_hover_text(
+                            "Every stream at this many times its rate, changed while it runs",
+                        );
+                    if (resp.drag_stopped() || resp.lost_focus()) && m != r.multiplier {
+                        *action = Some(Action::Speed(r.id, m));
                     }
                 }
             });
@@ -1113,6 +1160,36 @@ fn control_page(ui: &mut egui::Ui, s: &mut StreamDraft) {
             ui.end_row();
             ui.label("Rate shape");
             string_list(ui, "shape", &mut s.shape, "at=10s:500pps");
+            ui.end_row();
+            ui.label("Bursts");
+            ui.horizontal(|ui| {
+                let mut on = s.burst_size.is_some();
+                if ui.checkbox(&mut on, "").changed() {
+                    s.burst_size = on.then_some(64);
+                    if on && s.burst_gap.is_empty() {
+                        s.burst_gap = "10ms".into();
+                    }
+                }
+                if let Some(n) = &mut s.burst_size {
+                    ui.add(egui::DragValue::new(n).range(1..=u64::MAX).suffix(" packets"));
+                    ui.label("then");
+                    ui.add(egui::TextEdit::singleline(&mut s.burst_gap).hint_text("10ms").desired_width(70.0));
+                    ui.label("gap;");
+                    let mut all = s.bursts.is_some();
+                    if ui.checkbox(&mut all, "only").changed() {
+                        s.bursts = all.then_some(10);
+                    }
+                    if let Some(b) = &mut s.bursts {
+                        ui.add(egui::DragValue::new(b).range(1..=u64::MAX).suffix(" bursts"));
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Bursts of packets at the stream's rate with a gap between them");
+            ui.end_row();
+            ui.label("Then start");
+            ui.add(egui::TextEdit::singleline(&mut s.next).hint_text("stream name").desired_width(160.0))
+                .on_hover_text("The stream to start when this one ends; it waits until then (next_count and start in the file set loops)");
             ui.end_row();
             ui.label("Frame sizes");
             ui.horizontal(|ui| {

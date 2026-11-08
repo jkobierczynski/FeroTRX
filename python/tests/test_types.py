@@ -146,6 +146,30 @@ def test_start_params() -> None:
             _wire.output_spec(**bad)  # type: ignore[arg-type]
 
 
+def test_link_and_live_control_params() -> None:
+    out = _wire.output_spec(
+        iface="eth0", line_rate="1gbps", ip="10.0.0.2/24", gateway=["10.0.0.1"], vlan=10
+    )
+    assert out == {
+        "iface": "eth0",
+        "line_rate": "1gbps",
+        "ip": ["10.0.0.2/24"],
+        "gateway": ["10.0.0.1"],
+        "vlan": 10,
+    }
+    assert _wire.run_control("run.pause", 3, None).params == {"id": 3}
+    assert _wire.run_control("run.resume", 3, "dns").params == {"id": 3, "streams": ["dns"]}
+    call = _wire.run_update(3, 2.0, {"ping": "500pps", "dns": 0.5})
+    assert call.method == "run.update"
+    assert call.params == {
+        "id": 3,
+        "multiplier": 2.0,
+        "streams": [{"name": "ping", "rate": "500pps"}, {"name": "dns", "multiplier": 0.5}],
+    }
+    with pytest.raises(ValueError):
+        _wire.run_update(3, None, None)
+
+
 def test_y1564_params_and_info() -> None:
     call = _wire.y1564_start(
         None,

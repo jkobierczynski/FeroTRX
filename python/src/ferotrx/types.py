@@ -401,6 +401,10 @@ class StreamInfo(Record):
     model: str | None = None
     #: The stream's impairments (the profile's ``impair``), e.g. ``delay=20ms loss=1%``.
     impair: str | None = None
+    #: Bursts with gaps, e.g. ``10 bursts of 64, 5ms apart``.
+    bursts: str | None = None
+    #: The stream this one starts when it ends.
+    next: str | None = None
 
 
 @dataclass(kw_only=True)
@@ -521,6 +525,10 @@ class StreamCounters(Counters):
     latency: FlowCounters | None = None
     #: What the stream's impairments did.
     impair: ImpairCounters | None = None
+    #: Paused on its own (``pause(id, streams=...)``).
+    paused: bool = False
+    #: Its own rate multiplier from ``update`` (1 = as asked).
+    multiplier: float = 1.0
 
 
 @dataclass(kw_only=True)
@@ -555,6 +563,12 @@ class RunInfo(Record):
     #: When the run started sending, in seconds since 1970 by the server's
     #: clock; None while it waits for its ``start_at``.
     started_at: float | None = None
+    #: The port's own addresses and the next hops found, when it has them.
+    link: str | None = None
+    #: Held by ``pause``.
+    paused: bool = False
+    #: The rate multiplier ``update`` set for the whole run (1 = as asked).
+    multiplier: float = 1.0
 
     @property
     def running(self) -> bool:

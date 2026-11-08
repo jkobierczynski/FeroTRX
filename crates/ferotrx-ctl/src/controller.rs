@@ -1463,7 +1463,7 @@ impl Controller {
     pub fn update(&self, p: RunUpdateParams) -> Result<RunInfo, RpcError> {
         let run = self.get_run(p.id)?;
         let control = run.job.control();
-        let mut state = control.state();
+        let state = control.state();
         let bad = |e: ferotrx_core::Error| RpcError::invalid_params(e.to_string());
         let rates = run.job.rates();
         let mut changes: Vec<(usize, f64)> = Vec::new();
@@ -1514,8 +1514,6 @@ impl Controller {
         for (i, m) in changes {
             control.set_stream_multiplier(i, m).map_err(bad)?;
         }
-        state = control.state();
-        let _ = state;
         Ok(run.info())
     }
 

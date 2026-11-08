@@ -65,6 +65,13 @@ pub struct StreamDraft {
     pub sizes: String,
     pub model: String,
     pub shape: Vec<String>,
+    /// Packets in each burst (`burst_size`); `None` sends without bursts.
+    pub burst_size: Option<u64>,
+    /// Bursts in all (`bursts`); `None` until the stream ends.
+    pub bursts: Option<u64>,
+    pub burst_gap: String,
+    /// The stream this one starts when it ends (`next`).
+    pub next: String,
     /// Keys of a loaded `[[stream]]` this editor does not know, written back
     /// unchanged.
     pub extra: BTreeMap<String, String>,
@@ -89,6 +96,10 @@ impl Default for StreamDraft {
             latency: Latency::Off,
             sizes: String::new(),
             model: String::new(),
+            burst_size: None,
+            bursts: None,
+            burst_gap: String::new(),
+            next: String::new(),
             shape: Vec::new(),
             extra: BTreeMap::new(),
         }
@@ -154,6 +165,14 @@ impl StreamDraft {
         opt("delay", &self.delay);
         opt("sizes", &self.sizes);
         opt("model", &self.model);
+        opt("next", &self.next);
+        if let Some(n) = self.burst_size {
+            opt("burst_gap", &self.burst_gap);
+            t.insert("burst_size".into(), Value::Integer(n as i64));
+            if let Some(b) = self.bursts {
+                t.insert("bursts".into(), Value::Integer(b as i64));
+            }
+        }
         let clean = |v: &[String]| -> Vec<String> {
             v.iter()
                 .map(|x| x.trim().to_string())
@@ -241,6 +260,10 @@ impl StreamDraft {
                 "shape" => d.shape = list_of(k, v)?,
                 "sizes" => d.sizes = str_of(k, v)?,
                 "model" => d.model = str_of(k, v)?,
+                "next" => d.next = str_of(k, v)?,
+                "burst_size" => d.burst_size = Some(int_of(k, v)?),
+                "bursts" => d.bursts = Some(int_of(k, v)?),
+                "burst_gap" => d.burst_gap = str_of(k, v)?,
                 "latency" => {
                     d.latency = match v {
                         Value::Boolean(true) => Latency::On,
@@ -480,6 +503,10 @@ loops = 0
 delay = "2s"
 vary = ["port_src=1024..65535"]
 latency = 7
+burst_size = 8
+bursts = 3
+burst_gap = "5ms"
+next = "web"
 
 [[stream]]
 name = "web"
@@ -497,6 +524,11 @@ future_key = { a = 1 }
         assert_eq!(p.streams.len(), 2);
         assert_eq!(p.streams[0].packets.len(), 2);
         assert_eq!(p.streams[0].latency, Latency::Flow(7));
+        assert_eq!(
+            (p.streams[0].burst_size, p.streams[0].bursts),
+            (Some(8), Some(3))
+        );
+        assert_eq!(p.streams[0].next, "web");
         assert_eq!(p.streams[1].source, SourceKind::Pcap);
         assert_eq!(p.streams[1].limit, Some(100));
         assert!(p.streams[1].extra.contains_key("future_key"));

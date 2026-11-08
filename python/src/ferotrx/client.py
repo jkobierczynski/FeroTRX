@@ -7,7 +7,7 @@ import ssl
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, TypeVar
 
 from . import _wire
@@ -400,6 +400,12 @@ class Client:
         rx_wait: str | None = None,
         impair: str | None = None,
         start_at: float | None = None,
+        line_rate: str | None = None,
+        ip: str | Sequence[str] | None = None,
+        gateway: str | Sequence[str] | None = None,
+        mac: str | None = None,
+        vlan: int | None = None,
+        answer: str | Sequence[str] | None = None,
     ) -> RunInfo:
         """Starts a run of a loaded profile.
 
@@ -413,6 +419,11 @@ class Client:
         ``workers`` spreads the run over that many threads on the server.
         ``impair`` (e.g. ``"delay=20ms jitter=5ms loss=1%"``) impairs every
         stream's packets instead of the profile's impairments (``"none"``: none).
+        ``line_rate`` (e.g. ``"10gbps"``) is what ``"50%"`` rates are a share
+        of. ``ip`` (``"10.0.0.2/24"``), ``gateway``, ``mac``, ``vlan`` and
+        ``answer`` give the port addresses of its own: the gateway's MAC is
+        found by ARP or neighbor discovery and goes into every frame, and the
+        port answers ARP, neighbor solicitations and pings while it runs.
         """
         output = _wire.output_spec(
             iface=iface,
@@ -424,6 +435,12 @@ class Client:
             batch=batch,
             dpdk_args=dpdk_args,
             workers=workers,
+            line_rate=line_rate,
+            ip=ip,
+            gateway=gateway,
+            mac=mac,
+            vlan=vlan,
+            answer=answer,
         )
         return self._run(
             _wire.start(
@@ -444,6 +461,26 @@ class Client:
     def stop(self, id: int, *, wait: bool = True) -> RunInfo:
         """Stops a run; with ``wait``, answers once it has ended."""
         return self._run(_wire.stop(RunInfo, "run", id, wait))
+
+    def pause(self, id: int, streams: str | Sequence[str] | None = None) -> RunInfo:
+        """Holds a run, or only ``streams``, where it is; :meth:`resume` goes on
+        from there without a catch-up burst."""
+        return self._run(_wire.run_control("run.pause", id, streams))
+
+    def resume(self, id: int, streams: str | Sequence[str] | None = None) -> RunInfo:
+        return self._run(_wire.run_control("run.resume", id, streams))
+
+    def update(
+        self,
+        id: int,
+        *,
+        multiplier: float | None = None,
+        streams: Mapping[str, str | float] | None = None,
+    ) -> RunInfo:
+        """Changes the rate of a running run: every stream at ``multiplier``
+        times its asked rate, and ``streams`` one by one (name to a new rate
+        of the same kind, e.g. ``"2000pps"``, or to a multiplier)."""
+        return self._run(_wire.run_update(id, multiplier, streams))
 
     def stats(self, id: int) -> RunInfo:
         return self._run(_wire.stats(RunInfo, "run", id))
