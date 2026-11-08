@@ -35,6 +35,30 @@ impl IpCtx {
         }
         Some(ones_sum(&[&pseudo, seg]) == 0xffff)
     }
+
+    /// Whether a transport checksum `field` that did not verify holds only
+    /// the IP pseudo header sum. That is what a host puts there when it
+    /// hands the rest of the sum to its network card (checksum offload,
+    /// also TSO/GSO). A capture on that host sees the frame before the
+    /// card fills the checksum in. Linux leaves the sum with the segment
+    /// length in it for checksum offload, and without it for TSO.
+    pub fn offloaded(&self, proto: u8, at: usize, field: u16) -> bool {
+        let Some(end) = self.end else { return false };
+        let len = end.saturating_sub(at) as u32;
+        [len, 0].iter().any(|&len| {
+            let mut pseudo = Vec::with_capacity(40);
+            pseudo.extend(&self.src);
+            pseudo.extend(&self.dst);
+            if self.src.len() == 4 {
+                pseudo.extend([0, proto]);
+                pseudo.extend((len as u16).to_be_bytes());
+            } else {
+                pseudo.extend(len.to_be_bytes());
+                pseudo.extend([0, 0, 0, proto]);
+            }
+            ones_sum(&[&pseudo]) == field
+        })
+    }
 }
 
 pub(crate) fn proto_name(p: u8) -> &'static str {

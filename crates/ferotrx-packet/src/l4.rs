@@ -15,9 +15,23 @@ pub(crate) fn transport(d: &mut Decoder, proto: u8, at: usize, ip: &IpCtx) {
 }
 
 fn checksum_field(d: &mut Decoder, what: &str, at: usize, verdict: Option<bool>) {
+    checksum_field_with(d, what, at, verdict, false);
+}
+
+/// Like `checksum_field`, but a wrong checksum that holds only the pseudo
+/// header sum (`offloaded`) is reported as left to the network card, the
+/// way Wireshark calls it "unverified", instead of as a problem.
+fn checksum_field_with(
+    d: &mut Decoder,
+    what: &str,
+    at: usize,
+    verdict: Option<bool>,
+    offloaded: bool,
+) {
     let v = d.u16(at).unwrap_or(0);
     let note = match verdict {
         Some(true) => "correct",
+        Some(false) if offloaded => "not verified, partial: offloaded to the network card",
         Some(false) => {
             d.problem(format!("{what} checksum is incorrect"));
             "incorrect"
@@ -25,6 +39,16 @@ fn checksum_field(d: &mut Decoder, what: &str, at: usize, verdict: Option<bool>)
         None => "not verified",
     };
     d.field("Checksum", format!("{} [{note}]", hex16(v)), at..at + 2);
+}
+
+/// Checks the pseudo header checksum of TCP or UDP at `at`, whose
+/// checksum field sits at `at + field`.
+fn transport_checksum(d: &mut Decoder, what: &str, proto: u8, at: usize, field: usize, ip: &IpCtx) {
+    let verdict = ip.verify(d, proto, at);
+    let offloaded = verdict == Some(false)
+        && d.u16(at + field)
+            .is_some_and(|v| ip.offloaded(proto, at, v));
+    checksum_field_with(d, what, at + field, verdict, offloaded);
 }
 
 fn tcp(d: &mut Decoder, at: usize, end: usize, ip: &IpCtx) {
@@ -75,7 +99,7 @@ fn tcp(d: &mut Decoder, at: usize, end: usize, ip: &IpCtx) {
         at + 12..at + 14,
     );
     d.field("Window", win.to_string(), at + 14..at + 16);
-    checksum_field(d, "TCP", at + 16, ip.verify(d, 6, at));
+    transport_checksum(d, "TCP", 6, at, 16, ip);
     d.field("Urgent pointer", urg.to_string(), at + 18..at + 20);
     if off < 20 {
         d.problem(format!("TCP header length {off} is less than 20"));
@@ -152,7 +176,7 @@ fn udp(d: &mut Decoder, at: usize, end: usize, ip: &IpCtx) {
     if csum == 0 && ip.src.len() == 4 {
         d.field("Checksum", "0x0000 [none]", at + 6..at + 8);
     } else {
-        checksum_field(d, "UDP", at + 6, ip.verify(d, 17, at));
+        transport_checksum(d, "UDP", 17, at, 6, ip);
     }
     if len < 8 {
         d.problem(format!("UDP length {len} is less than 8"));

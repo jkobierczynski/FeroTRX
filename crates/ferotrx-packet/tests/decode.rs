@@ -234,3 +234,37 @@ fn built_packets_survive_fix_checksums() {
         }
     }
 }
+
+/// An SSH frame captured on the sending host (VirtualBox VM) with TSO:
+/// 3768 bytes of payload in one 3822-byte frame, and the TCP checksum field
+/// holding only the pseudo header sum the network card finishes later.
+fn offloaded_ssh_frame(payload: &[u8]) -> Vec<u8> {
+    let mut f = vec![
+        0x34, 0x5a, 0x60, 0x40, 0xe3, 0x99, 0x08, 0x00, 0x27, 0x3f, 0x8e, 0x28, 0x08,
+        0x00, // eth
+        0x45, 0xb8, 0x0e, 0xe0, 0xf8, 0x16, 0x40, 0x00, 0x40, 0x06, 0xae, 0xd7, 0xc0, 0xa8, 0x01,
+        0x9f, 0xc0, 0xa8, 0x01, 0x82, // IPv4 192.168.1.159 -> .130, length 3808
+        0x00, 0x16, 0xf5, 0x97, 0xf1, 0x5e, 0x73, 0x3a, 0xe6, 0xbf, 0x60, 0x58, 0x50, 0x18, 0x02,
+        0xb6, 0x93, 0x44, 0x00, 0x00, // TCP 22 -> 62871, checksum 0x9344
+    ];
+    f.extend(payload);
+    f
+}
+
+#[test]
+fn offloaded_tcp_checksum_is_not_a_problem() {
+    let payload: Vec<u8> = (0..3768u32).map(|i| (i * 7 + 3) as u8).collect();
+    let d = decode(LINKTYPE_ETHERNET, &offloaded_ssh_frame(&payload));
+    assert_eq!(d.protocol, "SSH");
+    assert!(d.problems.is_empty(), "{:?}", d.problems);
+    let tcp = d.layer("TCP").unwrap();
+    let sum = tcp.fields.iter().find(|f| f.name == "Checksum").unwrap();
+    assert!(sum.value.contains("offloaded"), "{}", sum.value);
+
+    // Same frame, but a checksum that is neither right nor the pseudo
+    // header sum: still reported.
+    let mut bad = offloaded_ssh_frame(&payload);
+    bad[50] = 0x12;
+    let d = decode(LINKTYPE_ETHERNET, &bad);
+    assert_eq!(d.problems, ["TCP checksum is incorrect"]);
+}
