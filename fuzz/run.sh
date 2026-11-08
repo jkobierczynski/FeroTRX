@@ -81,7 +81,7 @@ fi
 echo "== seeds"
 FEROTRX_FUZZ_CORPUS="$PWD/fuzz/seeds" cargo test -q -p ferotrx-core --features fuzzing --lib \
   fuzzing::tests::write_seed_corpora -- --ignored >/dev/null
-FEROTRX_FUZZ_CORPUS="$PWD/fuzz/seeds" cargo test -q -p ferotrx-ctl --features fuzzing --lib \
+FEROTRX_FUZZ_CORPUS="$PWD/fuzz/seeds" cargo test -q -p ferotrx-ctl --no-default-features --features fuzzing --lib \
   fuzzing::tests::write_seed_corpora -- --ignored >/dev/null
 
 # More than one process: libFuzzer writes their logs to fuzz-<n>.log here.
