@@ -220,13 +220,25 @@ fn a_multiplier_changes_the_rate_of_what_is_left() {
     let job = Job::spawn(streams, Box::new(sink.clone()), RunConfig::default()).unwrap();
     job.control().set_multiplier(4.0).unwrap();
     job.control().set_stream_multiplier(1, 0.25).unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    let set = Instant::now();
+    std::thread::sleep(Duration::from_millis(400));
     job.stop();
-    let stats = job.join().unwrap();
-    // a at 4000 pps, b at 1000 pps.
-    let (a, b) = (stats.streams[0].packets, stats.streams[1].packets);
+    job.join().unwrap();
+    // a at 4000 pps, b at 1000 pps, counted over 250 ms after the change.
+    // Packets never leave early, so the counts cannot be above the new
+    // rates however late the run was stopped; a stalled machine can only
+    // send fewer.
+    let window = set..set + Duration::from_millis(250);
+    let sent = sink.0.lock().unwrap().clone();
+    let count = |tag| {
+        sent.iter()
+            .filter(|p| p.0 == tag && window.contains(&p.1))
+            .count()
+    };
+    let (a, b) = (count(1), count(2));
     assert!(a > 2 * b, "a {a}, b {b}");
-    assert!((150..=400).contains(&b), "b {b}");
+    assert!((100..=260).contains(&b), "b {b}");
+    assert!(a <= 1010, "a {a}");
     // A paused stream with another one going.
     let streams = vec![
         Stream::new("a", CaptureSource::new(one_packet(1)).loops(0)).with_rate(Rate::Pps(1000.0)),
