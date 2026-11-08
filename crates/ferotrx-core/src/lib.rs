@@ -103,6 +103,7 @@ pub mod bundle;
 mod capture;
 #[cfg(feature = "profile")]
 pub mod check;
+mod control;
 mod error;
 mod field_engine;
 #[cfg(feature = "profile")]
@@ -120,6 +121,7 @@ mod host;
 mod impair;
 mod job;
 mod latency;
+mod link;
 pub mod live;
 mod net;
 mod pacer;
@@ -153,6 +155,7 @@ pub use bench::{
     SizeReport, ThroughputResult, Trial, TrialRecord, TrialResult, TrialRunner,
 };
 pub use capture::{Capture, Packet, LINKTYPE_ETHERNET};
+pub use control::{ControlState, RunControl, StreamControl, MAX_MULTIPLIER};
 pub use error::{Error, Result};
 pub use field_engine::{FieldEngine, FieldVar, Side, VarField, VarOp};
 pub use flows::{FlowRouter, Route};
@@ -176,15 +179,20 @@ pub use latency::{
     signed_len, wall_clock, FlowReport, FlowStats, IntervalStats, LatencyStats, PacketReceiver,
     PortReceiver, RxConfig, RxJob, RxStats, Signature, SIGNATURE_LEN,
 };
+pub use link::{
+    describe_link, IpPrefix, IpRange, LinkSettings, NeighborPort, NeighborStats, SetMacs,
+    RESOLVE_RETRY, RESOLVE_TIMEOUT,
+};
 pub use live::{
     CaptureCounters, CaptureDirection, CaptureFiles, CaptureJob, CaptureJobConfig, CaptureOptions,
     CaptureRead, Frame, FrameSource, PcapStreamWriter, PcapngWriter, Rotate, SourceCounters,
 };
 pub use net::{MacAddr, TPID_QINQ, TPID_VLAN};
-pub use pacer::{parse_duration, Pacer, Rate};
+pub use pacer::{parse_duration, Pacer, Rate, RateSpec, WIRE_OVERHEAD};
 #[cfg(feature = "profile")]
 pub use profile::{
-    check_format, parse_model, Profile, StreamSource, StreamSpec, DEFAULT_INTERVAL, FORMAT_VERSION,
+    check_format, parse_line_rate, parse_model, Profile, StreamSource, StreamSpec,
+    DEFAULT_INTERVAL, FORMAT_VERSION,
 };
 pub use replay::{replay, replay_with_progress, ReplayConfig, ReplayStats};
 pub use send::{Backend, SendSettings, XdpMode, DEFAULT_BATCH, MAX_WORKERS};
@@ -192,7 +200,7 @@ pub use sink::{share_sink, NullSink, PacketSink, SinkError, VecSink};
 pub use size_mix::{SizeMix, FCS_LEN, L1_OVERHEAD, RFC2544_SIZES};
 pub use source::{CaptureSource, PacketSource};
 pub use start::{from_unix_seconds, unix_seconds, wait_until};
-pub use stream::{run, run_with_progress, RunConfig, RunStats, Stream};
+pub use stream::{run, run_with_progress, MultiBurst, RunConfig, RunStats, Stream};
 pub use tcp::{
     memory_ports, parse_size, run_engine, run_tcp, split_port, split_ports, CcAck, CcWindow,
     Congestion, CongestionController, Cubic, MemoryPort, NewReno, PacketPort, PortEngine, PortJob,

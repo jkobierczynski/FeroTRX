@@ -449,6 +449,13 @@ pub struct StreamInfo {
     /// The stream's impairments (the profile's `impair`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impair: Option<String>,
+    /// Bursts with gaps (the profile's `burst_size`, `bursts`, `burst_gap`),
+    /// e.g. `10 bursts of 64, 5ms apart`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bursts: Option<String>,
+    /// The stream this one starts when it ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
 }
 
 // ----- run.* -----
@@ -496,6 +503,72 @@ pub struct OutputSpec {
     /// Discard the packets.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub null: bool,
+    /// The line's speed, e.g. `10gbps`, for rates that are a share of it
+    /// (`50%`); default the profile's `line_rate`, then the interface's speed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_rate: Option<String>,
+    /// The port's own addresses, e.g. `["10.0.0.2/24"]`, instead of the
+    /// profile's `ip`; with `gateway` the run resolves the next hop's MAC
+    /// and answers ARP, neighbor solicitations and pings (see docs/replay.md).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ip: Vec<String>,
+    /// Next hops, one per IP version, instead of the profile's `gateway`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gateway: Vec<String>,
+    /// The port's MAC instead of the interface's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+    /// VLAN of the port's ARP and answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vlan: Option<u16>,
+    /// More addresses or ranges (`10.0.1.1-10.0.1.254`) to answer for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answer: Vec<String>,
+}
+
+impl OutputSpec {
+    /// The link settings the output gives (line rate and the port's
+    /// addresses); what it leaves out comes from the profile.
+    pub fn link_settings(&self) -> Result<ferotrx_core::LinkSettings, RpcError> {
+        let bad = |e: ferotrx_core::Error| RpcError::invalid_params(e.to_string());
+        let link = ferotrx_core::LinkSettings {
+            line_rate: self
+                .line_rate
+                .as_deref()
+                .map(ferotrx_core::parse_line_rate)
+                .transpose()
+                .map_err(bad)?,
+            ip: self
+                .ip
+                .iter()
+                .map(|s| s.parse())
+                .collect::<Result<_, _>>()
+                .map_err(bad)?,
+            gateway: self
+                .gateway
+                .iter()
+                .map(|s| {
+                    s.trim().parse().map_err(|_| {
+                        RpcError::invalid_params(format!("gateway '{s}' is not an IP address"))
+                    })
+                })
+                .collect::<Result<_, _>>()?,
+            mac: self
+                .mac
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(bad)?,
+            vlan: self.vlan,
+            answer: self
+                .answer
+                .iter()
+                .map(|s| s.parse())
+                .collect::<Result<_, _>>()
+                .map_err(bad)?,
+        };
+        Ok(link)
+    }
 }
 
 /// Parameters of `run.start`.
@@ -619,6 +692,60 @@ pub struct RunInfo {
     /// server's clock; absent while it waits for its `start_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<f64>,
+    /// The port's addresses and the next hops found, for a run whose port
+    /// has addresses (`ip`, `gateway`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    /// Paused with `run.pause`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
+    /// The rate multiplier `run.update` set for the whole run (1 = as asked).
+    #[serde(default = "one_f64", skip_serializing_if = "is_one_f64")]
+    pub multiplier: f64,
+}
+
+fn one_f64() -> f64 {
+    1.0
+}
+
+fn is_one_f64(v: &f64) -> bool {
+    *v == 1.0
+}
+
+/// Parameters of `run.pause` and `run.resume`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunControlParams {
+    pub id: u64,
+    /// Only these streams (by name); empty: the whole run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streams: Vec<String>,
+}
+
+/// Parameters of `run.update`: the rate of a running run, changed in place.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunUpdateParams {
+    pub id: u64,
+    /// Every stream at this many times its rate (1 = as asked).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiplier: Option<f64>,
+    /// Streams to change one by one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streams: Vec<StreamUpdate>,
+}
+
+/// One stream's new rate in `run.update`: a `multiplier` of the rate it was
+/// asked for, or a new `rate` of the same kind (`2000pps` for a pps stream,
+/// `50mbps` for a bit rate, `2x` for a capture's own timing).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamUpdate {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiplier: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate: Option<String>,
 }
 
 impl ImpairCounters {
@@ -761,6 +888,12 @@ pub struct StreamCounters {
     /// What the stream's impairments did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impair: Option<ImpairCounters>,
+    /// Paused on its own with `run.pause`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
+    /// Its own rate multiplier from `run.update` (1 = as asked).
+    #[serde(default = "one_f64", skip_serializing_if = "is_one_f64")]
+    pub multiplier: f64,
 }
 
 impl RunInfo {
@@ -773,6 +906,8 @@ impl RunInfo {
                 counters: s.into(),
                 latency: None,
                 impair: s.impair.as_ref().map(Into::into),
+                paused: false,
+                multiplier: 1.0,
             })
             .collect();
         ((&stats.total).into(), streams)

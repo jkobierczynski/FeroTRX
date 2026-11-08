@@ -36,6 +36,13 @@ pub trait PacketSource: Send {
         }
         Ok(true)
     }
+
+    /// Starts over from the first packet, for a stream that runs again
+    /// ([`Stream::next`](crate::Stream::next)). Returns false when the
+    /// source cannot (the default).
+    fn rewind(&mut self) -> bool {
+        false
+    }
 }
 
 impl<S: PacketSource + ?Sized> PacketSource for Box<S> {
@@ -50,6 +57,9 @@ impl<S: PacketSource + ?Sized> PacketSource for Box<S> {
     }
     fn skip(&mut self, n: u64) -> Result<bool> {
         (**self).skip(n)
+    }
+    fn rewind(&mut self) -> bool {
+        (**self).rewind()
     }
 }
 
@@ -146,6 +156,12 @@ impl<C: Borrow<Capture> + Send> PacketSource for CaptureSource<C> {
         self.pass = self.pass.saturating_add(at / len);
         self.pos = (at % len) as usize;
         Ok(self.loops == 0 || self.pass < self.loops)
+    }
+
+    fn rewind(&mut self) -> bool {
+        self.pos = 0;
+        self.pass = 0;
+        true
     }
 }
 

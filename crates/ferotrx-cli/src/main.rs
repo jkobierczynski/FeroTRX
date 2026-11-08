@@ -6,6 +6,7 @@ mod host;
 mod impair;
 mod lab;
 mod latency;
+mod link;
 mod remote;
 mod scenario;
 #[cfg(windows)]
@@ -24,8 +25,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use ferotrx_core::{
     parse_duration, Backend, Capture, CaptureSource, FieldEngine, FieldVar, ImpairSpec, Job, Pacer,
-    PacketSink, Profile, Rate, ReplayStats, Rewrite, RunConfig, RunStats, SendSettings, SizeMix,
-    Stream, TrafficModel, Transform, XdpMode, LINKTYPE_ETHERNET,
+    PacketSink, Profile, Rate, RateSpec, ReplayStats, Rewrite, RunConfig, RunStats, SendSettings,
+    SizeMix, Stream, TrafficModel, Transform, XdpMode, LINKTYPE_ETHERNET,
 };
 
 /// FeroTRX: replay captured traffic at a controlled rate.
@@ -131,6 +132,9 @@ struct ReplayArgs {
 
     #[command(flatten)]
     send: SendArgs,
+
+    #[command(flatten)]
+    link: link::LinkArgs,
 
     #[command(flatten)]
     rate: RateArgs,
@@ -258,6 +262,9 @@ struct BuildArgs {
     send: SendArgs,
 
     #[command(flatten)]
+    link: link::LinkArgs,
+
+    #[command(flatten)]
     rate: RateArgs,
 
     /// Times to send the packets; 0 loops until Ctrl-C. Only with --iface.
@@ -338,6 +345,9 @@ struct RunArgs {
 
     #[command(flatten)]
     send: SendArgs,
+
+    #[command(flatten)]
+    link: link::LinkArgs,
 
     /// Traffic model for every stream instead of the profile's (see
     /// `ferotrx replay --help`); the streams need pps or mbps rates.
@@ -557,11 +567,50 @@ struct RateArgs {
     /// Send as fast as possible.
     #[arg(short = 't', long)]
     topspeed: bool,
+
+    /// Send at this percentage of the line rate, on the wire (the
+    /// interface's speed, or --line-rate).
+    #[arg(long, value_name = "PCT")]
+    load: Option<f64>,
 }
 
 impl RateArgs {
     fn is_set(&self) -> bool {
-        self.multiplier.is_some() || self.pps.is_some() || self.mbps.is_some() || self.topspeed
+        self.multiplier.is_some()
+            || self.pps.is_some()
+            || self.mbps.is_some()
+            || self.topspeed
+            || self.load.is_some()
+    }
+
+    /// The rate and the bytes per frame its pacer counts on top, with
+    /// `--load` worked out from the line's speed (`--line-rate`, else the
+    /// interface's).
+    fn resolve(&self, link: &link::LinkArgs, iface: Option<&str>) -> Result<(Rate, u32)> {
+        if link.l1 && self.mbps.is_none() {
+            bail!("--l1 goes with --mbps");
+        }
+        let spec = match self.load {
+            Some(pct) => format!("{pct}%").parse::<RateSpec>()?,
+            None => RateSpec::Rate {
+                rate: self.rate(),
+                l1: link.l1,
+            },
+        };
+        let mut line = link
+            .line_rate
+            .as_deref()
+            .map(ferotrx_core::parse_line_rate)
+            .transpose()?;
+        if line.is_none() && spec.needs_line_rate() {
+            line = iface
+                .and_then(|i| ferotrx_io::describe_interface(i).speed_mbps)
+                .map(|s| s as f64);
+            if line.is_none() {
+                bail!("--load needs the line's speed: give --line-rate (the interface's speed is not known here)");
+            }
+        }
+        Ok(spec.resolve(line)?)
     }
 
     fn rate(&self) -> Rate {
@@ -881,7 +930,7 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
     }
 
     if let Some(iface) = &args.iface {
-        let rate = args.rate.rate();
+        let (rate, overhead) = args.rate.resolve(&args.link, Some(iface))?;
         rate.validate()?;
         let period = args
             .interval
@@ -898,6 +947,7 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
             )
             .with_rate(rate)
             .with_model(traffic.clone());
+            stream.overhead = overhead;
             if !args.vary.is_empty() {
                 // A fresh engine, so the first loop sends what was shown above.
                 stream.push_transform(FieldEngine::new(args.vary.iter().cloned()));
@@ -918,7 +968,9 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
             null: false,
         };
         let rx = args.rx.open()?;
-        let (job, detail) = spawn_stream(make, &output, &args.send, linktype, &args.common, rx)?;
+        let link = args.link.settings(&Default::default())?;
+        let (job, detail) =
+            spawn_stream(make, &output, &args.send, &link, linktype, &args.common, rx)?;
         let (stats, report) = watch(job, &args.common)?;
         print_line(done_label(&stats.total), &stats.total);
         if let Some(mut r) = report {
@@ -1014,6 +1066,7 @@ fn spawn_stream(
     make: impl Fn() -> Stream<'static>,
     output: &Output,
     send: &SendArgs,
+    link: &ferotrx_core::LinkSettings,
     linktype: u32,
     common: &CommonArgs,
     rx: Option<ferotrx_core::RxSettings>,
@@ -1021,6 +1074,7 @@ fn spawn_stream(
     let workers = send.settings()?.workers();
     let output = output.to_io(send)?;
     warn_linktype(&output, linktype);
+    let service = ferotrx_ctl::start_link(&output, link).map_err(|e| anyhow::anyhow!(e))?;
     let opened = output
         .open_workers(linktype, workers)
         .map_err(|e| anyhow::anyhow!(e))?;
@@ -1030,13 +1084,22 @@ fn spawn_stream(
         if !details.contains(&o.detail) {
             details.push(o.detail);
         }
-        work.push((vec![make().shard(k, workers)], o.sink));
+        let mut stream = make();
+        if let Some(svc) = &service {
+            stream.prepend_transform(svc.macs());
+        }
+        work.push((vec![stream.shard(k, workers)], o.sink));
     }
     let detail = details.join("; ");
     if !common.quiet && matches!(output, ferotrx_io::Output::Interface { .. }) {
         eprintln!("sending with {detail}");
     }
     let job = Job::spawn_workers(work, run_config(common)?, rx)?;
+    if let Some(line) = ferotrx_ctl::attach_link(service, &job) {
+        if !common.quiet {
+            eprintln!("port {line}");
+        }
+    }
     Ok((job, detail))
 }
 
@@ -1049,7 +1112,9 @@ fn warn_linktype(output: &ferotrx_io::Output, linktype: u32) {
 }
 
 fn cmd_replay(args: ReplayArgs) -> Result<()> {
-    let rate = args.rate.rate();
+    let (rate, overhead) = args
+        .rate
+        .resolve(&args.link, args.output.iface.as_deref())?;
     rate.validate()?;
     let cap = load(&args.file)?;
     if cap.is_empty() {
@@ -1071,6 +1136,7 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
         let mut stream = Stream::new("capture", CaptureSource::new(cap.clone()).loops(args.loops))
             .with_rate(rate)
             .with_model(traffic.clone());
+        stream.overhead = overhead;
         for r in &args.rewrites {
             stream.push_transform(r.clone());
         }
@@ -1091,7 +1157,16 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
     };
     let rx = args.rx.open()?;
     let capture = args.capture.start(args.output.iface.as_deref())?;
-    let (job, detail) = spawn_stream(make, &args.output, &args.send, linktype, &args.common, rx)?;
+    let link = args.link.settings(&Default::default())?;
+    let (job, detail) = spawn_stream(
+        make,
+        &args.output,
+        &args.send,
+        &link,
+        linktype,
+        &args.common,
+        rx,
+    )?;
     let (stats, report) = watch(job, &args.common)?;
     if let Some(c) = capture {
         c.finish(args.common.quiet)?;
@@ -1116,6 +1191,11 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
 fn cmd_run(args: RunArgs) -> Result<()> {
     let mut profile = Profile::from_path(&args.profile)
         .with_context(|| format!("cannot read {}", args.profile.display()))?;
+    args.link.check_no_l1()?;
+    profile.link = args.link.settings(&profile.link)?;
+    if let Some(line) = profile.link.line_rate {
+        profile.resolve_line_rate(line)?;
+    }
     if args.rx.latency || (args.rx.rx.is_some() && !profile.has_latency()) {
         profile.enable_latency();
     }
@@ -1132,7 +1212,19 @@ fn cmd_run(args: RunArgs) -> Result<()> {
     }
     if !args.common.quiet {
         for spec in &profile.streams {
-            let mut line = format!("stream {}: {} at {}", spec.name, spec.source, spec.rate);
+            let rate = match spec.rate_spec {
+                RateSpec::Line(_) if profile.link.line_rate.is_none() => spec.rate_spec.to_string(),
+                _ if spec.overhead > 0 => format!("{}-l1", spec.rate),
+                _ => spec.rate.to_string(),
+            };
+            let mut line = format!("stream {}: {} at {rate}", spec.name, spec.source);
+            if let Some(b) = &spec.bursts {
+                let n = b.count.map_or("bursts".into(), |c| format!("{c} bursts"));
+                line.push_str(&format!(", {n} of {} {:?} apart", b.packets, b.gap));
+            }
+            if let Some(next) = &spec.next {
+                line.push_str(&format!(", then {next}"));
+            }
             if !spec.rewrite.is_empty() {
                 let r: Vec<String> = spec.rewrite.iter().map(ToString::to_string).collect();
                 line.push_str(&format!(", rewrite {}", r.join(" ")));
@@ -1166,6 +1258,9 @@ fn cmd_run(args: RunArgs) -> Result<()> {
             .map_err(|e| anyhow::anyhow!(e))?;
     if !args.common.quiet && matches!(output, ferotrx_io::Output::Interface { .. }) {
         eprintln!("sending with {}", started.detail);
+        if let Some(link) = &started.link {
+            eprintln!("port {link}");
+        }
     }
     let job = started.job;
     let names = job.stream_names().to_vec();
@@ -1208,6 +1303,7 @@ fn run_config(common: &CommonArgs) -> Result<RunConfig> {
         ignore_send_errors: common.ignore_errors,
         stop: Some(stop),
         start_at: None,
+        control: None,
     })
 }
 

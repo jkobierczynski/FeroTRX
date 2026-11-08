@@ -46,6 +46,7 @@ mod dpdk;
 mod capture;
 mod host;
 mod lab;
+mod link;
 mod port;
 #[cfg(windows)]
 pub mod windows;
@@ -59,6 +60,7 @@ pub use lab::{
     lab_unavailable, remove_lab, Lab, LabConfig, LAB_INTERFACE, LAB_NAMESPACE, LAB_RECEIVER_IP,
     LAB_RECEIVER_IP6, LAB_RECEIVER_MAC, LAB_ROUTER_MAC,
 };
+pub use link::LinkService;
 pub use port::{interface_mac, open_port, open_port_with, open_receiver, PortSettings};
 #[cfg(feature = "pcap")]
 pub use port::{PcapPort, PcapReceiver};

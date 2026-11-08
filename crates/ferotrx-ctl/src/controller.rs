@@ -35,6 +35,74 @@ pub struct Started {
     pub job: Job,
     /// How the output sends, e.g. `af_xdp on enp0s3 queue 0, copy mode`.
     pub detail: String,
+    /// The port's addresses and the next hops found, when the profile gives
+    /// the port addresses (`ip`, `gateway` in `[output]`).
+    pub link: Option<String>,
+}
+
+/// Gives the port of an interface output the addresses `link` names: finds
+/// the gateways' MACs (see [`ferotrx_io::LinkService`]); `None` when the
+/// port has no addresses or the output is not an interface. Put its
+/// [`macs`](ferotrx_io::LinkService::macs) first in every stream, start the
+/// job and hand both to [`attach_link`].
+pub fn start_link(
+    output: &Output,
+    link: &ferotrx_core::LinkSettings,
+) -> Result<Option<ferotrx_io::LinkService>, StartError> {
+    match output {
+        Output::Interface { name, send } if link.has_addresses() => {
+            if send.backend() == ferotrx_core::Backend::Dpdk {
+                return Err(
+                    "ip and gateway (ARP and answers) do not work with the DPDK \
+                            backend: the kernel does not see that port; set mac_dst with a \
+                            rewrite instead"
+                        .into(),
+                );
+            }
+            Ok(Some(ferotrx_io::LinkService::start(name, link)?))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Keeps a port's addresses answered for as long as `job` runs, and
+/// returns the line describing them.
+pub fn attach_link(service: Option<ferotrx_io::LinkService>, job: &Job) -> Option<String> {
+    service.map(|svc| {
+        let detail = svc.detail().to_string();
+        let ended = job.ended_flag();
+        svc.stop_when(move || ended.load(std::sync::atomic::Ordering::Acquire));
+        svc.detach();
+        detail
+    })
+}
+
+/// Works out rates that are a share of the line from the interface's speed,
+/// when the profile does not give `line_rate`.
+pub fn resolve_line_rate(profile: &mut Profile, output: &Output) -> Result<(), StartError> {
+    if !profile.needs_line_rate() || profile.link.line_rate.is_some() {
+        return Ok(());
+    }
+    if let Output::Interface { name, .. } = output {
+        if let Some(speed) = ferotrx_io::describe_interface(name).speed_mbps {
+            profile.resolve_line_rate(speed as f64)?;
+            return Ok(());
+        }
+    }
+    let name = profile
+        .streams
+        .iter()
+        .find(|s| s.rate_spec.needs_line_rate())
+        .map_or(String::new(), |s| s.name.clone());
+    let why = match output {
+        Output::Interface { name, .. } => format!("the speed of {name} is not known here"),
+        _ => "the output is not an interface".to_string(),
+    };
+    Err(format!(
+        "stream '{name}' sends a share of the line rate, but {why}: set line_rate in [output] \
+         (or --line-rate)"
+    )
+    .into())
 }
 
 /// Loads a profile's streams, opens the output and starts a [`Job`].
@@ -93,6 +161,12 @@ pub(crate) fn start_run_guarded(
         std::borrow::Cow::Borrowed(profile)
     };
     let output = output.clone().with_defaults(&profile.output);
+    let mut profile = profile;
+    if profile.needs_line_rate() && profile.link.line_rate.is_none() {
+        resolve_line_rate(profile.to_mut(), &output)?;
+    }
+    // The port's own addresses: find the gateways before anything is sent.
+    let service = start_link(&output, &profile.link)?;
     // Interface outputs carry the profile's [output] settings now; files and
     // the null output take the worker count from the profile.
     let workers = match &output {
@@ -108,6 +182,11 @@ pub(crate) fn start_run_guarded(
         for s in &mut streams {
             if let Some(rate) = rate {
                 s.rate = rate;
+                s.overhead = 0;
+            }
+            if let Some(link) = &service {
+                // First, so a stream's own mac rewrites still win.
+                s.prepend_transform(link.macs());
             }
         }
         if workers > 1 {
@@ -132,9 +211,12 @@ pub(crate) fn start_run_guarded(
         };
         work.push((streams, sink));
     }
+    let job = Job::spawn_workers(work, config, rx)?;
+    let link = attach_link(service, &job);
     Ok(Started {
-        job: Job::spawn_workers(work, config, rx)?,
+        job,
         detail: details.join("; "),
+        link,
     })
 }
 
@@ -222,6 +304,8 @@ pub(crate) struct Run {
     pub output: String,
     /// The interface the run receives on, if it measures loss and latency.
     pub rx_iface: Option<String>,
+    /// The port's addresses and next hops, when it has addresses.
+    pub link: Option<String>,
     pub job: Job,
     pub stopped_by_request: std::sync::atomic::AtomicBool,
 }
@@ -814,6 +898,9 @@ impl Controller {
                 to_value(self.run(p.id)?)
             }
             "run.list" => to_value(self.runs()),
+            "run.pause" => to_value(self.pause(parse(params)?, true)?),
+            "run.resume" => to_value(self.pause(parse(params)?, false)?),
+            "run.update" => to_value(self.update(parse(params)?)?),
             "run.remove" => {
                 let p: RunId = parse(params)?;
                 to_value(self.remove(p.id)?)
@@ -1234,6 +1321,16 @@ impl Controller {
             .cloned()
             .ok_or_else(|| no_profile(&p.profile))?;
         let send = p.output.send_settings()?;
+        profile.link = p.output.link_settings()?.or(&profile.link);
+        profile
+            .link
+            .validate()
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        if let Some(line) = profile.link.line_rate {
+            profile
+                .resolve_line_rate(line)
+                .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        }
         // Files and the null output take only a worker count.
         let workers_only = send
             == SendSettings {
@@ -1275,6 +1372,7 @@ impl Controller {
             self.limits.check_iface(&spec.iface)?;
         }
         self.limits.check_duration(duration)?;
+        resolve_line_rate(&mut profile, &output).map_err(RpcError::failed)?;
         if let Output::Interface { name, .. } = &output {
             self.limits.check_iface(name)?;
             self.check_stream_limits(&profile, rate, "the run")?;
@@ -1285,6 +1383,7 @@ impl Controller {
             ignore_send_errors: p.ignore_errors,
             stop: None,
             start_at,
+            control: None,
         };
         if p.latency {
             profile.enable_latency();
@@ -1319,6 +1418,7 @@ impl Controller {
             profile: p.profile,
             rx_iface: p.rx.map(|r| r.iface),
             output: started.detail,
+            link: started.link,
             job: started.job,
             stopped_by_request: Default::default(),
         });
@@ -1342,6 +1442,81 @@ impl Controller {
         );
         drop(starting);
         Ok(info)
+    }
+
+    /// Pauses (`pause`) or resumes a running run, or some of its streams.
+    pub fn pause(&self, p: RunControlParams, pause: bool) -> Result<RunInfo, RpcError> {
+        let run = self.get_run(p.id)?;
+        let indices = stream_indices(&run, &p.streams)?;
+        let control = run.job.control();
+        match (indices.is_empty(), pause) {
+            (true, true) => control.pause(),
+            (true, false) => control.resume(),
+            (false, true) => indices.iter().for_each(|&i| control.pause_stream(i)),
+            (false, false) => indices.iter().for_each(|&i| control.resume_stream(i)),
+        }
+        Ok(run.info())
+    }
+
+    /// Changes the rate of a running run, or of some of its streams, within
+    /// the server's rate limits.
+    pub fn update(&self, p: RunUpdateParams) -> Result<RunInfo, RpcError> {
+        let run = self.get_run(p.id)?;
+        let control = run.job.control();
+        let mut state = control.state();
+        let bad = |e: ferotrx_core::Error| RpcError::invalid_params(e.to_string());
+        let rates = run.job.rates();
+        let mut changes: Vec<(usize, f64)> = Vec::new();
+        for u in &p.streams {
+            let i = stream_indices(&run, std::slice::from_ref(&u.name))?[0];
+            let m = match (u.multiplier, &u.rate) {
+                (Some(m), None) => m,
+                (None, Some(text)) => {
+                    let new: Rate = text.parse().map_err(bad)?;
+                    rate_ratio(rates[i], new).ok_or_else(|| {
+                        RpcError::invalid_params(format!(
+                            "stream '{}' runs at {}: give a rate of that kind, or a multiplier",
+                            u.name, rates[i]
+                        ))
+                    })?
+                }
+                _ => {
+                    return Err(RpcError::invalid_params(format!(
+                        "stream '{}': give either multiplier or rate",
+                        u.name
+                    )))
+                }
+            };
+            changes.push((i, m));
+        }
+        let multiplier = p.multiplier.unwrap_or(state.multiplier);
+        // Check the new rates against the limits before changing anything.
+        let probe = ferotrx_core::RunControl::new();
+        probe.set_multiplier(multiplier).map_err(bad)?;
+        for (i, m) in &changes {
+            probe.set_stream_multiplier(*i, *m).map_err(bad)?;
+        }
+        for (i, c) in state.streams.iter().enumerate() {
+            if !changes.iter().any(|(j, _)| *j == i) {
+                probe.set_stream_multiplier(i, c.multiplier).map_err(bad)?;
+            }
+        }
+        let wanted = probe.state();
+        let mut demand = Demand::default();
+        for (i, rate) in rates.iter().enumerate() {
+            let speed = wanted.multiplier * wanted.stream(i).multiplier;
+            demand.add(scale_rate(*rate, speed));
+        }
+        self.limits.check_demand(demand, "the new rate")?;
+        if p.multiplier.is_some() {
+            control.set_multiplier(multiplier).map_err(bad)?;
+        }
+        for (i, m) in changes {
+            control.set_stream_multiplier(i, m).map_err(bad)?;
+        }
+        state = control.state();
+        let _ = state;
+        Ok(run.info())
     }
 
     /// Stops a run. With `wait`, answers once it has ended (or after 10 s).
@@ -2210,6 +2385,12 @@ impl Run {
             JobState::Failed(e) => (RunState::Failed, Some(e)),
         };
         let (total, mut streams) = RunInfo::counters(&stats, self.job.stream_names());
+        let control = self.job.control().state();
+        for (i, s) in streams.iter_mut().enumerate() {
+            let c = control.stream(i);
+            s.paused = c.paused;
+            s.multiplier = c.multiplier;
+        }
         let rx = match (&self.rx_iface, self.job.rx_stats()) {
             (Some(iface), Some(rx)) => {
                 let reports =
@@ -2235,6 +2416,9 @@ impl Run {
             streams,
             rx,
             started_at: self.job.started_at().map(ferotrx_core::unix_seconds),
+            link: self.link.clone(),
+            paused: control.paused,
+            multiplier: control.multiplier,
         }
     }
 }
@@ -2272,7 +2456,11 @@ fn profile_info(name: &str, p: &Profile) -> ProfileInfo {
                     StreamSource::Pcap(path) => display_path(path),
                     other => other.to_string(),
                 },
-                rate: s.rate.to_string(),
+                rate: match s.rate_spec {
+                    ferotrx_core::RateSpec::Line(_) => s.rate_spec.to_string(),
+                    _ if s.overhead > 0 => format!("{}-l1", s.rate),
+                    _ => s.rate.to_string(),
+                },
                 loops: s.loops,
                 limit: s.limit,
                 delay_s: s.delay.as_secs_f64(),
@@ -2282,8 +2470,51 @@ fn profile_info(name: &str, p: &Profile) -> ProfileInfo {
                 sizes: s.sizes.as_ref().map(ToString::to_string),
                 model: (!s.model.is_steady()).then(|| s.model.to_string()),
                 impair: s.impair.as_ref().map(ToString::to_string),
+                bursts: s.bursts.map(|b| {
+                    let count = b.count.map_or("bursts".into(), |c| format!("{c} bursts"));
+                    format!("{count} of {}, {:?} apart", b.packets, b.gap)
+                }),
+                next: s.next.as_ref().map(|n| match s.next_count {
+                    Some(c) => format!("{n} ({c} times)"),
+                    None => n.clone(),
+                }),
             })
             .collect(),
+    }
+}
+
+/// The indices of the streams named `names` in a run.
+fn stream_indices(run: &Run, names: &[String]) -> Result<Vec<usize>, RpcError> {
+    names
+        .iter()
+        .map(|n| {
+            run.job
+                .stream_names()
+                .iter()
+                .position(|s| s == n)
+                .ok_or_else(|| RpcError::not_found(format!("run {} has no stream '{n}'", run.id)))
+        })
+        .collect()
+}
+
+/// `new` as a multiple of `old`, when both are the same kind of rate.
+fn rate_ratio(old: Rate, new: Rate) -> Option<f64> {
+    match (old, new) {
+        (Rate::Pps(a), Rate::Pps(b)) | (Rate::Mbps(a), Rate::Mbps(b)) => Some(b / a),
+        (Rate::Original { multiplier: a }, Rate::Original { multiplier: b }) => Some(b / a),
+        _ => None,
+    }
+}
+
+/// `rate` sped up `speed` times.
+fn scale_rate(rate: Rate, speed: f64) -> Rate {
+    match rate {
+        Rate::Pps(v) => Rate::Pps(v * speed),
+        Rate::Mbps(v) => Rate::Mbps(v * speed),
+        Rate::Original { multiplier } => Rate::Original {
+            multiplier: multiplier * speed,
+        },
+        Rate::TopSpeed => Rate::TopSpeed,
     }
 }
 

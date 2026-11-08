@@ -7,8 +7,8 @@ use serde::Deserialize;
 
 use crate::{
     parse_duration, parse_shape_point, Capture, CaptureSource, Error, FieldEngine, FieldVar,
-    ImpairSpec, Pacer, Rate, Result, Rewrite, SendSettings, SizeMix, Stream, TrafficModel,
-    LINKTYPE_ETHERNET,
+    ImpairSpec, IpPrefix, IpRange, LinkSettings, MacAddr, MultiBurst, Pacer, Rate, RateSpec,
+    Result, Rewrite, SendSettings, SizeMix, Stream, TrafficModel, LINKTYPE_ETHERNET,
 };
 
 /// A traffic profile: several streams that run together, read from a TOML file.
@@ -19,7 +19,8 @@ use crate::{
 /// [[stream]]
 /// name = "dns"                 # optional; defaults to the pcap's file name
 /// pcap = "dns.pcap"            # relative to the profile's folder
-/// rate = "500pps"              # 1000pps, 10kpps, 100mbps, 1gbps, 2x, topspeed (default 1x)
+/// rate = "500pps"              # 1000pps, 10kpps, 100mbps, 1gbps, 2x, topspeed (default 1x);
+///                              # "25%" of the line rate, "100mbps-l1" on the wire
 /// loops = 0                    # 0 = until the run ends (default 1)
 /// limit = 10000                # optional packet limit for this stream
 /// delay = "2s"                 # optional start delay
@@ -44,6 +45,14 @@ use crate::{
 /// # Impairments on the way to the output, as a bad link (see `ImpairSpec`):
 /// # delay, jitter, loss, duplicates, reordering, corruption, rate, MTU.
 /// impair = "delay=20ms jitter=5ms loss=1% loss_burst=3"
+/// # Bursts with pauses between them: 10 bursts of 64 packets, 5 ms apart.
+/// burst_size = 64
+/// bursts = 10                  # default: until the stream ends otherwise
+/// burst_gap = "5ms"
+/// # When this stream ends, start another one (which then waits until it
+/// # does); naming an earlier stream makes a loop that runs next_count times.
+/// next = "ping"
+/// next_count = 3
 ///
 /// [[stream]]
 /// name = "ping"
@@ -61,6 +70,13 @@ use crate::{
 /// batch = 64                   # packets handed over at once (default 64)
 /// dpdk_args = ["-l", "0-1"]    # DPDK EAL arguments
 /// workers = 4                  # engine threads (cores), default 1
+/// line_rate = "1gbps"          # the line's speed, for rates such as "50%"
+/// # The port's own addresses: the gateway's MAC (by ARP or neighbor
+/// # discovery) goes into every frame, and the port answers ARP, neighbor
+/// # solicitations and pings for its addresses while it sends.
+/// ip = ["10.0.0.2/24", "2001:db8::2/64"]
+/// gateway = ["10.0.0.1", "2001:db8::1"]
+/// answer = ["10.0.1.1-10.0.1.254"]   # more addresses to answer for
 /// ```
 ///
 /// See [`Rewrite`] for the rewrite syntax, [`FieldVar`] for the `vary` syntax
@@ -70,6 +86,8 @@ pub struct Profile {
     pub streams: Vec<StreamSpec>,
     /// The `[output]` table: send settings for interface outputs.
     pub output: SendSettings,
+    /// The rest of `[output]`: the line's speed and the port's addresses.
+    pub link: LinkSettings,
 }
 
 /// One `[[stream]]` entry of a [`Profile`].
@@ -77,7 +95,13 @@ pub struct Profile {
 pub struct StreamSpec {
     pub name: String,
     pub source: StreamSource,
+    /// The rate to send at. For a share of the line rate it is known once
+    /// the line's speed is ([`Profile::resolve_line_rate`]).
     pub rate: Rate,
+    /// The rate as the file gave it.
+    pub rate_spec: RateSpec,
+    /// Bytes per frame a bit rate counts on top (24 for a rate on the wire).
+    pub overhead: u32,
     pub loops: u64,
     pub limit: Option<u64>,
     pub delay: Duration,
@@ -94,6 +118,14 @@ pub struct StreamSpec {
     pub model: TrafficModel,
     /// What a bad link does to the stream's packets ([`Stream::impair`]).
     pub impair: Option<ImpairSpec>,
+    /// Bursts with gaps between them.
+    pub bursts: Option<MultiBurst>,
+    /// The stream started when this one ends, and how many times.
+    pub next: Option<String>,
+    pub next_count: Option<u64>,
+    /// Whether it starts with the run (default: unless an earlier stream
+    /// names it as its `next`).
+    pub start: Option<bool>,
 }
 
 /// Where a [`StreamSpec`] gets its packets.
@@ -179,11 +211,100 @@ pub(crate) struct OutputFile {
     batch: Option<u32>,
     dpdk_args: Option<Vec<String>>,
     workers: Option<u16>,
+    line_rate: Option<String>,
+    ip: Option<OneOrMore>,
+    gateway: Option<OneOrMore>,
+    mac: Option<String>,
+    vlan: Option<u16>,
+    #[serde(default)]
+    answer: Vec<String>,
+}
+
+/// One string or a list of them.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrMore {
+    One(String),
+    More(Vec<String>),
+}
+
+impl OneOrMore {
+    fn list(this: Option<Self>) -> Vec<String> {
+        match this {
+            None => Vec::new(),
+            Some(OneOrMore::One(s)) => vec![s],
+            Some(OneOrMore::More(v)) => v,
+        }
+    }
+}
+
+/// A line rate such as `10gbps` or `100mbps`, in Mbit/s.
+pub fn parse_line_rate(text: &str) -> Result<f64> {
+    match text.parse::<Rate>()? {
+        Rate::Mbps(m) => Ok(m),
+        other => Err(Error::InvalidRate(format!(
+            "a line rate is a bit rate such as 1gbps or 100mbps, not {other}"
+        ))),
+    }
 }
 
 impl OutputFile {
+    /// The send settings and the link: what a traffic profile's `[output]` says.
+    pub(crate) fn split(mut self) -> Result<(SendSettings, LinkSettings)> {
+        let ctx = |e: Error| Error::Profile(format!("[output]: {e}"));
+        let link = LinkSettings {
+            line_rate: self
+                .line_rate
+                .take()
+                .as_deref()
+                .map(parse_line_rate)
+                .transpose()
+                .map_err(ctx)?,
+            ip: OneOrMore::list(self.ip.take())
+                .iter()
+                .map(|s| s.parse::<IpPrefix>())
+                .collect::<Result<_>>()
+                .map_err(ctx)?,
+            gateway: OneOrMore::list(self.gateway.take())
+                .iter()
+                .map(|s| {
+                    s.trim().parse::<std::net::IpAddr>().map_err(|_| {
+                        Error::InvalidSpec(format!("gateway '{s}' is not an IP address"))
+                    })
+                })
+                .collect::<Result<_>>()
+                .map_err(ctx)?,
+            mac: self
+                .mac
+                .take()
+                .as_deref()
+                .map(str::parse::<MacAddr>)
+                .transpose()
+                .map_err(ctx)?,
+            vlan: self.vlan.take(),
+            answer: std::mem::take(&mut self.answer)
+                .iter()
+                .map(|s| s.parse::<IpRange>())
+                .collect::<Result<_>>()
+                .map_err(ctx)?,
+        };
+        link.validate().map_err(ctx)?;
+        Ok((self.settings()?, link))
+    }
+
     pub(crate) fn settings(self) -> Result<SendSettings> {
         let ctx = |e: Error| Error::Profile(format!("[output]: {e}"));
+        if self.line_rate.is_some()
+            || self.ip.is_some()
+            || self.gateway.is_some()
+            || self.mac.is_some()
+            || self.vlan.is_some()
+            || !self.answer.is_empty()
+        {
+            return Err(ctx(Error::InvalidSpec(
+                "line_rate, ip, gateway, mac, vlan and answer are for traffic profiles".into(),
+            )));
+        }
         let settings = SendSettings {
             backend: self
                 .backend
@@ -230,6 +351,12 @@ struct StreamFile {
     #[serde(default)]
     shape: Vec<String>,
     impair: Option<ImpairFile>,
+    burst_size: Option<u64>,
+    bursts: Option<u64>,
+    burst_gap: Option<String>,
+    next: Option<String>,
+    next_count: Option<u64>,
+    start: Option<bool>,
 }
 
 /// An impairment in a profile: the text form, or a table of the same keys.
@@ -359,15 +486,49 @@ impl Profile {
                     Some(LatencyFile::On(true)) => Some(i as u32 + 1),
                     Some(LatencyFile::Flow(id)) => Some(id),
                 };
-                let rate = s
+                let rate_spec: RateSpec = s
                     .rate
                     .as_deref()
-                    .map_or(Ok(Rate::default()), str::parse)
+                    .map_or(Ok(RateSpec::default()), str::parse)
                     .map_err(ctx)?;
+                // A share of the line: a bit rate; its value comes with the line's speed.
+                let (rate, overhead) = match rate_spec {
+                    RateSpec::Line(_) => (Rate::Mbps(1.0), crate::WIRE_OVERHEAD),
+                    r => r.resolve(None).map_err(ctx)?,
+                };
                 let model = parse_model(s.model.as_deref(), &s.shape).map_err(ctx)?;
                 Pacer::check_model(rate, &model).map_err(ctx)?;
                 let impair = ImpairFile::into_option(s.impair, "impair").map_err(ctx)?;
+                let bursts = match (s.burst_size, s.bursts, s.burst_gap) {
+                    (None, None, None) => None,
+                    (Some(packets), count, gap) => {
+                        let b = MultiBurst {
+                            packets,
+                            count,
+                            gap: gap
+                                .as_deref()
+                                .map_or(Ok(Duration::ZERO), parse_duration)
+                                .map_err(ctx)?,
+                        };
+                        b.validate().map_err(ctx)?;
+                        Some(b)
+                    }
+                    (None, _, _) => {
+                        return Err(ctx(Error::InvalidSpec(
+                            "bursts and burst_gap need burst_size (packets per burst)".into(),
+                        )))
+                    }
+                };
+                if s.next_count.is_some() && s.next.is_none() {
+                    return Err(ctx(Error::InvalidSpec("next_count needs next".into())));
+                }
                 Ok(StreamSpec {
+                    rate_spec,
+                    overhead,
+                    bursts,
+                    next: s.next,
+                    next_count: s.next_count,
+                    start: s.start,
                     latency,
                     model,
                     impair,
@@ -402,12 +563,57 @@ impl Profile {
                 })
             })
             .collect::<Result<_>>()?;
-        let output = file
-            .output
-            .map_or(Ok(SendSettings::default()), OutputFile::settings)?;
-        let profile = Self { streams, output };
+        let (output, link) = match file.output {
+            Some(o) => o.split()?,
+            None => Default::default(),
+        };
+        let mut profile = Self {
+            streams,
+            output,
+            link,
+        };
         profile.check_flows()?;
+        profile.check_next()?;
+        if let Some(line) = profile.link.line_rate {
+            profile.resolve_line_rate(line)?;
+        }
         Ok(profile)
+    }
+
+    fn check_next(&self) -> Result<()> {
+        for s in &self.streams {
+            if let Some(next) = &s.next {
+                if !self.streams.iter().any(|o| &o.name == next) {
+                    return Err(Error::Profile(format!(
+                        "stream '{}': next stream '{next}' is not in the profile",
+                        s.name
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// True when a stream's rate is a share of the line rate.
+    pub fn needs_line_rate(&self) -> bool {
+        self.streams.iter().any(|s| s.rate_spec.needs_line_rate())
+    }
+
+    /// Works out the rates that are a share of the line, for a line of
+    /// `mbps` Mbit/s.
+    pub fn resolve_line_rate(&mut self, mbps: f64) -> Result<()> {
+        self.link.line_rate = Some(mbps);
+        for s in &mut self.streams {
+            if s.rate_spec.needs_line_rate() {
+                let (rate, overhead) = s
+                    .rate_spec
+                    .resolve(Some(mbps))
+                    .map_err(|e| Error::Profile(format!("stream '{}': {e}", s.name)))?;
+                s.rate = rate;
+                s.overhead = overhead;
+            }
+        }
+        Ok(())
     }
 
     fn check_flows(&self) -> Result<()> {
@@ -450,7 +656,14 @@ impl Profile {
     /// Loads the captures, builds the packets and makes the streams, ready for
     /// [`run`](crate::run). A pcap used by several streams is loaded once.
     pub fn load(&self) -> Result<Vec<Stream<'static>>> {
+        if self.needs_line_rate() && self.link.line_rate.is_none() {
+            let s = self.streams.iter().find(|s| s.rate_spec.needs_line_rate());
+            let name = s.map_or("", |s| s.name.as_str());
+            let e = RateSpec::Line(100.0).resolve(None).unwrap_err();
+            return Err(Error::Profile(format!("stream '{name}': {e}")));
+        }
         let mut cache: HashMap<&Path, Arc<Capture>> = HashMap::new();
+        let index = |name: &str| self.streams.iter().position(|s| s.name == name);
         self.streams
             .iter()
             .map(|spec| {
@@ -490,6 +703,11 @@ impl Profile {
                     .with_delay(spec.delay)
                     .with_model(spec.model.clone());
                 stream.impair = spec.impair.clone();
+                stream.overhead = spec.overhead;
+                stream.bursts = spec.bursts;
+                stream.next = spec.next.as_deref().and_then(index);
+                stream.next_count = spec.next_count;
+                stream.self_start = spec.start;
                 for r in &spec.rewrite {
                     stream.push_transform(r.clone());
                 }
