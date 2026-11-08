@@ -96,7 +96,8 @@ for t in "${targets[@]}"; do
   fi
 done
 
-# More than one process: libFuzzer writes their logs to fuzz-<n>.log here.
+# More than one process: libFuzzer writes their logs to fuzz-<n>.log here;
+# they are moved to fuzz/logs/<target>-<time>/ after each target.
 par=()
 [ "$jobs" -gt 1 ] && par=("-jobs=$jobs" "-workers=$jobs")
 
@@ -114,6 +115,13 @@ for t in "${targets[@]}"; do
       -print_final_stats=1 "${par[@]+"${par[@]}"}" \
       "${dict[@]+"${dict[@]}"}" "${extra[@]+"${extra[@]}"}"; then
     failed+=("$t")
+  fi
+  # Keep the processes' logs (the next target would overwrite them).
+  if compgen -G "fuzz-*.log" >/dev/null; then
+    logs="fuzz/logs/$t-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$logs"
+    mv fuzz-*.log "$logs/"
+    echo "Logs of the $jobs processes: $logs/"
   fi
 done
 
