@@ -16,8 +16,8 @@ pub struct DropCounters {
     /// `rx_nombuf`.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "is_zero"))]
     pub nic_rx_missed: u64,
-    /// Received frames the NIC or driver dropped as bad or unwanted: Linux
-    /// `rx_errors` and `rx_dropped`, Windows `InErrors`, DPDK `ierrors`.
+    /// Received frames the NIC or driver dropped as bad: Linux `rx_errors`
+    /// (less the missed ones), Windows `InErrors`, DPDK `ierrors`.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "is_zero"))]
     pub nic_rx_errors: u64,
     /// Received frames an AF_XDP socket lost: its ring was full, the fill

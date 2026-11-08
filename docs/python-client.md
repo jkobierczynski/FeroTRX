@@ -160,6 +160,9 @@ done = c.wait(run.id)
 for s in done.streams:
     if s.latency:
         print(s.name, s.latency.loss_pct, s.latency.latency.p99_us)
+if done.loss:                        # where the frames were lost
+    print(done.loss.generator, done.loss.network, done.loss.receiver)
+print(done.drops.capture_dropped, done.drops.nic_rx_missed)
 
 rx = c.rx_start("enp0s8")            # a receiver alone, for another FeroTRX's traffic
 ...

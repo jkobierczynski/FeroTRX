@@ -156,8 +156,8 @@ pub use bench::{
     SizeReport, ThroughputResult, Trial, TrialRecord, TrialResult, TrialRunner,
 };
 pub use capture::{Capture, Packet, LINKTYPE_ETHERNET};
-pub use drops::{DropCounters, LossReport};
 pub use control::{ControlState, RunControl, StreamControl, MAX_MULTIPLIER};
+pub use drops::{DropCounters, LossReport};
 pub use error::{Error, Result};
 pub use field_engine::{FieldEngine, FieldVar, Side, VarField, VarOp};
 pub use flows::{FlowRouter, Route};

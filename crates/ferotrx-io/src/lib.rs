@@ -44,10 +44,10 @@ pub use xdp::{XdpPort, XdpPortConfig};
 mod dpdk;
 
 mod capture;
-pub mod nic;
 mod host;
 mod lab;
 mod link;
+pub mod nic;
 mod port;
 #[cfg(windows)]
 pub mod windows;

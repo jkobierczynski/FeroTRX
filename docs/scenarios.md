@@ -239,7 +239,10 @@ the first request to the answer), `tps`, `server_answered`.
 
 **Traffic**: `tx_packets`, `tx_mbps`, `tx_pps`, `send_errors`, `rx_packets`
 (with a signature, duplicates not counted), `rx_mbps` (every frame the
-receiver saw, over the sending time), `lost`, `loss_pct`, `duplicates`,
+receiver saw, over the sending time), `lost`, `loss_pct`, where it was
+lost: `generator_loss`, `network_loss`, `receiver_loss` and each one's
+`_pct` (of the frames offered; see
+[loss-latency.md](loss-latency.md#where-the-frames-were-lost)), `duplicates`,
 `out_of_order`, `out_of_order_pct`, `latency_min`, `latency_avg` (over all
 streams), `latency_p50`, `latency_p99`, `latency_max`, `jitter` (ms; the
 percentiles, maximum and jitter are of the worst stream). Every stream

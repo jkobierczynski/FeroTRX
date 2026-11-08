@@ -521,10 +521,7 @@ fn print_rx(stats: &RxStats, report: Option<&Path>, info: Option<&RunInfo>) -> R
     }
     let drops = stats.drops.rx_side();
     if !drops.is_empty() {
-        eprintln!(
-            "  dropped here before they were read: {}",
-            drops.describe()
-        );
+        eprintln!("  dropped here before they were read: {}", drops.describe());
     }
     match report {
         Some(path) => write_report(

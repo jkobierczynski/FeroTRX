@@ -16,9 +16,13 @@
 #    loss through the router.
 # 3. The same through `ferotrx serve`: `ctl update -m 3` triples the rate of
 #    the running run, `ctl pause` holds it and `ctl resume` goes on.
+# 4. Loss made at a known place lands in the right column of the loss
+#    report: the router drops every 20th frame (network), then the
+#    router's port goes down for half a second, so the sending veth drops
+#    what it is handed (generator, counted in its tx_dropped).
 #
 # Usage: sudo scripts/link-netns.sh [path/to/ferotrx] [extra ferotrx run options]
-# Needs root, ip (iproute2), ping and jq. Removes the lab when done.
+# Needs root, ip (iproute2), iptables, ping and jq. Removes the lab when done.
 #
 # IPV6=1      the same over IPv6 (fd00:51:1::/64, fd00:51:2::/64): neighbor
 #             discovery instead of ARP, ping -6.
@@ -251,4 +255,41 @@ check "about 3000 pps after update -m 3" '.after > 5100 and .after < 6600' "$r2"
 check "nothing sent while paused" '.held <= 2' "$r2" .
 check "3000 pps again after resume" '.resumed > 5100 and .resumed < 6600' "$r2" .
 check "the run reports its multiplier and port" '.multiplier == 3 and (.link | test("next hop"))' "$info" '{multiplier, link}'
+kill "$SERVER" 2>/dev/null || true
+wait "$SERVER" 2>/dev/null || true
+SERVER=
+
+echo "== 4. where frames are lost"
+cat > "$WORK/probe.toml" <<EOF
+format = 1
+
+[[stream]]
+name = "probe"
+packet = "$pkt"
+rate = "2000pps"
+loops = 0
+latency = 1
+EOF
+if [ "${IPV6:-}" = 1 ]; then ipt=ip6tables; else ipt=iptables; fi
+probe() {
+    "$BIN" run "$WORK/probe.toml" -i c0 --ip "$(a 1 2)/$plen" --gateway "$(a 1 1)" \
+        --rx s0 -d 3s -q --report "$1" > "$WORK/probe.txt" 2>&1 \
+        || { cat "$WORK/probe.txt"; exit 1; }
+    grep "lost .* of" "$WORK/probe.txt" || true
+}
+r $ipt -I FORWARD -m statistic --mode nth --every 20 --packet 0 -j DROP
+probe "$WORK/net.json"
+dropped=$(r $ipt -L FORWARD -v -n -x | awk '$3 == "DROP" {print $1; exit}')
+r $ipt -D FORWARD -m statistic --mode nth --every 20 --packet 0 -j DROP
+echo "the router dropped $dropped"
+check "the router's drops are network loss" \
+    ".loss.network == $dropped and .loss.network > 100 and .loss.generator == 0 and .loss.receiver == 0" \
+    "$WORK/net.json" '.loss'
+(sleep 1.2; r ip link set rc down; sleep 0.5; r ip link set rc up) &
+flap=$!
+probe "$WORK/gen.json"
+wait $flap || true
+check "frames the sending veth dropped are generator loss" \
+    '.loss.generator > 100 and .loss.generator >= 0.9 * (.loss.generator + .loss.network) and .loss.receiver == 0 and .drops.nic_tx_errors > 0' \
+    "$WORK/gen.json" '{loss, drops}'
 exit $fail

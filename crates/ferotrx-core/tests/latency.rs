@@ -232,14 +232,29 @@ fn loss_is_put_where_it_happened() {
     assert_eq!((r.offered, r.received, r.lost()), (200, 200, 0));
     // The sending NIC drops every 10th and says so: generator loss.
     let r = loss_of(10, true, u64::MAX);
-    assert_eq!((r.generator, r.network, r.receiver), (20, 0, 0), "{}", r.line());
+    assert_eq!(
+        (r.generator, r.network, r.receiver),
+        (20, 0, 0),
+        "{}",
+        r.line()
+    );
     assert_eq!(r.tx_dropped, 20);
     // The same frames gone without a word: network loss.
     let r = loss_of(10, false, u64::MAX);
-    assert_eq!((r.generator, r.network, r.receiver), (0, 20, 0), "{}", r.line());
+    assert_eq!(
+        (r.generator, r.network, r.receiver),
+        (0, 20, 0),
+        "{}",
+        r.line()
+    );
     // The receiver's capture buffer overflows on every 8th: receiver loss.
     let r = loss_of(u64::MAX, false, 8);
-    assert_eq!((r.generator, r.network, r.receiver), (0, 0, 25), "{}", r.line());
+    assert_eq!(
+        (r.generator, r.network, r.receiver),
+        (0, 0, 25),
+        "{}",
+        r.line()
+    );
     assert!(r.line().contains("capture buffer 25"), "{}", r.line());
     // All three at once.
     let r = loss_of(10, false, 9);

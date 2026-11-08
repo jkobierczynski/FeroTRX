@@ -71,26 +71,26 @@ mod imp {
             z("rx_missed_errors"),
             z("rx_fifo_errors"),
             rx_errors,
-            z("rx_dropped"),
             z("tx_errors"),
             z("tx_dropped"),
         ))
     }
 
     /// Linux counts `rx_missed_errors` and `rx_fifo_errors` inside
-    /// `rx_errors` too: they go to "missed" only.
+    /// `rx_errors` too: they go to "missed" only. `rx_dropped` is left out:
+    /// it counts frames the stack did not want (an unknown protocol, a
+    /// VLAN nobody listens to) after captures saw them, not frames lost.
     pub fn from_sysfs(
         missed: u64,
         fifo: u64,
         errors: u64,
-        dropped: u64,
         tx_errors: u64,
         tx_dropped: u64,
     ) -> DropCounters {
         let nic_rx_missed = missed + fifo;
         DropCounters {
             nic_rx_missed,
-            nic_rx_errors: errors.saturating_sub(nic_rx_missed) + dropped,
+            nic_rx_errors: errors.saturating_sub(nic_rx_missed),
             nic_tx_errors: tx_errors + tx_dropped,
             ..Default::default()
         }
@@ -102,8 +102,11 @@ mod imp {
 
         #[test]
         fn missed_frames_are_not_counted_twice() {
-            let d = from_sysfs(3, 1, 10, 2, 4, 5);
-            assert_eq!((d.nic_rx_missed, d.nic_rx_errors, d.nic_tx_errors), (4, 8, 9));
+            let d = from_sysfs(3, 1, 10, 4, 5);
+            assert_eq!(
+                (d.nic_rx_missed, d.nic_rx_errors, d.nic_tx_errors),
+                (4, 6, 9)
+            );
         }
 
         #[test]

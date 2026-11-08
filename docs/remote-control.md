@@ -115,7 +115,11 @@ running. `capture.get` and `capture.list` need the read role; the other
 captures' starts and stops but not each `capture.read`.
 
 A subscription to one run ends with an update marked `"last": true` when the
-run ends. TCP and UDP counters (`tcp.stats`, `udp.stats`) carry `app`
+run ends. `run.stats` carries `drops` (what every layer dropped, both sides)
+and, for a run with a receiver, `loss` (generator, network and receiver
+loss, see [loss-latency.md](loss-latency.md#where-the-frames-were-lost));
+`rx.stats` carries the receiving side's `drops`, and `tcp.stats` and
+`udp.stats` their ports'. TCP and UDP counters (`tcp.stats`, `udp.stats`) carry `app`
 for each side that ran an [application protocol](app-protocols.md#counters):
 transactions, failures, error answers, protocol errors, `codes`,
 `response_time`, and over TLS `tls` (handshakes, failures, resumed sessions,

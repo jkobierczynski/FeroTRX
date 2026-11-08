@@ -543,7 +543,7 @@ class DropCounters(Record):
 
     #: Received frames the NIC had no room for.
     nic_rx_missed: int = 0
-    #: Received frames the NIC or driver dropped as bad or unwanted.
+    #: Received frames the NIC or driver dropped as bad.
     nic_rx_errors: int = 0
     #: Received frames an AF_XDP socket lost (ring full, no fill buffer).
     ring_rx_dropped: int = 0
