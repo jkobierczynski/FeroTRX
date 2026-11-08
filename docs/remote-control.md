@@ -54,9 +54,11 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 | `profile.load` | `path` (on the server) or `toml` (+ `base_dir`), optional `name` | the profile's streams |
 | `profile.get`, `profile.unload` | `name` | profile / `true` |
 | `profile.list` | | loaded profiles |
-| `run.start` | `profile`, `output` (`{"iface": ..}`, `{"file": ..}` or `{"null": true}`; with `iface` also optional `backend`, `xdp_mode`, `queue`, `batch`, `dpdk_args`), optional `rate`, `limit`, `duration`, `ignore_errors`, `latency`, `rx` (`{"iface": .., "wait": "500ms"}`), `start_at` | the run (`started_at` once it started) |
+| `run.start` | `profile`, `output` (`{"iface": ..}`, `{"file": ..}` or `{"null": true}`; with `iface` also optional `backend`, `xdp_mode`, `queue`, `batch`, `dpdk_args`, and the port's `line_rate`, `ip`, `gateway`, `mac`, `vlan`, `answer` as in `[output]`), optional `rate`, `limit`, `duration`, `ignore_errors`, `latency`, `rx` (`{"iface": .., "wait": "500ms"}`), `start_at` | the run (`started_at` once it started) |
 | `run.stop` | `id`, `wait` (default true) | the run, final counters |
 | `run.stats`, `run.remove` | `id` | the run |
+| `run.pause`, `run.resume` | `id`, optional `streams` (names; default the whole run) | the run (`paused`, and `paused` per stream) |
+| `run.update` | `id`, `multiplier` (every stream at that many times its rate) and/or `streams` (`[{"name": .., "rate": "2000pps"}]` or `{"name": .., "multiplier": 0.5}`) | the run (`multiplier`, and per stream) |
 | `run.list` | | every run |
 | `tcp.start` | a TCP profile as `path` (on the server) or `toml` (+ `base_dir`); optional `iface`, `cps`, `connections`, `concurrency`, `duration`, `start_at` | the TCP run |
 | `tcp.stop` | `id`, `wait` (default true) | the TCP run, final counters |
@@ -123,6 +125,27 @@ e.g. a profile that does not parse or an interface that will not open),
 -32004 (forbidden: a read-only login changing something, or a path outside
 the data directories) and -32005 (a limit: too many `stats` subscriptions,
 or too many wrong tokens; try again later).
+
+### Changing a running run
+
+`run.pause` holds a run, or only the streams named, where it is;
+`run.resume` goes on from there. `run.update` changes rates in place: a
+`multiplier` for the whole run, and per stream a `multiplier` of the rate it
+was asked for or a new `rate` of the same kind (packets per second for a
+pps stream, a bit rate for a bit-rate stream). Neither starts the schedule
+again: what was sent stays sent, and the new rate applies to the rest, so
+there is no catch-up burst after a pause. New multipliers and
+new rates are checked against the server's [traffic limits](#traffic-limits)
+before anything changes. A run's `duration` keeps counting while it is
+paused. These are operator calls, written to the audit log like the others.
+
+```sh
+ferotrx ctl -c lab:4510 start voip -i enp0s3 --ip 10.0.0.2/24 --gateway 10.0.0.1
+ferotrx ctl -c lab:4510 update 1 -m 2            # twice as fast
+ferotrx ctl -c lab:4510 update 1 -s voice=x0.5 -s bulk=20mbps
+ferotrx ctl -c lab:4510 pause 1 -s bulk          # one stream
+ferotrx ctl -c lab:4510 resume 1
+```
 
 ## Servers that programs start
 

@@ -143,6 +143,98 @@ loops = 0
 
 [`examples/lab-built-packets.toml`](../examples/lab-built-packets.toml) has more.
 
+### Rates that are a share of the line
+
+Besides packets and bits per second, a rate can be a share of the line,
+`rate = "50%"` (or `--load 50` on `replay` and `build`). It counts the frames
+as the wire carries them: 24 more bytes per frame for preamble, gap and FCS.
+The line's speed comes from `line_rate` in `[output]`, `--line-rate`, or the
+interface's own speed (Linux reads it with ethtool; give it where that does
+not work, and for `--out` and `--null`). Bit rates count the frames alone by
+default; `100mbps-l1` (or `--l1` with `--mbps`) counts them on the wire like
+a share does, and `100mbps-l2` says the default out loud.
+
+```toml
+[output]
+line_rate = "10gbps"
+
+[[stream]]
+pcap = "web.pcap"
+rate = "25%"                 # 2.5 Gbit/s on the wire
+```
+
+### Bursts and streams that start each other
+
+`burst_size` sends packets in bursts at the stream's rate, with `burst_gap`
+between them, and `bursts` ends the stream after that many (TRex's
+multi-burst). `next` names the stream to start when this one ends; a stream
+that some earlier stream names waits for it instead of starting with the
+run (`start = true` starts it with the run as well). Naming an earlier stream
+makes a loop, run `next_count` times (default: until the run ends).
+
+```toml
+[[stream]]
+name = "probe"
+packet = "eth/ipv4(dst=10.0.2.2)/udp/raw(len=18)"
+rate = "10kpps"
+burst_size = 64              # 64 packets at 10 kpps,
+burst_gap = "5ms"            # 5 ms quiet,
+bursts = 10                  # ten times, then
+next = "bulk"                # start "bulk"
+
+[[stream]]
+name = "bulk"
+pcap = "web.pcap"
+rate = "50%"
+limit = 10000
+next = "probe"               # and back, three more times
+next_count = 3
+```
+
+### The port's own addresses (L3 mode)
+
+Instead of writing MACs into every packet, a port can have an address of
+its own, as TRex's L3 port mode does. With `ip` and `gateway` FeroTRX asks
+for the gateway's MAC by ARP (IPv4) or neighbor discovery (IPv6) before it
+sends, puts it in every frame as the destination (and the port's MAC as the
+source), and while the run goes on answers ARP, neighbor solicitations and
+pings for the port's addresses, so the router can reach it. The gateway is
+the router, or the receiver itself when that is on the port's subnet. A
+stream's own `mac_dst`/`mac_src` rewrites still win. `answer` adds address
+ranges the port answers for too, such as the varied sources of a stream
+whose replies come back to the port.
+
+```toml
+[output]
+ip = ["10.0.0.2/24", "2001:db8::2/64"]   # one per IP version
+gateway = ["10.0.0.1", "2001:db8::1"]
+vlan = 10                                # ARP and answers in VLAN 10
+answer = ["10.0.1.1-10.0.1.254"]
+# mac = "02:00:00:00:00:10"              # default: the interface's
+```
+
+```sh
+sudo ferotrx run lab.toml -i eth0 --ip 10.0.0.2/24 --gateway 10.0.0.1
+sudo ferotrx build 'eth/ipv4(src=10.0.0.2,dst=10.0.2.2)/udp' -i eth0 --ip 10.0.0.2/24 --gateway 10.0.0.1 --load 10
+```
+
+`replay`, `build`, `run`, `bench`, and `run.start` and `bench.start` of the
+control server take the same; it fails with a clear error when the gateway
+does not answer within 3 s. Answers go out on the same interface through
+libpcap, also when the streams send with `af_xdp`; DPDK ports are not seen
+by the kernel and are refused (rewrite `mac_dst` there). Scenario traffic
+checks do not resolve addresses or shares of the line yet.
+
+### Changing a running run
+
+Through the control server a running run can be paused and resumed, as a
+whole or stream by stream, and its rate changed in place, without starting
+the schedule again: a paused stream goes on where it was, with no catch-up
+burst, and a new rate applies to what is left (`ferotrx ctl pause|resume|update`,
+`run.pause`, `run.resume`, `run.update`, Python `pause()`, `resume()`,
+`update()`, the GUI's Pause button and rate multiplier). See
+[remote-control.md](remote-control.md#changing-a-running-run).
+
 ### Traffic models: Poisson, bursts, ramps
 
 With a packet or bit rate, `model` (or `--model` on `replay`, `build`, `run`,

@@ -423,6 +423,19 @@ impl FeroApp {
                     ui.add(egui::TextEdit::singleline(&mut cfg.impair).hint_text("each stream's own").desired_width(260.0))
                         .on_hover_text("What a bad link does to every stream: delay=20ms jitter=5ms loss=1% loss_burst=3 duplicate=0.1% reorder=0.5% corrupt=0.01% rate=10mbit mtu=1400 seed=1; none turns the streams' own off");
                     ui.end_row();
+                    ui.label("Port address");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut cfg.ip).hint_text("10.0.0.2/24").desired_width(160.0))
+                            .on_hover_text("The port's own address (one per IP version, comma separated): it answers ARP, neighbor solicitations and pings while it runs");
+                        ui.label("gateway");
+                        ui.add(egui::TextEdit::singleline(&mut cfg.gateway).hint_text("10.0.0.1").desired_width(140.0))
+                            .on_hover_text("The router (or the receiver on the port's subnet): its MAC is found by ARP or neighbor discovery and goes into every frame");
+                    });
+                    ui.end_row();
+                    ui.label("Line rate");
+                    ui.add(egui::TextEdit::singleline(&mut cfg.line_rate).hint_text("the interface's").desired_width(100.0))
+                        .on_hover_text("The line's speed, e.g. 1gbps, for rates such as 50%");
+                    ui.end_row();
                 });
             });
     }

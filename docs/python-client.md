@@ -120,6 +120,22 @@ c.runs(); c.remove(run.id)        # runs stay listed until removed
 [multi-core.md](multi-core.md)) choose how to send, and the profile's
 `[output]` fills in what is left out. `rate`, `limit` and `duration` stop or
 pace the run, `ignore_errors` counts failed sends instead of failing.
+`line_rate` is what `"50%"` rates are a share of, and `ip`, `gateway`, `mac`,
+`vlan` and `answer` give the port addresses of its own (see
+[the port's own addresses](replay.md#the-ports-own-addresses-l3-mode));
+`run.link` says what was found.
+
+A running run can be held and its rate changed in place, with no catch-up
+burst afterwards:
+
+```python
+run = c.start("voip", iface="enp0s3", ip="10.0.0.2/24", gateway="10.0.0.1")
+c.pause(run.id)                     # the whole run; c.pause(run.id, "bulk") one stream
+c.resume(run.id)
+c.update(run.id, multiplier=2.0)    # every stream twice as fast
+c.update(run.id, streams={"voice": "200pps", "bulk": 0.5})  # a rate, or a multiplier
+c.stats(run.id).stream("bulk").multiplier
+```
 
 ### Live counters
 

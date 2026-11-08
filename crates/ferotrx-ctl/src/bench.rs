@@ -106,8 +106,8 @@ impl BenchRun {
             name: job.iface.clone(),
             send: job.send.clone(),
         };
-        let link = crate::controller::start_link(&output, &job.profile.link)
-            .map_err(|e| e.to_string())?;
+        let link =
+            crate::controller::start_link(&output, &job.profile.link).map_err(|e| e.to_string())?;
         if let Some(svc) = &link {
             let mut macs = svc.macs();
             for p in &mut capture.packets {

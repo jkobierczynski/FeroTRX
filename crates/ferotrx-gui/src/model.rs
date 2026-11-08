@@ -380,6 +380,12 @@ pub struct PortConfig {
     pub latency: bool,
     /// Impairments for all streams (`ImpairSpec` text), overriding theirs.
     pub impair: String,
+    /// The port's own addresses, `10.0.0.2/24` (comma separated, one per IP
+    /// version); with `gateway`, ARP or neighbor discovery finds its MAC.
+    pub ip: String,
+    pub gateway: String,
+    /// The line's speed, for rates such as `50%`.
+    pub line_rate: String,
 }
 
 /// The ports a server offers: its interfaces, and two that need no
@@ -461,6 +467,20 @@ pub fn start_params(
         if let Some(q) = cfg.queue {
             output.insert("queue".into(), q.into());
         }
+        for (k, v) in [("ip", &cfg.ip), ("gateway", &cfg.gateway)] {
+            let list: Vec<serde_json::Value> = v
+                .split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(Into::into)
+                .collect();
+            if !list.is_empty() {
+                output.insert(k.into(), list.into());
+            }
+        }
+    }
+    if !cfg.line_rate.trim().is_empty() {
+        output.insert("line_rate".into(), cfg.line_rate.trim().into());
     }
     if let Some(w) = cfg.workers.filter(|&w| w > 1) {
         output.insert("workers".into(), w.into());
@@ -567,6 +587,8 @@ future_key = { a = 1 }
             rx_iface: "veth1".into(),
             workers: Some(4),
             impair: "delay=5ms loss=1%".into(),
+            ip: "10.0.0.2/24, 2001:db8::2/64".into(),
+            gateway: "10.0.0.1".into(),
             ..Default::default()
         };
         let p = start_params(
@@ -576,6 +598,11 @@ future_key = { a = 1 }
             "",
         );
         assert_eq!(p["output"]["iface"], "veth0");
+        assert_eq!(
+            p["output"]["ip"],
+            serde_json::json!(["10.0.0.2/24", "2001:db8::2/64"])
+        );
+        assert_eq!(p["output"]["gateway"], serde_json::json!(["10.0.0.1"]));
         assert_eq!(p["output"]["backend"], "af_xdp");
         assert_eq!(p["rx"]["iface"], "veth1");
         assert_eq!(p["output"]["workers"], 4);
