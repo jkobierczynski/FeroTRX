@@ -200,12 +200,15 @@ fn a_paused_run_holds_and_goes_on_where_it_was() {
     job.stop();
     job.join().unwrap();
     let times = sink.times();
-    // No catch-up burst after the pause: at most a few packets in the first ms.
+    // No catch-up burst after the pause: the 150 ms held would be ~300
+    // packets at once. The first 10 ms carry ~20; allow twice that, since a
+    // late wake-up (macOS sleeps overshoot by several ms) legitimately sends
+    // the few packets that fell due meanwhile.
     let burst = times
         .iter()
-        .filter(|&&t| t >= resumed && t < resumed + Duration::from_millis(2))
+        .filter(|&&t| t >= resumed && t < resumed + Duration::from_millis(10))
         .count();
-    assert!(burst <= 6, "{burst} packets right after resuming");
+    assert!(burst <= 40, "{burst} packets right after resuming");
     assert!(times.len() > held + 100, "{} then {}", held, times.len());
 }
 
