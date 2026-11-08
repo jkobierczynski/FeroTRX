@@ -729,3 +729,14 @@ impl H3Server {
         }
     }
 }
+
+/// For the fuzz targets: reads `b` as a request stream's frames.
+#[cfg(any(test, feature = "fuzzing"))]
+#[allow(dead_code)]
+pub(crate) fn fuzz_frames(b: &[u8]) {
+    let mut m = Message {
+        buf: b.to_vec(),
+        ..Default::default()
+    };
+    let _ = m.frames(|f| field(f, ":status").is_some_and(|s| s.starts_with('1')));
+}

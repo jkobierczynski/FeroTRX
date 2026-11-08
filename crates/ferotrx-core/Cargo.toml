@@ -21,6 +21,8 @@ tls = ["dep:rustls", "dep:rcgen"]
 ssh = ["dep:ring"]
 # QUIC and HTTP/3 (rustls for the TLS handshake and keys, ring for Retry tags).
 quic = ["tls", "dep:ring"]
+# Entry points for the fuzz targets in fuzz/ (not an API).
+fuzzing = ["profile", "ssh", "quic"]
 
 [dependencies]
 ferotrx-packet = { workspace = true, optional = true }

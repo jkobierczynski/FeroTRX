@@ -199,10 +199,20 @@ impl AppProtocol for Http3 {
     }
 
     fn session(&self, init: &SessionInit) -> Box<dyn AppSession> {
-        let cfg = Arc::new(self.clone());
+        Box::new(QuicSession::new(self, init))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl QuicSession {
+    fn new(h3: &Http3, init: &SessionInit) -> Self {
+        let cfg = Arc::new(h3.clone());
         let role = match init.role {
             AppRole::Client => {
-                let host = self.http.client.host.clone().unwrap_or_else(|| {
+                let host = h3.http.client.host.clone().unwrap_or_else(|| {
                     match (init.remote, init.remote.port() == 443) {
                         (std::net::SocketAddr::V4(a), true) => a.ip().to_string(),
                         (std::net::SocketAddr::V6(a), true) => format!("[{}]", a.ip()),
@@ -213,7 +223,7 @@ impl AppProtocol for Http3 {
             }
             AppRole::Server => Role::Server(H3Server::new(cfg.clone())),
         };
-        Box::new(QuicSession {
+        QuicSession {
             cfg,
             init: init.clone(),
             conn: None,
@@ -224,11 +234,7 @@ impl AppProtocol for Http3 {
             ended: false,
             lost: 0,
             failed_start: None,
-        })
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
+        }
     }
 }
 
@@ -645,4 +651,134 @@ pub fn parse(t: &toml::Table, base: &std::path::Path) -> Result<Http3> {
     }
     h3.validate_settings()?;
     Ok(h3)
+}
+
+/// For the fuzz targets: connects a client and a server in memory, then
+/// hands `payloads` to one end (`server_side`) as the plaintext of 1-RTT
+/// packets, as if they had been decrypted, so the frames reach the
+/// connection and HTTP/3 behind the packet protection.
+#[cfg(any(test, feature = "fuzzing"))]
+#[allow(dead_code)]
+pub(crate) fn fuzz_established(h3: &Http3, server_side: bool, payloads: &[&[u8]]) {
+    let init = |role, seed, local: &str, remote: &str| SessionInit {
+        role,
+        transport: Transport::Datagram,
+        index: 0,
+        seed,
+        local: local.parse().unwrap(),
+        remote: remote.parse().unwrap(),
+    };
+    let mut c = QuicSession::new(
+        h3,
+        &init(AppRole::Client, 7, "10.0.0.1:40000", "10.0.0.2:443"),
+    );
+    let mut s = QuicSession::new(
+        h3,
+        &init(AppRole::Server, 9, "10.0.0.2:443", "10.0.0.1:40000"),
+    );
+    let mut now = Duration::from_millis(1);
+    let mut cx = AppCx::new(now, now);
+    c.start(&mut cx);
+    let mut to_server = cx.take_sends();
+    let mut to_client = Vec::new();
+    for _ in 0..64 {
+        now += Duration::from_millis(1);
+        for d in std::mem::take(&mut to_server) {
+            let mut cx = AppCx::new(now, now);
+            s.receive(&d, &mut cx);
+            to_client.extend(cx.take_sends());
+        }
+        for d in std::mem::take(&mut to_client) {
+            let mut cx = AppCx::new(now, now);
+            c.receive(&d, &mut cx);
+            to_server.extend(cx.take_sends());
+        }
+        let up = |q: &QuicSession| q.conn.as_ref().is_some_and(|c| c.is_established());
+        // The client's requests end the connection soon after: stop at
+        // the first moment the end under test is up.
+        if up(if server_side { &s } else { &c }) {
+            break;
+        }
+    }
+    let end = if server_side { &mut s } else { &mut c };
+    debug_assert!(end.conn.as_ref().is_some_and(|c| c.is_established()));
+    for (pn, p) in (1 << 20..).zip(payloads) {
+        now += Duration::from_millis(1);
+        let mut cx = AppCx::new(now, now);
+        let Some(conn) = end.conn.as_mut() else {
+            return;
+        };
+        conn.fuzz_packet(pn, p, now);
+        end.drive(&mut cx);
+        if cx.wants_close() {
+            return;
+        }
+    }
+}
+
+/// Seeds for the fuzz target: 1-RTT payloads of a request and of the
+/// frames a connection sees.
+#[cfg(any(test, feature = "fuzzing"))]
+#[allow(dead_code)]
+pub(crate) fn fuzz_seed_payloads() -> Vec<Vec<Vec<u8>>> {
+    use frame::Frame;
+    let enc = |fs: &[Frame]| {
+        let mut out = Vec::new();
+        for f in fs {
+            f.encode(&mut out);
+        }
+        out
+    };
+    let mut req = Vec::new();
+    let fields = qpack::encode(
+        [
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":authority", "lab"),
+            (":path", "/"),
+        ],
+        false,
+    );
+    h3::frame(&mut req, h3::HEADERS, &fields);
+    h3::frame(&mut req, h3::DATA, b"hello");
+    let mut settings = vec![0]; // a control stream
+    h3::frame(&mut settings, h3::SETTINGS, &[]);
+    vec![
+        vec![enc(&[Frame::Stream {
+            id: 0,
+            offset: 0,
+            data: req.clone(),
+            fin: true,
+        }])],
+        vec![
+            enc(&[Frame::Stream {
+                id: 2,
+                offset: 0,
+                data: settings,
+                fin: false,
+            }]),
+            enc(&[Frame::Ping, Frame::MaxData(1 << 30)]),
+            enc(&[Frame::MaxStreams {
+                bidi: true,
+                max: 1000,
+            }]),
+            enc(&[Frame::NewConnectionId {
+                seq: 1,
+                retire_prior_to: 0,
+                cid: vec![7; 8],
+                token: [1; 16],
+            }]),
+            enc(&[Frame::ResetStream {
+                id: 0,
+                code: 1,
+                final_size: 5,
+            }]),
+            enc(&[Frame::ConnectionClose {
+                app: true,
+                code: 0x100,
+                frame_type: 0,
+                reason: b"bye".to_vec(),
+            }]),
+        ],
+    ]
 }

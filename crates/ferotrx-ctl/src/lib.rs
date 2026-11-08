@@ -133,6 +133,9 @@ mod client;
 mod controller;
 mod files;
 pub mod fleet;
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub mod fuzzing;
 pub mod protocol;
 mod scenario;
 mod server;

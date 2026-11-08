@@ -2612,6 +2612,16 @@ fn local_params(
     }
 }
 
+#[cfg(any(test, feature = "fuzzing"))]
+#[allow(dead_code)]
+impl Conn {
+    /// For the fuzz targets: takes `payload` as the plaintext of a 1-RTT
+    /// packet numbered `pn`.
+    pub(crate) fn fuzz_packet(&mut self, pn: u64, payload: &[u8], now: Duration) {
+        self.on_packet(Level::Data, pn, payload, now);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
