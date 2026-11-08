@@ -210,6 +210,23 @@ class ServerInfo(Record):
     #: What remote operators may do at most, when the server's owner set
     #: limits (servers from 0.42.0); ``None`` when nothing is limited.
     limits: Limits | None = None
+    #: When the server's TLS certificate expires, ``YYYY-MM-DDTHH:MM:SS.mmmZ``
+    #: (servers from 0.43.0).
+    certificate_expires: str | None = None
+
+
+@dataclass(kw_only=True)
+class ReloadInfo(Record):
+    """Result of ``server.reload``: what the server read again (servers from 0.43.0)."""
+
+    #: Tokens that log in now.
+    tokens: int = 0
+    #: Certificate revocation lists in force.
+    crls: int = 0
+    #: Client certificate fingerprints refused.
+    denied_certs: int = 0
+    #: When the server's TLS certificate expires.
+    certificate_expires: str | None = None
 
 
 @dataclass(kw_only=True)

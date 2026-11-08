@@ -143,6 +143,7 @@ pub mod fleet;
 pub mod fuzzing;
 mod limits;
 pub mod protocol;
+mod safe_open;
 mod scenario;
 mod server;
 mod tcp;
@@ -162,7 +163,10 @@ pub use files::{sha256_hex, FilePolicy, DEFAULT_MAX_FILE, DEFAULT_MAX_UPLOAD};
 pub use limits::{parse_bps, parse_limit_duration, parse_pps, refused_limit, Demand, Limits, Net};
 pub use protocol::{Role, RpcError};
 pub use scenario::{check_info, scenario_info, LabRunner, SinkOpener};
-pub use server::{Server, ServerConfig, MAX_LINE};
+pub use server::{Credentials, ReloadHandle, Reloader, Server, ServerConfig, MAX_LINE};
 pub use tcp::{start_tcp, start_tcp_with, PortOpener, TcpStarted};
-pub use tls::{common_name, fingerprint, ClientTls, Issued, LabPki, ServerTls, TlsError};
+pub use tls::{
+    common_name, crl_file, fingerprint, ClientTls, Issued, LabPki, ServerTls, TlsError,
+    LAB_CA_DAYS, LAB_CERT_DAYS,
+};
 pub use udp::{start_udp, start_udp_with, UdpStarted};

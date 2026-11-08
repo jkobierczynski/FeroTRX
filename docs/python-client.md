@@ -85,7 +85,10 @@ Everything else needs `operator` and raises `Forbidden` otherwise. Paths
 outside the server's `--data-dir` raise `Forbidden` too, and so do starts
 beyond the server's [traffic limits](remote-control.md#traffic-limits): then
 `e.limit` names the limit (`"max_pps"`, `"interfaces"`, ...), and
-`client.info().limits` lists them beforehand.
+`client.info().limits` lists them beforehand. `client.reload()` (operator) makes the server read
+its tokens, certificates and revocation lists again ([locking someone
+out](remote-control.md#locking-someone-out)); `client.info().certificate_expires`
+says when its TLS certificate runs out.
 
 ## Stateless runs
 

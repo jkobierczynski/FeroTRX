@@ -212,6 +212,24 @@ pub struct ServerInfo {
     /// set limits (servers from 0.42.0; see [`Limits`](crate::Limits)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<Box<LimitsInfo>>,
+    /// When the server's TLS certificate expires, `YYYY-MM-DDTHH:MM:SS.mmmZ`
+    /// (servers from 0.43.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_expires: Option<String>,
+}
+
+/// What `server.reload` read again (servers from 0.43.0).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReloadInfo {
+    /// Tokens that log in now.
+    pub tokens: usize,
+    /// Certificate revocation lists in force.
+    pub crls: usize,
+    /// Client certificate fingerprints refused.
+    pub denied_certs: usize,
+    /// When the server's TLS certificate expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_expires: Option<String>,
 }
 
 /// A server's limits as `server.info` reports them.

@@ -48,7 +48,7 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `server.info` | | name, version, protocol, interfaces, backends, auth_required, tls, this connection's role and user, the server's clock `time` (Unix seconds) and `max_file` |
+| `server.info` | | name, version, protocol, interfaces, backends, auth_required, tls, this connection's role and user, the server's clock `time` (Unix seconds), `max_file` and `certificate_expires` |
 | `auth` | `token` | `true`; the connection now has the token's role |
 | `interfaces.list` | | `[{name, description}]` |
 | `profile.load` | `path` (on the server) or `toml` (+ `base_dir`), optional `name` | the profile's streams |
@@ -67,7 +67,8 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 | `udp.stats`, `udp.remove` | `id` | the UDP run |
 | `udp.list` | | every UDP run |
 | `file.put` | `path` (relative, in the first data directory), `data` (base64), `offset` (0 starts the file; pieces in order) | the file's `size` so far |
-| `file.stat` | `path` | `exists`, `size`, `sha256` |
+| `file.stat` | `path` | `exists`, `size`, `sha256` (hashed as it is read) |
+| `server.reload` | | reads tokens, certificates, CRLs and refused fingerprints again (operator): `tokens`, `crls`, `denied_certs`, `certificate_expires` |
 | `file.get` | `path`, optional `offset`, `length` (at most 4 MiB a call) | `data` (base64), `offset`, `size` of the whole file, `eof` |
 | `capture.start` | `iface`, optional `filter` (BPF), `snaplen`, `promisc`, `direction` (`in`, `out`, `both`), `count`, `duration`, `file` (a pcap in the data directory), `rotate` (`100M`, `5m`), `files`, `stream` (default true: keep frames for `capture.read`), `ctl_traffic` (default false: TCP on the server's control port is left out) | the capture: `id`, `state`, `linktype`, `frames`, `bytes`, libpcap's `received`/`dropped`/`if_dropped`, `files` ([capturing](capture.md)) |
 | `capture.read` | `id`, `after` (frame number, 0 for the first), optional `max` (1000), `wait_ms` (at most 2000) | `frames` (`n`, `ts_ns`, `len`, base64 `data`), `next`, `missed` (frames gone from the server's buffer), `more` (false once it ended and all was read) |
@@ -169,10 +170,16 @@ the server's owner set) and write pcap files anywhere in the data
 directories; anyone who has a token or key file (keep them private: `ferotrx
 certs` writes keys readable only by their owner); local users of the box
 (listen on 127.0.0.1, the default, when you do not need the network); and
-denial of service by a client that is allowed in. The server checks paths
-when a profile is loaded, so a file swapped for a symbolic link afterwards is
-not caught. There is no rate limit per client and no certificate revocation:
-to lock someone out, issue new CAs (or tokens) and restart.
+denial of service by a client that is allowed in. Files the server opens
+itself (profiles, `file.get`, `file.put`, `file.stat`) are opened without
+following a symbolic link put in place after the path was checked (see
+[Files](#files)), but pcaps a profile names and run outputs are opened again
+by their path by the reader or writer, so someone who can write in a data
+directory can still swap one in the moment between: keep data directories
+writable by the server's user only (`ferotrx serve` warns when they are not).
+There is no rate limit per client. To lock someone out, revoke their
+certificate or remove their token and reload ([Locking someone
+out](#locking-someone-out)).
 
 **Logins and roles.** `read` may call `server.info`, `interfaces.list`, the
 `*.get`, `*.list` and `*.stats` methods and `stats.subscribe`; `operator` may
@@ -203,14 +210,70 @@ clients, it reuses the CAs. Clients check the server against `--ca` (or
 [docs/python-client.md](python-client.md)).
 Certificates from your own PKI work as well: any PEM certificate and key.
 
-**Files.** Profiles, the pcaps they name, `base_dir` and pcap outputs must be
+<a id="files"></a>**Files.** Profiles, the pcaps they name, `base_dir` and pcap outputs must be
 inside the `--data-dir` directories (repeatable; default: the directory the
-server was started in); relative paths start from the first one. Uploaded
+server was started in); relative paths start from the first one. Symbolic
+links inside a data directory are fine as long as they lead to somewhere
+inside one. The server holds each data directory open and walks a path from
+it one name at a time without following links (`openat` with `O_NOFOLLOW` on
+Unix; on Windows every step is checked not to be a link or junction and the
+file is opened with `FILE_FLAG_OPEN_REPARSE_POINT`), so a file or folder
+swapped for a link after the check is refused rather than followed; only
+regular files open (not pipes or devices), and `file.put` does not write
+through a file with other names (hard links). Folders `file.put` and
+captures need are made one by one the same way, after the path was checked. Uploaded
 profiles may be at most `--max-upload` (1M); a request at most
 `--max-request` (4M). Profiles given with `-p` at start are not checked.
 `file.put` writes files of at most `--max-file` bytes (256M; 0 refuses
 files) under the first data directory; [fleets](fleet.md) send profiles and
 pcaps to the agents with it.
+
+### Locking someone out
+
+Revoke a client certificate, refuse it by fingerprint, or withdraw a token,
+and reload: connections that logged in with it are closed within a second,
+new ones are refused, and the audit log says why (`revoked_cert`,
+`denied_cert`, `token_withdrawn`).
+
+| `ferotrx serve` option | What it refuses |
+| --- | --- |
+| `--crl FILE` (repeatable; PEM or DER) | client certificates a certificate revocation list names (certificates from a CA without a list are not checked) |
+| `--deny-cert SHA256` (repeatable) | the client certificate with that fingerprint (the audit log's `cert_sha256`; colons allowed) |
+| `--deny-file FILE` | the fingerprints in the file, one per line; `#` starts a comment |
+
+`ferotrx certs DIR` writes an empty `crl.pem` (operator CA) and
+`read-crl.pem` (read-only CA) with the CAs, so a server can be given `--crl`
+from the start; `ferotrx certs DIR --revoke NAME` adds `NAME.pem` to the list
+of the CA that issued it.
+
+**Reloading.** SIGHUP (Unix) or `ferotrx ctl reload` (`server.reload`,
+operator) makes `ferotrx serve` read its `--tokens` file, `--tls-cert` and
+`--tls-key`, the client CAs, `--crl` files, `--deny-cert` and `--deny-file`
+again. A reload that fails (a file that does not parse, TLS turned off)
+changes nothing and says why; it is in the audit log as `reload`. Programs
+that run a `Server` give `ServerConfig::reload` a `Reloader` and call
+`Server::reload_handle`.
+
+**Certificate lifetimes.** `ferotrx certs` issues server and client
+certificates for a year (`--days N`), the CAs for ten. `server.info` shows
+when the server's certificate expires (`certificate_expires`, also in `ferotrx
+ctl info`), and `ferotrx serve` warns at start and on reload when it has
+fewer than 30 days left. Expired client certificates are refused.
+
+**Rotating a client certificate** (a laptop lost, a person leaving, a year
+gone by):
+
+```sh
+ferotrx certs lab-pki --revoke alice --client alice   # revoke the old one first, then issue the new
+# the server was started with --crl lab-pki/crl.pem --crl lab-pki/read-crl.pem
+ferotrx ctl -c lab1 --ca lab-pki/ca.pem --cert lab-pki/bob.pem --key lab-pki/bob-key.pem reload
+# or on the server: kill -HUP $(pidof ferotrx)
+```
+
+Give alice her new `alice.pem` and `alice-key.pem`; the old pair no longer
+connects. Revoke before issuing: issuing replaces `NAME.pem`, after which the
+old certificate can only be refused by its fingerprint (`--deny-file`). With
+a PKI of your own, give its CRLs to `--crl` and reload when they change.
 
 **Starting together.** `run.start`, `tcp.start` and `udp.start` take
 `start_at`, Unix seconds by the server's clock (`server.info` tells it).

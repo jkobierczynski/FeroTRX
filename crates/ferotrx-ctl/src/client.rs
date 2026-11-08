@@ -123,6 +123,11 @@ impl Client {
                 let resp: Response = serde_json::from_value(msg)
                     .map_err(|e| ClientError::Protocol(e.to_string()))?;
                 if resp.id != id {
+                    // An error for no request: the server closing the
+                    // connection says why (a revoked certificate, say).
+                    if let (Value::Null, Some(e)) = (&resp.id, resp.error) {
+                        return Err(ClientError::Rpc(e));
+                    }
                     return Err(ClientError::Protocol(format!(
                         "answer to request {} while waiting for {id}",
                         resp.id
@@ -202,6 +207,12 @@ impl Client {
 
     pub fn info(&mut self) -> Result<ServerInfo, ClientError> {
         self.call("server.info", &Value::Null)
+    }
+
+    /// Makes the server read its tokens, certificates, revocation lists and
+    /// refused fingerprints again (`server.reload`, operator).
+    pub fn reload(&mut self) -> Result<ReloadInfo, ClientError> {
+        self.call("server.reload", &Value::Null)
     }
 
     pub fn auth(&mut self, token: &str) -> Result<(), ClientError> {
