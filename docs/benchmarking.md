@@ -166,6 +166,25 @@ of `burst_max`. The result is the longest burst without loss, also given as
 the time it lasts at that rate; `at_limit` says the device took `burst_max`
 and might take more.
 
+**Sweep** (`--sweep`, or `sweep` in `tests`; not an RFC 2544 test). For
+each size a warm-up trial at `max_load` (`--load PCT`; `warmup` long, or up
+to 1 s when the profile has none) that is thrown away, then `repetitions`
+trials at that load (`--sweep` makes it 5 when neither the profile nor
+`--repetitions` asks for more than one). For each figure the report gives
+the median of the trials, their minimum and maximum, mean, standard
+deviation and spread (max - min in percent of the median): frames and bits
+per second sent (frames, and on the wire), frames per second received, loss
+and the trials' latency p50 and p99. The sweep answers "how much does this
+setup carry, and how steady is that", so two machines, builds or settings
+can be compared; `sender_limited` counts the trials where the sender stayed
+below 97% of the offered rate, where the figures are the sender's limit.
+[performance.md](performance.md) has the method and numbers.
+
+```sh
+sudo ferotrx bench examples/bench-rfc2544.toml -i eth1 --rx eth2 --sweep --load 100 \
+     --size 64 --size 512 --size 1514 -B af_xdp --workers 2 --cpus 2-3 --report sweep.json
+```
+
 Every trial is in the report too, with what was offered (the rate asked for)
 and what was achieved (the rate the sender measured itself sending), the
 frames sent and received, the loss and the latency.
@@ -181,22 +200,26 @@ frames sent and received, the loss and the latency.
 
 ## Reports
 
-`--report bench.json` writes the JSON report and `bench.txt` next to it; the
-text also goes to the terminal. Both start with the run metadata:
+`--report bench.json` writes the JSON report, and `bench.txt` and
+`bench.md` (Markdown, with the test conditions as a table and a table per
+test) next to it; the text also goes to the terminal. All start with the run
+metadata:
 
 * the FeroTRX version, the start time (UTC) and the command line;
 * the operating system, kernel, host name, CPU model and number of threads;
-* how frames were sent (`pcap on eth1`, `af_xdp on eth1 queue 0, copy mode`, ...);
+* how frames were sent (`pcap on eth1`, `af_xdp on eth1 queue 0, copy mode`, ...),
+  with the queue of each worker, and the workers and the CPUs they were
+  pinned to (`--cpus`);
 * each interface's driver, NIC (PCI ids, bus address, firmware), link speed,
-  MTU and MAC address, where the system tells them (Linux; elsewhere the
-  name only);
+  MTU, MAC address and NUMA node with its CPUs, where the system tells them
+  (Linux; elsewhere the name only);
 * how timestamps were taken;
 * the profile's path and its whole text.
 
 The JSON has `format: "ferotrx-bench-1"`, `info` (the metadata), `config`
 (the settings used, after command line overrides), `stopped`, `elapsed_s`
 and `sizes`: per size its `throughput`, `latency`, `frame_loss`,
-`back_to_back` and `trials`. Latencies are in microseconds.
+`back_to_back`, `sweep` and `trials`. Latencies are in microseconds.
 
 The loss and latency report of `replay`, `run` and `build` (`--rx ...
 --report`) carries the same metadata now, and per stream the offered rate

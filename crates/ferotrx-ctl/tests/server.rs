@@ -387,6 +387,8 @@ fn reports_errors() {
         serde_json::json!({"iface": "eth0", "backend": "netmap"}),
         serde_json::json!({"iface": "eth0", "xdp_mode": "fast"}),
         serde_json::json!({"iface": "eth0", "batch": 0}),
+        serde_json::json!({"null": true, "cpus": "3-1"}),
+        serde_json::json!({"iface": "eth0", "cpus": ""}),
     ] {
         assert_eq!(
             call(

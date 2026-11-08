@@ -83,8 +83,9 @@ each milestone added and what comes next.
   build option, for stateless and stateful runs.
   [Guide](docs/backends.md)
 * **Several cores**: `--workers N` spreads one run over N engine threads,
-  streams packet by packet and TCP/UDP runs by flow, one AF_XDP queue per
-  worker. [Guide](docs/multi-core.md)
+  streams packet by packet and TCP/UDP runs by flow, one AF_XDP or DPDK
+  queue per worker, pinned to CPUs with `--cpus`. [Guide](docs/multi-core.md),
+  [performance](docs/performance.md)
 * **Remote control**: a JSON-RPC server with TLS, client certificates,
   read-only and operator roles and an audit log; a command line client and a
   Python package. [Guide](docs/remote-control.md),
@@ -171,10 +172,11 @@ The manual is in [docs/](docs/README.md):
 | [Application protocols](docs/app-protocols.md) | HTTP/1.1 and HTTP/2, HTTPS and TLS, DNS over UDP, TCP and TLS, MQTT, SSH, SIP and RTP, SMB, NTP, your own |
 | [Host emulation](docs/host-emulation.md) | `host`, DHCP, SLAAC, IGMP/MLD |
 | [TCP and UDP over AF_XDP and DPDK](docs/fast-ports.md) | fast ports for stateful runs |
-| [One run on several cores](docs/multi-core.md) | `--workers`, splitting streams and flows |
+| [One run on several cores](docs/multi-core.md) | `--workers`, `--cpus`, splitting streams and flows |
+| [Performance](docs/performance.md) | `bench --sweep`, repeatability, measured numbers |
 | [Capturing traffic](docs/capture.md) | `capture`, BPF filters, Wireshark, remote and fleet captures |
 | [Loss and latency](docs/loss-latency.md) | signatures, `--rx`, `rx`, where frames were lost, run records |
-| [Benchmarking](docs/benchmarking.md) | `bench`, RFC 2544 |
+| [Benchmarking](docs/benchmarking.md) | `bench`, RFC 2544, `--sweep` |
 | [Y.1564 service activation](docs/y1564.md) | `y1564`, CIR/EIR, policing, availability |
 | [Scenarios and regression tests](docs/scenarios.md) | `scenario` |
 | [Remote control](docs/remote-control.md) | `serve`, `ctl`, the protocol, security |

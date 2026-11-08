@@ -54,7 +54,7 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 | `profile.load` | `path` (on the server) or `toml` (+ `base_dir`), optional `name` | the profile's streams |
 | `profile.get`, `profile.unload` | `name` | profile / `true` |
 | `profile.list` | | loaded profiles |
-| `run.start` | `profile`, `output` (`{"iface": ..}`, `{"file": ..}` or `{"null": true}`; with `iface` also optional `backend`, `xdp_mode`, `queue`, `batch`, `dpdk_args`, and the port's `line_rate`, `ip`, `gateway`, `mac`, `vlan`, `answer` as in `[output]`), optional `rate`, `limit`, `duration`, `ignore_errors`, `latency`, `rx` (`{"iface": .., "wait": "500ms"}`), `start_at` | the run (`started_at` once it started) |
+| `run.start` | `profile`, `output` (`{"iface": ..}`, `{"file": ..}` or `{"null": true}`; with `iface` also optional `backend`, `xdp_mode`, `queue`, `batch`, `dpdk_args`, `workers`, `cpus` (also with `file` and `null`), and the port's `line_rate`, `ip`, `gateway`, `mac`, `vlan`, `answer` as in `[output]`), optional `rate`, `limit`, `duration`, `ignore_errors`, `latency`, `rx` (`{"iface": .., "wait": "500ms"}`), `start_at` | the run (`started_at` once it started) |
 | `run.stop` | `id`, `wait` (default true) | the run, final counters |
 | `run.stats`, `run.remove` | `id` | the run |
 | `run.pause`, `run.resume` | `id`, optional `streams` (names; default the whole run) | the run (`paused`, and `paused` per stream) |
@@ -85,11 +85,11 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 | `scenario.get`, `scenario.remove` | `id` | the scenario run: `state`, each check's `state` (`waiting`, `running`, `pass`, `fail`, `error`, `skipped`), live `progress` and `report`, and the whole report once it has ended |
 | `scenario.stop` | `id`, `wait` (default true) | the scenario run: the running check ends, the rest are skipped |
 | `scenario.list` | | every scenario run |
-| `bench.start` | a [benchmark profile](benchmarking.md) as `path` (on the server) or `toml`; `iface` (send) and `rx` (receive); optional `tests`, `sizes` (`"rfc2544"`, `"imix"`, `"124"`, …), `line_rate`, `trial_duration`, `repetitions`, `backend`, `xdp_mode`, `queue`, `workers` | the benchmark run, started on a thread of the server |
+| `bench.start` | a [benchmark profile](benchmarking.md) as `path` (on the server) or `toml`; `iface` (send) and `rx` (receive); optional `tests`, `sizes` (`"rfc2544"`, `"imix"`, `"124"`, …), `line_rate`, `trial_duration`, `repetitions`, `backend`, `xdp_mode`, `queue`, `workers`, `cpus` | the benchmark run, started on a thread of the server |
 | `bench.get`, `bench.remove` | `id` | the benchmark run: `state`, `elapsed_s`, `tests`, `sizes`, every finished `trial` with its `size`, the run `info` (host, interfaces, backend), and once it has ended the `report` (as in `ferotrx bench --report`) and its `text` |
 | `bench.stop` | `id`, `wait` (default true) | the benchmark run: it ends after the trial under way, with a partial report |
 | `bench.list` | | every benchmark run |
-| `y1564.start` | a [Y.1564 profile](y1564.md) as `path` or `toml`; `iface` and `rx`; optional `tests`, `services`, `line_rate`, `step_duration`, `performance_duration`, `backend`, `xdp_mode`, `queue`, `workers` | the Y.1564 run, on a thread of the server |
+| `y1564.start` | a [Y.1564 profile](y1564.md) as `path` or `toml`; `iface` and `rx`; optional `tests`, `services`, `line_rate`, `step_duration`, `performance_duration`, `backend`, `xdp_mode`, `queue`, `workers`, `cpus` | the Y.1564 run, on a thread of the server |
 | `y1564.get`, `y1564.remove` | `id` | the Y.1564 run: `state`, `elapsed_s`, `tests`, `services`, every finished `steps` record (flows and service verdicts), the run `info`, and once it has ended the `report` (as in `ferotrx y1564 --report`) and its `text` |
 | `y1564.stop` | `id`, `wait` (default true) | the run: the step under way ends early, and the report is partial |
 | `y1564.list` | | every Y.1564 run |
