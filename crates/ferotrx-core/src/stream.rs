@@ -2,11 +2,36 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::control::LaneClock;
 use crate::latency::{reserve, reserve_inside, stamp, wall_clock};
 use crate::{
     Error, ImpairSpec, ImpairStats, Impairer, MergeStats, Pacer, Packet, PacketSink, PacketSource,
-    Rate, ReplayStats, Result, SinkError, TrafficModel, Transform,
+    Rate, ReplayStats, Result, RunControl, SinkError, TrafficModel, Transform,
 };
+
+/// Packets in bursts with a pause between them (TRex's multi-burst,
+/// Ostinato's bursts mode): `count` bursts (`None`: until the stream ends
+/// otherwise) of `packets` each, sent at the stream's rate, with `gap` added
+/// to the schedule before every burst after the first. So the time from the
+/// last packet of a burst to the first of the next is `gap` plus one packet
+/// interval (none at top speed).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MultiBurst {
+    pub packets: u64,
+    pub count: Option<u64>,
+    pub gap: Duration,
+}
+
+impl MultiBurst {
+    pub fn validate(&self) -> Result<()> {
+        if self.packets == 0 || self.count == Some(0) {
+            return Err(Error::InvalidSpec(
+                "bursts need at least one packet and at least one burst".into(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// One flow of traffic: a source, the transforms applied to it, and its own rate.
 ///
@@ -41,6 +66,25 @@ pub struct Stream<'a> {
     /// limit, packets more than this late are left out, so the stream sends
     /// fewer packets but never bursts more than this much of its rate.
     pub max_lag: Option<Duration>,
+    /// Bytes counted per packet on top of its length by a bit rate:
+    /// [`WIRE_OVERHEAD`](crate::WIRE_OVERHEAD) for a rate on the wire (see
+    /// [`RateSpec`](crate::RateSpec)).
+    pub overhead: u32,
+    /// Packets in bursts with gaps between them.
+    pub bursts: Option<MultiBurst>,
+    /// The stream (by index in the run) that starts when this one ends:
+    /// the end of its source, its limit, its bursts or its model's shape.
+    /// A stream that an earlier stream names here waits for that, unless
+    /// [`self_start`](Self::self_start) says otherwise; a later stream
+    /// naming an earlier one makes a loop.
+    pub next: Option<usize>,
+    /// How many times this stream starts its `next` (`None`: every time it
+    /// ends). Pointing `next` back at an earlier stream makes a loop that
+    /// runs this many more times.
+    pub next_count: Option<u64>,
+    /// Whether the stream starts with the run. `None` (the default): yes,
+    /// unless an earlier stream names it as its [`next`](Self::next).
+    pub self_start: Option<bool>,
     /// This stream's part of a stream split over several workers:
     /// (index, count); see [`shard`](Stream::shard).
     shard: (u64, u64),
@@ -61,6 +105,11 @@ impl<'a> Stream<'a> {
             model: TrafficModel::default(),
             impair: None,
             max_lag: None,
+            overhead: 0,
+            bursts: None,
+            next: None,
+            next_count: None,
+            self_start: None,
             shard: (0, 1),
             source: Box::new(source),
             transforms: Vec::new(),
@@ -93,6 +142,26 @@ impl<'a> Stream<'a> {
     /// [`max_lag`](Self::max_lag)).
     pub fn with_max_lag(mut self, lag: Duration) -> Self {
         self.max_lag = Some(lag);
+        self
+    }
+
+    /// Sends the packets in bursts (see [`MultiBurst`]).
+    pub fn with_bursts(mut self, bursts: MultiBurst) -> Self {
+        self.bursts = Some(bursts);
+        self
+    }
+
+    /// Starts stream `index` of the run when this one ends, `count` times
+    /// (`None`: every time).
+    pub fn with_next(mut self, index: usize, count: Option<u64>) -> Self {
+        self.next = Some(index);
+        self.next_count = count;
+        self
+    }
+
+    /// Whether the stream starts with the run (see [`self_start`](Self::self_start)).
+    pub fn with_self_start(mut self, yes: bool) -> Self {
+        self.self_start = Some(yes);
         self
     }
 
@@ -129,6 +198,11 @@ impl<'a> Stream<'a> {
 
     pub fn push_transform(&mut self, transform: impl Transform + 'a) {
         self.transforms.push(Box::new(transform));
+    }
+
+    /// Puts a transform before all the others.
+    pub fn prepend_transform(&mut self, transform: impl Transform + 'a) {
+        self.transforms.insert(0, Box::new(transform));
     }
 
     pub fn linktype(&self) -> u32 {
@@ -216,7 +290,9 @@ impl std::fmt::Debug for Stream<'_> {
             .field("keep_size", &self.keep_size)
             .field("model", &self.model)
             .field("impair", &self.impair.as_ref().map(ToString::to_string))
-            .field("impair", &self.impair.as_ref().map(ToString::to_string))
+            .field("overhead", &self.overhead)
+            .field("bursts", &self.bursts)
+            .field("next", &self.next)
             .field("shard", &self.shard)
             .field("transforms", &self.transforms.len())
             .finish_non_exhaustive()
@@ -237,6 +313,10 @@ pub struct RunConfig {
     /// A [`Job`](crate::Job) waits for this wall-clock time before it sends,
     /// so that runs on several machines start together (see [`wait_until`](crate::wait_until)).
     pub start_at: Option<std::time::SystemTime>,
+    /// Pause, resume and change the rate while the run goes. A
+    /// [`Job`](crate::Job) makes one when this is `None` (see
+    /// [`Job::control`](crate::Job::control)).
+    pub control: Option<Arc<RunControl>>,
 }
 
 /// Counters of a run: the total, and one entry per stream in the order given.
@@ -262,16 +342,49 @@ struct Lane {
     packet: Packet,
     pending: bool,
     done: bool,
-    /// Offset from the start of the run when the pending packet should leave.
+    /// Sending now: started with the run or by another stream's end, and
+    /// not ended yet. A lane that waits to be started is done but not active.
+    active: bool,
+    /// Ran before: a new start rewinds the source.
+    used: bool,
+    /// Offset on the stream's own schedule when the pending packet should leave.
     deadline: Duration,
     /// The source's pass count after the pending packet was read.
     passes: u64,
+    /// Passes of earlier starts.
+    pass_base: u64,
     /// Where the pending packet's latency signature is.
     signature: Option<usize>,
     /// Sequence number of the next signature.
     seq: u64,
     /// No packet read yet (a shard skips the packets before its first).
     first: bool,
+    /// The stream's sent and failed packets when it last started, for its limit.
+    base: u64,
+    /// Packets this worker read since the stream last started.
+    count: u64,
+    /// The burst of the last packet read.
+    burst: u64,
+    /// Top speed in bursts: no packet before this point of the schedule.
+    floor: Duration,
+    /// Times `next` may still be started (`None`: always).
+    nexts_left: Option<u64>,
+    /// The stream's schedule against the run's clock.
+    clock: LaneClock,
+}
+
+impl Lane {
+    /// Where the stream's schedule is now.
+    fn sched_now(&self, start: Instant) -> Duration {
+        Duration::from_secs_f64(self.clock.sched(start.elapsed().as_secs_f64()))
+    }
+
+    /// When the pending packet leaves, as time since the run started;
+    /// `None` while the stream is paused.
+    fn real_deadline(&self) -> Option<Duration> {
+        let t = self.clock.real(self.deadline.as_secs_f64());
+        t.is_finite().then(|| Duration::from_secs_f64(t))
+    }
 }
 
 /// Like [`run`], and calls `progress` with the running counters about every `interval`.
@@ -293,6 +406,18 @@ where
         s.rate.validate()?;
         Pacer::check_model(s.rate, &s.model)
             .map_err(|e| Error::InvalidSpec(format!("stream '{}': {e}", s.name)))?;
+        if let Some(b) = &s.bursts {
+            b.validate()
+                .map_err(|e| Error::InvalidSpec(format!("stream '{}': {e}", s.name)))?;
+        }
+        if let Some(n) = s.next {
+            if n >= streams.len() {
+                return Err(Error::InvalidSpec(format!(
+                    "stream '{}': next stream {n} is not in the run",
+                    s.name
+                )));
+            }
+        }
     }
     if let Some(first) = streams.first() {
         let lt = first.linktype();
@@ -300,6 +425,13 @@ where
             return Err(Error::MixedLinkTypes(lt, other));
         }
     }
+    // Streams an earlier stream starts wait for it, unless told otherwise.
+    let waits: Vec<bool> = (0..streams.len())
+        .map(|i| match streams[i].self_start {
+            Some(yes) => !yes,
+            None => streams[..i].iter().any(|s| s.next == Some(i)),
+        })
+        .collect();
 
     let mut stats = RunStats {
         total: ReplayStats::default(),
@@ -307,16 +439,28 @@ where
     };
     let mut lanes: Vec<Lane> = streams
         .iter()
-        .map(|s| Lane {
-            pacer: Pacer::with_model(s.rate, &s.model).expect("checked above"),
+        .zip(&waits)
+        .map(|(s, &waits)| Lane {
+            pacer: Pacer::with_model(s.rate, &s.model)
+                .expect("checked above")
+                .with_overhead(s.overhead),
             packet: Packet::new(Duration::ZERO, Vec::new()),
             pending: false,
-            done: false,
+            done: waits,
+            active: !waits,
+            used: !waits,
             deadline: Duration::ZERO,
             passes: 0,
+            pass_base: 0,
             signature: None,
             seq: s.shard.0,
             first: true,
+            base: 0,
+            count: 0,
+            burst: 0,
+            floor: Duration::ZERO,
+            nexts_left: s.next_count,
+            clock: LaneClock::default(),
         })
         .collect();
 
@@ -326,12 +470,15 @@ where
         .collect();
     let impaired = impairers.iter().any(Option::is_some);
 
+    let control = config.control.as_deref();
+    let mut seen = None;
     let stop_requested = || {
         config
             .stop
             .as_ref()
             .is_some_and(|s| s.load(Ordering::Relaxed))
     };
+    let changed = |seen: Option<u64>| control.is_some_and(|c| Some(c.generation()) != seen);
     let start = Instant::now();
     let mut next_report = start.checked_add(interval);
 
@@ -342,29 +489,96 @@ where
         {
             break;
         }
+        if let Some(c) = control {
+            let g = c.generation();
+            if seen != Some(g) {
+                seen = Some(g);
+                let state = c.state();
+                let now = start.elapsed().as_secs_f64();
+                for (i, lane) in lanes.iter_mut().enumerate() {
+                    lane.clock.set_speed(now, state.speed(i));
+                }
+            }
+        }
 
-        for ((stream, lane), st) in streams.iter_mut().zip(&mut lanes).zip(&stats.streams) {
-            if !lane.pending && !lane.done {
-                fill(stream, lane, st, start)?;
+        // Fill the lanes; a stream that ends may start another one.
+        loop {
+            let mut started = false;
+            for i in 0..lanes.len() {
+                if lanes[i].pending || lanes[i].done {
+                    continue;
+                }
+                fill(&mut streams[i], &mut lanes[i], &stats.streams[i], start)?;
+                if lanes[i].done && lanes[i].active {
+                    lanes[i].active = false;
+                    if let Some(j) = next_to_start(&streams[i], &mut lanes[i]) {
+                        begin(&mut streams[j], &mut lanes, j, &stats.streams[j], start)?;
+                        started = true;
+                    }
+                }
+            }
+            if !started {
+                break;
             }
         }
         let Some(i) = (0..lanes.len())
             .filter(|&i| lanes[i].pending)
-            .min_by_key(|&i| lanes[i].deadline)
+            .min_by(|&a, &b| {
+                let key = |i: usize| lanes[i].real_deadline().unwrap_or(Duration::MAX);
+                key(a).cmp(&key(b))
+            })
         else {
             break;
+        };
+        let Some(real) = lanes[i].real_deadline() else {
+            // Every stream with a packet to send is paused: wait for a change.
+            if let Some(limit) = config.duration {
+                if start.elapsed() > limit {
+                    break;
+                }
+            }
+            let wake = Instant::now() + PAUSED_POLL;
+            let wake = match next_due(&impairers) {
+                Some(due) if start + due < wake => start + due,
+                _ => wake,
+            };
+            if let Err(source) = release(&mut impairers, start.elapsed(), sink) {
+                if !config.ignore_send_errors {
+                    let index = stats.total.packets + stats.total.send_errors;
+                    let _ = sink.flush();
+                    return Err(Error::Sink { index, source });
+                }
+            }
+            let _ = sink.idle();
+            match wait_until(wake, &stop_requested, &|| changed(seen)) {
+                Wait::Stopped => {
+                    stats.total.stopped = true;
+                    break;
+                }
+                Wait::Due | Wait::Changed => {}
+            }
+            report(
+                &mut next_report,
+                interval,
+                start,
+                &mut stats,
+                impaired,
+                &impairers,
+                &mut progress,
+            );
+            continue;
         };
         let lane = &mut lanes[i];
 
         if let Some(limit) = config.duration {
-            if lane.deadline > limit || start.elapsed() > limit {
+            if real > limit || start.elapsed() > limit {
                 break;
             }
         }
-        let send_at = start + lane.deadline;
+        let send_at = start + real;
         if impaired {
             // Let held packets out as they fall due while we wait for this one.
-            let mut waited = true;
+            let mut outcome = Wait::Due;
             loop {
                 if let Err(source) = release(&mut impairers, start.elapsed(), sink) {
                     if !config.ignore_send_errors {
@@ -376,17 +590,21 @@ where
                 match next_due(&impairers) {
                     Some(due) if start + due < send_at => {
                         let _ = sink.idle();
-                        if !wait_until(start + due, &stop_requested) {
-                            waited = false;
+                        outcome = wait_until(start + due, &stop_requested, &|| changed(seen));
+                        if outcome != Wait::Due {
                             break;
                         }
                     }
                     _ => break,
                 }
             }
-            if !waited {
-                stats.total.stopped = true;
-                break;
+            match outcome {
+                Wait::Stopped => {
+                    stats.total.stopped = true;
+                    break;
+                }
+                Wait::Changed => continue,
+                Wait::Due => {}
             }
         }
         if send_at > Instant::now() {
@@ -399,9 +617,14 @@ where
                 }
             }
         }
-        if !wait_until(send_at, &stop_requested) {
-            stats.total.stopped = true;
-            break;
+        match wait_until(send_at, &stop_requested, &|| changed(seen)) {
+            Wait::Stopped => {
+                stats.total.stopped = true;
+                break;
+            }
+            // The schedule changed: the packet keeps its place and gets a new time.
+            Wait::Changed => continue,
+            Wait::Due => {}
         }
 
         let flow = streams[i].latency;
@@ -441,21 +664,20 @@ where
                 return Err(Error::Sink { index, source });
             }
         }
-        stats.total.loops_completed += lane.passes - st.loops_completed;
-        st.loops_completed = lane.passes;
+        let passes = lane.pass_base + lane.passes;
+        stats.total.loops_completed += passes - st.loops_completed;
+        st.loops_completed = passes;
         lane.pending = false;
 
-        if let Some(at) = next_report {
-            let now = Instant::now();
-            if now >= at {
-                set_elapsed(&mut stats, now - start);
-                if impaired {
-                    set_impair(&mut stats, &impairers);
-                }
-                progress(&stats);
-                next_report = now.checked_add(interval);
-            }
-        }
+        report(
+            &mut next_report,
+            interval,
+            start,
+            &mut stats,
+            impaired,
+            &impairers,
+            &mut progress,
+        );
     }
 
     if impaired && !stats.total.stopped {
@@ -469,7 +691,7 @@ where
                 break;
             };
             let _ = sink.idle();
-            if !wait_until(start + due, &stop_requested) {
+            if wait_until(start + due, &stop_requested, &|| false) == Wait::Stopped {
                 stats.total.stopped = true;
                 break;
             }
@@ -489,6 +711,82 @@ where
     Ok(stats)
 }
 
+/// How often a run whose streams are all paused looks for a change.
+const PAUSED_POLL: Duration = Duration::from_millis(20);
+
+/// Calls `progress` when a report is due.
+#[allow(clippy::too_many_arguments)]
+fn report<F: FnMut(&RunStats)>(
+    next_report: &mut Option<Instant>,
+    interval: Duration,
+    start: Instant,
+    stats: &mut RunStats,
+    impaired: bool,
+    impairers: &[Option<Impairer>],
+    progress: &mut F,
+) {
+    if let Some(at) = *next_report {
+        let now = Instant::now();
+        if now >= at {
+            set_elapsed(stats, now - start);
+            if impaired {
+                set_impair(stats, impairers);
+            }
+            progress(stats);
+            *next_report = now.checked_add(interval);
+        }
+    }
+}
+
+/// The stream an ended stream starts, if any is left to start.
+fn next_to_start(stream: &Stream<'_>, lane: &mut Lane) -> Option<usize> {
+    let next = stream.next?;
+    match &mut lane.nexts_left {
+        Some(0) => None,
+        Some(n) => {
+            *n -= 1;
+            Some(next)
+        }
+        None => Some(next),
+    }
+}
+
+/// Starts stream `j` (again): its schedule, limit and bursts from the top,
+/// its source from the first packet. Field engines and signature numbers go on.
+fn begin(
+    stream: &mut Stream<'_>,
+    lanes: &mut [Lane],
+    j: usize,
+    st: &ReplayStats,
+    start: Instant,
+) -> Result<()> {
+    let lane = &mut lanes[j];
+    if lane.active {
+        // Still going: nothing to start.
+        return Ok(());
+    }
+    if lane.used && !stream.source.rewind() {
+        return Err(Error::InvalidSpec(format!(
+            "stream '{}' can't start again: its source can't start over",
+            stream.name
+        )));
+    }
+    lane.pass_base += lane.passes;
+    lane.passes = 0;
+    lane.pacer = Pacer::with_model(stream.rate, &stream.model)?.with_overhead(stream.overhead);
+    lane.pending = false;
+    lane.done = false;
+    lane.active = true;
+    lane.used = true;
+    lane.first = true;
+    lane.base = st.packets + st.send_errors;
+    lane.count = 0;
+    lane.burst = 0;
+    lane.floor = Duration::ZERO;
+    lane.clock.restart(start.elapsed().as_secs_f64());
+    Ok(())
+}
+
 /// Reads and transforms the next packet of `stream`, and works out when it
 /// leaves. With a [`max_lag`](Stream::max_lag), packets due longer ago than
 /// that are skipped.
@@ -496,7 +794,9 @@ fn fill(stream: &mut Stream<'_>, lane: &mut Lane, st: &ReplayStats, start: Insta
     loop {
         fill_one(stream, lane, st, start)?;
         let late = match stream.max_lag {
-            Some(lag) if lane.pending => start.elapsed() > lane.deadline + lag,
+            Some(lag) if lane.pending && !lane.clock.paused() => {
+                lane.sched_now(start) > lane.deadline + lag
+            }
             _ => false,
         };
         if !late {
@@ -514,12 +814,21 @@ fn fill_one(
 ) -> Result<()> {
     if stream
         .limit
-        .is_some_and(|l| st.packets + st.send_errors >= l)
+        .is_some_and(|l| st.packets + st.send_errors - lane.base >= l)
     {
         lane.done = true;
         return Ok(());
     }
     let (k, n) = stream.shard;
+    // The burst of the packet about to be read: packet `count` of this
+    // worker is packet `k + count * n` of the whole stream.
+    let burst = stream.bursts.map(|b| (k + lane.count * n) / b.packets);
+    if let (Some(b), Some(burst)) = (&stream.bursts, burst) {
+        if b.count.is_some_and(|c| burst >= c) {
+            lane.done = true;
+            return Ok(());
+        }
+    }
     if n > 1 {
         // The packets before this worker's next one belong to the others.
         let skip = if lane.first { k } else { n - 1 };
@@ -548,17 +857,31 @@ fn fill_one(
             reserve(&mut lane.packet.data, flow)
         }
     });
+    // Every burst after the first starts `gap` later on the schedule.
+    let gaps = match (&stream.bursts, burst) {
+        (Some(b), Some(burst)) => {
+            if burst != lane.burst && lane.count > 0 {
+                lane.floor = lane.sched_now(start) + b.gap;
+            }
+            lane.burst = burst;
+            b.gap
+                .saturating_mul(u32::try_from(burst).unwrap_or(u32::MAX))
+        }
+        _ => Duration::ZERO,
+    };
+    lane.count += 1;
     lane.deadline = match lane
         .pacer
         .next_deadline(lane.packet.timestamp, lane.packet.data.len())
     {
-        Some(d) => stream.delay + d,
+        Some(d) => stream.delay + gaps + d,
         // The model's shape has ended: so has the stream.
         None if lane.pacer.ended() => {
             lane.done = true;
             return Ok(());
         }
-        None => start.elapsed().max(stream.delay),
+        // Top speed: now, after the start delay and a burst's gap.
+        None => lane.sched_now(start).max(stream.delay).max(lane.floor),
     };
     lane.passes = stream.source.passes();
     lane.pending = true;
@@ -605,19 +928,35 @@ fn set_elapsed(stats: &mut RunStats, elapsed: Duration) {
     }
 }
 
+/// How a [`wait_until`] ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wait {
+    Due,
+    Stopped,
+    /// The run control changed: the schedule needs another look.
+    Changed,
+}
+
 /// Waits until `target`, sleeping while far away and spinning for the last stretch,
-/// because OS sleeps are too coarse for sub-millisecond gaps.
-/// Returns false if a stop was requested while waiting.
-fn wait_until(target: Instant, stop_requested: &impl Fn() -> bool) -> bool {
+/// because OS sleeps are too coarse for sub-millisecond gaps. Ends early when
+/// a stop is requested or `changed` says the schedule changed.
+fn wait_until(
+    target: Instant,
+    stop_requested: &impl Fn() -> bool,
+    changed: &impl Fn() -> bool,
+) -> Wait {
     const SPIN: Duration = Duration::from_micros(200);
     const MAX_SLEEP: Duration = Duration::from_millis(50);
     loop {
         if stop_requested() {
-            return false;
+            return Wait::Stopped;
+        }
+        if changed() {
+            return Wait::Changed;
         }
         let now = Instant::now();
         if now >= target {
-            return true;
+            return Wait::Due;
         }
         let remaining = target - now;
         if remaining > SPIN {

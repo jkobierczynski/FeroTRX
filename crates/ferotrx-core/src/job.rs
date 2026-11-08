@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::{
     merge_all, run_with_progress, share, Error, FlowReport, PacketReceiver, PacketSink, Rate,
-    Result, RunConfig, RunStats, RxConfig, RxJob, RxStats, Stream,
+    Result, RunConfig, RunControl, RunStats, RxConfig, RxJob, RxStats, Stream,
 };
 
 /// How often a running [`Job`] publishes its counters.
@@ -71,6 +71,8 @@ pub struct Job {
     workers: usize,
     rx: Option<Arc<RxJob>>,
     stop: Arc<AtomicBool>,
+    control: Arc<RunControl>,
+    ended: Arc<AtomicBool>,
     shared: Arc<Shared>,
     thread: Option<JoinHandle<Result<RunStats>>>,
 }
@@ -189,6 +191,10 @@ impl Job {
             .stop
             .get_or_insert_with(|| Arc::new(AtomicBool::new(false)))
             .clone();
+        let control = config
+            .control
+            .get_or_insert_with(|| Arc::new(RunControl::new()))
+            .clone();
         let names: Vec<String> = first.iter().map(|s| s.name.clone()).collect();
         let flows: Vec<Option<u32>> = first.iter().map(|s| s.latency).collect();
         // The rate asked for: the workers' parts added up.
@@ -226,10 +232,12 @@ impl Job {
             }),
             changed: Condvar::new(),
         });
+        let ended = Arc::new(AtomicBool::new(false));
         let thread = {
             let shared = shared.clone();
             let rx = rx.clone();
             let stop = stop.clone();
+            let ended = ended.clone();
             std::thread::Builder::new()
                 .name("ferotrx-job".into())
                 .spawn(move || {
@@ -266,6 +274,7 @@ impl Job {
                         }
                     }
                     drop(live);
+                    ended.store(true, Ordering::Release);
                     shared.changed.notify_all();
                     result
                 })?
@@ -277,6 +286,8 @@ impl Job {
             workers: count,
             rx,
             stop,
+            control,
+            ended,
             shared,
             thread: Some(thread),
         })
@@ -286,6 +297,18 @@ impl Job {
     /// waits for its [`RunConfig::start_at`].
     pub fn started_at(&self) -> Option<SystemTime> {
         self.shared.lock().started_at
+    }
+
+    /// Pauses, resumes and changes the rate of the running streams (all
+    /// workers together); stream numbers are as in [`stream_names`](Job::stream_names).
+    pub fn control(&self) -> &Arc<RunControl> {
+        &self.control
+    }
+
+    /// A flag that turns true when the job has ended, for helpers that live
+    /// as long as the run (such as a port answering ARP for it).
+    pub fn ended_flag(&self) -> Arc<AtomicBool> {
+        self.ended.clone()
     }
 
     /// The number of threads the streams run on (see [`spawn_workers`](Job::spawn_workers)).

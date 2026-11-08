@@ -294,6 +294,7 @@ impl LabRunner {
                 ignore_send_errors: false,
                 stop: Some(Arc::new(AtomicBool::new(false))),
                 start_at: None,
+                control: None,
             },
             Some(RxSettings {
                 receiver,
@@ -306,6 +307,7 @@ impl LabRunner {
             profile: check.name.clone(),
             output: format!("{iface} (scenario: {})", check.name),
             rx_iface: Some(rx.clone()),
+            link: None,
             job,
             stopped_by_request: Default::default(),
         });

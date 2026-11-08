@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import ssl
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from typing import Any, TypeVar
 
 from . import _wire
@@ -409,6 +409,12 @@ class AsyncClient:
         rx_wait: str | None = None,
         impair: str | None = None,
         start_at: float | None = None,
+        line_rate: str | None = None,
+        ip: str | Sequence[str] | None = None,
+        gateway: str | Sequence[str] | None = None,
+        mac: str | None = None,
+        vlan: int | None = None,
+        answer: str | Sequence[str] | None = None,
     ) -> RunInfo:
         output = _wire.output_spec(
             iface=iface,
@@ -420,6 +426,12 @@ class AsyncClient:
             batch=batch,
             dpdk_args=dpdk_args,
             workers=workers,
+            line_rate=line_rate,
+            ip=ip,
+            gateway=gateway,
+            mac=mac,
+            vlan=vlan,
+            answer=answer,
         )
         return await self._run(
             _wire.start(
@@ -439,6 +451,26 @@ class AsyncClient:
 
     async def stop(self, id: int, *, wait: bool = True) -> RunInfo:
         return await self._run(_wire.stop(RunInfo, "run", id, wait))
+
+    async def pause(self, id: int, streams: str | Sequence[str] | None = None) -> RunInfo:
+        """Holds a run, or only ``streams``, where it is; :meth:`resume` goes on
+        from there without a catch-up burst."""
+        return await self._run(_wire.run_control("run.pause", id, streams))
+
+    async def resume(self, id: int, streams: str | Sequence[str] | None = None) -> RunInfo:
+        return await self._run(_wire.run_control("run.resume", id, streams))
+
+    async def update(
+        self,
+        id: int,
+        *,
+        multiplier: float | None = None,
+        streams: Mapping[str, str | float] | None = None,
+    ) -> RunInfo:
+        """Changes the rate of a running run: every stream at ``multiplier``
+        times its asked rate, and ``streams`` one by one (name to a new rate
+        of the same kind, e.g. ``"2000pps"``, or to a multiplier)."""
+        return await self._run(_wire.run_update(id, multiplier, streams))
 
     async def stats(self, id: int) -> RunInfo:
         return await self._run(_wire.stats(RunInfo, "run", id))

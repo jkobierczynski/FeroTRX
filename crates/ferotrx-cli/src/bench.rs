@@ -33,6 +33,9 @@ pub struct BenchArgs {
     #[command(flatten)]
     send: SendArgs,
 
+    #[command(flatten)]
+    addr: crate::link::AddrArgs,
+
     /// Run these tests instead of the profile's: throughput, latency,
     /// frame_loss, back_to_back (comma separated).
     #[arg(long, value_delimiter = ',', value_name = "TEST")]
@@ -148,7 +151,18 @@ pub fn cmd_bench(args: BenchArgs) -> Result<()> {
         name: args.iface.clone(),
         send,
     };
-    let capture = Arc::new(profile.capture()?);
+    let link = args.addr.settings(&profile.link)?;
+    // The port's addresses: the gateway's MAC found now and put in the
+    // frames once, answers for the port while the benchmark runs.
+    let link_service = ferotrx_ctl::start_link(&output, &link).map_err(|e| anyhow::anyhow!(e))?;
+    let mut capture = profile.capture()?;
+    if let Some(svc) = &link_service {
+        let mut macs = svc.macs();
+        for p in &mut capture.packets {
+            ferotrx_core::Transform::apply(&mut macs, p);
+        }
+    }
+    let capture = Arc::new(capture);
     let workers = match &output {
         ferotrx_io::Output::Interface { send, .. } => send.workers(),
         _ => 1,
@@ -172,7 +186,10 @@ pub fn cmd_bench(args: BenchArgs) -> Result<()> {
     info.command = Some(std::env::args().collect::<Vec<_>>().join(" "));
     info.profile = Some(args.profile.display().to_string());
     info.profile_text = Some(text);
-    info.backend = Some(detail);
+    info.backend = Some(match &link_service {
+        Some(svc) => format!("{detail}; port {}", svc.detail()),
+        None => detail,
+    });
     info.tx_interface = Some(ferotrx_io::describe_interface(&args.iface));
     info.rx_interface = Some(ferotrx_io::describe_interface(&args.rx));
     info.timestamps = Some(
@@ -233,6 +250,7 @@ pub fn cmd_bench(args: BenchArgs) -> Result<()> {
     if report.stopped {
         eprintln!("stopped before the end: the results are partial");
     }
+    drop(link_service);
     Ok(())
 }
 

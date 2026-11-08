@@ -38,6 +38,13 @@ repetitions = 1
 loss_threshold = 0.0           # percent
 ```
 
+The sending port can have an address of its own instead of fixed MACs in
+`packet`: `ip` and `gateway` in `[output]` (or `--ip` and `--gateway` on
+`ferotrx bench`) find the router's MAC by ARP or neighbor discovery before
+the first trial, put it in every frame, and answer the router's ARP and
+pings while the benchmark runs (see [the port's own
+addresses](replay.md#the-ports-own-addresses-l3-mode)).
+
 ## An example report
 
 Through the namespace router of `scripts/bench-netns.sh`, which forwards

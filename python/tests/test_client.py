@@ -117,6 +117,22 @@ def test_stop_endless_run(server: Server) -> None:
         assert not stopped.running
 
 
+def test_pause_resume_and_update(server: Server) -> None:
+    with connect(server) as c:
+        c.load_profile(name="lab", toml=PROFILE)
+        run = c.start("lab", null=True)
+        assert c.pause(run.id).paused
+        assert not c.resume(run.id).paused
+        c.pause(run.id, "dns")
+        info = c.update(run.id, multiplier=2.0, streams={"ping": "500pps"})
+        assert info.multiplier == 2.0
+        assert info.stream("dns").paused
+        assert abs(info.stream("ping").multiplier - 0.25) < 1e-9
+        with pytest.raises(ferotrx.NotFound):
+            c.update(run.id, streams={"nope": 1.0})
+        c.stop(run.id)
+
+
 def test_watch_until_last_update(server: Server) -> None:
     with connect(server) as c:
         c.load_profile(name="lab", toml=PROFILE)

@@ -8,8 +8,8 @@ use clap::{Args, Subcommand};
 use ferotrx_core::{parse_duration, parse_size, Profile};
 use ferotrx_ctl::protocol::{
     CaptureInfo, CaptureStartParams, Counters, LoadProfileParams, OutputSpec, ProfileInfo,
-    ReloadInfo, RunInfo, RunState, RxRunInfo, RxSpec, RxStartParams, StartParams, TcpStartParams,
-    UdpStartParams, DEFAULT_PORT,
+    ReloadInfo, RunInfo, RunState, RunUpdateParams, RxRunInfo, RxSpec, RxStartParams, StartParams,
+    StreamUpdate, TcpStartParams, UdpStartParams, DEFAULT_PORT,
 };
 use ferotrx_ctl::{
     parse_bps, parse_limit_duration, parse_pps, AuditLog, Client, ClientTls, Controller,
@@ -640,6 +640,32 @@ enum CtlCommand {
     Start(StartArgs),
     /// Stop a run and show its final counters.
     Stop { id: u64 },
+    /// Hold a run (or some of its streams) where it is; `resume` goes on
+    /// from there without a catch-up burst.
+    Pause {
+        id: u64,
+        /// Only this stream (by name); repeat for more.
+        #[arg(short, long = "stream", value_name = "NAME")]
+        streams: Vec<String>,
+    },
+    /// Go on with a paused run or paused streams.
+    Resume {
+        id: u64,
+        /// Only this stream (by name); repeat for more.
+        #[arg(short, long = "stream", value_name = "NAME")]
+        streams: Vec<String>,
+    },
+    /// Change the rate of a running run in place.
+    Update {
+        id: u64,
+        /// Every stream at this many times its asked rate (1 = as asked).
+        #[arg(short, long)]
+        multiplier: Option<f64>,
+        /// One stream's new rate, NAME=RATE (e.g. web=2000pps) or
+        /// NAME=xFACTOR (e.g. web=x0.5); repeat for more.
+        #[arg(short, long = "stream", value_name = "NAME=RATE")]
+        streams: Vec<String>,
+    },
     /// Show the counters of one run, or of every run.
     Stats { id: Option<u64> },
     /// Follow live counters of one run (until it ends) or of every run.
@@ -819,7 +845,11 @@ struct StartArgs {
     #[command(flatten)]
     send: crate::SendArgs,
 
-    /// Rate for every stream instead of the profile's, e.g. 10kpps or 100mbps.
+    #[command(flatten)]
+    link: crate::link::LinkArgs,
+
+    /// Rate for every stream instead of the profile's, e.g. 10kpps, 100mbps
+    /// or 50% (of the line rate).
     #[arg(short, long)]
     rate: Option<String>,
 
@@ -1020,6 +1050,7 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
         }
         CtlCommand::Unload { name } => c.unload_profile(&name)?,
         CtlCommand::Start(s) => {
+            s.link.check_no_l1()?;
             let params = StartParams {
                 profile: s.profile,
                 output: {
@@ -1034,6 +1065,12 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                         batch: send.batch,
                         dpdk_args: send.dpdk_args,
                         workers: send.workers,
+                        line_rate: s.link.line_rate.clone(),
+                        ip: s.link.addr.ip.iter().map(|p| p.to_string()).collect(),
+                        gateway: s.link.addr.gateway.iter().map(|g| g.to_string()).collect(),
+                        mac: s.link.addr.mac.map(|m| m.to_string()),
+                        vlan: s.link.addr.port_vlan,
+                        answer: s.link.addr.answer.iter().map(|r| r.to_string()).collect(),
                     }
                 },
                 rate: s.rate,
@@ -1061,6 +1098,42 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
         }
         CtlCommand::Stop { id } => {
             let run = c.stop(id)?;
+            if json {
+                return print_json(&run);
+            }
+            print_run(&run);
+        }
+        CtlCommand::Pause { id, streams } => {
+            let run = c.pause(id, &streams)?;
+            if json {
+                return print_json(&run);
+            }
+            print_run(&run);
+        }
+        CtlCommand::Resume { id, streams } => {
+            let run = c.resume(id, &streams)?;
+            if json {
+                return print_json(&run);
+            }
+            print_run(&run);
+        }
+        CtlCommand::Update {
+            id,
+            multiplier,
+            streams,
+        } => {
+            if multiplier.is_none() && streams.is_empty() {
+                bail!("give --multiplier or --stream NAME=RATE");
+            }
+            let params = RunUpdateParams {
+                id,
+                multiplier,
+                streams: streams
+                    .iter()
+                    .map(|s| parse_stream_update(s))
+                    .collect::<Result<_>>()?,
+            };
+            let run = c.update(&params)?;
             if json {
                 return print_json(&run);
             }
@@ -1388,6 +1461,27 @@ fn print_profile(p: &ProfileInfo) {
     }
 }
 
+/// `NAME=RATE` or `NAME=xFACTOR` of `ctl update --stream`.
+fn parse_stream_update(s: &str) -> Result<StreamUpdate> {
+    let Some((name, v)) = s.split_once('=') else {
+        bail!("--stream {s:?}: expected NAME=RATE or NAME=xFACTOR");
+    };
+    let mut u = StreamUpdate {
+        name: name.to_string(),
+        ..Default::default()
+    };
+    match v.strip_prefix('x') {
+        Some(f) => {
+            u.multiplier = Some(
+                f.parse()
+                    .map_err(|_| anyhow::anyhow!("--stream {s:?}: {f:?} is not a number"))?,
+            )
+        }
+        None => u.rate = Some(v.to_string()),
+    }
+    Ok(u)
+}
+
 fn print_run(r: &RunInfo) {
     let state = match r.state {
         RunState::Running => "running",
@@ -1395,12 +1489,32 @@ fn print_run(r: &RunInfo) {
         RunState::Stopped => "stopped",
         RunState::Failed => "failed",
     };
-    println!("run {} ({} to {}): {state}", r.id, r.profile, r.output);
+    let mut held = String::new();
+    if r.paused && r.state == RunState::Running {
+        held.push_str(", paused");
+    }
+    if r.multiplier != 1.0 {
+        held.push_str(&format!(", rate x{}", r.multiplier));
+    }
+    println!(
+        "run {} ({} to {}): {state}{held}",
+        r.id, r.profile, r.output
+    );
+    if let Some(l) = &r.link {
+        println!("  port: {l}");
+    }
     if let Some(e) = &r.error {
         println!("  error: {e}");
     }
     for s in &r.streams {
-        print_counters(&format!("  {}", s.name), &s.counters);
+        let mut label = format!("  {}", s.name);
+        if s.paused {
+            label.push_str(" (paused)");
+        }
+        if s.multiplier != 1.0 {
+            label.push_str(&format!(" (x{})", s.multiplier));
+        }
+        print_counters(&label, &s.counters);
     }
     print_counters("  total", &r.total);
     for s in &r.streams {

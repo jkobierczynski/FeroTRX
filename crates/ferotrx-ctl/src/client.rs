@@ -407,6 +407,29 @@ impl Client {
         self.call("run.stats", &RunId { id })
     }
 
+    /// Pauses a run, or the streams named (all of them when `streams` is empty).
+    pub fn pause(&mut self, id: u64, streams: &[String]) -> Result<RunInfo, ClientError> {
+        let p = RunControlParams {
+            id,
+            streams: streams.to_vec(),
+        };
+        self.call("run.pause", &p)
+    }
+
+    /// Resumes a run, or the streams named.
+    pub fn resume(&mut self, id: u64, streams: &[String]) -> Result<RunInfo, ClientError> {
+        let p = RunControlParams {
+            id,
+            streams: streams.to_vec(),
+        };
+        self.call("run.resume", &p)
+    }
+
+    /// Changes the rate of a running run or of some of its streams.
+    pub fn update(&mut self, params: &RunUpdateParams) -> Result<RunInfo, ClientError> {
+        self.call("run.update", params)
+    }
+
     pub fn runs(&mut self) -> Result<Vec<RunInfo>, ClientError> {
         self.call("run.list", &Value::Null)
     }

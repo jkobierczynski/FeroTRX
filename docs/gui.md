@@ -426,7 +426,16 @@ holds what `ferotrx run` takes on its command line: backend (`pcap`,
 [several cores](multi-core.md)), a duration, one rate for all streams, an
 interface of the same server to receive on (loss and latency per stream, see
 [loss and latency](loss-latency.md)), and signatures on all streams for a
-receiver on another machine.
+receiver on another machine. **Port address** and **gateway** give the
+port an address of its own: the gateway's MAC is found by ARP or neighbor
+discovery and goes into every frame, and the port answers ARP, neighbor
+solicitations and pings while it sends (see [the port's own
+addresses](replay.md#the-ports-own-addresses-l3-mode)); **Line rate** is what
+rates such as `50%` are a share of.
+
+While a port's run goes, **⏸ Pause** holds it where it is and **▶ Resume**
+goes on from there; **rate x** changes the rate of every stream in place
+(`run.update`; drag or type a factor).
 
 ## The stream editor
 
@@ -450,9 +459,12 @@ Each stream has four pages:
   and checksums left to the builder, as when importing a capture), so the
   layers, the text form and the bytes stay in step; what cannot be carried
   over into fields is listed under the bytes.
-* **Stream control**: rate (`1000pps`, `20mbps`, `2x`, `topspeed`) or
-  interval, loops (0 is until the run ends), packet limit, start delay,
-  traffic model and rate shape ([traffic models](traffic-models.md)), frame
+* **Stream control**: rate (`1000pps`, `20mbps`, `100mbps-l1`, `50%`, `2x`,
+  `topspeed`) or interval, loops (0 is until the run ends), packet limit,
+  start delay, traffic model and rate shape ([traffic models](traffic-models.md)),
+  bursts with a gap between them, the stream to start when this one ends
+  (**Then start**; see [bursts and streams that start each
+  other](replay.md#bursts-and-streams-that-start-each-other)), frame
   sizes (`imix`, `rfc2544`, weights), loss and latency signatures.
 * **Variable fields**: the field engine (`vary`) and rewrites, as in
   profiles ([replay](replay.md)).

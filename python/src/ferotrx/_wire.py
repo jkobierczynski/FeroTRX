@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import os
 import ssl
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
@@ -410,6 +410,12 @@ def output_spec(
     batch: int | None = None,
     dpdk_args: str | Sequence[str] | None = None,
     workers: int | None = None,
+    line_rate: str | None = None,
+    ip: str | Sequence[str] | None = None,
+    gateway: str | Sequence[str] | None = None,
+    mac: str | None = None,
+    vlan: int | None = None,
+    answer: str | Sequence[str] | None = None,
 ) -> dict[str, Any]:
     if sum((iface is not None, file is not None, bool(null))) != 1:
         raise ValueError("give exactly one of iface, file and null=True")
@@ -423,7 +429,43 @@ def output_spec(
         workers=workers,
         file=_path(file),
         null=null,
+        line_rate=line_rate,
+        ip=_str_list(ip),
+        gateway=_str_list(gateway),
+        mac=mac,
+        vlan=vlan,
+        answer=_str_list(answer),
     )
+
+
+def _str_list(v: str | Sequence[str] | None) -> list[str] | None:
+    """One string or several, as the list the server takes."""
+    if v is None:
+        return None
+    return [v] if isinstance(v, str) else list(v)
+
+
+def run_control(method: str, id: int, streams: Sequence[str] | None) -> Call[RunInfo]:
+    return Call(method, _drop_none(id=id, streams=_str_list(streams) or None), _record(RunInfo))
+
+
+def run_update(
+    id: int,
+    multiplier: float | None,
+    streams: Mapping[str, str | float] | None,
+) -> Call[RunInfo]:
+    """``streams`` maps a stream's name to a new rate (``"2000pps"``) or a
+    multiplier of the rate it was asked for (a number)."""
+    if multiplier is None and not streams:
+        raise ValueError("give multiplier or streams")
+    updates: list[dict[str, Any]] = []
+    for name, v in (streams or {}).items():
+        if isinstance(v, str):
+            updates.append({"name": name, "rate": v})
+        else:
+            updates.append({"name": name, "multiplier": float(v)})
+    params = _drop_none(id=id, multiplier=multiplier, streams=updates or None)
+    return Call("run.update", params, _record(RunInfo))
 
 
 def start(

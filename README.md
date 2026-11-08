@@ -24,8 +24,11 @@ each milestone added and what comes next.
   prefix), ports, VLAN and QinQ tags, checksums; per-packet field ranges like
   TRex's field engine. [Guide](docs/replay.md#rewriting)
 * **Profiles**: several streams at once from a TOML file, each with its own
-  capture or built packets, rate, loops, delay, rewrites and size mix.
-  [Guide](docs/replay.md#profiles)
+  capture or built packets, rate (also `50%` of the line, or L1 bit rates),
+  loops, delay, rewrites, size mix, bursts with gaps and streams that start
+  each other. A port can have an address of its own: the router's MAC found
+  by ARP or neighbor discovery, ARP and pings answered. Running runs pause,
+  resume and change rate in place. [Guide](docs/replay.md#profiles)
 * **Inspect and build packets**: decode captures layer by layer with byte
   ranges and checksum checks; build Ethernet, VLAN, ARP, IPv4, IPv6 (with
   extension headers), TCP, UDP, ICMP/ICMPv6 and DNS packets from one line of
