@@ -44,6 +44,7 @@ fn multi_bursts_leave_with_gaps_between_them() {
             gap: Duration::from_millis(40),
         })];
     let mut sink = Timed::default();
+    let start = Instant::now();
     let stats = run(&mut streams, &mut sink, &RunConfig::default()).unwrap();
     assert_eq!(stats.total.packets, 15);
     let t = sink.times();
@@ -53,9 +54,16 @@ fn multi_bursts_leave_with_gaps_between_them() {
         assert!(span < Duration::from_millis(20), "burst {b}: {span:?}");
     }
     for b in 1..3 {
+        // Packets never leave early: burst b starts no sooner than b gaps
+        // (and 5 b packets at 0.1 ms) after the run did. The gap seen
+        // between two packets can be shorter when the burst before ended
+        // late (busy CI machines), so it only has to be clearly there.
+        let due = (Duration::from_millis(40) + Duration::from_micros(500)) * b as u32;
+        let at = t[b * 5] - start;
+        assert!(at >= due, "burst {b} at {at:?}, due {due:?}");
         let gap = t[b * 5] - t[b * 5 - 1];
         assert!(
-            gap >= Duration::from_millis(40),
+            gap >= Duration::from_millis(20),
             "gap before burst {b}: {gap:?}"
         );
     }
