@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 import ferotrx
-from ferotrx import RunInfo, RunState, ServerInfo, TcpRunInfo, _wire
+from ferotrx import ReloadInfo, RunInfo, RunState, ServerInfo, TcpRunInfo, _wire
 from ferotrx.errors import Forbidden, NotFound, RpcError
 
 
@@ -84,6 +84,15 @@ def test_server_limits_and_refusals() -> None:
     e = RpcError.from_error({"code": -32004, "message": "no", "data": {"limit": "max_pps"}})
     assert isinstance(e, Forbidden) and e.limit == "max_pps"
     assert RpcError.from_error({"code": -32004, "message": "no"}).limit is None
+
+
+def test_certificate_expiry_and_reload() -> None:
+    info = ServerInfo.from_dict({"tls": True, "certificate_expires": "2027-11-08T00:00:00.000Z"})
+    assert info.certificate_expires == "2027-11-08T00:00:00.000Z"
+    assert ServerInfo.from_dict({}).certificate_expires is None
+    r = ReloadInfo.from_dict({"tokens": 2, "crls": 1, "denied_certs": 3})
+    assert (r.tokens, r.crls, r.denied_certs, r.certificate_expires) == (2, 1, 3, None)
+    assert _wire.reload().method == "server.reload"
 
 
 @pytest.mark.parametrize(

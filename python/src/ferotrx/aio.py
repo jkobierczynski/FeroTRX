@@ -19,6 +19,7 @@ from .types import (
     InterfaceEntry,
     Notification,
     ProfileInfo,
+    ReloadInfo,
     RunInfo,
     RxRunInfo,
     ServerInfo,
@@ -307,6 +308,9 @@ class AsyncClient:
 
     async def auth(self, token: str) -> None:
         await self._run(_wire.auth(token))
+
+    async def reload(self) -> ReloadInfo:
+        return await self._run(_wire.reload())
 
     async def interfaces(self) -> list[InterfaceEntry]:
         return await self._run(_wire.interfaces())

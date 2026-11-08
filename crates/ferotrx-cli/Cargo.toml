@@ -29,6 +29,9 @@ clap.workspace = true
 ctrlc.workspace = true
 
 # `ferotrx service`: the control server as a Windows service.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
 

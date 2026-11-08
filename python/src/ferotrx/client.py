@@ -21,6 +21,7 @@ from .types import (
     InterfaceEntry,
     Notification,
     ProfileInfo,
+    ReloadInfo,
     RunInfo,
     RxRunInfo,
     ServerInfo,
@@ -292,6 +293,12 @@ class Client:
     def auth(self, token: str) -> None:
         """Logs in with a token (``--token``, ``--read-token`` or ``--tokens``)."""
         self._run(_wire.auth(token))
+
+    def reload(self) -> ReloadInfo:
+        """Makes the server read its tokens file, certificates, revocation lists
+        and refused fingerprints again (operator). Connections whose
+        certificate or token is no longer accepted are closed."""
+        return self._run(_wire.reload())
 
     def interfaces(self) -> list[InterfaceEntry]:
         """The interfaces the server can send on."""

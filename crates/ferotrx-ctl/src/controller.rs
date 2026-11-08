@@ -974,6 +974,7 @@ impl Controller {
                     refused_frames: self.guard.as_ref().map_or(0, |g| g.refused()),
                 })
             }),
+            certificate_expires: None,
         }
     }
 
@@ -1168,8 +1169,9 @@ impl Controller {
                         .map(|s| s.to_string_lossy().into_owned())
                         .ok_or_else(|| RpcError::invalid_params("path has no file name"))?,
                 };
-                let file = self.files.readable(&path)?;
-                let profile = Profile::from_path(&file).map_err(|e| {
+                let (text, file) = self.files.read_text(&path)?;
+                let base = file.parent().unwrap_or(Path::new(""));
+                let profile = Profile::from_toml(&text, base).map_err(|e| {
                     RpcError::failed(format!("cannot load {}: {e}", path.display()))
                 })?;
                 (name, profile)
@@ -1489,10 +1491,7 @@ impl Controller {
                         "base_dir goes with toml; a scenario file uses its own folder",
                     ));
                 }
-                let file = self.files.readable(path)?;
-                let text = std::fs::read_to_string(&file).map_err(|e| {
-                    RpcError::failed(format!("cannot read {}: {e}", path.display()))
-                })?;
+                let (text, file) = self.files.read_text(path)?;
                 let base = file.parent().unwrap_or(Path::new("."));
                 let what = path.display().to_string();
                 let mut s = Scenario::from_toml_with(&text, base, &overrides, &allow)
@@ -1641,10 +1640,7 @@ impl Controller {
         let bad = |e: String| RpcError::invalid_params(e);
         let (text, name) = match (&p.path, &p.toml) {
             (Some(path), None) => {
-                let file = self.files.readable(path)?;
-                let text = std::fs::read_to_string(&file).map_err(|e| {
-                    RpcError::failed(format!("cannot read {}: {e}", path.display()))
-                })?;
+                let (text, _) = self.files.read_text(path)?;
                 (text, path.display().to_string())
             }
             (None, Some(text)) => {
@@ -1789,10 +1785,7 @@ impl Controller {
         let bad = |e: String| RpcError::invalid_params(e);
         let (text, name) = match (&p.path, &p.toml) {
             (Some(path), None) => {
-                let file = self.files.readable(path)?;
-                let text = std::fs::read_to_string(&file).map_err(|e| {
-                    RpcError::failed(format!("cannot read {}: {e}", path.display()))
-                })?;
+                let (text, _) = self.files.read_text(path)?;
                 (text, path.display().to_string())
             }
             (None, Some(text)) => {
@@ -1927,8 +1920,12 @@ impl Controller {
         let start_at = start_time(p.start_at)?;
         let failed = |e: ferotrx_core::Error| RpcError::failed(e);
         let mut profile = match (p.path, p.toml) {
-            (Some(path), None) => TcpProfile::from_path(self.files.readable(&path)?)
-                .map_err(|e| RpcError::failed(format!("{}: {e}", path.display())))?,
+            (Some(path), None) => {
+                let (text, file) = self.files.read_text(&path)?;
+                let base = file.parent().unwrap_or(Path::new(""));
+                TcpProfile::from_toml(&text, base)
+                    .map_err(|e| RpcError::failed(format!("{}: {e}", path.display())))?
+            }
             (None, Some(text)) => {
                 self.files.upload(&text)?;
                 let base = self.files.base_dir(p.base_dir.as_deref())?;
@@ -2033,8 +2030,12 @@ impl Controller {
         let start_at = start_time(p.start_at)?;
         let failed = |e: ferotrx_core::Error| RpcError::failed(e);
         let mut profile = match (p.path, p.toml) {
-            (Some(path), None) => UdpProfile::from_path(self.files.readable(&path)?)
-                .map_err(|e| RpcError::failed(format!("{}: {e}", path.display())))?,
+            (Some(path), None) => {
+                let (text, file) = self.files.read_text(&path)?;
+                let base = file.parent().unwrap_or(Path::new(""));
+                UdpProfile::from_toml(&text, base)
+                    .map_err(|e| RpcError::failed(format!("{}: {e}", path.display())))?
+            }
             (None, Some(text)) => {
                 self.files.upload(&text)?;
                 let base = self.files.base_dir(p.base_dir.as_deref())?;

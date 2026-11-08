@@ -7,13 +7,14 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use ferotrx_core::{parse_duration, parse_size, Profile};
 use ferotrx_ctl::protocol::{
-    CaptureInfo, CaptureStartParams, Counters, LoadProfileParams, OutputSpec, ProfileInfo, RunInfo,
-    RunState, RxRunInfo, RxSpec, RxStartParams, StartParams, TcpStartParams, UdpStartParams,
-    DEFAULT_PORT,
+    CaptureInfo, CaptureStartParams, Counters, LoadProfileParams, OutputSpec, ProfileInfo,
+    ReloadInfo, RunInfo, RunState, RxRunInfo, RxSpec, RxStartParams, StartParams, TcpStartParams,
+    UdpStartParams, DEFAULT_PORT,
 };
 use ferotrx_ctl::{
     parse_bps, parse_limit_duration, parse_pps, AuditLog, Client, ClientTls, Controller,
-    FilePolicy, LabPki, Limits, Role, Server, ServerConfig, ServerTls, Token,
+    Credentials, FilePolicy, LabPki, Limits, Reloader, Role, Server, ServerConfig, ServerTls,
+    Token,
 };
 use serde_json::Value;
 
@@ -62,6 +63,23 @@ pub struct ServeArgs {
     /// Client certificates from this CA log in read-only.
     #[arg(long, value_name = "FILE", requires = "tls_cert")]
     read_client_ca: Option<PathBuf>,
+
+    /// Refuse client certificates this revocation list names (PEM or DER;
+    /// `ferotrx certs --revoke` writes crl.pem and read-crl.pem).
+    /// Repeatable. Read again on SIGHUP and `ferotrx ctl reload`.
+    #[arg(long = "crl", value_name = "FILE", requires = "tls_cert")]
+    crls: Vec<PathBuf>,
+
+    /// Refuse the client certificate with this SHA-256 fingerprint (as the
+    /// audit log's cert_sha256 names it). Repeatable.
+    #[arg(long = "deny-cert", value_name = "SHA256", requires = "tls_cert")]
+    deny_certs: Vec<String>,
+
+    /// Refuse the client certificates this file lists, one SHA-256
+    /// fingerprint per line (# starts a comment). Read again on SIGHUP and
+    /// `ferotrx ctl reload`, like --tokens and --crl.
+    #[arg(long, value_name = "FILE", requires = "tls_cert")]
+    deny_file: Option<PathBuf>,
 
     /// Clients may only name profiles, pcaps and output files inside this
     /// directory; relative paths start from the first one. Repeatable.
@@ -202,6 +220,8 @@ fn env_or(arg: Option<String>, env: &str) -> Option<String> {
 
 pub fn cmd_serve(args: ServeArgs) -> Result<()> {
     let server = start_server(args)?;
+    #[cfg(unix)]
+    reload_on_hangup(server.reload_handle());
     {
         let controller = server.controller().clone();
         ctrlc::set_handler(move || {
@@ -216,33 +236,148 @@ pub fn cmd_serve(args: ServeArgs) -> Result<()> {
     Ok(())
 }
 
+/// Reads the logins again when the process gets SIGHUP.
+#[cfg(unix)]
+fn reload_on_hangup(handle: ferotrx_ctl::ReloadHandle) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static HANGUP: AtomicBool = AtomicBool::new(false);
+    extern "C" fn on_hangup(_: libc::c_int) {
+        HANGUP.store(true, Ordering::SeqCst);
+    }
+    let handler = on_hangup as extern "C" fn(libc::c_int);
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        libc::signal(libc::SIGHUP, handler as libc::sighandler_t);
+    }
+    let _ = std::thread::Builder::new()
+        .name("reload".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(200));
+            if HANGUP.swap(false, Ordering::SeqCst) {
+                match handle.reload() {
+                    Ok(r) => eprintln!("{}", describe_reload(&r)),
+                    Err(e) => eprintln!("reload failed, the old logins stay in force: {e}"),
+                }
+            }
+        });
+}
+
+fn describe_reload(r: &ReloadInfo) -> String {
+    let mut line = format!(
+        "reloaded: {} token(s), {} revocation list(s), {} refused certificate(s)",
+        r.tokens, r.crls, r.denied_certs
+    );
+    if let Some(e) = &r.certificate_expires {
+        line.push_str(&format!("; server certificate valid until {e}"));
+    }
+    line
+}
+
 /// Builds the server `args` describe and binds its address, ready to
 /// [`Server::serve`]; `ferotrx serve` and the Windows service share it.
+/// Where `ferotrx serve` reads its logins from: at start, and again on
+/// SIGHUP and `server.reload`.
+#[derive(Clone)]
+struct LoginFiles {
+    token: Option<String>,
+    read_token: Option<String>,
+    tokens: Option<PathBuf>,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
+    client_ca: Option<PathBuf>,
+    read_client_ca: Option<PathBuf>,
+    crls: Vec<PathBuf>,
+    deny_certs: Vec<String>,
+    deny_file: Option<PathBuf>,
+}
+
+impl LoginFiles {
+    fn of(args: &ServeArgs) -> Self {
+        Self {
+            token: env_or(args.token.clone(), TOKEN_ENV),
+            read_token: env_or(args.read_token.clone(), READ_TOKEN_ENV),
+            tokens: args.tokens.clone(),
+            tls_cert: args.tls_cert.clone(),
+            tls_key: args.tls_key.clone(),
+            client_ca: args.client_ca.clone(),
+            read_client_ca: args.read_client_ca.clone(),
+            crls: args.crls.clone(),
+            deny_certs: args.deny_certs.clone(),
+            deny_file: args.deny_file.clone(),
+        }
+    }
+
+    fn load(&self) -> Result<Credentials> {
+        let mut tokens = Vec::new();
+        if let Some(t) = &self.token {
+            tokens.push(Token::new("operator", Role::Operator, t));
+        }
+        if let Some(t) = &self.read_token {
+            tokens.push(Token::new("read", Role::Read, t));
+        }
+        if let Some(f) = &self.tokens {
+            tokens.extend(Token::from_file(f)?);
+        }
+        let tls = match (&self.tls_cert, &self.tls_key) {
+            (Some(cert), Some(key)) => {
+                let mut t = ServerTls::from_files(cert, key)?;
+                if let Some(ca) = &self.client_ca {
+                    t = t.with_client_ca_file(Role::Operator, ca)?;
+                }
+                if let Some(ca) = &self.read_client_ca {
+                    t = t.with_client_ca_file(Role::Read, ca)?;
+                }
+                for crl in &self.crls {
+                    t = t.with_crl_file(crl)?;
+                }
+                for fp in &self.deny_certs {
+                    t = t.deny(fp).context("--deny-cert")?;
+                }
+                if let Some(f) = &self.deny_file {
+                    t = t.with_deny_file(f)?;
+                }
+                Some(t)
+            }
+            _ => None,
+        };
+        Ok(Credentials { tokens, tls })
+    }
+}
+
+/// Seconds since 1970.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// Warns when the server's certificate expires within 30 days.
+fn warn_expiry(tls: &ServerTls) {
+    let Some(at) = tls.expires() else {
+        return;
+    };
+    let days = (at - unix_now()).div_euclid(86_400);
+    if days < 0 {
+        eprintln!("warning: the server certificate (--tls-cert) has expired: clients will refuse it; issue a new one (ferotrx certs DIR --server HOST)");
+    } else if days < 30 {
+        eprintln!("warning: the server certificate (--tls-cert) expires in {days} day(s); issue a new one (ferotrx certs DIR --server HOST) and restart, or reload");
+    }
+}
+
 pub fn start_server(args: ServeArgs) -> Result<Server> {
     let limits = serve_limits(&args)?;
-    let mut tokens = Vec::new();
-    if let Some(t) = env_or(args.token, TOKEN_ENV) {
-        tokens.push(Token::new("operator", Role::Operator, t));
+    let logins = LoginFiles::of(&args);
+    let Credentials { tokens, tls } = logins.load()?;
+    if let Some(t) = &tls {
+        warn_expiry(t);
     }
-    if let Some(t) = env_or(args.read_token, READ_TOKEN_ENV) {
-        tokens.push(Token::new("read", Role::Read, t));
-    }
-    if let Some(f) = &args.tokens {
-        tokens.extend(Token::from_file(f)?);
-    }
-    let tls = match (&args.tls_cert, &args.tls_key) {
-        (Some(cert), Some(key)) => {
-            let mut t = ServerTls::from_files(cert, key)?;
-            if let Some(ca) = &args.client_ca {
-                t = t.with_client_ca_file(Role::Operator, ca)?;
-            }
-            if let Some(ca) = &args.read_client_ca {
-                t = t.with_client_ca_file(Role::Read, ca)?;
-            }
-            Some(t)
+    let reload = Reloader::new(move || {
+        let c = logins.load().map_err(|e| format!("{e:#}"))?;
+        if let Some(t) = &c.tls {
+            warn_expiry(t);
         }
-        _ => None,
-    };
+        Ok(c)
+    });
     let dirs = if args.data_dirs.is_empty() {
         vec![std::env::current_dir()?]
     } else {
@@ -269,6 +404,7 @@ pub fn start_server(args: ServeArgs) -> Result<Server> {
         max_request: parse_size(&args.max_request)? as usize,
         idle_timeout: (idle > Duration::ZERO).then_some(idle),
         audit: Some(audit),
+        reload: Some(reload),
         ..Default::default()
     };
     let login = config.login_required();
@@ -336,6 +472,13 @@ pub fn start_server(args: ServeArgs) -> Result<Server> {
         .map(|d| d.display().to_string())
         .collect();
     eprintln!("data directories: {}", dirs.join(", "));
+    for d in files.shared_dirs() {
+        eprintln!(
+            "warning: other users may write in the data directory {}: they could swap files \
+             under the server's clients; make it writable by the server's user only",
+            d.display()
+        );
+    }
     if !limits.is_empty() {
         eprintln!("limits for remote runs: {}", limits.describe().join("; "));
     }
@@ -469,6 +612,10 @@ pub struct CtlArgs {
 enum CtlCommand {
     /// Show the server's version and what it supports.
     Info,
+    /// Make the server read its tokens file, certificates, revocation lists
+    /// and refused fingerprints again; connections whose certificate or
+    /// token is no longer accepted are closed (operator).
+    Reload,
     /// List the interfaces the server can send on.
     Interfaces,
     /// Load a profile. PATH is on the server, unless --upload sends the local file.
@@ -785,6 +932,9 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                 println!("backends: {}", i.backends.join(", "));
             }
             println!("tls: {}", if i.tls { "yes" } else { "no" });
+            if let Some(e) = &i.certificate_expires {
+                println!("server certificate valid until: {e}");
+            }
             println!(
                 "login required: {}",
                 if i.auth_required { "yes" } else { "no" }
@@ -806,6 +956,13 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                     );
                 }
             }
+        }
+        CtlCommand::Reload => {
+            let r = c.reload()?;
+            if json {
+                return print_json(&r);
+            }
+            println!("{}", describe_reload(&r));
         }
         CtlCommand::Interfaces => {
             let list = c.interfaces()?;
@@ -1316,14 +1473,35 @@ pub struct CertsArgs {
     /// Issue a read-only client certificate with this name. Repeatable.
     #[arg(long, value_name = "NAME", value_delimiter = ',')]
     read_client: Vec<String>,
+
+    /// Revoke the certificate NAME.pem: add it to crl.pem (or read-crl.pem
+    /// for a read-only one), done before issuing so `--revoke alice
+    /// --client alice` replaces her certificate. Repeatable.
+    #[arg(long, value_name = "NAME", value_delimiter = ',')]
+    revoke: Vec<String>,
+
+    /// Days the certificates issued now are valid (the CAs: ten years).
+    #[arg(long, value_name = "N", default_value_t = ferotrx_ctl::LAB_CERT_DAYS)]
+    days: u32,
 }
 
 pub fn cmd_certs(args: CertsArgs) -> Result<()> {
-    if args.server.is_empty() && args.client.is_empty() && args.read_client.is_empty() {
-        bail!("say what to issue: --server HOST, --client NAME or --read-client NAME");
+    if args.server.is_empty()
+        && args.client.is_empty()
+        && args.read_client.is_empty()
+        && args.revoke.is_empty()
+    {
+        bail!(
+            "say what to issue: --server HOST, --client NAME or --read-client NAME, \
+             or what to revoke: --revoke NAME"
+        );
     }
-    let pki = LabPki::new(&args.dir);
+    let pki = LabPki::new(&args.dir).with_days(args.days);
     let mut files = Vec::new();
+    for n in &args.revoke {
+        files.extend(pki.revoke(n)?.files);
+        println!("revoked {n}");
+    }
     if !args.server.is_empty() {
         files.extend(pki.issue_server(&args.server)?.files);
     }
@@ -1338,12 +1516,20 @@ pub fn cmd_certs(args: CertsArgs) -> Result<()> {
     }
     let d = args.dir.display();
     println!();
-    let read_ca = if pki.path("read-ca.pem").exists() {
+    let mut read_ca = if pki.path("read-ca.pem").exists() {
         format!(" --read-client-ca {d}/read-ca.pem")
     } else {
         String::new()
     };
+    for crl in ["crl.pem", "read-crl.pem"] {
+        if pki.path(crl).exists() {
+            read_ca.push_str(&format!(" --crl {d}/{crl}"));
+        }
+    }
     println!("server: ferotrx serve -l 0.0.0.0:{DEFAULT_PORT} --tls-cert {d}/server.pem --tls-key {d}/server-key.pem --client-ca {d}/ca.pem{read_ca}");
+    if !args.revoke.is_empty() {
+        println!("A server running with these --crl options refuses the revoked certificates after `ferotrx ctl reload` (or SIGHUP); one started without them needs a restart with them.");
+    }
     let host = args
         .server
         .first()

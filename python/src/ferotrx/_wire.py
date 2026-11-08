@@ -22,6 +22,7 @@ from .types import (
     Notification,
     ProfileInfo,
     Record,
+    ReloadInfo,
     RunInfo,
     RxRunInfo,
     ServerInfo,
@@ -245,6 +246,10 @@ def _upload(path: PathLike) -> str:
 
 def info() -> Call[ServerInfo]:
     return Call("server.info", None, _record(ServerInfo))
+
+
+def reload() -> Call[ReloadInfo]:
+    return Call("server.reload", None, _record(ReloadInfo))
 
 
 def auth(token: str) -> Call[None]:

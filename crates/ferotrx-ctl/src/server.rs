@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -88,6 +88,34 @@ pub struct ServerConfig {
     pub login_timeout: Duration,
     /// Where logins, refusals and changes are recorded.
     pub audit: Option<AuditLog>,
+    /// Reads tokens, certificates, revocation lists and refused
+    /// fingerprints again for `server.reload` (and `ferotrx serve`'s
+    /// SIGHUP); without it the server cannot reload.
+    pub reload: Option<Reloader>,
+}
+
+/// What logs in to a server, as a [`Reloader`] reads it again.
+#[derive(Clone, Debug, Default)]
+pub struct Credentials {
+    pub tokens: Vec<Token>,
+    pub tls: Option<ServerTls>,
+}
+
+/// Reads a server's [`Credentials`] again (from the files it was started
+/// with): `server.reload` and [`ReloadHandle::reload`] call it.
+#[derive(Clone)]
+pub struct Reloader(Arc<dyn Fn() -> Result<Credentials, String> + Send + Sync>);
+
+impl Reloader {
+    pub fn new(f: impl Fn() -> Result<Credentials, String> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+}
+
+impl std::fmt::Debug for Reloader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Reloader")
+    }
 }
 
 impl Default for ServerConfig {
@@ -109,6 +137,7 @@ impl Default for ServerConfig {
             idle_timeout: Some(Duration::from_secs(300)),
             login_timeout: Duration::from_secs(10),
             audit: None,
+            reload: None,
         }
     }
 }
@@ -130,9 +159,19 @@ pub struct Server {
     shared: Arc<Shared>,
 }
 
-struct Shared {
+/// The logins in force; [`Shared::reload`] replaces them.
+struct Creds {
     tokens: Vec<Token>,
     tls: Option<TlsSetup>,
+}
+
+struct Shared {
+    creds: RwLock<Arc<Creds>>,
+    /// Counts reloads, so connections see that they must check their
+    /// logins again.
+    generation: AtomicU64,
+    reload: Option<Reloader>,
+    tls_on: bool,
     login_required: bool,
     max_connections: usize,
     max_request: usize,
@@ -156,6 +195,79 @@ struct Shared {
 }
 
 impl Shared {
+    fn creds(&self) -> Arc<Creds> {
+        self.creds
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Reads the logins again; connections whose certificate or token is
+    /// no longer accepted are closed when they next wake (within a second).
+    fn reload(&self, by: Map<String, Value>) -> Result<ReloadInfo, String> {
+        let outcome = self.try_reload();
+        let mut m = by;
+        match &outcome {
+            Ok(r) => {
+                m.insert("ok".into(), true.into());
+                m.insert("tokens".into(), r.tokens.into());
+                m.insert("crls".into(), r.crls.into());
+                m.insert("denied_certs".into(), r.denied_certs.into());
+            }
+            Err(e) => {
+                m.insert("ok".into(), false.into());
+                m.insert("error".into(), e.clone().into());
+            }
+        }
+        self.audit("reload", Value::Object(m));
+        outcome
+    }
+
+    fn try_reload(&self) -> Result<ReloadInfo, String> {
+        let reload = self
+            .reload
+            .as_ref()
+            .ok_or("this server was not started from files it can read again")?;
+        let c = (reload.0)()?;
+        if c.tls.is_some() != self.tls_on {
+            return Err(if self.tls_on {
+                "the reloaded settings have no TLS; restart the server to turn it off".into()
+            } else {
+                "the reloaded settings have TLS; restart the server to turn it on".into()
+            });
+        }
+        let login = !c.tokens.is_empty() || c.tls.as_ref().is_some_and(ServerTls::verifies_clients);
+        if login != self.login_required {
+            return Err(if login {
+                "the reloaded settings need logins and this server started without; restart it"
+                    .into()
+            } else {
+                "the reloaded settings have no token and no client CA: nobody could log in".into()
+            });
+        }
+        let info = ReloadInfo {
+            tokens: c.tokens.len(),
+            crls: c.tls.as_ref().map_or(0, ServerTls::crl_count),
+            denied_certs: c.tls.as_ref().map_or(0, ServerTls::denied_count),
+            certificate_expires: c.tls.as_ref().and_then(ServerTls::expires).map(expiry),
+        };
+        let tls = c
+            .tls
+            .as_ref()
+            .map(|t| t.build(!c.tokens.is_empty()))
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        *self
+            .creds
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(Creds {
+            tokens: c.tokens,
+            tls,
+        });
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        Ok(info)
+    }
+
     fn audit(&self, event: &str, fields: Value) {
         if let (Some(log), Value::Object(m)) = (&self.audit, fields) {
             log.record(event, m);
@@ -188,7 +300,7 @@ impl Shared {
     /// log and, without TLS, to the client.
     fn refuse(&self, stream: &TcpStream, peer: &str, reason: &str) {
         self.audit("refused", json!({"peer": peer, "reason": reason}));
-        if self.tls.is_none() {
+        if !self.tls_on {
             let err = RpcError::new(RpcError::FAILED, reason);
             let mut s = stream;
             let _ = s.set_write_timeout(Some(Duration::from_secs(1)));
@@ -276,9 +388,15 @@ impl Server {
         controller.set_audit(config.audit.clone());
         // Captures on this server leave its own control traffic out.
         controller.set_ctl_port(local.port());
+        let tls_on = tls.is_some();
         let shared = Arc::new(Shared {
-            tokens: config.tokens,
-            tls,
+            creds: RwLock::new(Arc::new(Creds {
+                tokens: config.tokens,
+                tls,
+            })),
+            generation: AtomicU64::new(0),
+            reload: config.reload,
+            tls_on,
             login_required,
             max_connections: config.max_connections.max(1),
             max_request: config.max_request.max(1024),
@@ -317,7 +435,19 @@ impl Server {
 
     /// True when connections are encrypted.
     pub fn tls(&self) -> bool {
-        self.shared.tls.is_some()
+        self.shared.tls_on
+    }
+
+    /// Reads tokens, certificates, revocation lists and refused
+    /// fingerprints again (see [`ServerConfig::reload`]).
+    pub fn reload(&self) -> Result<ReloadInfo, String> {
+        self.reload_handle().reload()
+    }
+
+    /// Something that reloads this server from another thread while
+    /// [`serve`](Server::serve) runs, e.g. on a signal.
+    pub fn reload_handle(&self) -> ReloadHandle {
+        ReloadHandle(self.shared.clone())
     }
 
     /// Accepts connections for ever.
@@ -380,6 +510,24 @@ impl Server {
             .spawn(move || self.serve())?;
         Ok(addr)
     }
+}
+
+/// Reloads a running [`Server`]'s logins ([`Server::reload_handle`]).
+#[derive(Clone)]
+pub struct ReloadHandle(Arc<Shared>);
+
+impl ReloadHandle {
+    /// As `server.reload`; the audit log records it as by `signal`.
+    pub fn reload(&self) -> Result<ReloadInfo, String> {
+        let mut by = Map::new();
+        by.insert("by".into(), "signal".into());
+        self.0.reload(by)
+    }
+}
+
+/// An expiry time as `server.info` and `server.reload` give it.
+fn expiry(secs: i64) -> String {
+    crate::audit::rfc3339(secs, 0)
 }
 
 struct OpenGuard(Arc<Shared>);
@@ -571,6 +719,13 @@ struct Connection {
     /// The role and name the client certificate gave, if any.
     cert_login: Option<(Role, String)>,
     cert_checked: bool,
+    /// The client certificate chain, checked again after a reload.
+    cert_chain: Option<Vec<rustls::pki_types::CertificateDer<'static>>>,
+    /// The token this connection logged in with, checked again after a
+    /// reload.
+    token: Option<String>,
+    /// The reload this connection last checked its logins against.
+    generation: u64,
     auth_failures: u32,
     opened: Instant,
     last_request: Instant,
@@ -594,7 +749,8 @@ impl Connection {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(TICK))?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
-        let wire = match &shared.tls {
+        let creds = shared.creds();
+        let wire = match &creds.tls {
             None => Wire::Plain(Mutex::new(stream.try_clone()?)),
             Some(tls) => Wire::Tls(Box::new(Mutex::new(TlsWire {
                 conn: rustls::ServerConnection::new(tls.config.clone())
@@ -623,7 +779,10 @@ impl Connection {
             role: open.then_some(Role::Operator),
             user: None,
             cert_login: None,
-            cert_checked: shared.tls.is_none(),
+            cert_checked: !shared.tls_on,
+            cert_chain: None,
+            token: None,
+            generation: shared.generation.load(Ordering::SeqCst),
             shared,
             auth_failures: 0,
             opened: now,
@@ -659,7 +818,7 @@ impl Connection {
     }
 
     fn run(mut self) {
-        self.audit("connect", json!({"tls": self.shared.tls.is_some()}));
+        self.audit("connect", json!({"tls": self.shared.tls_on}));
         let reason = match self.serve() {
             Ok(reason) => reason.to_string(),
             Err(e) => {
@@ -688,7 +847,12 @@ impl Connection {
             let limit = (max + 1).saturating_sub(line.len()) as u64;
             let read = (&mut self.reader).take(limit).read_until(b'\n', &mut line);
             if !self.cert_checked {
-                self.check_certificate();
+                if let Some(reason) = self.check_certificate()? {
+                    return Ok(reason);
+                }
+            }
+            if let Some(reason) = self.recheck()? {
+                return Ok(reason);
             }
             match read {
                 Ok(0) if line.is_empty() => return Ok("closed by the client"),
@@ -738,25 +902,89 @@ impl Connection {
     }
 
     /// Logs in with the client certificate once the handshake is done.
-    fn check_certificate(&mut self) {
+    /// A refused fingerprint closes the connection: the reason is returned.
+    fn check_certificate(&mut self) -> io::Result<Option<&'static str>> {
         let Some(chain) = self.writer.peer_certificates() else {
-            return;
+            return Ok(None);
         };
         self.cert_checked = true;
         let Some(end) = chain.first() else {
-            return;
+            return Ok(None);
         };
-        let role = self.shared.tls.as_ref().and_then(|t| t.role_of(&chain));
+        let creds = self.shared.creds();
         let fp = fingerprint(end);
+        if creds.tls.as_ref().is_some_and(|t| t.is_denied(&fp)) {
+            self.audit("denied_cert", json!({"cert_sha256": fp}));
+            self.goodbye("this client certificate is no longer accepted")?;
+            return Ok(Some("certificate denied"));
+        }
+        let role = creds.tls.as_ref().and_then(|t| t.role_of(&chain));
         let name = common_name(end).unwrap_or_else(|| format!("cert:{}", &fp[..16]));
         let Some(role) = role else {
-            return;
+            return Ok(None);
         };
         self.cert_login = Some((role, name.clone()));
+        self.cert_chain = Some(chain);
         self.role = Some(role);
         self.user = Some(name);
         self.logged_in();
         self.audit("login", json!({"by": "certificate", "cert_sha256": fp}));
+        Ok(None)
+    }
+
+    /// After a reload: checks the certificate and token this connection
+    /// logged in with against the new settings. One no longer accepted
+    /// closes the connection: the reason is returned.
+    fn recheck(&mut self) -> io::Result<Option<&'static str>> {
+        let generation = self.shared.generation.load(Ordering::SeqCst);
+        if generation == self.generation {
+            return Ok(None);
+        }
+        self.generation = generation;
+        let creds = self.shared.creds();
+        if let (Some((_, name)), Some(chain)) = (self.cert_login.clone(), &self.cert_chain) {
+            let fp = fingerprint(&chain[0]);
+            let tls = creds.tls.as_ref();
+            let denied = tls.is_some_and(|t| t.is_denied(&fp));
+            let role = tls.and_then(|t| t.role_of(chain)).filter(|_| !denied);
+            let Some(role) = role else {
+                let event = if denied {
+                    "denied_cert"
+                } else {
+                    "revoked_cert"
+                };
+                self.audit(event, json!({"cert_sha256": fp}));
+                self.goodbye("this client certificate is no longer accepted")?;
+                return Ok(Some("certificate revoked"));
+            };
+            self.cert_login = Some((role, name.clone()));
+            if self.token.is_none() {
+                self.role = Some(role);
+                self.user = Some(name);
+            }
+        }
+        if let Some(secret) = &self.token {
+            match creds.tokens.iter().find(|t| t.matches(secret)) {
+                Some(t) => {
+                    self.role = Some(t.role);
+                    self.user = Some(t.name.clone());
+                }
+                None => {
+                    self.audit("token_withdrawn", json!({}));
+                    self.goodbye("this token is no longer accepted")?;
+                    return Ok(Some("token withdrawn"));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Tells the client why the connection closes.
+    fn goodbye(&self, why: &str) -> io::Result<()> {
+        send(
+            &self.writer,
+            &Response::new(Value::Null, Err(RpcError::forbidden(why))),
+        )
     }
 
     /// The first login frees the connection's place among those waiting.
@@ -843,7 +1071,14 @@ impl Connection {
                 }
                 "server.info" => {
                     let mut info = self.controller.info();
-                    info.tls = self.shared.tls.is_some();
+                    info.tls = self.shared.tls_on;
+                    info.certificate_expires = self
+                        .shared
+                        .creds()
+                        .tls
+                        .as_ref()
+                        .and_then(|t| t.expires)
+                        .map(expiry);
                     info.role = self.role;
                     info.user = self.user.clone();
                     info.connections = Some(self.shared.open.load(Ordering::Relaxed));
@@ -861,6 +1096,11 @@ impl Connection {
                     return Ok(Next::Continue);
                 }
                 "stats.unsubscribe" => self.unsubscribe(req.params),
+                "server.reload" => self
+                    .shared
+                    .reload(self.who())
+                    .map_err(RpcError::failed)
+                    .and_then(to_value),
                 method if need == Some(Role::Operator) => {
                     if let Some(e) = self.audit_unavailable(method) {
                         if let Some(id) = req.id {
@@ -913,8 +1153,9 @@ impl Connection {
             return Err(RpcError::limit(why));
         }
         // Check every token, so the time taken does not tell which one is close.
+        let creds = self.shared.creds();
         let mut found = None;
-        for t in &self.shared.tokens {
+        for t in &creds.tokens {
             if t.matches(&p.token) && found.is_none() {
                 found = Some(t);
             }
@@ -923,12 +1164,14 @@ impl Connection {
             Some(t) => {
                 self.role = Some(t.role);
                 self.user = Some(t.name.clone());
+                self.token = Some(p.token.clone());
                 self.logged_in();
                 self.audit("login", json!({"by": "token"}));
                 Ok(Value::Bool(true))
             }
             None => {
                 // A wrong token ends a token login; a certificate login stays.
+                self.token = None;
                 match &self.cert_login {
                     Some((role, name)) => {
                         self.role = Some(*role);

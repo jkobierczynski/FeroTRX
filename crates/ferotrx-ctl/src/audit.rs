@@ -140,7 +140,7 @@ pub(crate) fn now_rfc3339() -> String {
     rfc3339(d.as_secs() as i64, d.subsec_millis())
 }
 
-fn rfc3339(secs: i64, millis: u32) -> String {
+pub(crate) fn rfc3339(secs: i64, millis: u32) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
