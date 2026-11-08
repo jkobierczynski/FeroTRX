@@ -295,3 +295,35 @@ def test_tcp_run_app_and_tls_counters() -> None:
     assert app.tls.full_time is not None and app.tls.full_time.avg_us == 1800.0
     assert app.tls.resumed_time is not None and app.tls.resumed_time.avg_us == 600.0
     assert info.server.app is None
+
+
+def test_drops_and_loss() -> None:
+    run = RunInfo.from_dict(
+        {
+            "id": 1,
+            "state": "finished",
+            "total": {"packets": 1000, "late_skipped": 3},
+            "streams": [],
+            "drops": {"capture_dropped": 4, "nic_tx_errors": 2},
+            "loss": {
+                "offered": 1003,
+                "sent": 1000,
+                "received": 990,
+                "generator": 5,
+                "network": 4,
+                "receiver": 4,
+                "late_skipped": 3,
+                "tx_dropped": 2,
+                "drops": {"capture_dropped": 4, "nic_tx_errors": 2},
+            },
+        }
+    )
+    assert run.total.late_skipped == 3
+    assert run.drops.rx_total == 4 and run.drops.tx_total == 2
+    assert run.loss is not None
+    assert run.loss.lost == 13
+    assert round(run.loss.pct(run.loss.network), 3) == 0.399
+    assert run.loss.drops.capture_dropped == 4
+    tcp = TcpRunInfo.from_dict({"id": 2, "state": "running", "drops": {"ring_rx_dropped": 7}})
+    assert tcp.drops.ring_rx_dropped == 7
+    assert RunInfo.from_dict({"id": 3, "state": "running"}).loss is None

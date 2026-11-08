@@ -427,6 +427,8 @@ class Counters(Record):
     #: Packets sent with a latency signature.
     tagged: int = 0
     send_errors: int = 0
+    #: Packets skipped for being later than the stream's ``max_lag``: never sent.
+    late_skipped: int = 0
     loops_completed: int = 0
     elapsed_s: float = 0.0
     #: Average packets per second since the run started.
@@ -532,6 +534,69 @@ class StreamCounters(Counters):
 
 
 @dataclass(kw_only=True)
+class DropCounters(Record):
+    """Frames dropped by each layer a frame passes, as the system counts them.
+
+    The NIC counters count everything on the interface over the run, not
+    only FeroTRX's frames; zero where a layer has no counter.
+    """
+
+    #: Received frames the NIC had no room for.
+    nic_rx_missed: int = 0
+    #: Received frames the NIC or driver dropped as bad or unwanted.
+    nic_rx_errors: int = 0
+    #: Received frames an AF_XDP socket lost (ring full, no fill buffer).
+    ring_rx_dropped: int = 0
+    #: Frames the capture buffer had no room for (libpcap/Npcap).
+    capture_dropped: int = 0
+    #: Frames the NIC failed to send.
+    nic_tx_errors: int = 0
+    #: Frames an AF_XDP socket refused to send.
+    ring_tx_invalid: int = 0
+
+    @property
+    def rx_total(self) -> int:
+        """Received frames dropped before FeroTRX read them."""
+        return self.nic_rx_missed + self.nic_rx_errors + self.ring_rx_dropped + self.capture_dropped
+
+    @property
+    def tx_total(self) -> int:
+        """Frames handed to the sender that did not leave."""
+        return self.nic_tx_errors + self.ring_tx_invalid
+
+
+@dataclass(kw_only=True)
+class LossReport(Record):
+    """Where a run's frames with signatures were lost.
+
+    ``generator``: never sent or never left (send errors, late skips, the
+    sending NIC or ring); ``network``: sent and never seen at the receiving
+    port; ``receiver``: dropped there before FeroTRX read them.
+    """
+
+    offered: int = 0
+    sent: int = 0
+    received: int = 0
+    generator: int = 0
+    network: int = 0
+    receiver: int = 0
+    send_errors: int = 0
+    late_skipped: int = 0
+    tx_dropped: int = 0
+    #: The layer counters behind ``receiver`` and ``tx_dropped``, uncapped.
+    drops: DropCounters = field(default_factory=DropCounters)
+
+    @property
+    def lost(self) -> int:
+        """Every frame offered and not received."""
+        return self.generator + self.network + self.receiver
+
+    def pct(self, part: int) -> float:
+        """``part`` as a percentage of the frames offered."""
+        return part * 100.0 / self.offered if self.offered else 0.0
+
+
+@dataclass(kw_only=True)
 class RxCounters(Record):
     """What a receiver saw: every frame, and those without a signature."""
 
@@ -541,6 +606,8 @@ class RxCounters(Record):
     #: Frames without a latency signature (other traffic on the interface).
     untagged: int = 0
     elapsed_s: float = 0.0
+    #: What the receiving NIC, ring or capture buffer dropped.
+    drops: DropCounters = field(default_factory=DropCounters)
 
 
 @dataclass(kw_only=True)
@@ -569,6 +636,10 @@ class RunInfo(Record):
     paused: bool = False
     #: The rate multiplier ``update`` set for the whole run (1 = as asked).
     multiplier: float = 1.0
+    #: What every layer dropped, both sides.
+    drops: DropCounters = field(default_factory=DropCounters)
+    #: Where the frames with signatures were lost, for a run with a receiver.
+    loss: LossReport | None = None
 
     @property
     def running(self) -> bool:
@@ -865,6 +936,8 @@ class TcpRunInfo(Record):
     #: When the run started sending, in seconds since 1970 by the server's
     #: clock; None while it waits for its ``start_at``.
     started_at: float | None = None
+    #: What every layer of the ports dropped.
+    drops: DropCounters = field(default_factory=DropCounters)
 
     @property
     def running(self) -> bool:
@@ -943,6 +1016,8 @@ class UdpRunInfo(Record):
     #: When the run started sending, in seconds since 1970 by the server's
     #: clock; None while it waits for its ``start_at``.
     started_at: float | None = None
+    #: What every layer of the ports dropped.
+    drops: DropCounters = field(default_factory=DropCounters)
 
     @property
     def running(self) -> bool:

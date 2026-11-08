@@ -28,6 +28,7 @@ from .types import (
     Counters,
     DhcpLeaseInfo,
     DhcpServerInfo,
+    DropCounters,
     FileInfo,
     FlowCounters,
     HandshakeCounters,
@@ -38,6 +39,7 @@ from .types import (
     InterfaceEntry,
     LatencyCounters,
     Limits,
+    LossReport,
     MediaCounters,
     Notification,
     PortImpairCounters,
@@ -62,7 +64,7 @@ from .types import (
     Y1564RunInfo,
 )
 
-__version__ = "0.44.0"
+__version__ = "0.45.0"
 
 __all__ = [
     "__version__",
@@ -100,6 +102,8 @@ __all__ = [
     "MediaCounters",
     "FileInfo",
     "FlowCounters",
+    "DropCounters",
+    "LossReport",
     "RxCounters",
     "RunInfo",
     "RxRunInfo",
