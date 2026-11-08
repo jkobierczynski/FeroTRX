@@ -99,6 +99,14 @@ mod pcap_receiver {
 
     use ferotrx_core::{PacketReceiver, SinkError};
 
+    /// Bytes kept of each received frame: a jumbo frame and its tags,
+    /// enough for the signature at the end of its IP payload. In immediate
+    /// mode Linux libpcap gives every frame a ring slot this big (on an
+    /// interface with offloads it would otherwise be 64 KiB), so with the
+    /// 64 MiB buffer the ring holds about 6900 frames instead of 256: a
+    /// receiver that stalls for a moment (a VM) no longer drops at once.
+    const RX_SNAPLEN: i32 = 9600;
+
     /// Receives on a network interface through libpcap or Npcap, in
     /// promiscuous mode, for measuring loss and latency. Each frame comes with
     /// the time the kernel (or Npcap's driver) took it in, which is more
@@ -116,8 +124,8 @@ mod pcap_receiver {
                 Ok(pcap::Capture::from_device(dev.as_str())?
                     .promisc(true)
                     .immediate_mode(true)
-                    .snaplen(65535)
-                    .buffer_size(16 << 20))
+                    .snaplen(RX_SNAPLEN)
+                    .buffer_size(64 << 20))
             };
             // Windows: Npcap's default time stamps count from the
             // performance counter and drift away from the system clock that

@@ -298,8 +298,9 @@ probe "$WORK/gen.json"
 wait $flap || true
 # Depending on the kernel, the sending veth drops the frames and counts them
 # (tx_dropped), or refuses them (ENOBUFS, a send error); both are the
-# generator's.
+# generator's. Frames the receiver's capture buffer dropped (a VM that
+# stalls) are counted as the receiver's, apart from these.
 check "frames the sending veth dropped or refused are generator loss" \
-    '.loss.generator > 100 and .loss.generator >= 0.9 * (.loss.generator + .loss.network) and .loss.receiver == 0 and (.drops.nic_tx_errors > 0 or .loss.send_errors > 0)' \
+    '.loss.generator > 100 and .loss.generator >= 0.9 * (.loss.generator + .loss.network) and (.drops.nic_tx_errors > 0 or .loss.send_errors > 0)' \
     "$WORK/gen.json" '{loss, drops}'
 exit $fail
