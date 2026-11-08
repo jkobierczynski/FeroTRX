@@ -201,46 +201,54 @@ fn a_capture_ends_at_its_count() {
 #[test]
 fn a_capture_nobody_reads_stops() {
     // A client that streamed a capture and went away leaves nothing running.
+    //
+    // No fixed sleeps against the deadline: three captures start together,
+    // one read all the time, one never read, one writing a file. Once the
+    // unread one has stopped (however long the machine took), the other two
+    // must still be running. Reads come every ~50 ms against a 2 s
+    // deadline, so even macOS runners that oversleep by 100+ ms keep up.
     let d = dir("abandoned");
     let addr = server_with(
         &d,
         3,
-        Controller::new().with_capture_abandoned_after(Duration::from_millis(300)),
+        Controller::new().with_capture_abandoned_after(Duration::from_secs(2)),
     );
     let mut c = client(addr);
-    let start = |c: &mut Client| {
+    let mut start = |file: Option<&str>| {
         c.capture_start(&CaptureStartParams {
             iface: "mem0".into(),
+            file: file.map(Into::into),
             ..Default::default()
         })
         .unwrap()
         .id
     };
-    // Read now and then: it keeps going.
-    let read = start(&mut c);
+    let read = start(None);
+    let unread = start(None);
+    let file = start(Some("keep.pcap"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     let mut after = 0;
-    for _ in 0..8 {
-        after = c.capture_read(read, after, None).unwrap().next;
-        std::thread::sleep(Duration::from_millis(100));
+    loop {
+        after = c
+            .capture_read(read, after, Some(Duration::from_millis(50)))
+            .unwrap()
+            .next;
+        if c.capture_get(unread).unwrap().state != RunState::Running {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the unread capture never stopped"
+        );
     }
-    assert_eq!(c.capture_get(read).unwrap().state, RunState::Running);
-    // Never read again: it stops, and says why.
-    std::thread::sleep(Duration::from_millis(1200));
-    let info = c.capture_get(read).unwrap();
+    let info = c.capture_get(unread).unwrap();
     assert_eq!(info.state, RunState::Stopped);
     assert!(info.error.unwrap().contains("no client read it"));
-
-    // One that writes a file runs on without readers.
-    let file = c
-        .capture_start(&CaptureStartParams {
-            iface: "mem0".into(),
-            file: Some("keep.pcap".into()),
-            ..Default::default()
-        })
-        .unwrap()
-        .id;
-    std::thread::sleep(Duration::from_millis(800));
+    // Read all along: it keeps going.
+    assert_eq!(c.capture_get(read).unwrap().state, RunState::Running);
+    // Writes a file: it runs on without readers.
     assert_eq!(c.capture_get(file).unwrap().state, RunState::Running);
+    c.capture_stop(read).unwrap();
     c.capture_stop(file).unwrap();
     std::fs::remove_dir_all(d).unwrap();
 }
