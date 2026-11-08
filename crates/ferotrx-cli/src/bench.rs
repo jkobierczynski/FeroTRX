@@ -167,6 +167,10 @@ pub fn cmd_bench(args: BenchArgs) -> Result<()> {
         ferotrx_io::Output::Interface { send, .. } => send.workers(),
         _ => 1,
     };
+    let pinning = match &output {
+        ferotrx_io::Output::Interface { send, .. } => ferotrx_ctl::pinning(send.cpus.as_ref()),
+        _ => None,
+    };
     let mut opened = output
         .open_workers(capture.linktype, workers)
         .map_err(|e| anyhow::anyhow!(e))?;
@@ -186,6 +190,9 @@ pub fn cmd_bench(args: BenchArgs) -> Result<()> {
     info.command = Some(std::env::args().collect::<Vec<_>>().join(" "));
     info.set_profile(args.profile.display().to_string(), Some(text));
     info.workers = Some(workers);
+    info.pinned_cpus = pinning
+        .as_ref()
+        .map(|p| p.cpus.used_by(workers).to_string());
     info.backend = Some(match &link_service {
         Some(svc) => format!("{detail}; port {}", svc.detail()),
         None => detail,
@@ -229,7 +236,8 @@ pub fn cmd_bench(args: BenchArgs) -> Result<()> {
     )
     .with_vary(profile.vary.clone())
     .with_stop(stop)
-    .with_workers(workers);
+    .with_workers(workers)
+    .with_pinning(pinning);
     runner.rx_wait = profile.rx_wait;
 
     let quiet = args.quiet;

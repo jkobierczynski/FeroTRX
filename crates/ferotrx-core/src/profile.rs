@@ -70,6 +70,7 @@ use crate::{
 /// batch = 64                   # packets handed over at once (default 64)
 /// dpdk_args = ["-l", "0-1"]    # DPDK EAL arguments
 /// workers = 4                  # engine threads (cores), default 1
+/// cpus = "2-5"                 # pin worker k to the k-th of these CPUs
 /// line_rate = "1gbps"          # the line's speed, for rates such as "50%"
 /// # The port's own addresses: the gateway's MAC (by ARP or neighbor
 /// # discovery) goes into every frame, and the port answers ARP, neighbor
@@ -211,6 +212,7 @@ pub(crate) struct OutputFile {
     batch: Option<u32>,
     dpdk_args: Option<Vec<String>>,
     workers: Option<u16>,
+    cpus: Option<String>,
     line_rate: Option<String>,
     ip: Option<OneOrMore>,
     gateway: Option<OneOrMore>,
@@ -322,6 +324,12 @@ impl OutputFile {
             batch: self.batch,
             dpdk_args: self.dpdk_args,
             workers: self.workers,
+            cpus: self
+                .cpus
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(ctx)?,
         };
         settings.validate().map_err(ctx)?;
         Ok(settings)

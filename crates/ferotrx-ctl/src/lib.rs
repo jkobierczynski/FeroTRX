@@ -156,8 +156,8 @@ pub use auth::{Token, TokenError};
 pub use bench::{open_bench_sinks, BenchSinkOpener};
 pub use client::{Client, ClientError, UPLOAD_PIECE};
 pub use controller::{
-    attach_link, resolve_line_rate, start_link, start_run, start_run_detailed, start_run_with_rx,
-    Controller, ReceiverOpener, StartError, Started,
+    attach_link, pinning, resolve_line_rate, start_link, start_run, start_run_detailed,
+    start_run_with_rx, Controller, ReceiverOpener, StartError, Started,
 };
 pub use files::{sha256_hex, FilePolicy, DEFAULT_MAX_FILE, DEFAULT_MAX_UPLOAD};
 pub use limits::{parse_bps, parse_limit_duration, parse_pps, refused_limit, Demand, Limits, Net};

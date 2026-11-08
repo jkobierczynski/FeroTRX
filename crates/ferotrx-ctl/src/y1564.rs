@@ -82,6 +82,11 @@ impl Y1564Run {
         info.command = Some("y1564.start".into());
         info.set_profile(job.profile_name.clone(), Some(job.profile_text.clone()));
         info.backend = Some(detail);
+        info.workers = Some(workers);
+        let pinning = crate::controller::pinning(job.send.cpus.as_ref());
+        info.pinned_cpus = pinning
+            .as_ref()
+            .map(|p| p.cpus.used_by(workers).to_string());
         info.tx_interface = Some(ferotrx_io::describe_interface(&job.iface));
         info.rx_interface = Some(ferotrx_io::describe_interface(&job.rx));
 
@@ -120,7 +125,8 @@ impl Y1564Run {
                     sinks.take().unwrap_or_default(),
                     receiver.take().expect("a receiver"),
                     stop,
-                );
+                )
+                .with_pinning(pinning);
                 r.main(job.profile, runner)
             })
             .map_err(|e| format!("cannot start the Y.1564 test: {e}"))?;

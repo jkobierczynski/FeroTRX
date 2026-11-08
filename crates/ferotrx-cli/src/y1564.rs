@@ -109,6 +109,7 @@ pub fn cmd_y1564(args: Y1564Args) -> Result<()> {
 
     let send = args.send.settings()?.or(&profile.output);
     let workers = send.workers();
+    let pinning = ferotrx_ctl::pinning(send.cpus.as_ref());
     let output = ferotrx_io::Output::Interface {
         name: args.iface.clone(),
         send,
@@ -131,6 +132,10 @@ pub fn cmd_y1564(args: Y1564Args) -> Result<()> {
     info.command = Some(std::env::args().collect::<Vec<_>>().join(" "));
     info.set_profile(args.profile.display().to_string(), Some(text));
     info.backend = Some(details.join("; "));
+    info.workers = Some(workers);
+    info.pinned_cpus = pinning
+        .as_ref()
+        .map(|p| p.cpus.used_by(workers).to_string());
     info.tx_interface = Some(ferotrx_io::describe_interface(&args.iface));
     info.rx_interface = Some(ferotrx_io::describe_interface(&args.rx));
     if !args.quiet {
@@ -168,7 +173,8 @@ pub fn cmd_y1564(args: Y1564Args) -> Result<()> {
         Box::new(move || Ok(Box::new(SharedReceiver(receiver.clone())) as Box<dyn PacketReceiver>)),
     )
     .with_stop(stop)
-    .with_workers(workers);
+    .with_workers(workers)
+    .with_pinning(pinning);
     runner.rx_wait = profile.rx_wait;
 
     let quiet = args.quiet;

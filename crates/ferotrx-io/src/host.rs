@@ -73,6 +73,52 @@ pub fn describe_host(info: &mut RunInfo) {
     }
 }
 
+/// Pins the calling thread to one CPU: `sched_setaffinity` on Linux,
+/// `SetThreadAffinityMask` on Windows (CPUs 0 to 63 of the first group).
+/// Other systems (macOS) cannot pin threads and return an error. This is
+/// the hook [`ferotrx_core::CpuPinning`] takes.
+pub fn pin_thread(cpu: usize) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        if cpu >= libc::CPU_SETSIZE as usize {
+            return Err(format!(
+                "CPU {cpu} is past the highest this system pins ({})",
+                libc::CPU_SETSIZE - 1
+            ));
+        }
+        // SAFETY: a zeroed cpu_set_t is an empty set; CPU_SET stays inside it
+        // (checked above), and 0 means the calling thread.
+        let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        unsafe { libc::CPU_SET(cpu, &mut set) };
+        let r = unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) };
+        if r != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadAffinityMask};
+        if cpu >= usize::BITS as usize {
+            return Err(format!(
+                "CPU {cpu} is past the first processor group (0-{})",
+                usize::BITS - 1
+            ));
+        }
+        // SAFETY: GetCurrentThread returns a pseudo handle for this thread.
+        let old = unsafe { SetThreadAffinityMask(GetCurrentThread(), 1usize << cpu) };
+        if old == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = cpu;
+        Err("this system cannot pin threads to CPUs".into())
+    }
+}
+
 /// The CPUs this process may run on (`sched_getaffinity`), e.g. `0-3,8`.
 #[cfg(target_os = "linux")]
 pub fn cpu_affinity() -> Option<String> {
@@ -150,6 +196,11 @@ pub fn describe_interface(name: &str) -> InterfaceDetails {
             .filter(|&s| s > 0);
         d.mtu = read("mtu").and_then(|s| s.parse().ok());
         d.mac = read("address");
+        // -1 when the machine has one node or the device none (virtual).
+        d.numa_node = read("device/numa_node").and_then(|s| s.parse().ok());
+        if d.numa_node.is_some() {
+            d.local_cpus = read("device/local_cpulist");
+        }
     }
     d
 }
@@ -224,6 +275,22 @@ mod tests {
         assert_eq!(cpu_ranges(&[0, 1, 2, 3, 8, 10, 11]), "0-3,8,10-11");
         assert_eq!(cpu_ranges(&[]), "");
         assert!(cpu_affinity().is_some_and(|a| !a.is_empty()));
+        // Pinning to a CPU the process may use works; on a thread of its own
+        // so the test thread keeps its CPUs.
+        let first: usize = cpu_affinity()
+            .unwrap()
+            .split([',', '-'])
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        std::thread::spawn(move || {
+            pin_thread(first).unwrap();
+            assert_eq!(cpu_affinity().as_deref(), Some(first.to_string().as_str()));
+            assert!(pin_thread(1 << 20).is_err());
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

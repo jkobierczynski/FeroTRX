@@ -529,6 +529,11 @@ pub struct SendArgs {
     /// af_xdp each worker sends on its own queue from --queue up.
     #[arg(long)]
     pub workers: Option<u16>,
+
+    /// Pin worker k to the k-th CPU of this list, e.g. 2-5 or 0,2,4,6
+    /// (Linux, Windows). Workers past the end wrap around.
+    #[arg(long, value_name = "LIST")]
+    pub cpus: Option<ferotrx_core::CpuList>,
 }
 
 impl SendArgs {
@@ -543,6 +548,7 @@ impl SendArgs {
                 .as_deref()
                 .map(|a| a.split_whitespace().map(String::from).collect()),
             workers: self.workers,
+            cpus: self.cpus.clone(),
         };
         s.validate()?;
         Ok(s)
@@ -1042,6 +1048,7 @@ impl Output {
         }
         let mut rest = send.clone();
         rest.workers = None;
+        rest.cpus = None;
         if !rest.is_empty() {
             eprintln!("note: --backend, --queue, --xdp-mode, --batch and --dpdk-args apply to --iface only");
         }
@@ -1066,7 +1073,8 @@ fn spawn_stream(
     common: &CommonArgs,
     rx: Option<ferotrx_core::RxSettings>,
 ) -> Result<(Job, String)> {
-    let workers = send.settings()?.workers();
+    let settings = send.settings()?;
+    let workers = settings.workers();
     let output = output.to_io(send)?;
     warn_linktype(&output, linktype);
     let service = ferotrx_ctl::start_link(&output, link).map_err(|e| anyhow::anyhow!(e))?;
@@ -1089,7 +1097,9 @@ fn spawn_stream(
     if !common.quiet && matches!(output, ferotrx_io::Output::Interface { .. }) {
         eprintln!("sending with {detail}");
     }
-    let job = Job::spawn_workers(work, run_config(common)?, rx)?;
+    let mut config = run_config(common)?;
+    config.pinning = ferotrx_ctl::pinning(settings.cpus.as_ref());
+    let job = Job::spawn_workers(work, config, rx)?;
     if let Some(line) = ferotrx_ctl::attach_link(service, &job) {
         if !common.quiet {
             eprintln!("port {line}");
@@ -1238,9 +1248,13 @@ fn cmd_run(args: RunArgs) -> Result<()> {
         }
     }
     let output = args.output.to_io(&args.send)?;
-    // Files and the null output take only the worker count, from the profile.
+    // Files and the null output take only the worker count and CPUs, from
+    // the profile.
     if let Some(w) = args.send.workers {
         profile.output.workers = Some(w);
+    }
+    if let Some(c) = &args.send.cpus {
+        profile.output.cpus = Some(c.clone());
     }
     let rx = args.rx.open()?;
     let capture = args.capture.start(args.output.iface.as_deref())?;
@@ -1295,6 +1309,7 @@ fn run_config(common: &CommonArgs) -> Result<RunConfig> {
         stop: Some(stop),
         start_at: None,
         control: None,
+        pinning: None,
     })
 }
 

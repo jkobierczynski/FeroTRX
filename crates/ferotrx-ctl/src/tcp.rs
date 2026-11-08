@@ -55,6 +55,9 @@ pub fn start_tcp_with(
     // With DHCP, SLAAC or DHCPv6 the hosts get their addresses first, and
     // the engine is built with them; checked now with example addresses.
     let workers = profile.output.workers();
+    if config.pinning.is_none() {
+        config.pinning = crate::controller::pinning(profile.output.cpus.as_ref());
+    }
     let plan = profile.endpoint_hosts(&engine_config)?;
     if workers > 1 && plan.is_some() {
         return Err(ferotrx_core::Error::Tcp(

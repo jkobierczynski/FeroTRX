@@ -78,6 +78,7 @@ pub struct JobServiceRunner {
     stop: Option<Arc<AtomicBool>>,
     next_flow: u32,
     workers: usize,
+    pinning: Option<crate::CpuPinning>,
 }
 
 impl JobServiceRunner {
@@ -94,6 +95,7 @@ impl JobServiceRunner {
             stop: None,
             next_flow: 1,
             workers: 1,
+            pinning: None,
         }
     }
 
@@ -101,6 +103,12 @@ impl JobServiceRunner {
     /// flow's rate.
     pub fn with_workers(mut self, workers: usize) -> Self {
         self.workers = workers.max(1);
+        self
+    }
+
+    /// Pins the workers to CPUs (see [`crate::CpuPinning`]).
+    pub fn with_pinning(mut self, pinning: Option<crate::CpuPinning>) -> Self {
+        self.pinning = pinning;
         self
     }
 
@@ -177,6 +185,7 @@ impl ServiceRunner for JobServiceRunner {
         )?;
         let config = RunConfig {
             duration: Some(step.duration),
+            pinning: self.pinning.clone(),
             ..Default::default()
         };
         let start = wall_clock();

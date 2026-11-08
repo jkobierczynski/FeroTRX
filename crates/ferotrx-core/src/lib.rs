@@ -104,6 +104,7 @@ mod capture;
 #[cfg(feature = "profile")]
 pub mod check;
 mod control;
+mod cpus;
 mod drops;
 mod error;
 mod field_engine;
@@ -157,6 +158,7 @@ pub use bench::{
 };
 pub use capture::{Capture, Packet, LINKTYPE_ETHERNET};
 pub use control::{ControlState, RunControl, StreamControl, MAX_MULTIPLIER};
+pub use cpus::{CpuList, CpuPinning, PinFn};
 pub use drops::{DropCounters, LossReport};
 pub use error::{Error, Result};
 pub use field_engine::{FieldEngine, FieldVar, Side, VarField, VarOp};

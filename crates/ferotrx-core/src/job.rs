@@ -69,6 +69,7 @@ pub struct Job {
     rates: Vec<Rate>,
     flows: Vec<Option<u32>>,
     workers: usize,
+    pinned: Option<crate::CpuList>,
     rx: Option<Arc<RxJob>>,
     stop: Arc<AtomicBool>,
     control: Arc<RunControl>,
@@ -195,6 +196,7 @@ impl Job {
             .control
             .get_or_insert_with(|| Arc::new(RunControl::new()))
             .clone();
+        let pinned = config.pinning.as_ref().map(|p| p.cpus.used_by(count));
         let names: Vec<String> = first.iter().map(|s| s.name.clone()).collect();
         let flows: Vec<Option<u32>> = first.iter().map(|s| s.latency).collect();
         // The rate asked for: the workers' parts added up.
@@ -285,6 +287,7 @@ impl Job {
             rates,
             flows,
             workers: count,
+            pinned,
             rx,
             stop,
             control,
@@ -315,6 +318,11 @@ impl Job {
     /// The number of threads the streams run on (see [`spawn_workers`](Job::spawn_workers)).
     pub fn workers(&self) -> usize {
         self.workers
+    }
+
+    /// The CPUs the workers are pinned to, in worker order (`--cpus`).
+    pub fn pinned_cpus(&self) -> Option<&crate::CpuList> {
+        self.pinned.as_ref()
     }
 
     /// Names of the streams, in the order of [`RunStats::streams`].
@@ -451,6 +459,7 @@ fn run_workers(
     let count = workers.len();
     if count == 1 {
         let (mut streams, mut sink) = workers.into_iter().next().expect("one worker");
+        crate::cpus::pin(&config.pinning, 0)?;
         return run_with_progress(&mut streams, &mut *sink, config, JOB_STATS_INTERVAL, |s| {
             shared.update(0, s)
         });
@@ -465,6 +474,10 @@ fn run_workers(
                 std::thread::Builder::new()
                     .name(format!("ferotrx-worker-{k}"))
                     .spawn_scoped(scope, move || {
+                        if let Err(e) = crate::cpus::pin(&config.pinning, k) {
+                            stop.store(true, Ordering::Relaxed);
+                            return Err(e);
+                        }
                         let result = run_with_progress(
                             &mut streams,
                             &mut *sink,

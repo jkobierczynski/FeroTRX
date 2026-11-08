@@ -61,6 +61,7 @@ pub struct JobTrialRunner {
     stop: Option<Arc<AtomicBool>>,
     next_flow: u32,
     workers: usize,
+    pinning: Option<crate::CpuPinning>,
 }
 
 impl JobTrialRunner {
@@ -75,6 +76,7 @@ impl JobTrialRunner {
             stop: None,
             next_flow: 1,
             workers: 1,
+            pinning: None,
         }
     }
 
@@ -83,6 +85,12 @@ impl JobTrialRunner {
     /// for every trial.
     pub fn with_workers(mut self, workers: usize) -> Self {
         self.workers = workers.max(1);
+        self
+    }
+
+    /// Pins the workers to CPUs (see [`crate::CpuPinning`]).
+    pub fn with_pinning(mut self, pinning: Option<crate::CpuPinning>) -> Self {
+        self.pinning = pinning;
         self
     }
 
@@ -145,6 +153,7 @@ impl TrialRunner for JobTrialRunner {
         // which must not stop the whole benchmark.
         let config = RunConfig {
             duration: trial.duration,
+            pinning: self.pinning.clone(),
             ..Default::default()
         };
         let job = Job::spawn_workers(workers, config, rx)?;

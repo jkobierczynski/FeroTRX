@@ -350,6 +350,7 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
             duration: profile.duration,
             stop: Some(stop),
             start_at: None,
+            pinning: None,
         },
     )
     .map_err(|e| anyhow::anyhow!(e))?;
@@ -405,6 +406,7 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
     }
     let job = started.job;
     let workers = job.workers();
+    let pinned = job.pinned_cpus().map(ToString::to_string);
     while !job.wait(Some(Duration::from_secs(1))) {
         if !args.quiet {
             eprintln!("{}", progress_line(&job.stats()));
@@ -423,6 +425,7 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
             (!started.port_details.is_empty()).then(|| started.port_details.join("; ")),
         );
         info.workers = Some(workers);
+        info.pinned_cpus = pinned;
         if let Some(p) = &args.profile {
             crate::latency::set_profile_file(&mut info, p);
         }

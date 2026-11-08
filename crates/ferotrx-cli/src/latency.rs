@@ -105,6 +105,7 @@ pub struct Report {
     drops: DropCounters,
     loss: Option<LossReport>,
     workers: usize,
+    pinned: Option<String>,
     /// Run metadata for the JSON report.
     pub info: Option<RunInfo>,
 }
@@ -317,6 +318,7 @@ impl Report {
             drops,
             loss: job.loss(),
             workers: job.workers(),
+            pinned: job.pinned_cpus().map(ToString::to_string),
             info: None,
         }
     }
@@ -324,6 +326,7 @@ impl Report {
     /// Writes the report as JSON, with `info` (and the job's worker count).
     pub fn save(&mut self, path: &Path, mut info: RunInfo) -> Result<()> {
         info.workers = Some(self.workers);
+        info.pinned_cpus = self.pinned.clone();
         self.info = Some(info);
         write_report(
             path,

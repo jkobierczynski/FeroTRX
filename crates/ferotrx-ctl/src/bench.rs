@@ -132,6 +132,11 @@ impl BenchRun {
             Some(svc) => format!("{detail}; port {}", svc.detail()),
             None => detail,
         });
+        info.workers = Some(workers);
+        let pinning = crate::controller::pinning(job.send.cpus.as_ref());
+        info.pinned_cpus = pinning
+            .as_ref()
+            .map(|p| p.cpus.used_by(workers).to_string());
         info.tx_interface = Some(ferotrx_io::describe_interface(&job.iface));
         info.rx_interface = Some(ferotrx_io::describe_interface(&job.rx));
         info.timestamps = Some(
@@ -184,7 +189,8 @@ impl BenchRun {
             )
             .with_vary(vary)
             .with_stop(stop)
-            .with_workers(workers);
+            .with_workers(workers)
+            .with_pinning(pinning);
             runner.rx_wait = rx_wait;
             runner
         };

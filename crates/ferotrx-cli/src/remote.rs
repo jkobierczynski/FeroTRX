@@ -1065,6 +1065,7 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                         batch: send.batch,
                         dpdk_args: send.dpdk_args,
                         workers: send.workers,
+                        cpus: send.cpus.as_ref().map(|c| c.to_string()),
                         line_rate: s.link.line_rate.clone(),
                         ip: s.link.addr.ip.iter().map(|p| p.to_string()).collect(),
                         gateway: s.link.addr.gateway.iter().map(|g| g.to_string()).collect(),
