@@ -154,7 +154,8 @@ pub use bench::BenchProfile;
 pub use bench::{
     run_benchmark, utc_timestamp, BenchConfig, BenchReport, BenchTest, BurstResult, ConfigSummary,
     InterfaceDetails, JobTrialRunner, LatencyResult, LatencySummary, LossPoint, RunInfo,
-    SizeReport, ThroughputResult, Trial, TrialRecord, TrialResult, TrialRunner,
+    SizeReport, Spread, SweepResult, ThroughputResult, Trial, TrialRecord, TrialResult,
+    TrialRunner,
 };
 pub use capture::{Capture, Packet, LINKTYPE_ETHERNET};
 pub use control::{ControlState, RunControl, StreamControl, MAX_MULTIPLIER};

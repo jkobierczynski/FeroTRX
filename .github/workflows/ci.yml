@@ -555,6 +555,9 @@ jobs:
           cargo build -p ferotrx-cli
           sudo modprobe sch_netem || true
           sudo scripts/bench-netns.sh ./target/debug/ferotrx -q
+          # The sweep: warm-up, 3 trials per size, medians and spread, and
+          # the Markdown report; two workers pinned to CPUs 0 and 1.
+          sudo SWEEP=1 scripts/bench-netns.sh ./target/debug/ferotrx -q --workers 2 --cpus 0-1
 
       # Y.1564 through a router that polices two services by DSCP (tc police
       # on its ingress): every configuration step and the performance test

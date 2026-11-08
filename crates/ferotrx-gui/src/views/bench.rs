@@ -689,6 +689,7 @@ fn results_table(ui: &mut egui::Ui, report: &BenchReport) {
                 "max",
                 "Back-to-back",
                 "Frame loss",
+                "Sweep sent/s",
             ] {
                 ui.strong(h);
             }
@@ -739,6 +740,18 @@ fn results_table(ui: &mut egui::Ui, report: &BenchReport) {
                     let worst = s.frame_loss.iter().map(|p| p.loss_pct).fold(0.0, f64::max);
                     ui.label(format!("{} loads, worst {worst:.2} %", s.frame_loss.len()));
                 }
+                match &s.sweep {
+                    Some(w) => ui
+                        .label(format!(
+                            "{:.0} ±{:.1} %",
+                            w.tx_pps.median, w.tx_pps.spread_pct
+                        ))
+                        .on_hover_text(format!(
+                            "Median of {} trials at {:.1} %, {:.0} to {:.0} frames/s; loss {:.3} %",
+                            w.trials, w.load_pct, w.tx_pps.min, w.tx_pps.max, w.loss_pct.median
+                        )),
+                    None => ui.weak("–"),
+                };
                 ui.end_row();
             }
         });

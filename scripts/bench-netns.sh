@@ -19,6 +19,9 @@
 #              delay is left out and not checked)
 # SIZES="1020 imix"  frame sizes to test
 # TRIAL=1s     length of each trial
+# SWEEP=1      run `ferotrx bench --sweep` instead (3 trials per size at 15%,
+#              below the bottleneck) and check its medians, spread and the
+#              Markdown report
 set -eu
 
 if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
@@ -107,7 +110,12 @@ rx_wait = "300ms"
 EOF
 
 set +e
-"$BIN" bench "$WORK/bench.toml" -i c0 --rx s0 --report "$WORK/bench.json" "$@"
+if [ "${SWEEP:-0}" = 1 ]; then
+    "$BIN" bench "$WORK/bench.toml" -i c0 --rx s0 --report "$WORK/bench.json" \
+        --sweep --load 15 --repetitions 3 "$@"
+else
+    "$BIN" bench "$WORK/bench.toml" -i c0 --rx s0 --report "$WORK/bench.json" "$@"
+fi
 status=$?
 set -e
 echo "router: packets sent and dropped by the bottleneck:"
@@ -124,6 +132,25 @@ check() {
     fi
 }
 [ -s "$WORK/bench.txt" ] && echo "ok: text report written" || { echo "FAILED: no text report"; fail=1; }
+if [ "${SWEEP:-0}" = 1 ]; then
+    if grep -q '^## Test conditions' "$WORK/bench.md" && grep -q '^## Sweep' "$WORK/bench.md"; then
+        echo "ok: Markdown report with the test conditions and the sweep"
+    else
+        echo "FAILED: Markdown report"
+        fail=1
+    fi
+    check "every size has a sweep of 3 trials" \
+        "([.sizes[] | .sweep.trials == 3 and ([.trials[] | select(.test == \"sweep\")] | length) == 3] | all) and (.sizes | length) == $(echo $SIZES | wc -w)"
+    jq -r '.sizes[] | "\(.size): sent \(.sweep.tx_pps.median | floor)/s (offered \(.sweep.offered_pps | floor)/s, spread \(.sweep.tx_pps.spread_pct * 100 | floor / 100)%), loss \(.sweep.loss_pct.median)%"' "$WORK/bench.json"
+    check "the sender reaches the offered rate (median within 5%)" \
+        '[.sizes[].sweep | .tx_pps.median > .offered_pps * 0.95 and .tx_pps.median < .offered_pps * 1.05] | all'
+    check "below the bottleneck nothing is lost (median)" '[.sizes[].sweep.loss_pct.median < 0.5] | all'
+    check "trials agree: sent rate spread under 10%" '[.sizes[].sweep.tx_pps.spread_pct < 10] | all'
+    check "latency measured in every trial" '[.sizes[].sweep.latency_p50_us.min > 0] | all'
+    echo "--- Markdown report ---"
+    cat "$WORK/bench.md"
+    exit $fail
+fi
 check "report carries run metadata" \
     '.format == "ferotrx-bench-1" and (.info.ferotrx_version | length > 0) and .info.tx_interface.name == "c0" and .info.rx_interface.name == "s0" and (.info.kernel | length > 0) and (.info.profile_text | contains("[benchmark]"))'
 check "every size has every result" \

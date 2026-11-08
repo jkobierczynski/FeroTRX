@@ -37,9 +37,21 @@ pub struct BenchArgs {
     addr: crate::link::AddrArgs,
 
     /// Run these tests instead of the profile's: throughput, latency,
-    /// frame_loss, back_to_back (comma separated).
+    /// frame_loss, back_to_back, sweep (comma separated).
     #[arg(long, value_delimiter = ',', value_name = "TEST")]
     tests: Vec<BenchTest>,
+
+    /// Run the sweep instead of the profile's tests: for each size a
+    /// warm-up, then --repetitions trials (5 unless given) at --load,
+    /// reported as median, min, max and spread of the rates, loss and
+    /// latency. Same as --tests sweep.
+    #[arg(long, conflicts_with = "tests")]
+    sweep: bool,
+
+    /// Load of the sweep and highest load of the other tests, in percent of
+    /// the line rate (the profile's max_load; default 100).
+    #[arg(long, value_name = "PCT")]
+    load: Option<f64>,
 
     /// Frame sizes instead of the profile's; repeat for more: a size without
     /// FCS (508), rfc2544 (the seven RFC 2544 sizes), imix, or a mix such as
@@ -59,8 +71,8 @@ pub struct BenchArgs {
     #[arg(long, value_name = "N")]
     repetitions: Option<u32>,
 
-    /// Write the report as JSON to this file, and as text next to it (same
-    /// name, ending in .txt).
+    /// Write the report as JSON to this file, and as text and Markdown next
+    /// to it (same name, ending in .txt and .md).
     #[arg(long, value_name = "FILE")]
     report: Option<PathBuf>,
 
@@ -93,6 +105,10 @@ impl PacketReceiver for SharedReceiver {
     }
 }
 
+/// Trials per size of `--sweep` when neither the profile nor
+/// `--repetitions` asks for more than one.
+const SWEEP_TRIALS: u32 = 5;
+
 /// What the report files contain.
 #[derive(serde::Serialize)]
 struct JsonReport<'a> {
@@ -110,6 +126,16 @@ pub fn cmd_bench(args: BenchArgs) -> Result<()> {
     let config = &mut profile.config;
     if !args.tests.is_empty() {
         config.tests = args.tests.clone();
+    }
+    if args.sweep {
+        config.tests = vec![BenchTest::Sweep];
+        if args.repetitions.is_none() && config.repetitions < 2 {
+            config.repetitions = SWEEP_TRIALS;
+        }
+    }
+    if let Some(l) = args.load {
+        config.max_load = l;
+        config.min_load = config.min_load.min(l);
     }
     if !args.sizes.is_empty() {
         config.sizes = Vec::new();
@@ -253,7 +279,12 @@ pub fn cmd_bench(args: BenchArgs) -> Result<()> {
     println!("{text}");
     if let Some(path) = &args.report {
         save(path, &info, &report, &text)?;
-        eprintln!("wrote {} and {}", path.display(), text_path(path).display());
+        eprintln!(
+            "wrote {}, {} and {}",
+            path.display(),
+            text_path(path).display(),
+            path.with_extension("md").display()
+        );
     }
     if report.stopped {
         eprintln!("stopped before the end: the results are partial");
@@ -296,8 +327,8 @@ fn text_path(path: &Path) -> PathBuf {
 }
 
 fn save(path: &Path, info: &RunInfo, report: &BenchReport, text: &str) -> Result<()> {
-    if path.extension().is_some_and(|e| e == "txt") {
-        bail!("--report is the JSON file; the text report goes next to it as .txt");
+    if path.extension().is_some_and(|e| e == "txt" || e == "md") {
+        bail!("--report is the JSON file; the text and Markdown reports go next to it as .txt and .md");
     }
     let json = serde_json::to_string_pretty(&JsonReport {
         format: "ferotrx-bench-1",
@@ -307,5 +338,8 @@ fn save(path: &Path, info: &RunInfo, report: &BenchReport, text: &str) -> Result
     std::fs::write(path, json + "\n")
         .with_context(|| format!("cannot write {}", path.display()))?;
     let t = text_path(path);
-    std::fs::write(&t, text).with_context(|| format!("cannot write {}", t.display()))
+    std::fs::write(&t, text).with_context(|| format!("cannot write {}", t.display()))?;
+    let md = path.with_extension("md");
+    std::fs::write(&md, report.markdown(info))
+        .with_context(|| format!("cannot write {}", md.display()))
 }
