@@ -454,6 +454,7 @@ impl AppProtocol for Tls {
             state: State::Handshaking,
             inner_told_closed: false,
             peer_done: false,
+            sent_close: false,
             buf: vec![0; 16 * 1024],
             resuming: init.role == AppRole::Client && resuming,
             post_handshake: false,
@@ -570,6 +571,10 @@ struct TlsSession {
     /// nothing more, so no close_notify goes back (a closed socket would
     /// answer it with a reset).
     peer_done: bool,
+    /// We sent close_notify: what the peer sends after it is not read
+    /// (rustls takes a bad record after close_notify for a second fatal
+    /// alert, which it asserts never happens).
+    sent_close: bool,
     buf: Vec<u8>,
     /// Client: it keeps sessions for later connections.
     resuming: bool,
@@ -659,6 +664,7 @@ impl TlsSession {
         }
         if close && !self.peer_done {
             conn.send_close_notify();
+            self.sent_close = true;
         }
     }
 
@@ -678,6 +684,7 @@ impl TlsSession {
         if let Some(Ok(conn)) = &mut self.conn {
             if !self.peer_done {
                 conn.send_close_notify();
+                self.sent_close = true;
             }
         }
         self.flush(cx);
@@ -776,7 +783,7 @@ impl AppSession for TlsSession {
     }
 
     fn receive(&mut self, data: &[u8], cx: &mut AppCx) -> Receive {
-        if self.state == State::Failed {
+        if self.state == State::Failed || self.sent_close {
             return Receive::Taken;
         }
         if self.began.is_none() {

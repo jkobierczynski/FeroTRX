@@ -94,6 +94,9 @@ impl Signature {
         }
         // Not IP, or IP that lost its signature position: look near the end,
         // where it sits before any Ethernet padding.
+        if frame.len() < SIGNATURE_LEN {
+            return None;
+        }
         let from = frame.len().saturating_sub(64 + SIGNATURE_LEN);
         (from..=frame.len().saturating_sub(SIGNATURE_LEN))
             .rev()
@@ -265,6 +268,9 @@ mod tests {
         f.resize(60, 0); // padded by the NIC
         assert_eq!(Signature::find(&f).unwrap().flow, 3);
         assert_eq!(Signature::find(&[0u8; 60]), None);
+        for n in 0..SIGNATURE_LEN {
+            assert_eq!(Signature::find(&vec![0u8; n]), None);
+        }
         assert_eq!(reserve(&mut vec![0u8; 4], 1), None);
     }
 }

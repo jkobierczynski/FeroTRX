@@ -1726,6 +1726,75 @@ pub fn parse(t: &toml::Table, base_dir: &std::path::Path) -> Result<Ssh> {
     Ok(ssh)
 }
 
+/// For the fuzz targets: plays decrypted messages (each a packet's payload,
+/// as the transport hands them on) to a client or a server whose key
+/// exchange is done. Returns the bytes it sent.
+#[cfg(any(test, feature = "fuzzing"))]
+#[allow(dead_code)]
+pub(crate) fn fuzz_messages(cfg: &Ssh, server: bool, packets: &[&[u8]], cx: &mut AppCx) {
+    let cfg = Arc::new(cfg.clone());
+    let events: Vec<Event> = std::iter::once(Event::KexDone { first: true })
+        .chain(
+            packets
+                .iter()
+                .filter(|p| !p.is_empty())
+                .map(|p| Event::Packet(p.to_vec())),
+        )
+        .collect();
+    if server {
+        ServerSession::new(cfg).events(events, cx);
+    } else {
+        ClientSession::new(cfg, 0).events(events, cx);
+    }
+}
+
+/// Seed messages for [`fuzz_messages`]: a server's login and an exec.
+#[cfg(any(test, feature = "fuzzing"))]
+#[allow(dead_code)]
+pub(crate) fn fuzz_seed_messages() -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut w = Writer::msg(SERVICE_REQUEST);
+    w.str(USERAUTH);
+    out.push(w.into_inner());
+    let mut w = Writer::msg(USERAUTH_REQUEST);
+    w.str("lab")
+        .str(CONNECTION)
+        .str("password")
+        .bool(false)
+        .str("secret");
+    out.push(w.into_inner());
+    let mut w = Writer::msg(CHANNEL_OPEN);
+    w.str("session").u32(0).u32(1 << 20).u32(MAX_DATA);
+    out.push(w.into_inner());
+    let mut w = Writer::msg(CHANNEL_REQUEST);
+    w.u32(0)
+        .str("pty-req")
+        .bool(true)
+        .str("xterm")
+        .u32(80)
+        .u32(24)
+        .u32(0)
+        .u32(0)
+        .string(b"");
+    out.push(w.into_inner());
+    let mut w = Writer::msg(CHANNEL_REQUEST);
+    w.u32(0).str("exec").bool(true).str("echo hello");
+    out.push(w.into_inner());
+    let mut w = Writer::msg(CHANNEL_DATA);
+    w.u32(0).string(b"ls\n");
+    out.push(w.into_inner());
+    let mut w = Writer::msg(CHANNEL_WINDOW_ADJUST);
+    w.u32(0).u32(1 << 30);
+    out.push(w.into_inner());
+    let mut w = Writer::msg(CHANNEL_EOF);
+    w.u32(0);
+    out.push(w.into_inner());
+    let mut w = Writer::msg(CHANNEL_CLOSE);
+    w.u32(0);
+    out.push(w.into_inner());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

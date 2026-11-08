@@ -56,6 +56,11 @@ The [README](../README.md) has the overview and a quickstart.
 * [Scenarios and regression tests](scenarios.md): `ferotrx scenario`,
   expected outcomes, JUnit reports, comparing runs.
 
+## Development
+
+* [Fuzzing and hostile-input tests](fuzzing.md): the fuzz targets, running
+  long campaigns, what to do with a crash.
+
 ## Automation
 
 * [Remote control](remote-control.md): `ferotrx serve` and `ferotrx ctl`,

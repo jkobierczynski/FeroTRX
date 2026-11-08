@@ -28,7 +28,11 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Wrong tokens a connection may send before it is closed.
 const MAX_AUTH_FAILURES: u32 = 5;
 /// Pause after a wrong token, against guessing.
+#[cfg(not(feature = "fuzzing"))]
 const AUTH_FAILURE_DELAY: Duration = Duration::from_millis(500);
+/// Fuzz builds try thousands of logins a second.
+#[cfg(feature = "fuzzing")]
+const AUTH_FAILURE_DELAY: Duration = Duration::ZERO;
 /// The window wrong tokens are counted in, per address and in total.
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 

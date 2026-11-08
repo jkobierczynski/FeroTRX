@@ -1422,6 +1422,25 @@ impl Controller {
         }
     }
 
+    /// For the fuzz targets: stops everything and forgets every run,
+    /// capture and profile, so one input does not pile up on the next.
+    #[cfg(any(test, feature = "fuzzing"))]
+    pub(crate) fn forget_all(&self) {
+        self.stop_all();
+        for c in self.captures() {
+            let _ = self.capture_stop(c.id, true);
+        }
+        lock(&self.captures).clear();
+        lock(&self.runs).clear();
+        lock(&self.tcp_runs).clear();
+        lock(&self.udp_runs).clear();
+        lock(&self.rx_runs).clear();
+        lock(&self.scenario_runs).clear();
+        lock(&self.bench_runs).clear();
+        lock(&self.y1564_runs).clear();
+        lock(&self.profiles).clear();
+    }
+
     /// The pcaps the streams of a profile replay must be readable.
     fn check_stream_files(&self, profile: &Profile) -> Result<(), RpcError> {
         for s in &profile.streams {

@@ -1118,7 +1118,7 @@ fn interval_records(config: &Y1564Config, r: &FlowResult, len: Duration) -> Vec<
             (Some(a), None) if a == i => {
                 let got = get(first + i as u128);
                 match got.and_then(|g| Some((g.first_seq?, g.last_seq?))) {
-                    Some((x, y)) => (y - x + 1) as f64,
+                    Some((x, y)) => (y - x) as f64 + 1.0,
                     None => per_interval,
                 }
             }

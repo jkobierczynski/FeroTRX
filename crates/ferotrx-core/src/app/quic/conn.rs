@@ -1067,8 +1067,9 @@ impl Conn {
                 2 => Level::Handshake,
                 _ => {
                     // 0-RTT: we never accept early data.
-                    let len = r.varint()? as usize;
-                    return Some(r.pos() + len);
+                    // Skipped whole, if it is all there.
+                    let len = usize::try_from(r.varint()?).ok()?;
+                    return r.pos().checked_add(len).filter(|&end| end <= d.len());
                 }
             };
             let len = r.varint()? as usize;
@@ -2609,6 +2610,16 @@ fn local_params(
         initial_scid: Some(scid.to_vec()),
         retry_scid: retry_scid.map(<[u8]>::to_vec),
         stateless_reset_token: None,
+    }
+}
+
+#[cfg(any(test, feature = "fuzzing"))]
+#[allow(dead_code)]
+impl Conn {
+    /// For the fuzz targets: takes `payload` as the plaintext of a 1-RTT
+    /// packet numbered `pn`.
+    pub(crate) fn fuzz_packet(&mut self, pn: u64, payload: &[u8], now: Duration) {
+        self.on_packet(Level::Data, pn, payload, now);
     }
 }
 

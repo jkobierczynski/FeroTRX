@@ -400,6 +400,10 @@ fn packet(first: u8, body: &[u8]) -> Vec<u8> {
 /// none while it is incomplete.
 type Split<'a> = std::result::Result<Option<(u8, &'a [u8], usize)>, String>;
 
+/// The longest packet taken. MQTT allows 256 MiB; a peer announcing that
+/// much would have it buffered before anything is checked.
+const MAX_PACKET: usize = 16 << 20;
+
 fn split(buf: &[u8]) -> Split<'_> {
     if buf.is_empty() {
         return Ok(None);
@@ -418,6 +422,11 @@ fn split(buf: &[u8]) -> Split<'_> {
         if i > 4 {
             return Err("remaining length over four bytes".into());
         }
+    }
+    if len > MAX_PACKET {
+        return Err(format!(
+            "a packet of {len} bytes, over the {MAX_PACKET} taken"
+        ));
     }
     if buf.len() < i + len {
         return Ok(None);

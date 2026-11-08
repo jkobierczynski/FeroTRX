@@ -1,0 +1,114 @@
+# Fuzz targets for cargo-fuzz (libFuzzer). Not part of the workspace: it
+# needs a nightly toolchain. See fuzz/README.md.
+[package]
+name = "ferotrx-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ferotrx-core = { path = "../crates/ferotrx-core", features = ["fuzzing"] }
+# Without libpcap and AF_XDP: the fuzzing controllers open no interfaces.
+ferotrx-ctl = { path = "../crates/ferotrx-ctl", default-features = false, features = ["fuzzing"] }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "app"
+path = "fuzz_targets/app.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tcp_engine"
+path = "fuzz_targets/tcp_engine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "udp_engine"
+path = "fuzz_targets/udp_engine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "host_engine"
+path = "fuzz_targets/host_engine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "packet"
+path = "fuzz_targets/packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pcap"
+path = "fuzz_targets/pcap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "profile"
+path = "fuzz_targets/profile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text"
+path = "fuzz_targets/text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssh"
+path = "fuzz_targets/ssh.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quic"
+path = "fuzz_targets/quic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctl_call"
+path = "fuzz_targets/ctl_call.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctl_server"
+path = "fuzz_targets/ctl_server.rs"
+test = false
+doc = false
+bench = false

@@ -15,6 +15,8 @@ pcap = ["ferotrx-io/pcap"]
 af-xdp = ["ferotrx-io/af-xdp"]
 # Let runs send through DPDK (needs DPDK installed to build).
 dpdk = ["ferotrx-io/dpdk"]
+# Entry points for the fuzz targets in fuzz/ (not an API).
+fuzzing = []
 
 [dependencies]
 ferotrx-core.workspace = true
