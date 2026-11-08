@@ -4,6 +4,18 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Run every job even when an equivalent tree already passed
+        type: boolean
+        default: true
+
+# A new push to a pull request cancels the run still going for the old one.
+# Runs on main are never cancelled.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # The token can read the repository and nothing else; a job that needs more
 # asks for it. Every action is pinned to a commit (the comment names its
@@ -18,26 +30,43 @@ jobs:
   test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      actions: read # scripts/ci-gate.sh looks up earlier runs' artifacts
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Parents and grandparents too: scripts/ci-gate.sh compares their trees.
+          fetch-depth: 3
+      # Skips the remaining steps when this job already passed on the same
+      # tree, or on one that differs only in docs or version numbers. The
+      # job itself still runs, so its required check still reports.
+      - name: Skip if an equivalent tree already passed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_FORCE: ${{ inputs.full == true }}
+        run: scripts/ci-gate.sh ${{ matrix.os }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: env.CI_SKIP != 'true'
         with:
           toolchain: stable
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: env.CI_SKIP != 'true'
 
       - name: Install libpcap (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libpcap-dev
 
       # macOS ships libpcap. Windows links against the Npcap SDK; running the
       # binary needs Npcap installed, so on Windows only the core and packet tests run.
       - name: Install Npcap SDK (Windows)
-        if: runner.os == 'Windows'
+        if: env.CI_SKIP != 'true' && runner.os == 'Windows'
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri https://npcap.com/dist/npcap-sdk-1.13.zip -OutFile npcap-sdk.zip
@@ -45,23 +74,26 @@ jobs:
           "LIB=$PWD\npcap-sdk\Lib\x64;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Format
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: cargo fmt --all --check
       - name: Clippy
+        if: env.CI_SKIP != 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build
+        if: env.CI_SKIP != 'true'
         run: cargo build --workspace
       - name: Build without libpcap
+        if: env.CI_SKIP != 'true'
         run: cargo build -p ferotrx-cli --no-default-features
       - name: Test
-        if: runner.os != 'Windows'
+        if: env.CI_SKIP != 'true' && runner.os != 'Windows'
         run: cargo test --workspace
       - name: Test core (Windows)
-        if: runner.os == 'Windows'
+        if: env.CI_SKIP != 'true' && runner.os == 'Windows'
         run: cargo test -p ferotrx-core -p ferotrx-packet -p ferotrx-gui
       # The control server tests need no interfaces, so they run without libpcap/Npcap.
       - name: Test control API (Windows)
-        if: runner.os == 'Windows'
+        if: env.CI_SKIP != 'true' && runner.os == 'Windows'
         run: cargo test -p ferotrx-ctl --no-default-features
 
       # The installer: build it from this build, install it silently, check
@@ -70,7 +102,7 @@ jobs:
       # Npcap: ferotrx.exe must still start (wpcap.dll is loaded late) and say
       # what is missing when asked for interfaces.
       - name: Windows installer (MSI)
-        if: runner.os == 'Windows'
+        if: env.CI_SKIP != 'true' && runner.os == 'Windows'
         shell: pwsh
         run: |
           cargo build -p ferotrx-cli -p ferotrx-gui
@@ -144,7 +176,7 @@ jobs:
       # virtual X display with Mesa's software OpenGL. `timeout` ending it
       # (exit 124) is the pass; anything earlier is a crash.
       - name: GUI smoke test (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           sudo apt-get install -y xvfb libxkbcommon-x11-0 libgl1-mesa-dri libegl1
           cargo build -p ferotrx-cli -p ferotrx-gui
@@ -164,9 +196,11 @@ jobs:
       # tokens, roles, TLS and client certificates, every method family,
       # blocking and asyncio. Windows runs the server built without libpcap.
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: env.CI_SKIP != 'true'
         with:
           python-version: "3.12"
       - name: Python client
+        if: env.CI_SKIP != 'true'
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Windows ]; then
@@ -184,7 +218,7 @@ jobs:
       # The Python client's lab tests: TCP sessions, DNS transactions and a
       # stream with a receiver across a veth pair, through a root server.
       - name: Python client on a veth pair (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           sudo ip link add pt0 type veth peer name pt1
           sudo sysctl -qw net.ipv6.conf.pt0.disable_ipv6=1 net.ipv6.conf.pt1.disable_ipv6=1
@@ -205,7 +239,7 @@ jobs:
 
       # AF_XDP needs root and an interface it may send on: a veth pair.
       - name: AF_XDP on a veth pair (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           sudo ip link add xt0 type veth peer name xt1
           # No IPv6 on the pair: router solicitations and MLD reports sent after
@@ -227,7 +261,7 @@ jobs:
       # kernel's routing, conntrack and masquerading between two VLANs on a
       # trunk, as in a small lab. Then without VLANs, with 3% packet loss.
       - name: Stateful TCP through a NAT router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo modprobe 8021q || true
@@ -237,7 +271,7 @@ jobs:
       # The lab router the control server builds (serve --lab, lab.start), as
       # the GUI starts it: the lab examples as they are, through NAT.
       - name: Lab examples through the server's lab router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo modprobe 8021q || true
@@ -246,7 +280,7 @@ jobs:
       # Several templates mixed by weight, from ten clients to four servers,
       # through the same NAT router: on the trunk, then with 3% loss.
       - name: Multi-flow TCP templates through a NAT router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo modprobe 8021q || true
@@ -257,7 +291,7 @@ jobs:
       # emulated hosts instead of ARP, one session on the trunk, then the
       # template mix with 3% loss.
       - name: Stateful TCP over IPv6 through a router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo modprobe 8021q || true
@@ -269,7 +303,7 @@ jobs:
       # reordering, duplicates and loss both ways, with the template mix.
       # IPv4 and IPv6.
       - name: Stateful TCP on long and impaired paths (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo modprobe 8021q || true
@@ -286,7 +320,7 @@ jobs:
       # without retransmitting. NewReno over IPv4 with VLANs, CUBIC over IPv6
       # without; then Linux (cubic) as the sender to the emulated client.
       - name: TCP congestion control and ECN (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           sudo apt-get install -y ethtool
           cargo build -p ferotrx-cli
@@ -300,7 +334,7 @@ jobs:
       # clients and an emulated server (which dig then asks too), with 3%
       # loss, a mix of DNS, NTP and a timed echo, and over IPv6.
       - name: Stateful UDP and DNS through a NAT router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo modprobe 8021q || true
@@ -316,7 +350,7 @@ jobs:
       # password) against the emulated server, and the emulated phones
       # against SIPp's answering end; with 3% loss, over IPv6 and AF_XDP.
       - name: SIP and RTP through a NAT router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo modprobe 8021q || true
@@ -332,7 +366,7 @@ jobs:
       # the emulated server, and the emulated clients against Samba's smbd;
       # with 3% loss, over IPv6 and AF_XDP.
       - name: SMB through a NAT router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo modprobe 8021q || true
@@ -348,7 +382,7 @@ jobs:
       # emulated server, and the emulated clients against aioquic's server;
       # with 3% loss, over IPv6 and AF_XDP.
       - name: HTTP/3 and QUIC through a NAT router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo modprobe 8021q || true
@@ -372,7 +406,7 @@ jobs:
       # server and the emulated client against sshd; with 3% loss, over IPv6,
       # and over AF_XDP with two workers.
       - name: Application protocols through a NAT router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           sudo apt-get install -y ethtool curl openssl mosquitto mosquitto-clients nghttp2-client nghttp2-server openssh-client openssh-server sshpass
           cargo build -p ferotrx-cli
@@ -388,7 +422,7 @@ jobs:
       # server (python3 -m http.server); with 3% loss, over IPv6, and over
       # AF_XDP with two workers.
       - name: HTTP response checks through a NAT router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           sudo apt-get install -y ethtool
           cargo build -p ferotrx-cli
@@ -404,7 +438,7 @@ jobs:
       # emulated server and the emulated client against openssl s_server;
       # with 3% loss, over IPv6, and over AF_XDP with two workers.
       - name: TLS handshake load through a NAT router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           sudo apt-get install -y ethtool openssl
           cargo build -p ferotrx-cli
@@ -421,7 +455,7 @@ jobs:
       # a TCP client with a SLAAC address; a FeroTRX DHCP and DHCPv6 server for
       # busybox udhcpc/udhcpc6 and emulated clients. Then the same over AF_XDP.
       - name: Host emulation on a bridged LAN (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           sudo apt-get install -y dnsmasq-base busybox
           cargo build -p ferotrx-cli
@@ -436,7 +470,7 @@ jobs:
       # trunk, without VLANs with 3% loss, over IPv6, the template mix, and a
       # higher connection rate.
       - name: Stateful TCP and UDP over AF_XDP (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo modprobe 8021q || true
@@ -454,7 +488,7 @@ jobs:
       # shared by the workers, AF_XDP ports split by queue (QUEUES=4), IPv6,
       # the template mixes, and a stream with latency signatures.
       - name: One run on several workers (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo modprobe 8021q || true
@@ -483,7 +517,7 @@ jobs:
       # Loss and latency through a router in a network namespace: routing and
       # masquerading, a 5 ms delay (netem), then 3% packet loss on top.
       - name: Loss and latency through a router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo modprobe sch_netem || true
@@ -506,7 +540,7 @@ jobs:
       # between hosts in namespaces, a stream's impairments measured by a
       # receiver, a rate limit; and a TCP run through impaired ports.
       - name: Built-in impairments (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo scripts/impair-netns.sh ./target/debug/ferotrx
@@ -516,7 +550,7 @@ jobs:
       # 20 Mbit/s: throughput, latency, frame loss and back-to-back for a
       # fixed size and IMIX, checked against the limit; JSON and text reports.
       - name: Benchmark a rate-limited router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo modprobe sch_netem || true
@@ -527,7 +561,7 @@ jobs:
       # pass; then with one service's policer below its CIR the test fails,
       # at that service's 100% step.
       - name: Y.1564 service activation through a policing router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo modprobe act_police || true
@@ -539,7 +573,7 @@ jobs:
       # cut off, which must fail. Captures on two agents are collected and
       # merged (read back with tcpdump).
       - name: Fleet of agents started together (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo apt-get install -y tcpdump
@@ -549,7 +583,7 @@ jobs:
       # tcpdump (the way Wireshark reads it), on a remote agent over ctl,
       # next to a run, and `inspect -f`.
       - name: Capture with BPF filters (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo apt-get install -y tcpdump
@@ -558,7 +592,7 @@ jobs:
       # Traffic limits of a control server: starts beyond them refused, a
       # top-speed run held to --max-pps on a veth, --max-duration.
       - name: Server traffic limits (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo scripts/limits-netns.sh ./target/debug/ferotrx
@@ -568,38 +602,69 @@ jobs:
       # stream arrives. Then the router resets TCP to port 80, and the second
       # run, compared with the first, must fail and name that check.
       - name: Regression scenario through a NAT router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo KEEP="$RUNNER_TEMP/scenario" scripts/scenario-netns.sh ./target/debug/ferotrx
 
       - name: Scenario reports (Linux)
-        if: always() && runner.os == 'Linux'
+        if: always() && env.CI_SKIP != 'true' && runner.os == 'Linux'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: scenario-reports
           path: ${{ runner.temp }}/scenario
           if-no-files-found: ignore
 
+      # Remembers that this job passed on this tree (scripts/ci-gate.sh).
+      # Also after a skip: an equivalent tree passed, so this one counts too.
+      - name: Remember that this tree passed
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-pass-${{ matrix.os }}-${{ env.CI_TREE }}
+          path: ${{ runner.temp }}/ci-pass.txt
+          retention-days: 30
+          overwrite: true
+
   # DPDK is an optional feature: build it against Ubuntu's DPDK and send
   # through DPDK's af_packet driver on a veth pair, without hugepages.
   dpdk:
     name: dpdk (ubuntu-latest)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read # scripts/ci-gate.sh looks up earlier runs' artifacts
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Parents and grandparents too: scripts/ci-gate.sh compares their trees.
+          fetch-depth: 3
+      # Skips the remaining steps when this job already passed on the same
+      # tree, or on one that differs only in docs or version numbers. The
+      # job itself still runs, so its required check still reports.
+      - name: Skip if an equivalent tree already passed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_FORCE: ${{ inputs.full == true }}
+        run: scripts/ci-gate.sh dpdk
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: env.CI_SKIP != 'true'
         with:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: env.CI_SKIP != 'true'
       - name: Install DPDK and libpcap
+        if: env.CI_SKIP != 'true'
         run: sudo apt-get update && sudo apt-get install -y dpdk-dev libpcap-dev pkg-config
       - name: Clippy
+        if: env.CI_SKIP != 'true'
         run: cargo clippy --workspace --all-targets --features ferotrx-cli/dpdk -- -D warnings
       - name: Build
+        if: env.CI_SKIP != 'true'
         run: cargo build -p ferotrx-cli --features dpdk
       - name: Send through DPDK
+        if: env.CI_SKIP != 'true'
         run: |
           sudo ip link add dt0 type veth peer name dt1
           # No IPv6 on the pair: router solicitations and MLD reports sent after
@@ -621,6 +686,7 @@ jobs:
       # Stateful TCP and UDP through the NAT router, with DPDK's af_packet
       # driver on the router's links: on the VLAN trunk, then one link per side.
       - name: Stateful TCP and UDP over DPDK
+        if: env.CI_SKIP != 'true'
         run: |
           sudo modprobe 8021q || true
           eal='--no-huge -m 512 --no-pci -l 0 --log-level=warning'
@@ -630,6 +696,16 @@ jobs:
             --client-iface net_af_packet0,iface=c0 --server-iface net_af_packet1,iface=s0 -n 300 --cps 100
           sudo scripts/udp-netns.sh ./target/debug/ferotrx -B dpdk --dpdk-args "$eal" \
             -i net_af_packet0,iface=t0
+
+      # Remembers that this job passed on this tree (scripts/ci-gate.sh).
+      # Also after a skip: an equivalent tree passed, so this one counts too.
+      - name: Remember that this tree passed
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-pass-dpdk-${{ env.CI_TREE }}
+          path: ${{ runner.temp }}/ci-pass.txt
+          retention-days: 30
+          overwrite: true
 
   # The dependency tree against RustSec advisories, licenses and sources
   # (deny.toml), and on pull requests the dependencies a change adds against

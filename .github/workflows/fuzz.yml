@@ -17,6 +17,11 @@ on:
         description: Targets (blank for all)
         default: ""
 
+# A new push to a pull request cancels the fuzzing still going for the old one.
+concurrency:
+  group: fuzz-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
