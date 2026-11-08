@@ -267,6 +267,8 @@ pub fn open_port_with(
                 queue: send.queue(),
                 batch: send.batch(),
                 eal_args: send.dpdk_args().to_vec(),
+                // One TX and RX queue pair per worker, split among them.
+                queues: u16::try_from(send.workers()).unwrap_or(u16::MAX),
             };
             Ok(Box::new(
                 crate::DpdkPort::open(name, &config).map_err(fail)?,

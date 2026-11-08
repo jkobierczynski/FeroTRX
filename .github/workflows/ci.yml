@@ -682,6 +682,14 @@ jobs:
           test $((after - before)) -ge 2100
           sudo ./target/debug/ferotrx replay examples/web.pcap -i net_null0 \
             -B dpdk --dpdk-args "$eal" --pps 2000 -l 5
+          # Two workers, each on a TX queue of its own, pinned to a CPU each.
+          before=$(cat /sys/class/net/dt1/statistics/rx_packets)
+          sudo ./target/debug/ferotrx replay examples/web.pcap -i net_af_packet0,iface=dt0,qpairs=2 \
+            -B dpdk --dpdk-args "$eal" -t -l 100 --workers 2 --cpus 0-1 2>&1 | tee dpdk-mq.txt
+          after=$(cat /sys/class/net/dt1/statistics/rx_packets)
+          echo "dt1 received $((after - before)) packets from two queues"
+          test $((after - before)) -ge 2100
+          grep -q 'queue 1 (2 of 2)' dpdk-mq.txt
 
       # Stateful TCP and UDP through the NAT router, with DPDK's af_packet
       # driver on the router's links: on the VLAN trunk, then one link per side.
@@ -696,6 +704,10 @@ jobs:
             --client-iface net_af_packet0,iface=c0 --server-iface net_af_packet1,iface=s0 -n 300 --cps 100
           sudo scripts/udp-netns.sh ./target/debug/ferotrx -B dpdk --dpdk-args "$eal" \
             -i net_af_packet0,iface=t0
+          # Two workers, each with a TX and an RX queue of its own per port.
+          sudo NO_VLAN=1 scripts/tcp-nat-netns.sh ./target/debug/ferotrx -B dpdk --dpdk-args "$eal" \
+            --client-iface net_af_packet0,iface=c0,qpairs=2 \
+            --server-iface net_af_packet1,iface=s0,qpairs=2 --workers 2 -n 300 --cps 100
 
       # Remembers that this job passed on this tree (scripts/ci-gate.sh).
       # Also after a skip: an equivalent tree passed, so this one counts too.

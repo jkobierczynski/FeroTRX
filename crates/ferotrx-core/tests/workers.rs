@@ -336,10 +336,7 @@ fn null_workers(n: usize) -> Vec<(Vec<Stream<'static>>, Box<dyn PacketSink + Sen
             let s = Stream::new("pinned", CaptureSource::new(cap.clone()).loops(0))
                 .with_limit(Some(100))
                 .shard(k, n);
-            (
-                vec![s],
-                Box::new(NullSink::default()) as Box<dyn PacketSink + Send>,
-            )
+            (vec![s], Box::new(NullSink) as Box<dyn PacketSink + Send>)
         })
         .collect()
 }
