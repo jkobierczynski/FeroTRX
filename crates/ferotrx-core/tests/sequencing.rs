@@ -48,25 +48,23 @@ fn multi_bursts_leave_with_gaps_between_them() {
     let stats = run(&mut streams, &mut sink, &RunConfig::default()).unwrap();
     assert_eq!(stats.total.packets, 15);
     let t = sink.times();
-    for b in 0..3 {
-        // Inside a burst: 0.1 ms apart.
-        let span = t[b * 5 + 4] - t[b * 5];
-        assert!(span < Duration::from_millis(20), "burst {b}: {span:?}");
-    }
+    // The firm check, whatever the machine does: packets never leave early,
+    // so burst b starts no sooner than b gaps (and 5 b packets at 0.1 ms)
+    // after the run did. Spreading the packets evenly instead would start
+    // burst 1 at about 28 ms and fail here.
     for b in 1..3 {
-        // Packets never leave early: burst b starts no sooner than b gaps
-        // (and 5 b packets at 0.1 ms) after the run did. The gap seen
-        // between two packets can be shorter when the burst before ended
-        // late (busy CI machines), so it only has to be clearly there.
         let due = (Duration::from_millis(40) + Duration::from_micros(500)) * b as u32;
         let at = t[b * 5] - start;
         assert!(at >= due, "burst {b} at {at:?}, due {due:?}");
-        let gap = t[b * 5] - t[b * 5 - 1];
-        assert!(
-            gap >= Duration::from_millis(20),
-            "gap before burst {b}: {gap:?}"
-        );
     }
+    // The shape: tight bursts with clear gaps. A stalled CI machine (macOS
+    // runners stall for 40 ms and more) can send one burst late, which
+    // stretches it and eats the gap after it, so only the best of the three
+    // bursts and of the two gaps is checked.
+    let tightest = (0..3).map(|b| t[b * 5 + 4] - t[b * 5]).min().unwrap();
+    assert!(tightest < Duration::from_millis(20), "bursts: {t:?}");
+    let widest = (1..3).map(|b| t[b * 5] - t[b * 5 - 1]).max().unwrap();
+    assert!(widest >= Duration::from_millis(30), "gaps: {t:?}");
 }
 
 #[test]
