@@ -529,9 +529,9 @@ where
         self.hosts.finish();
     }
 
-    fn set_rx_dropped(&mut self, frames: u64) {
+    fn set_drops(&mut self, drops: &crate::DropCounters) {
         if let Some(e) = self.inner.as_mut() {
-            e.set_rx_dropped(frames);
+            e.set_drops(drops);
         }
         self.refresh();
     }

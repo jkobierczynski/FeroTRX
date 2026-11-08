@@ -409,6 +409,7 @@ mod tests {
                 ..Default::default()
             },
             streams: Vec::new(),
+            drops: Default::default(),
         };
         let m = traffic_metrics(&run, None, &[]);
         assert_eq!(m["tx_packets"], 10.0);

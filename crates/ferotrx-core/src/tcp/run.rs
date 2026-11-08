@@ -49,6 +49,16 @@ pub trait PacketPort: Send {
         None
     }
 
+    /// Frames the layers below dropped, by layer
+    /// ([`PacketSink::drops`](crate::PacketSink::drops)); by default
+    /// [`rx_dropped`](Self::rx_dropped) as the capture buffer's.
+    fn drops(&mut self) -> crate::DropCounters {
+        crate::DropCounters {
+            capture_dropped: self.rx_dropped().unwrap_or(0),
+            ..Default::default()
+        }
+    }
+
     /// What the port's impairments did ([`ImpairPort`](crate::ImpairPort));
     /// `None` for a port without them.
     fn impairments(&mut self) -> Option<crate::PortImpairStats> {
@@ -74,6 +84,9 @@ impl<P: PacketPort + ?Sized> PacketPort for Box<P> {
     }
     fn rx_dropped(&mut self) -> Option<u64> {
         (**self).rx_dropped()
+    }
+    fn drops(&mut self) -> crate::DropCounters {
+        (**self).drops()
     }
     fn impairments(&mut self) -> Option<crate::PortImpairStats> {
         (**self).impairments()
@@ -177,6 +190,14 @@ impl PacketPort for SharedLane {
         }
     }
 
+    fn drops(&mut self) -> crate::DropCounters {
+        if self.reader {
+            lock(&self.port).drops()
+        } else {
+            crate::DropCounters::default()
+        }
+    }
+
     fn impairments(&mut self) -> Option<crate::PortImpairStats> {
         // Only the reader counts, as for rx_dropped.
         if self.reader {
@@ -258,9 +279,9 @@ pub trait PortEngine: Send {
     /// Queues what goes out when the run ends (lease releases, group
     /// leaves); [`run_engine`] sends it. Nothing by default.
     fn finish(&mut self) {}
-    /// Puts the frames the ports dropped before the engine read them
-    /// ([`PacketPort::rx_dropped`]) in the counters. Nothing by default.
-    fn set_rx_dropped(&mut self, _frames: u64) {}
+    /// Puts what the ports' layers dropped ([`PacketPort::drops`]) in the
+    /// counters. Nothing by default.
+    fn set_drops(&mut self, _drops: &crate::DropCounters) {}
     /// Puts what the ports' impairments did ([`PacketPort::impairments`]) in
     /// the counters. Nothing by default.
     fn set_impairments(&mut self, _stats: &crate::PortImpairStats) {}
@@ -289,8 +310,8 @@ impl PortEngine for TcpEngine {
     fn set_elapsed(&mut self, elapsed: Duration, stopped: bool) {
         TcpEngine::set_elapsed(self, elapsed, stopped)
     }
-    fn set_rx_dropped(&mut self, frames: u64) {
-        TcpEngine::set_rx_dropped(self, frames)
+    fn set_drops(&mut self, drops: &crate::DropCounters) {
+        TcpEngine::set_drops(self, drops)
     }
     fn set_impairments(&mut self, stats: &crate::PortImpairStats) {
         TcpEngine::set_impairments(self, stats)
@@ -306,7 +327,11 @@ impl PortEngine for TcpEngine {
 /// Puts the ports' own counters (frames dropped before they were read,
 /// impairments) in the engine's.
 fn port_counters<E: PortEngine + ?Sized>(engine: &mut E, ports: &mut [Box<dyn PacketPort>]) {
-    engine.set_rx_dropped(ports.iter_mut().filter_map(|p| p.rx_dropped()).sum());
+    let mut drops = crate::DropCounters::default();
+    for p in ports.iter_mut() {
+        drops.add(&p.drops());
+    }
+    engine.set_drops(&drops);
     let mut impair = crate::PortImpairStats::default();
     let mut any = false;
     for s in ports.iter_mut().filter_map(|p| p.impairments()) {

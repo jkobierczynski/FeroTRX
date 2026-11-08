@@ -161,6 +161,19 @@ void ftrx_dpdk_stop(uint16_t port, uint16_t queue) {
     (void)rte_eth_dev_stop(port);
 }
 
+/* The port's drop counters: imissed, ierrors, oerrors, rx_nombuf. */
+int ftrx_dpdk_stats(uint16_t port, uint64_t *out) {
+    struct rte_eth_stats st;
+    int r = rte_eth_stats_get(port, &st);
+    if (r < 0)
+        return r;
+    out[0] = st.imissed;
+    out[1] = st.ierrors;
+    out[2] = st.oerrors;
+    out[3] = st.rx_nombuf;
+    return 0;
+}
+
 int ftrx_dpdk_port_name(uint16_t port, char *name, size_t len) {
     char buf[RTE_ETH_NAME_MAX_LEN];
     int r = rte_eth_dev_get_name_by_port(port, buf);

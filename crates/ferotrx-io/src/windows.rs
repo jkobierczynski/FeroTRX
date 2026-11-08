@@ -25,6 +25,8 @@ pub struct Adapter {
     pub description: String,
     /// `aa:bb:cc:dd:ee:ff`, when the adapter has one.
     pub mac: Option<String>,
+    /// The adapter's LUID, for its counters ([`if_counters`]).
+    pub luid: u64,
 }
 
 /// Loads Npcap's `wpcap.dll` (from `System32\Npcap` or the usual search
@@ -186,10 +188,24 @@ pub fn adapters() -> Vec<Adapter> {
             friendly_name: unsafe { wide_str(a.FriendlyName) },
             description: unsafe { wide_str(a.Description) },
             mac,
+            // SAFETY: every bit pattern is a valid u64.
+            luid: unsafe { a.Luid.Value },
         });
         p = a.Next;
     }
     out
+}
+
+/// The drop counters of an adapter (`GetIfEntry2`): `InDiscards`,
+/// `InErrors`, `OutDiscards`, `OutErrors`, in that order.
+pub fn if_counters(luid: u64) -> Option<[u64; 4]> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetIfEntry2, MIB_IF_ROW2};
+    let mut row = MIB_IF_ROW2::default();
+    row.InterfaceLuid.Value = luid;
+    // SAFETY: `row` is a valid MIB_IF_ROW2 with its LUID set, which is all
+    // GetIfEntry2 reads; it fills in the rest.
+    let r = unsafe { GetIfEntry2(&mut row) };
+    (r == 0).then_some([row.InDiscards, row.InErrors, row.OutDiscards, row.OutErrors])
 }
 
 /// The GUID in an Npcap device name (`\Device\NPF_{GUID}`), or the name
@@ -257,6 +273,7 @@ mod tests {
             friendly_name: "Ethernet 2".into(),
             description: "Realtek Gaming 5GbE Family Controller".into(),
             mac: Some("00:11:22:33:44:55".into()),
+            luid: 1,
         }]
     }
 

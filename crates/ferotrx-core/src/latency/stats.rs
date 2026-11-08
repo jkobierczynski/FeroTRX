@@ -355,6 +355,9 @@ pub struct RxStats {
     /// When set, every flow also counts what arrived per interval of send
     /// time ([`FlowStats::intervals`]), e.g. per second for availability.
     pub interval: Option<Duration>,
+    /// What the layers below the receiver dropped before it could read
+    /// ([`PacketReceiver::drops`](crate::PacketReceiver::drops)).
+    pub drops: crate::DropCounters,
 }
 
 impl RxStats {

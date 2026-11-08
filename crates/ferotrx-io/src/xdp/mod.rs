@@ -70,6 +70,7 @@ pub struct XdpPort {
     macs: usize,
     /// Which lane of a split port this is: (index, count).
     lane: Option<(usize, usize)>,
+    nic: crate::nic::NicCounters,
 }
 
 /// The number of receive queues of an interface (1 if the system does not say).
@@ -132,6 +133,7 @@ impl XdpPort {
             name: name.to_string(),
             macs: macs.len(),
             lane: None,
+            nic: crate::nic::NicCounters::new(name),
         })
     }
 
@@ -196,6 +198,14 @@ impl PacketPort for XdpPort {
         Some(XdpPort::describe(self))
     }
 
+    fn drops(&mut self) -> ferotrx_core::DropCounters {
+        let mut d = self.nic.since_start();
+        for x in &self.xsks {
+            d.add(&crate::afxdp::xdp_drops(x.fd));
+        }
+        d
+    }
+
     /// One lane per worker, each with the sockets of every `n`-th queue
     /// counting from the send queue; worker `k` sends on send queue + `k`.
     /// Needs at least `n` queues.
@@ -216,6 +226,7 @@ impl PacketPort for XdpPort {
                 name: self.name.clone(),
                 macs: self.macs,
                 lane: Some((k, n)),
+                nic: self.nic.clone(),
             })
             .collect();
         lanes[0].group = self.group.take();

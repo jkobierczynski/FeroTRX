@@ -36,6 +36,7 @@ mod pcap_port {
     /// tell them apart (Linux, macOS).
     pub struct PcapPort {
         capture: pcap::Capture<pcap::Active>,
+        nic: crate::nic::NicCounters,
     }
 
     impl PcapPort {
@@ -51,7 +52,10 @@ mod pcap_port {
             // Npcap cannot filter by direction; the engine ignores its own frames.
             let _ = capture.direction(pcap::Direction::In);
             let capture = capture.setnonblock()?;
-            Ok(Self { capture })
+            Ok(Self {
+                capture,
+                nic: crate::nic::NicCounters::new(name),
+            })
         }
     }
 
@@ -77,6 +81,12 @@ mod pcap_port {
             // Frames the kernel had for this capture but no room for.
             self.capture.stats().ok().map(|s| u64::from(s.dropped))
         }
+
+        fn drops(&mut self) -> ferotrx_core::DropCounters {
+            let mut d = self.nic.since_start();
+            d.capture_dropped = self.rx_dropped().unwrap_or(0);
+            d
+        }
     }
 }
 
@@ -96,6 +106,7 @@ mod pcap_receiver {
     /// interface are left out where the system can tell them apart.
     pub struct PcapReceiver {
         capture: pcap::Capture<pcap::Active>,
+        nic: crate::nic::NicCounters,
     }
 
     impl PcapReceiver {
@@ -140,11 +151,22 @@ mod pcap_receiver {
             // waits for the next packet). The naps do not touch the
             // timestamps, which the kernel takes.
             let capture = capture.setnonblock()?;
-            Ok(Self { capture })
+            Ok(Self {
+                capture,
+                nic: crate::nic::NicCounters::new(name),
+            })
         }
     }
 
     impl PacketReceiver for PcapReceiver {
+        fn drops(&mut self) -> ferotrx_core::DropCounters {
+            let mut d = self.nic.rx();
+            // ps_drop: no room in the capture buffer. ps_ifdrop is left
+            // out: Linux libpcap reads it from the NIC counters above.
+            d.capture_dropped = self.capture.stats().map_or(0, |s| u64::from(s.dropped));
+            d
+        }
+
         fn recv(&mut self, buf: &mut Vec<u8>) -> Result<Option<Duration>, SinkError> {
             match self.capture.next_packet() {
                 Ok(p) => {

@@ -1018,6 +1018,10 @@ impl PacketPort for ImpairPort {
         self.inner.rx_dropped()
     }
 
+    fn drops(&mut self) -> crate::DropCounters {
+        self.inner.drops()
+    }
+
     fn impairments(&mut self) -> Option<PortImpairStats> {
         let now = self.now();
         self.publish(now, true);
