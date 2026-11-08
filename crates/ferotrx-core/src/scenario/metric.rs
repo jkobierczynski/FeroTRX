@@ -557,6 +557,42 @@ pub const TRAFFIC_METRICS: &[MetricDef] = &[
         "lost, of the packets sent with a signature",
     ),
     m(
+        "generator_loss",
+        Count,
+        Lower,
+        "of those, never sent or never left: send errors, late skips, sending NIC or ring drops",
+    ),
+    m(
+        "generator_loss_pct",
+        Percent,
+        Lower,
+        "generator_loss, of the packets offered with a signature",
+    ),
+    m(
+        "network_loss",
+        Count,
+        Lower,
+        "sent and never seen at the receiving port",
+    ),
+    m(
+        "network_loss_pct",
+        Percent,
+        Lower,
+        "network_loss, of the packets offered with a signature",
+    ),
+    m(
+        "receiver_loss",
+        Count,
+        Lower,
+        "dropped by the receiving NIC, ring or capture buffer before they were read",
+    ),
+    m(
+        "receiver_loss_pct",
+        Percent,
+        Lower,
+        "receiver_loss, of the packets offered with a signature",
+    ),
+    m(
         "duplicates",
         Count,
         Lower,

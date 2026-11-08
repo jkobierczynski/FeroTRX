@@ -328,11 +328,12 @@ impl LabRunner {
         );
         let rx_stats = job.rx_stats();
         let flows = job.flow_reports();
+        let loss = job.loss();
         if let ferotrx_core::JobState::Failed(e) = job.state() {
             return Err(e);
         }
         let stats = job.stats();
-        let metrics = traffic_metrics(&stats, rx_stats.as_ref(), &flows);
+        let metrics = traffic_metrics(&stats, rx_stats.as_ref(), &flows, loss.as_ref());
         let summary = traffic_summary(&metrics);
         Ok(CheckRun { metrics, summary })
     }

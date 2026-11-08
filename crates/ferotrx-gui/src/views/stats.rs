@@ -133,6 +133,29 @@ fn port_impair_rows(
     }
 }
 
+/// Where a run's frames were lost, and what each layer dropped.
+fn loss_rows(
+    loss: Option<&ferotrx_ctl::protocol::LossReport>,
+    drops: &ferotrx_ctl::protocol::DropCounters,
+    rows: &mut Vec<(String, String)>,
+) {
+    if let Some(l) = loss {
+        rows.push((
+            "lost: generator / network / receiver".into(),
+            format!(
+                "{} / {} / {} of {}",
+                n(l.generator),
+                n(l.network),
+                n(l.receiver),
+                n(l.offered)
+            ),
+        ));
+    }
+    if !drops.is_empty() {
+        rows.push(("dropped at".into(), drops.describe()));
+    }
+}
+
 fn lat_rows(prefix: &str, l: &LatencyCounters, rows: &mut Vec<(String, String)>) {
     rows.push((
         format!("{prefix}latency min/avg/max"),
@@ -158,10 +181,14 @@ impl RunColumn {
             ("loops".into(), n(t.loops_completed)),
             ("elapsed".into(), format!("{:.1} s", t.elapsed_s)),
         ];
+        if t.late_skipped > 0 {
+            rows.push(("skipped late".into(), n(t.late_skipped)));
+        }
         if let Some(rx) = &r.rx {
             rows.push(("rx on".into(), rx.iface.clone()));
             rows.push(("rx packets".into(), n(rx.packets)));
         }
+        loss_rows(r.loss.as_ref(), &r.drops, &mut rows);
         for s in &r.streams {
             rows.push((format!("{}: packets", s.name), n(s.counters.packets)));
             if let Some(l) = &s.latency {
@@ -223,6 +250,7 @@ impl RunColumn {
             lat_rows("first byte ", l, &mut rows);
         }
         port_impair_rows(&r.impair, &mut rows);
+        loss_rows(None, &r.drops, &mut rows);
         for t in &r.templates {
             rows.push((
                 format!("{}: completed", t.name),
@@ -270,6 +298,7 @@ impl RunColumn {
             media_rows(m, &mut rows);
         }
         port_impair_rows(&r.impair, &mut rows);
+        loss_rows(None, &r.drops, &mut rows);
         for t in &r.templates {
             rows.push((
                 format!("{}: answered", t.name),
@@ -295,6 +324,7 @@ impl RunColumn {
             ("elapsed".into(), format!("{:.1} s", c.elapsed_s)),
             ("flows".into(), r.flows.len().to_string()),
         ];
+        loss_rows(None, &c.drops, &mut rows);
         for f in &r.flows {
             latency_rows(&format!("flow {}: ", f.flow), f, &mut rows);
         }
@@ -650,6 +680,32 @@ mod tests {
         assert_eq!(h.points.len(), 1);
         h.add(3.0, &a);
         assert!(h.points.is_empty(), "a counter going back starts again");
+    }
+
+    #[test]
+    fn a_run_shows_where_frames_were_lost() {
+        let drops = ferotrx_ctl::protocol::DropCounters {
+            capture_dropped: 4,
+            ..Default::default()
+        };
+        let r = RunInfo {
+            loss: Some(ferotrx_ctl::protocol::LossReport::new(100, 90, 0, 0, drops)),
+            drops,
+            ..serde_json::from_value(serde_json::json!({
+                "id": 1, "profile": "p", "output": "o", "state": "finished",
+                "total": {"packets": 100, "bytes": 6400, "send_errors": 0,
+                          "loops_completed": 1, "elapsed_s": 1.0, "pps": 100.0, "mbps": 0.05},
+                "streams": []
+            }))
+            .unwrap()
+        };
+        let c = RunColumn::stream(&r);
+        let row = |k: &str| c.rows.iter().find(|r| r.0 == k).map(|r| r.1.clone());
+        assert_eq!(
+            row("lost: generator / network / receiver").as_deref(),
+            Some("0 / 6 / 4 of 100")
+        );
+        assert_eq!(row("dropped at").as_deref(), Some("capture buffer 4"));
     }
 
     #[test]

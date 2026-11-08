@@ -168,6 +168,13 @@ pub struct TcpArgs {
     #[arg(short, long)]
     quiet: bool,
 
+    /// Write a record of the run to this file, as JSON: what ran where
+    /// (version, host, NIC and driver, ports, workers, CPU affinity,
+    /// profile and its hash) and the final counters, with what every layer
+    /// of the ports dropped.
+    #[arg(long, value_name = "FILE")]
+    report: Option<PathBuf>,
+
     #[command(flatten)]
     capture: crate::capture::RunCaptureArgs,
 }
@@ -568,6 +575,7 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
         }
     }
     let job = started.job;
+    let workers = job.workers();
     while !job.wait(Some(Duration::from_secs(1))) {
         if !args.quiet {
             eprintln!("{}", progress_line(&job.stats()));
@@ -579,6 +587,26 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
     }
     print_summary(&stats);
     crate::host::print_hosts(&stats.hosts, "  ");
+    if let Some(path) = &args.report {
+        let mut info = crate::latency::run_info(
+            started.interfaces.first().map(String::as_str),
+            None,
+            (!started.port_details.is_empty()).then(|| started.port_details.join("; ")),
+        );
+        info.workers = Some(workers);
+        if let Some(p) = &args.profile {
+            crate::latency::set_profile_file(&mut info, p);
+        }
+        let mut counters = ferotrx_ctl::protocol::TcpRunInfo {
+            program: started.program.clone(),
+            interfaces: started.interfaces.clone(),
+            ports: started.port_details.clone(),
+            workers,
+            ..Default::default()
+        };
+        counters.fill(&stats);
+        crate::latency::save_record(path, &info, "tcp", &counters)?;
+    }
     let failed = stats.client.failed() + stats.server.failed();
     let mismatched = stats.client.mismatched + stats.server.mismatched;
     if failed + mismatched > 0 {
@@ -641,6 +669,9 @@ fn print_summary(s: &TcpStats) {
             String::new()
         }
     );
+    if let Some(line) = crate::latency::drops_line(&s.drops) {
+        eprintln!("  {line}");
+    }
     for line in crate::impair_lines(&s.impair) {
         eprintln!("  {line}");
     }
@@ -861,6 +892,9 @@ pub fn print_tcp_run(r: &TcpRunInfo) {
     println!("  session: {}", r.program);
     if let Some(e) = &r.error {
         println!("  error: {e}");
+    }
+    if !r.drops.is_empty() {
+        println!("  dropped at: {}", r.drops.describe());
     }
     for line in crate::port_impair_lines(&r.impair) {
         println!("  {line}");

@@ -184,8 +184,8 @@ pub fn cmd_bench(args: BenchArgs) -> Result<()> {
     let mut info = RunInfo::new();
     ferotrx_io::describe_host(&mut info);
     info.command = Some(std::env::args().collect::<Vec<_>>().join(" "));
-    info.profile = Some(args.profile.display().to_string());
-    info.profile_text = Some(text);
+    info.set_profile(args.profile.display().to_string(), Some(text));
+    info.workers = Some(workers);
     info.backend = Some(match &link_service {
         Some(svc) => format!("{detail}; port {}", svc.detail()),
         None => detail,

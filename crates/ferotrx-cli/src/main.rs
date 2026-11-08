@@ -971,18 +971,13 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
         let link = args.link.settings(&Default::default())?;
         let (job, detail) =
             spawn_stream(make, &output, &args.send, &link, linktype, &args.common, rx)?;
-        let (stats, report) = watch(job, &args.common)?;
+        let (stats, mut report) = watch(job, &args.common)?;
         print_line(done_label(&stats.total), &stats.total);
-        if let Some(mut r) = report {
-            r.print();
-            if let Some(path) = &args.rx.report {
-                r.info = Some(latency::run_info(
-                    Some(iface),
-                    args.rx.rx.as_deref(),
-                    Some(detail),
-                ));
-                r.save(path)?;
-            }
+        report.print();
+        if let Some(path) = &args.rx.report {
+            let mut info = latency::run_info(Some(iface), args.rx.rx.as_deref(), Some(detail));
+            info.set_profile(format!("built {}", specs.join(" ")), None);
+            report.save(path, info)?;
         }
         return Ok(());
     }
@@ -1167,23 +1162,20 @@ fn cmd_replay(args: ReplayArgs) -> Result<()> {
         &args.common,
         rx,
     )?;
-    let (stats, report) = watch(job, &args.common)?;
+    let (stats, mut report) = watch(job, &args.common)?;
     if let Some(c) = capture {
         c.finish(args.common.quiet)?;
     }
     print_line(done_label(&stats.total), &stats.total);
-    if let Some(mut r) = report {
-        r.print();
-        if let Some(path) = &args.rx.report {
-            let mut info = latency::run_info(
-                args.output.iface.as_deref(),
-                args.rx.rx.as_deref(),
-                Some(detail),
-            );
-            info.profile = Some(format!("capture {}", args.file.display()));
-            r.info = Some(info);
-            r.save(path)?;
-        }
+    report.print();
+    if let Some(path) = &args.rx.report {
+        let mut info = latency::run_info(
+            args.output.iface.as_deref(),
+            args.rx.rx.as_deref(),
+            Some(detail),
+        );
+        info.set_profile(format!("capture {}", args.file.display()), None);
+        report.save(path, info)?;
     }
     Ok(())
 }
@@ -1264,7 +1256,7 @@ fn cmd_run(args: RunArgs) -> Result<()> {
     }
     let job = started.job;
     let names = job.stream_names().to_vec();
-    let (stats, report) = watch(job, &args.common)?;
+    let (stats, mut report) = watch(job, &args.common)?;
     if let Some(c) = capture {
         c.finish(args.common.quiet)?;
     }
@@ -1272,19 +1264,18 @@ fn cmd_run(args: RunArgs) -> Result<()> {
         print_line(&format!("  {name}"), st);
     }
     print_line(done_label(&stats.total), &stats.total);
-    if let Some(mut r) = report {
-        r.print();
-        if let Some(path) = &args.rx.report {
-            let mut info = latency::run_info(
-                args.output.iface.as_deref(),
-                args.rx.rx.as_deref(),
-                Some(started.detail),
-            );
-            info.profile = Some(args.profile.display().to_string());
-            info.profile_text = std::fs::read_to_string(&args.profile).ok();
-            r.info = Some(info);
-            r.save(path)?;
-        }
+    report.print();
+    if let Some(path) = &args.rx.report {
+        let mut info = latency::run_info(
+            args.output.iface.as_deref(),
+            args.rx.rx.as_deref(),
+            Some(started.detail),
+        );
+        info.set_profile(
+            args.profile.display().to_string(),
+            std::fs::read_to_string(&args.profile).ok(),
+        );
+        report.save(path, info)?;
     }
     Ok(())
 }
@@ -1308,9 +1299,8 @@ fn run_config(common: &CommonArgs) -> Result<RunConfig> {
 }
 
 /// Waits for a job, printing a progress line every second unless quiet.
-/// Returns the final counters, and the loss and latency report if the job
-/// has a receiver.
-fn watch(job: Job, common: &CommonArgs) -> Result<(RunStats, Option<latency::Report>)> {
+/// Returns the final counters and the run's record.
+fn watch(job: Job, common: &CommonArgs) -> Result<(RunStats, latency::Report)> {
     while !job.wait(Some(Duration::from_secs(1))) {
         if !common.quiet {
             let mut line = stats_line("progress", &job.stats().total);
@@ -1351,6 +1341,9 @@ fn stats_line(label: &str, s: &ReplayStats) -> String {
     );
     if s.send_errors > 0 {
         line.push_str(&format!(", {} send errors", s.send_errors));
+    }
+    if s.late_skipped > 0 {
+        line.push_str(&format!(", {} skipped late", s.late_skipped));
     }
     line
 }

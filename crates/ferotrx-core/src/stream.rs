@@ -326,6 +326,9 @@ pub struct RunConfig {
 pub struct RunStats {
     pub total: ReplayStats,
     pub streams: Vec<ReplayStats>,
+    /// What the sink's layers dropped since it was opened
+    /// ([`PacketSink::drops`]).
+    pub drops: crate::DropCounters,
 }
 
 /// Runs `streams` together into `sink`, each at its own rate, and returns the counters.
@@ -436,6 +439,7 @@ where
     let mut stats = RunStats {
         total: ReplayStats::default(),
         streams: vec![ReplayStats::default(); streams.len()],
+        drops: Default::default(),
     };
     let mut lanes: Vec<Lane> = streams
         .iter()
@@ -508,7 +512,9 @@ where
                 if lanes[i].pending || lanes[i].done {
                     continue;
                 }
-                fill(&mut streams[i], &mut lanes[i], &stats.streams[i], start)?;
+                let skipped = fill(&mut streams[i], &mut lanes[i], &stats.streams[i], start)?;
+                stats.streams[i].late_skipped += skipped;
+                stats.total.late_skipped += skipped;
                 if lanes[i].done && lanes[i].active {
                     lanes[i].active = false;
                     if let Some(j) = next_to_start(&streams[i], &mut lanes[i]) {
@@ -562,6 +568,7 @@ where
                 interval,
                 start,
                 &mut stats,
+                sink,
                 impaired,
                 &impairers,
                 &mut progress,
@@ -674,6 +681,7 @@ where
             interval,
             start,
             &mut stats,
+            sink,
             impaired,
             &impairers,
             &mut progress,
@@ -701,6 +709,7 @@ where
         index: stats.total.packets,
         source,
     })?;
+    stats.drops = sink.drops();
     set_elapsed(&mut stats, start.elapsed());
     if impaired {
         set_impair(&mut stats, &impairers);
@@ -721,6 +730,7 @@ fn report<F: FnMut(&RunStats)>(
     interval: Duration,
     start: Instant,
     stats: &mut RunStats,
+    sink: &mut dyn PacketSink,
     impaired: bool,
     impairers: &[Option<Impairer>],
     progress: &mut F,
@@ -729,6 +739,7 @@ fn report<F: FnMut(&RunStats)>(
         let now = Instant::now();
         if now >= at {
             set_elapsed(stats, now - start);
+            stats.drops = sink.drops();
             if impaired {
                 set_impair(stats, impairers);
             }
@@ -789,8 +800,9 @@ fn begin(
 
 /// Reads and transforms the next packet of `stream`, and works out when it
 /// leaves. With a [`max_lag`](Stream::max_lag), packets due longer ago than
-/// that are skipped.
-fn fill(stream: &mut Stream<'_>, lane: &mut Lane, st: &ReplayStats, start: Instant) -> Result<()> {
+/// that are skipped; returns how many.
+fn fill(stream: &mut Stream<'_>, lane: &mut Lane, st: &ReplayStats, start: Instant) -> Result<u64> {
+    let mut skipped = 0;
     loop {
         fill_one(stream, lane, st, start)?;
         let late = match stream.max_lag {
@@ -800,9 +812,10 @@ fn fill(stream: &mut Stream<'_>, lane: &mut Lane, st: &ReplayStats, start: Insta
             _ => false,
         };
         if !late {
-            return Ok(());
+            return Ok(skipped);
         }
         lane.pending = false;
+        skipped += 1;
     }
 }
 

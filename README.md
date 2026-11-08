@@ -64,7 +64,10 @@ each milestone added and what comes next.
   announce them, join multicast groups and act as IPv6 routers and DHCP or
   DHCPv6 servers.
   [Guide](docs/host-emulation.md)
-* **Loss and latency** per stream, from a signature in each packet.
+* **Loss and latency** per stream, from a signature in each packet, with
+  the loss split into what the generator never sent, what the network lost
+  and what the receiver dropped (NIC, AF_XDP ring and capture buffer
+  counters), and a record of every run (`--report`).
   [Guide](docs/loss-latency.md)
 * **Benchmarking**: RFC 2544 throughput, latency, frame loss and
   back-to-back, with IMIX and other size mixes. [Guide](docs/benchmarking.md)
@@ -170,7 +173,7 @@ The manual is in [docs/](docs/README.md):
 | [TCP and UDP over AF_XDP and DPDK](docs/fast-ports.md) | fast ports for stateful runs |
 | [One run on several cores](docs/multi-core.md) | `--workers`, splitting streams and flows |
 | [Capturing traffic](docs/capture.md) | `capture`, BPF filters, Wireshark, remote and fleet captures |
-| [Loss and latency](docs/loss-latency.md) | signatures, `--rx`, `rx` |
+| [Loss and latency](docs/loss-latency.md) | signatures, `--rx`, `rx`, where frames were lost, run records |
 | [Benchmarking](docs/benchmarking.md) | `bench`, RFC 2544 |
 | [Y.1564 service activation](docs/y1564.md) | `y1564`, CIR/EIR, policing, availability |
 | [Scenarios and regression tests](docs/scenarios.md) | `scenario` |
@@ -180,6 +183,8 @@ The manual is in [docs/](docs/README.md):
 | [The desktop GUI](docs/gui.md) | `ferotrx-gui`: ports, stream and packet editor, application profiles, benchmarks, Y.1564, workspaces |
 | [Using FeroTRX as a library](docs/library.md) | the Rust API |
 | [Lab scripts](docs/lab-scripts.md) | network namespace labs, as run in CI |
+| [Feature status](docs/status.md) | done, partial, experimental, planned |
+| [Interoperability](docs/interop.md) | the real implementations each protocol is tested against |
 
 Every command also has `--help`.
 

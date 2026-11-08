@@ -13,6 +13,8 @@ use ferotrx_core::{
     PortImpairStats, ReplayStats, RunStats, RxStats, TcpSideStats, TcpStats, UdpSideStats,
     UdpStats,
 };
+/// The drop counters and loss report in run, rx, tcp and udp info.
+pub use ferotrx_core::{DropCounters, LossReport};
 
 /// Version of the method set below. Bumped when a method changes incompatibly.
 pub const PROTOCOL_VERSION: u32 = 2;
@@ -702,6 +704,14 @@ pub struct RunInfo {
     /// The rate multiplier `run.update` set for the whole run (1 = as asked).
     #[serde(default = "one_f64", skip_serializing_if = "is_one_f64")]
     pub multiplier: f64,
+    /// What every layer dropped: the sending side's, and the receiving
+    /// side's when the run has a receiver (see `ferotrx_core::DropCounters`).
+    #[serde(default, skip_serializing_if = "DropCounters::is_empty")]
+    pub drops: DropCounters,
+    /// Where the frames of the streams with signatures were lost
+    /// (generator, network, receiver), when the run has a receiver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss: Option<LossReport>,
 }
 
 fn one_f64() -> f64 {
@@ -853,6 +863,9 @@ pub struct Counters {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub tagged: u64,
     pub send_errors: u64,
+    /// Packets skipped for being later than the stream's `max_lag`: never sent.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub late_skipped: u64,
     pub loops_completed: u64,
     pub elapsed_s: f64,
     /// Average packets per second since the run started.
@@ -868,6 +881,7 @@ impl From<&ReplayStats> for Counters {
             bytes: s.bytes,
             tagged: s.tagged,
             send_errors: s.send_errors,
+            late_skipped: s.late_skipped,
             loops_completed: s.loops_completed,
             elapsed_s: s.elapsed.as_secs_f64(),
             pps: s.pps(),
@@ -930,6 +944,10 @@ pub struct RxCounters {
     /// Frames without a latency signature (other traffic on the interface).
     pub untagged: u64,
     pub elapsed_s: f64,
+    /// What the receiving NIC, ring or capture buffer dropped before the
+    /// frames were read.
+    #[serde(default, skip_serializing_if = "DropCounters::is_empty")]
+    pub drops: DropCounters,
 }
 
 impl RxCounters {
@@ -940,6 +958,7 @@ impl RxCounters {
             bytes: s.bytes,
             untagged: s.untagged,
             elapsed_s: s.elapsed.as_secs_f64(),
+            drops: s.drops.rx_side(),
         }
     }
 }
@@ -1182,6 +1201,10 @@ pub struct TcpRunInfo {
     /// server's clock; absent while it waits for its `start_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<f64>,
+    /// What every layer of the ports dropped (NIC, AF_XDP ring, capture
+    /// buffer); see `ferotrx_core::DropCounters`.
+    #[serde(default, skip_serializing_if = "DropCounters::is_empty")]
+    pub drops: DropCounters,
 }
 
 /// The counters of one template of a [`TcpRunInfo`].
@@ -1474,7 +1497,8 @@ impl From<&TcpSideStats> for TcpCounters {
 }
 
 impl TcpRunInfo {
-    pub(crate) fn fill(&mut self, s: &TcpStats) {
+    /// Puts the counters of `s` in.
+    pub fn fill(&mut self, s: &TcpStats) {
         self.client = (&s.client).into();
         self.server = (&s.server).into();
         self.templates = s
@@ -1494,6 +1518,7 @@ impl TcpRunInfo {
         self.cps = s.cps();
         self.hosts = s.hosts.iter().map(HostInfo::from).collect();
         self.impair = PortImpairCounters::of(&s.impair);
+        self.drops = s.drops;
     }
 }
 
@@ -1603,6 +1628,10 @@ pub struct UdpRunInfo {
     /// server's clock; absent while it waits for its `start_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<f64>,
+    /// What every layer of the ports dropped (NIC, AF_XDP ring, capture
+    /// buffer); see `ferotrx_core::DropCounters`.
+    #[serde(default, skip_serializing_if = "DropCounters::is_empty")]
+    pub drops: DropCounters,
 }
 
 /// The counters of one template of a [`UdpRunInfo`].
@@ -1662,7 +1691,8 @@ impl From<&UdpSideStats> for UdpCounters {
 }
 
 impl UdpRunInfo {
-    pub(crate) fn fill(&mut self, s: &UdpStats) {
+    /// Puts the counters of `s` in.
+    pub fn fill(&mut self, s: &UdpStats) {
         self.client = (&s.client).into();
         self.server = (&s.server).into();
         self.templates = s
@@ -1682,6 +1712,7 @@ impl UdpRunInfo {
         self.tps = s.tps();
         self.hosts = s.hosts.iter().map(HostInfo::from).collect();
         self.impair = PortImpairCounters::of(&s.impair);
+        self.drops = s.drops;
     }
 }
 

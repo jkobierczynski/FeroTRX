@@ -41,6 +41,9 @@ pub struct ReplayStats {
     pub packets: u64,
     pub bytes: u64,
     pub send_errors: u64,
+    /// Packets skipped for being later than the stream's
+    /// [`max_lag`](crate::Stream::max_lag): never sent.
+    pub late_skipped: u64,
     pub loops_completed: u64,
     /// Packets sent with a latency [`Signature`](crate::Signature).
     pub tagged: u64,

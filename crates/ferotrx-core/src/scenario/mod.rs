@@ -53,8 +53,8 @@ use serde::Deserialize;
 use crate::{parse_duration, Error, Profile, Result, TcpProfile, UdpProfile};
 
 pub use collect::{
-    tcp_metrics, tcp_summary, traffic_metrics, traffic_summary, udp_metrics, udp_summary,
-    y1564_metrics, y1564_summary,
+    loss_metrics, tcp_metrics, tcp_summary, traffic_metrics, traffic_summary, udp_metrics,
+    udp_summary, y1564_metrics, y1564_summary,
 };
 pub use metric::{
     Better, CheckKind, Condition, MetricDef, Metrics, Op, Unit, TCP_METRICS, TRAFFIC_METRICS,

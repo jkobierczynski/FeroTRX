@@ -127,8 +127,7 @@ impl BenchRun {
         let mut info = RunInfo::new();
         ferotrx_io::describe_host(&mut info);
         info.command = Some("bench.start".into());
-        info.profile = Some(job.profile_name.clone());
-        info.profile_text = Some(job.profile_text.clone());
+        info.set_profile(job.profile_name.clone(), Some(job.profile_text.clone()));
         info.backend = Some(match &link {
             Some(svc) => format!("{detail}; port {}", svc.detail()),
             None => detail,

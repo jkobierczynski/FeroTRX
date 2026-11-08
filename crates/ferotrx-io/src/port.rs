@@ -36,6 +36,7 @@ mod pcap_port {
     /// tell them apart (Linux, macOS).
     pub struct PcapPort {
         capture: pcap::Capture<pcap::Active>,
+        nic: crate::nic::NicCounters,
     }
 
     impl PcapPort {
@@ -51,7 +52,10 @@ mod pcap_port {
             // Npcap cannot filter by direction; the engine ignores its own frames.
             let _ = capture.direction(pcap::Direction::In);
             let capture = capture.setnonblock()?;
-            Ok(Self { capture })
+            Ok(Self {
+                capture,
+                nic: crate::nic::NicCounters::new(name),
+            })
         }
     }
 
@@ -77,6 +81,12 @@ mod pcap_port {
             // Frames the kernel had for this capture but no room for.
             self.capture.stats().ok().map(|s| u64::from(s.dropped))
         }
+
+        fn drops(&mut self) -> ferotrx_core::DropCounters {
+            let mut d = self.nic.since_start();
+            d.capture_dropped = self.rx_dropped().unwrap_or(0);
+            d
+        }
     }
 }
 
@@ -89,6 +99,14 @@ mod pcap_receiver {
 
     use ferotrx_core::{PacketReceiver, SinkError};
 
+    /// Bytes kept of each received frame: a jumbo frame and its tags,
+    /// enough for the signature at the end of its IP payload. In immediate
+    /// mode Linux libpcap gives every frame a ring slot this big (on an
+    /// interface with offloads it would otherwise be 64 KiB), so with the
+    /// 64 MiB buffer the ring holds about 6900 frames instead of 256: a
+    /// receiver that stalls for a moment (a VM) no longer drops at once.
+    const RX_SNAPLEN: i32 = 9600;
+
     /// Receives on a network interface through libpcap or Npcap, in
     /// promiscuous mode, for measuring loss and latency. Each frame comes with
     /// the time the kernel (or Npcap's driver) took it in, which is more
@@ -96,6 +114,7 @@ mod pcap_receiver {
     /// interface are left out where the system can tell them apart.
     pub struct PcapReceiver {
         capture: pcap::Capture<pcap::Active>,
+        nic: crate::nic::NicCounters,
     }
 
     impl PcapReceiver {
@@ -105,8 +124,8 @@ mod pcap_receiver {
                 Ok(pcap::Capture::from_device(dev.as_str())?
                     .promisc(true)
                     .immediate_mode(true)
-                    .snaplen(65535)
-                    .buffer_size(16 << 20))
+                    .snaplen(RX_SNAPLEN)
+                    .buffer_size(64 << 20))
             };
             // Windows: Npcap's default time stamps count from the
             // performance counter and drift away from the system clock that
@@ -140,11 +159,22 @@ mod pcap_receiver {
             // waits for the next packet). The naps do not touch the
             // timestamps, which the kernel takes.
             let capture = capture.setnonblock()?;
-            Ok(Self { capture })
+            Ok(Self {
+                capture,
+                nic: crate::nic::NicCounters::new(name),
+            })
         }
     }
 
     impl PacketReceiver for PcapReceiver {
+        fn drops(&mut self) -> ferotrx_core::DropCounters {
+            let mut d = self.nic.rx();
+            // ps_drop: no room in the capture buffer. ps_ifdrop is left
+            // out: Linux libpcap reads it from the NIC counters above.
+            d.capture_dropped = self.capture.stats().map_or(0, |s| u64::from(s.dropped));
+            d
+        }
+
         fn recv(&mut self, buf: &mut Vec<u8>) -> Result<Option<Duration>, SinkError> {
             match self.capture.next_packet() {
                 Ok(p) => {

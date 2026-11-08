@@ -361,6 +361,9 @@ pub struct UdpStats {
     /// Frames the ports dropped before the engine could read them (a full
     /// capture buffer): lost on this machine, not on the network.
     pub rx_dropped: u64,
+    /// What every layer of the ports dropped (`rx_dropped` is their
+    /// capture buffers'), see [`DropCounters`](crate::DropCounters).
+    pub drops: crate::DropCounters,
     /// What the ports' impairments did ([`PortImpair`](crate::PortImpair)):
     /// frames sent and frames received; empty without them.
     pub impair: crate::PortImpairStats,
@@ -1275,9 +1278,11 @@ impl UdpEngine {
         self.stats.stopped = stopped;
     }
 
-    /// Sets the frames the ports dropped before the engine read them.
-    pub fn set_rx_dropped(&mut self, frames: u64) {
-        self.stats.rx_dropped = frames;
+    /// Sets what the ports' layers dropped (the capture buffers' drops
+    /// are also `rx_dropped`).
+    pub fn set_drops(&mut self, drops: &crate::DropCounters) {
+        self.stats.rx_dropped = drops.capture_dropped;
+        self.stats.drops = *drops;
     }
 
     /// Puts what the ports' impairments did in the counters.
@@ -1860,8 +1865,8 @@ impl PortEngine for UdpEngine {
     fn set_elapsed(&mut self, elapsed: Duration, stopped: bool) {
         UdpEngine::set_elapsed(self, elapsed, stopped)
     }
-    fn set_rx_dropped(&mut self, frames: u64) {
-        UdpEngine::set_rx_dropped(self, frames)
+    fn set_drops(&mut self, drops: &crate::DropCounters) {
+        UdpEngine::set_drops(self, drops)
     }
     fn set_impairments(&mut self, stats: &crate::PortImpairStats) {
         UdpEngine::set_impairments(self, stats)

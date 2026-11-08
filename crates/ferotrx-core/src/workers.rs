@@ -57,6 +57,7 @@ impl MergeStats for ReplayStats {
         self.packets += o.packets;
         self.bytes += o.bytes;
         self.send_errors += o.send_errors;
+        self.late_skipped += o.late_skipped;
         self.loops_completed = self.loops_completed.max(o.loops_completed);
         self.tagged += o.tagged;
         self.elapsed = self.elapsed.max(o.elapsed);
@@ -77,6 +78,7 @@ impl MergeStats for RunStats {
         let loops = self.streams.iter().map(|s| s.loops_completed).sum();
         self.total.merge(&o.total);
         self.total.loops_completed = loops;
+        self.drops.merge_workers(&o.drops);
     }
 }
 

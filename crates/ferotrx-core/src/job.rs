@@ -221,6 +221,7 @@ impl Job {
         let empty = RunStats {
             total: Default::default(),
             streams: vec![Default::default(); first.len()],
+            drops: Default::default(),
         };
         let shared = Arc::new(Shared {
             live: Mutex::new(Live {
@@ -346,6 +347,14 @@ impl Job {
             Some(rx) => FlowReport::for_run(&self.names, &self.flows, &self.stats(), &rx),
             None => Vec::new(),
         }
+    }
+
+    /// Where the frames of the streams with signatures were lost (the
+    /// generator, the network or the receiver), when the job has a receiver.
+    /// While the job runs, frames on their way count as network loss.
+    pub fn loss(&self) -> Option<crate::LossReport> {
+        let rx = self.rx_stats()?;
+        crate::LossReport::for_run(&self.flows, &self.stats(), &rx)
     }
 
     /// The latest counters. While the job runs they are at most

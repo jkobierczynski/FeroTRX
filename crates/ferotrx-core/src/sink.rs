@@ -21,6 +21,13 @@ pub trait PacketSink {
     fn idle(&mut self) -> Result<(), SinkError> {
         Ok(())
     }
+
+    /// Frames the layers below dropped on the way out since the sink was
+    /// opened (the NIC's, an AF_XDP ring's); zero where there are no
+    /// counters.
+    fn drops(&mut self) -> crate::DropCounters {
+        crate::DropCounters::default()
+    }
 }
 
 impl<S: PacketSink + ?Sized> PacketSink for &mut S {
@@ -33,6 +40,9 @@ impl<S: PacketSink + ?Sized> PacketSink for &mut S {
     fn idle(&mut self) -> Result<(), SinkError> {
         (**self).idle()
     }
+    fn drops(&mut self) -> crate::DropCounters {
+        (**self).drops()
+    }
 }
 
 impl<S: PacketSink + ?Sized> PacketSink for Box<S> {
@@ -44,6 +54,9 @@ impl<S: PacketSink + ?Sized> PacketSink for Box<S> {
     }
     fn idle(&mut self) -> Result<(), SinkError> {
         (**self).idle()
+    }
+    fn drops(&mut self) -> crate::DropCounters {
+        (**self).drops()
     }
 }
 

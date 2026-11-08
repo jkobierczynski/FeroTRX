@@ -9,6 +9,9 @@ The [README](../README.md) has the overview and a quickstart.
   DPDK, permissions to send.
 * [Lab scripts](lab-scripts.md): try every feature in Linux network
   namespaces, without a lab.
+* [Feature status](status.md): what is done, partial, experimental or
+  planned; [interoperability](interop.md): the real implementations each
+  protocol is tested against.
 
 ## Stateless traffic
 
@@ -39,7 +42,8 @@ The [README](../README.md) has the overview and a quickstart.
 
 ## Measuring and testing
 
-* [Loss and latency](loss-latency.md): signatures, `--rx`, `ferotrx rx`.
+* [Loss and latency](loss-latency.md): signatures, `--rx`, `ferotrx rx`,
+  where frames were lost, run records (`--report`).
 * [Call quality, jitter and latency](call-quality.md): RTP loss, jitter,
   late packets and RTCP round trips per call, E-model R and MOS, TCP
   connect and first-byte times.

@@ -47,6 +47,7 @@ mod capture;
 mod host;
 mod lab;
 mod link;
+pub mod nic;
 mod port;
 #[cfg(windows)]
 pub mod windows;
@@ -402,6 +403,7 @@ mod interface {
         capture: pcap::Capture<pcap::Active>,
         #[cfg(windows)]
         queue: Option<SendQueue>,
+        nic: crate::nic::NicCounters,
     }
 
     /// Packets queued for one `pcap_sendqueue_transmit`.
@@ -455,6 +457,7 @@ mod interface {
                 capture,
                 #[cfg(windows)]
                 queue,
+                nic: crate::nic::NicCounters::new(name),
             })
         }
 
@@ -527,6 +530,10 @@ mod interface {
             #[cfg(windows)]
             self.transmit()?;
             Ok(())
+        }
+
+        fn drops(&mut self) -> ferotrx_core::DropCounters {
+            self.nic.tx()
         }
     }
 

@@ -207,6 +207,8 @@ fn pause_resume_and_change_the_rate_of_a_run() {
         .unwrap();
     let paused = c.pause(run.id, &[]).unwrap();
     assert!(paused.paused);
+    // Counters are up to 100 ms old: let the ones from before the pause go by.
+    std::thread::sleep(Duration::from_millis(250));
     let held = c.stats(run.id).unwrap().total.packets;
     std::thread::sleep(Duration::from_millis(200));
     assert!(c.stats(run.id).unwrap().total.packets <= held + 2);

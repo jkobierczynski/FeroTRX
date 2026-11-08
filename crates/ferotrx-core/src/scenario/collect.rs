@@ -213,8 +213,14 @@ pub fn udp_summary(s: &UdpStats) -> String {
 
 /// The metrics of a traffic run with a receiver
 /// ([`TRAFFIC_METRICS`](super::TRAFFIC_METRICS)): what was sent, what the
-/// receiver saw, and the streams' loss and latency.
-pub fn traffic_metrics(run: &RunStats, rx: Option<&RxStats>, flows: &[FlowReport]) -> Metrics {
+/// receiver saw, the streams' loss and latency, and where the frames were
+/// lost (`loss`, see [`Job::loss`](crate::Job::loss)).
+pub fn traffic_metrics(
+    run: &RunStats,
+    rx: Option<&RxStats>,
+    flows: &[FlowReport],
+    loss: Option<&crate::LossReport>,
+) -> Metrics {
     let t = &run.total;
     let mut m = Metrics::new();
     put(&mut m, "tx_packets", t.packets as f64);
@@ -240,6 +246,9 @@ pub fn traffic_metrics(run: &RunStats, rx: Option<&RxStats>, flows: &[FlowReport
     let ooo: u64 = flows.iter().map(|f| f.out_of_order).sum();
     put(&mut m, "out_of_order", ooo as f64);
     put(&mut m, "out_of_order_pct", pct(ooo, got));
+    if let Some(l) = loss {
+        loss_metrics(&mut m, l);
+    }
     if let Some(rx) = rx {
         let secs = t.elapsed.as_secs_f64();
         let mbps = if secs > 0.0 {
@@ -280,6 +289,18 @@ pub fn traffic_metrics(run: &RunStats, rx: Option<&RxStats>, flows: &[FlowReport
         }
     }
     m
+}
+
+/// `generator_loss`, `network_loss`, `receiver_loss` and their `_pct`.
+pub fn loss_metrics(m: &mut Metrics, l: &crate::LossReport) {
+    for (name, v) in [
+        ("generator_loss", l.generator),
+        ("network_loss", l.network),
+        ("receiver_loss", l.receiver),
+    ] {
+        put(m, name, v as f64);
+        put(m, &format!("{name}_pct"), l.pct(v));
+    }
 }
 
 /// One line on a traffic run.
@@ -409,8 +430,9 @@ mod tests {
                 ..Default::default()
             },
             streams: Vec::new(),
+            drops: Default::default(),
         };
-        let m = traffic_metrics(&run, None, &[]);
+        let m = traffic_metrics(&run, None, &[], None);
         assert_eq!(m["tx_packets"], 10.0);
         assert_eq!(m["rx_packets"], 0.0);
         assert_eq!(m["loss_pct"], 0.0);

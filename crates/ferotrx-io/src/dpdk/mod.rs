@@ -46,6 +46,7 @@ extern "C" {
         spin_limit: u64,
     ) -> c_int;
     fn ftrx_dpdk_stop(port: u16, queue: u16);
+    fn ftrx_dpdk_stats(port: u16, out: *mut u64) -> c_int;
     fn ftrx_dpdk_promisc(port: u16) -> c_int;
     fn ftrx_dpdk_recv(port: u16, out: *mut u8, slot: usize, lens: *mut u16, max: u16) -> c_int;
 }
@@ -129,6 +130,8 @@ pub struct DpdkSink {
     ends: Vec<usize>,
     thread: Option<ThreadId>,
     describe: String,
+    /// The port's counters when the sink opened.
+    start: ferotrx_core::DropCounters,
 }
 
 // The pool is DPDK's and safe to use from any thread; the sink is used by one at a time.
@@ -190,6 +193,7 @@ impl DpdkSink {
                 config.queue,
                 if r == 0 { " (link is down)" } else { "" }
             ),
+            start: port_drops(port),
         })
     }
 
@@ -272,6 +276,26 @@ impl PacketSink for DpdkSink {
 
     fn flush(&mut self) -> Result<(), SinkError> {
         self.submit()
+    }
+
+    fn drops(&mut self) -> ferotrx_core::DropCounters {
+        port_drops(self.port).since(&self.start).tx_side()
+    }
+}
+
+/// A port's drop counters (`rte_eth_stats_get`): `imissed` and `rx_nombuf`
+/// (no room), `ierrors`, `oerrors`. Port-wide: every queue's.
+fn port_drops(port: u16) -> ferotrx_core::DropCounters {
+    let mut v = [0u64; 4];
+    // SAFETY: room for the four counters the shim writes.
+    if unsafe { ftrx_dpdk_stats(port, v.as_mut_ptr()) } < 0 {
+        return ferotrx_core::DropCounters::default();
+    }
+    ferotrx_core::DropCounters {
+        nic_rx_missed: v[0] + v[3],
+        nic_rx_errors: v[1],
+        nic_tx_errors: v[2],
+        ..Default::default()
     }
 }
 
@@ -367,5 +391,9 @@ impl PacketPort for DpdkPort {
 
     fn describe(&self) -> Option<String> {
         Some(DpdkPort::describe(self))
+    }
+
+    fn drops(&mut self) -> ferotrx_core::DropCounters {
+        port_drops(self.tx.port).since(&self.tx.start)
     }
 }

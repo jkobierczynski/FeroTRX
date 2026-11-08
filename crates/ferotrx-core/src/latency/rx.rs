@@ -19,11 +19,21 @@ pub trait PacketReceiver: Send {
     /// while. Must not block for more than about 50 ms, so a receiver can be
     /// stopped quickly.
     fn recv(&mut self, buf: &mut Vec<u8>) -> std::result::Result<Option<Duration>, SinkError>;
+
+    /// Frames the layers below dropped before they could be read, since the
+    /// receiver was opened (the NIC's, an AF_XDP ring's, the capture
+    /// buffer's); zero where there are no counters.
+    fn drops(&mut self) -> crate::DropCounters {
+        crate::DropCounters::default()
+    }
 }
 
 impl<R: PacketReceiver + ?Sized> PacketReceiver for Box<R> {
     fn recv(&mut self, buf: &mut Vec<u8>) -> std::result::Result<Option<Duration>, SinkError> {
         (**self).recv(buf)
+    }
+    fn drops(&mut self) -> crate::DropCounters {
+        (**self).drops()
     }
 }
 
@@ -41,6 +51,10 @@ impl<P: PacketPort> PacketReceiver for PortReceiver<P> {
             std::thread::sleep(Duration::from_micros(200));
             Ok(None)
         }
+    }
+
+    fn drops(&mut self) -> crate::DropCounters {
+        self.0.drops()
     }
 }
 
@@ -268,10 +282,12 @@ fn receive(
         let now = Instant::now();
         if now >= next_report {
             stats.elapsed = now - start;
+            stats.drops = receiver.drops();
             shared.lock().stats = stats.clone();
             next_report = now + RX_STATS_INTERVAL;
         }
     }
     stats.elapsed = start.elapsed();
+    stats.drops = receiver.drops();
     Ok(stats)
 }

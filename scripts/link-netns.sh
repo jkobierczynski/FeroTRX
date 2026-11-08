@@ -16,9 +16,13 @@
 #    loss through the router.
 # 3. The same through `ferotrx serve`: `ctl update -m 3` triples the rate of
 #    the running run, `ctl pause` holds it and `ctl resume` goes on.
+# 4. Loss made at a known place lands in the right column of the loss
+#    report: the router drops every 20th frame (network), then the
+#    router's port goes down for half a second, so the sending veth drops
+#    what it is handed (generator, counted in its tx_dropped).
 #
 # Usage: sudo scripts/link-netns.sh [path/to/ferotrx] [extra ferotrx run options]
-# Needs root, ip (iproute2), ping and jq. Removes the lab when done.
+# Needs root, ip (iproute2), iptables, ping and jq. Removes the lab when done.
 #
 # IPV6=1      the same over IPv6 (fd00:51:1::/64, fd00:51:2::/64): neighbor
 #             discovery instead of ARP, ping -6.
@@ -226,9 +230,24 @@ ctl() { "$BIN" ctl -c $CTL "$@"; }
 ctl load "$WORK/steady.toml" -n steady >/dev/null
 id=$(ctl --json start steady -i c0 --ip "$(a 1 2)/$plen" --gateway "$(a 1 1)" | jq .id)
 ctl stats "$id" | sed -n '1,2p'
-packets() { ctl --json stats "$id" | jq .total.packets; }
-# Packets sent in 2 s.
-rate2s() { p0=$(packets); sleep 2; p1=$(packets); echo $((p1 - p0)); }
+# Packets and the run's own clock, from one snapshot of its counters.
+snap() { ctl --json stats "$id" | jq -r '"\(.total.packets) \(.total.elapsed_s)"'; }
+# Packets per 2 s: the median of three 1 s windows, each measured by the
+# run's clock between two snapshots. A slow `ctl` call (a busy VM) makes a
+# window longer, not the rate higher, and a window where the VM stalled the
+# sender (it catches up in the next) does not decide the result.
+rate2s() {
+    s0=$(snap); sleep 1; s1=$(snap); sleep 1; s2=$(snap); sleep 1; s3=$(snap)
+    echo "$s0 $s1 $s2 $s3" | awk '
+        function r(p0, e0, p1, e1) { return (e1 > e0) ? (p1 - p0) * 2 / (e1 - e0) : (p1 - p0) * 2 }
+        {
+            a = r($1, $2, $3, $4); b = r($3, $4, $5, $6); c = r($5, $6, $7, $8)
+            m = a
+            if ((b >= a && b <= c) || (b <= a && b >= c)) m = b
+            else if ((c >= a && c <= b) || (c <= a && c >= b)) m = c
+            printf "%d\n", m
+        }'
+}
 sleep 0.5
 before=$(rate2s)
 ctl update "$id" -m 3 >/dev/null
@@ -251,4 +270,45 @@ check "about 3000 pps after update -m 3" '.after > 5100 and .after < 6600' "$r2"
 check "nothing sent while paused" '.held <= 2' "$r2" .
 check "3000 pps again after resume" '.resumed > 5100 and .resumed < 6600' "$r2" .
 check "the run reports its multiplier and port" '.multiplier == 3 and (.link | test("next hop"))' "$info" '{multiplier, link}'
+kill "$SERVER" 2>/dev/null || true
+wait "$SERVER" 2>/dev/null || true
+SERVER=
+
+echo "== 4. where frames are lost"
+cat > "$WORK/probe.toml" <<EOF
+format = 1
+
+[[stream]]
+name = "probe"
+packet = "$pkt"
+rate = "2000pps"
+loops = 0
+latency = 1
+EOF
+if [ "${IPV6:-}" = 1 ]; then ipt=ip6tables; else ipt=iptables; fi
+probe() {
+    "$BIN" run "$WORK/probe.toml" -i c0 --ip "$(a 1 2)/$plen" --gateway "$(a 1 1)" \
+        --rx s0 -d 3s -q --ignore-errors --report "$1" > "$WORK/probe.txt" 2>&1 \
+        || { cat "$WORK/probe.txt"; exit 1; }
+    grep "lost .* of" "$WORK/probe.txt" || true
+}
+r $ipt -I FORWARD -m statistic --mode nth --every 20 --packet 0 -j DROP
+probe "$WORK/net.json"
+dropped=$(r $ipt -L FORWARD -v -n -x | awk '$3 == "DROP" {print $1; exit}')
+r $ipt -D FORWARD -m statistic --mode nth --every 20 --packet 0 -j DROP
+echo "the router dropped $dropped"
+check "the router's drops are network loss" \
+    ".loss.network == $dropped and .loss.network > 100 and .loss.generator == 0 and .loss.receiver == 0" \
+    "$WORK/net.json" '.loss'
+(sleep 1.2; r ip link set rc down; sleep 0.5; r ip link set rc up) &
+flap=$!
+probe "$WORK/gen.json"
+wait $flap || true
+# Depending on the kernel, the sending veth drops the frames and counts them
+# (tx_dropped), or refuses them (ENOBUFS, a send error); both are the
+# generator's. Frames the receiver's capture buffer dropped (a VM that
+# stalls) are counted as the receiver's, apart from these.
+check "frames the sending veth dropped or refused are generator loss" \
+    '.loss.generator > 100 and .loss.generator >= 0.9 * (.loss.generator + .loss.network) and (.drops.nic_tx_errors > 0 or .loss.send_errors > 0)' \
+    "$WORK/gen.json" '{loss, drops}'
 exit $fail

@@ -49,6 +49,7 @@ pub fn describe_host(info: &mut RunInfo) {
                 .and_then(|l| l.split_once(':'))
                 .map(|(_, v)| v.trim().to_string())
         });
+        info.cpu_affinity = cpu_affinity();
     }
     #[cfg(target_os = "macos")]
     {
@@ -70,6 +71,41 @@ pub fn describe_host(info: &mut RunInfo) {
         info.hostname = std::env::var("COMPUTERNAME").ok();
         info.cpu = std::env::var("PROCESSOR_IDENTIFIER").ok();
     }
+}
+
+/// The CPUs this process may run on (`sched_getaffinity`), e.g. `0-3,8`.
+#[cfg(target_os = "linux")]
+pub fn cpu_affinity() -> Option<String> {
+    // SAFETY: a zeroed cpu_set_t is an empty set; the call fills it in.
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    let r = unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) };
+    if r != 0 {
+        return None;
+    }
+    let cpus: Vec<usize> = (0..libc::CPU_SETSIZE as usize)
+        .filter(|&c| unsafe { libc::CPU_ISSET(c, &set) })
+        .collect();
+    Some(cpu_ranges(&cpus))
+}
+
+/// `0-3,8` from `[0, 1, 2, 3, 8]`.
+#[cfg(target_os = "linux")]
+fn cpu_ranges(cpus: &[usize]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < cpus.len() {
+        let mut j = i;
+        while j + 1 < cpus.len() && cpus[j + 1] == cpus[j] + 1 {
+            j += 1;
+        }
+        out.push(if j > i {
+            format!("{}-{}", cpus[i], cpus[j])
+        } else {
+            cpus[i].to_string()
+        });
+        i = j + 1;
+    }
+    out.join(",")
 }
 
 /// The driver, NIC, link speed, MTU and MAC address of an interface, as far
@@ -181,6 +217,14 @@ fn ethtool_drvinfo(name: &str) -> Option<(String, String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn cpu_lists_become_ranges() {
+        assert_eq!(cpu_ranges(&[0, 1, 2, 3, 8, 10, 11]), "0-3,8,10-11");
+        assert_eq!(cpu_ranges(&[]), "");
+        assert!(cpu_affinity().is_some_and(|a| !a.is_empty()));
+    }
 
     #[test]
     fn describes_what_it_can() {

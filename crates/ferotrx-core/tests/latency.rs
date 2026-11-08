@@ -131,3 +131,134 @@ fn tagged_packets_stay_valid_after_rewrites_and_vary() {
         assert_eq!((sig.flow, sig.seq), (3, i as u64));
     }
 }
+
+/// A sender that loses every `every`-th frame: on the NIC, which says so
+/// (`counted`), or on the network, which does not.
+struct LossySink {
+    port: MemoryPort,
+    every: u64,
+    counted: bool,
+    n: u64,
+    lost: u64,
+}
+
+impl PacketSink for LossySink {
+    fn send(&mut self, data: &[u8]) -> std::result::Result<(), SinkError> {
+        self.n += 1;
+        if self.n.is_multiple_of(self.every) {
+            self.lost += 1;
+            return Ok(());
+        }
+        PacketPort::send(&mut self.port, data)
+    }
+
+    fn drops(&mut self) -> DropCounters {
+        DropCounters {
+            nic_tx_errors: if self.counted { self.lost } else { 0 },
+            ..Default::default()
+        }
+    }
+}
+
+/// A receiver whose capture buffer overflows on every `every`-th frame.
+struct LossyReceiver {
+    inner: PortReceiver<MemoryPort>,
+    every: u64,
+    n: u64,
+    lost: u64,
+}
+
+impl PacketReceiver for LossyReceiver {
+    fn recv(&mut self, buf: &mut Vec<u8>) -> std::result::Result<Option<Duration>, SinkError> {
+        loop {
+            let Some(at) = self.inner.recv(buf)? else {
+                return Ok(None);
+            };
+            self.n += 1;
+            if !self.n.is_multiple_of(self.every) {
+                return Ok(Some(at));
+            }
+            self.lost += 1;
+        }
+    }
+
+    fn drops(&mut self) -> DropCounters {
+        DropCounters {
+            capture_dropped: self.lost,
+            ..Default::default()
+        }
+    }
+}
+
+/// Runs 200 tagged frames through a lossy sender and receiver.
+fn loss_of(tx_every: u64, tx_counted: bool, rx_every: u64) -> LossReport {
+    let (tx, rx) = memory_ports();
+    let cap = Arc::new(
+        Capture::from_specs(
+            &["eth/ipv4(dst=10.0.0.2)/udp(dport=7)/raw(len=32)"],
+            Duration::ZERO,
+        )
+        .unwrap(),
+    );
+    let streams = vec![Stream::new("probe", CaptureSource::new(cap).loops(200))
+        .with_rate(Rate::Pps(20000.0))
+        .with_latency(1)];
+    let sink = LossySink {
+        port: tx,
+        every: tx_every,
+        counted: tx_counted,
+        n: 0,
+        lost: 0,
+    };
+    let receiver = LossyReceiver {
+        inner: PortReceiver(rx),
+        every: rx_every,
+        n: 0,
+        lost: 0,
+    };
+    let rx = RxSettings {
+        receiver: Box::new(receiver),
+        wait: Duration::from_millis(50),
+    };
+    let job = Job::spawn_with_rx(streams, Box::new(sink), RunConfig::default(), Some(rx)).unwrap();
+    job.wait(None);
+    job.loss().expect("a stream with a signature")
+}
+
+#[test]
+fn loss_is_put_where_it_happened() {
+    // Nothing lost.
+    let r = loss_of(u64::MAX, false, u64::MAX);
+    assert_eq!((r.offered, r.received, r.lost()), (200, 200, 0));
+    // The sending NIC drops every 10th and says so: generator loss.
+    let r = loss_of(10, true, u64::MAX);
+    assert_eq!(
+        (r.generator, r.network, r.receiver),
+        (20, 0, 0),
+        "{}",
+        r.line()
+    );
+    assert_eq!(r.tx_dropped, 20);
+    // The same frames gone without a word: network loss.
+    let r = loss_of(10, false, u64::MAX);
+    assert_eq!(
+        (r.generator, r.network, r.receiver),
+        (0, 20, 0),
+        "{}",
+        r.line()
+    );
+    // The receiver's capture buffer overflows on every 8th: receiver loss.
+    let r = loss_of(u64::MAX, false, 8);
+    assert_eq!(
+        (r.generator, r.network, r.receiver),
+        (0, 0, 25),
+        "{}",
+        r.line()
+    );
+    assert!(r.line().contains("capture buffer 25"), "{}", r.line());
+    // All three at once.
+    let r = loss_of(10, false, 9);
+    assert_eq!(r.network, 20);
+    assert_eq!(r.receiver, 20, "{}", r.line());
+    assert_eq!(r.lost(), 40);
+}

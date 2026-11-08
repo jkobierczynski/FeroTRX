@@ -173,6 +173,7 @@ impl TcpRun {
             hosts: Vec::new(),
             impair: None,
             started_at: self.job.started_at().map(ferotrx_core::unix_seconds),
+            drops: Default::default(),
         };
         info.fill(&stats);
         info

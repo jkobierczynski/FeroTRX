@@ -61,6 +61,7 @@ pub struct AfXdpSink {
     zero_copy: bool,
     name: String,
     queue: u16,
+    nic: crate::nic::NicCounters,
 }
 
 // The raw pointers point into memory owned by the sink alone.
@@ -285,6 +286,7 @@ impl AfXdpSink {
             zero_copy,
             name: name.to_string(),
             queue: config.queue,
+            nic: crate::nic::NicCounters::new(name),
         })
     }
 
@@ -420,6 +422,40 @@ impl PacketSink for AfXdpSink {
     fn flush(&mut self) -> Result<(), SinkError> {
         self.submit()?;
         self.drive_until(|s| s.free.len() == FRAMES as usize)
+    }
+
+    fn drops(&mut self) -> ferotrx_core::DropCounters {
+        let mut d = self.nic.tx();
+        d.add(&xdp_drops(self.fd).tx_side());
+        d
+    }
+}
+
+/// What an AF_XDP socket dropped since it was opened (`XDP_STATISTICS`):
+/// received frames lost to a full RX ring or no fill-ring buffer
+/// (`rx_dropped`, `rx_ring_full`), and descriptors it refused to send
+/// (`tx_invalid_descs`). `rx_fill_ring_empty_descs` is left out: the
+/// frames it counts are in `rx_dropped` already.
+pub(crate) fn xdp_drops(fd: c_int) -> ferotrx_core::DropCounters {
+    let mut st: libc::xdp_statistics = unsafe { std::mem::zeroed() };
+    let mut len = size_of::<libc::xdp_statistics>() as socklen_t;
+    // SAFETY: `st` has room for `len` bytes; older kernels write fewer.
+    let r = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_XDP,
+            libc::XDP_STATISTICS,
+            &mut st as *mut _ as *mut c_void,
+            &mut len,
+        )
+    };
+    if r != 0 {
+        return ferotrx_core::DropCounters::default();
+    }
+    ferotrx_core::DropCounters {
+        ring_rx_dropped: st.rx_dropped + st.rx_ring_full,
+        ring_tx_invalid: st.tx_invalid_descs,
+        ..Default::default()
     }
 }
 

@@ -416,6 +416,7 @@ impl MergeStats for TcpStats {
         self.rx_packets += o.rx_packets;
         self.rx_bytes += o.rx_bytes;
         self.rx_dropped += o.rx_dropped;
+        self.drops.merge_workers(&o.drops);
         self.impair.merge(&o.impair);
         self.elapsed = self.elapsed.max(o.elapsed);
         self.stopped |= o.stopped;
@@ -462,6 +463,7 @@ impl MergeStats for UdpStats {
         self.rx_packets += o.rx_packets;
         self.rx_bytes += o.rx_bytes;
         self.rx_dropped += o.rx_dropped;
+        self.drops.merge_workers(&o.drops);
         self.impair.merge(&o.impair);
         self.elapsed = self.elapsed.max(o.elapsed);
         self.stopped |= o.stopped;
