@@ -269,6 +269,7 @@ impl Server {
             .transpose()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         controller.set_auth_required(login_required);
+        controller.set_audit(config.audit.clone());
         // Captures on this server leave its own control traffic out.
         controller.set_ctl_port(local.port());
         let shared = Arc::new(Shared {
@@ -879,6 +880,13 @@ impl Connection {
                             Err(e) => extra["error"] = e.message.clone().into(),
                         }
                         self.audit("call", extra);
+                        if let Some(limit) = r.as_ref().err().and_then(crate::refused_limit) {
+                            let e = r.as_ref().unwrap_err();
+                            self.audit(
+                                "limit_refused",
+                                json!({"method": method, "limit": limit, "error": e.message}),
+                            );
+                        }
                     }
                     r
                 }

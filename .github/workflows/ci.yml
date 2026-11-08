@@ -544,6 +544,14 @@ jobs:
           sudo apt-get install -y tcpdump
           sudo scripts/capture-netns.sh ./target/debug/ferotrx
 
+      # Traffic limits of a control server: starts beyond them refused, a
+      # top-speed run held to --max-pps on a veth, --max-duration.
+      - name: Server traffic limits (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo scripts/limits-netns.sh ./target/debug/ferotrx
+
       # A regression scenario (examples/scenario-nat.toml) against the NAT
       # router: web and DNS pass, TCP 8080 and NTP are blocked, a voice
       # stream arrives. Then the router resets TCP to port 80, and the second

@@ -467,3 +467,38 @@ iface = "cap0"
     assert_eq!(tags, b"eeewww".to_vec());
     assert!(report.text().contains("Captures:"));
 }
+
+#[test]
+fn plans_beyond_an_agents_limits_fail_before_anything_starts() {
+    let limited = Controller::new().with_limits(ferotrx_ctl::Limits {
+        max_duration: Some(5.0),
+        max_flows: Some(50),
+        ..Default::default()
+    });
+    let addr = Server::bind("127.0.0.1:0", limited, None)
+        .unwrap()
+        .spawn()
+        .unwrap();
+    let d = plans("limits");
+    let plan = |extra: &str| {
+        let text = format!(
+            "start_delay = \"300ms\"\n[[agent]]\nname = \"lab\"\naddress = \"{addr}\"\n\
+             [[run]]\nname = \"pairs\"\nagents = [\"lab\"]\ntcp = \"pair.toml\"\n{extra}"
+        );
+        FleetPlan::from_toml(&text, &d.join("plans"), &[]).unwrap()
+    };
+    for (extra, words) in [
+        ("duration = \"1m\"", "--max-duration"),
+        ("cps = 500", "--max-flows"),
+    ] {
+        let e = run_fleet(&plan(extra), &FleetOptions::default(), &mut |_| {}).unwrap_err();
+        let msg = e.to_string();
+        assert!(
+            msg.contains(words) && msg.contains("'pairs' on 'lab'"),
+            "{msg}"
+        );
+    }
+    // Nothing was deployed.
+    let mut c = Client::connect(addr).unwrap();
+    assert!(c.tcp_runs().unwrap().is_empty());
+}

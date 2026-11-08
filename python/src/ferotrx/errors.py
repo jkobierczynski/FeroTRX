@@ -50,6 +50,14 @@ class RpcError(FerotrxError):
         self.data = data
         self.method = method
 
+    @property
+    def limit(self) -> str | None:
+        """The server limit a refused start went beyond (``max_pps``,
+        ``interfaces``, ...), from the error's ``data``; else ``None``."""
+        if isinstance(self.data, dict) and isinstance(self.data.get("limit"), str):
+            return self.data["limit"]
+        return None
+
     def __str__(self) -> str:
         where = f"{self.method}: " if self.method else ""
         return f"{where}{self.message} (code {self.code})"

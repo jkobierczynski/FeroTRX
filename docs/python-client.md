@@ -82,7 +82,10 @@ A `read` login (`--read-token`, a certificate from `--read-client-ca`) sees
 everything and changes nothing: `info`, `interfaces`, `profile`, `profiles`,
 `stats`, `runs`, the `tcp_`/`udp_`/`rx_` equivalents, `subscribe`, `watch`.
 Everything else needs `operator` and raises `Forbidden` otherwise. Paths
-outside the server's `--data-dir` raise `Forbidden` too.
+outside the server's `--data-dir` raise `Forbidden` too, and so do starts
+beyond the server's [traffic limits](remote-control.md#traffic-limits): then
+`e.limit` names the limit (`"max_pps"`, `"interfaces"`, ...), and
+`client.info().limits` lists them beforehand.
 
 ## Stateless runs
 
@@ -244,7 +247,7 @@ asyncio client has the same methods. More in [capturing](capture.md).
 | `Unauthorized` | -32001 | not logged in, or a wrong token |
 | `NotFound` | -32002 | no profile, run or subscription by that name or id |
 | `Failed` | -32003 | a profile that does not parse, an interface that cannot be opened |
-| `Forbidden` | -32004 | the role may not do that, or a path outside the data directories |
+| `Forbidden` | -32004 | the role may not do that, a path outside the data directories, or a start beyond a traffic limit (`limit`) |
 | `InvalidParams` | -32602 | missing, unknown or mistyped parameters |
 | `MethodNotFound` | -32601 | an older server, or a typo in `call()` |
 | `ConnectionClosed` | | the server went away, or the client was closed |

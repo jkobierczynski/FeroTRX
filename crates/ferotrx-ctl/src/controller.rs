@@ -15,9 +15,11 @@ use ferotrx_core::{
 };
 use ferotrx_io::Output;
 
+use crate::audit::AuditLog;
 use crate::bench::{open_bench_sinks, BenchJob, BenchRun, BenchSinkOpener};
 use crate::capture::{CaptureOpener, CaptureRun, MAX_CAPTURES};
 use crate::files::FilePolicy;
+use crate::limits::{self, Demand, Guard, Limits};
 use crate::protocol::*;
 use crate::scenario::{scenario_info, LabRunner, RunLists, ScenarioRun};
 use crate::tcp::{start_tcp_with, PortOpener, TcpRun};
@@ -71,6 +73,18 @@ pub fn start_run_with_rx(
     config: RunConfig,
     rx: Option<RxSettings>,
 ) -> Result<Started, StartError> {
+    start_run_guarded(profile, output, rate, config, rx, &None)
+}
+
+/// [`start_run_with_rx`] with the sinks held to a server's limits.
+pub(crate) fn start_run_guarded(
+    profile: &Profile,
+    output: &Output,
+    rate: Option<Rate>,
+    config: RunConfig,
+    rx: Option<RxSettings>,
+    guard: &Option<Arc<Guard>>,
+) -> Result<Started, StartError> {
     let profile = if rx.is_some() && !profile.has_latency() {
         let mut p = profile.clone();
         p.enable_latency();
@@ -111,7 +125,12 @@ pub fn start_run_with_rx(
         if !details.contains(&o.detail) {
             details.push(o.detail);
         }
-        work.push((streams, o.sink));
+        // Files and the null output put nothing on the network.
+        let sink = match &output {
+            Output::Interface { .. } => limits::guard_sink(guard, o.sink, linktype),
+            _ => o.sink,
+        };
+        work.push((streams, sink));
     }
     Ok(Started {
         job: Job::spawn_workers(work, config, rx)?,
@@ -153,6 +172,40 @@ pub struct Controller {
     /// Whether `lab.start` may build a lab, and the one running.
     lab_allowed: bool,
     lab: Mutex<Option<ferotrx_io::Lab>>,
+    /// What remote operators may do at most, and its hold on the frames.
+    limits: Limits,
+    guard: Option<Arc<Guard>>,
+    /// Runs that send, going or done: what `max_runs` counts.
+    active: Mutex<Vec<Arc<RunningFn>>>,
+    /// Starts one at a time while `max_runs` is checked.
+    start_lock: Mutex<()>,
+    audit: Option<AuditLog>,
+}
+
+/// Tells whether a run still goes.
+type RunningFn = dyn Fn() -> bool + Send + Sync;
+
+/// Finished runs of each kind kept for `*.list` and `*.get`; older ones are
+/// forgotten as new runs start, so a client cannot grow the server's memory
+/// by starting runs and never removing them.
+const MAX_FINISHED: usize = 256;
+
+/// How long a run with a duration may go past it (closing connections,
+/// frames in flight) before the `max_duration` guard stops it anyway.
+const DURATION_GRACE: Duration = Duration::from_secs(5);
+
+/// Forgets the oldest finished runs of `map` beyond [`MAX_FINISHED`].
+fn prune<T>(map: &mut BTreeMap<u64, Arc<T>>, running: impl Fn(&T) -> bool) {
+    let finished: Vec<u64> = map
+        .iter()
+        .filter(|(_, r)| !running(r))
+        .map(|(id, _)| *id)
+        .collect();
+    if finished.len() > MAX_FINISHED {
+        for id in &finished[..finished.len() - MAX_FINISHED] {
+            map.remove(id);
+        }
+    }
 }
 
 struct RxRun {
@@ -202,7 +255,368 @@ impl Controller {
             ctl_port: None,
             lab_allowed: false,
             lab: Mutex::default(),
+            limits: Limits::default(),
+            guard: None,
+            active: Mutex::default(),
+            start_lock: Mutex::default(),
+            audit: None,
         }
+    }
+
+    /// Sets the limits remote operators cannot exceed (see [`Limits`]):
+    /// starts beyond them are refused with `FORBIDDEN`, runs are stopped at
+    /// `max_duration`, and the frames of all runs are paced below the rate
+    /// limits and checked against the allowed destinations.
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.guard = Guard::new(&limits);
+        self.limits = limits;
+        self
+    }
+
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
+    /// Where runs stopped by a limit are recorded (`limit_stopped`).
+    pub(crate) fn set_audit(&mut self, audit: Option<AuditLog>) {
+        self.audit = audit;
+    }
+
+    /// Holds other starts back while this one checks `max_runs`; keep the
+    /// guard until the run is [tracked](Controller::track).
+    fn begin_start(&self) -> Result<MutexGuard<'_, ()>, RpcError> {
+        let g = lock(&self.start_lock);
+        let running = {
+            let mut a = lock(&self.active);
+            a.retain(|r| r());
+            a.len()
+        };
+        self.limits.check_runs(running)?;
+        Ok(g)
+    }
+
+    /// How long a run may go under `max_duration`: that, and a little
+    /// grace for a run that ends on its own duration.
+    fn allowance(&self) -> Option<Duration> {
+        self.limits.max_duration().map(|m| m + DURATION_GRACE)
+    }
+
+    /// Counts a started run for `max_runs` and stops it once it has gone
+    /// for `allowance` after `start_at` (see [`allowance`](Controller::allowance)).
+    fn track(
+        &self,
+        kind: &'static str,
+        id: u64,
+        start_at: Option<std::time::SystemTime>,
+        allowance: Option<Duration>,
+        running: impl Fn() -> bool + Send + Sync + 'static,
+        stop: impl Fn() + Send + 'static,
+    ) {
+        let running: Arc<RunningFn> = Arc::new(running);
+        lock(&self.active).push(running.clone());
+        let (Some(allowance), Some(max)) = (allowance, self.limits.max_duration()) else {
+            return;
+        };
+        let wait = start_at
+            .and_then(|t| t.duration_since(std::time::SystemTime::now()).ok())
+            .unwrap_or_default();
+        let deadline = std::time::Instant::now() + wait + allowance;
+        let audit = self.audit.clone();
+        let _ = std::thread::Builder::new()
+            .name(format!("limit-{kind}-{id}"))
+            .spawn(move || {
+                loop {
+                    if !running() {
+                        return;
+                    }
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    std::thread::sleep((deadline - now).min(Duration::from_millis(200)));
+                }
+                stop();
+                if let Some(log) = audit {
+                    let rec = serde_json::json!({
+                        "kind": kind,
+                        "id": id,
+                        "limit": "max_duration",
+                        "max_duration": max.as_secs_f64(),
+                    });
+                    if let Value::Object(m) = rec {
+                        log.record("limit_stopped", m);
+                    }
+                }
+            });
+    }
+
+    /// Opens the ports of TCP and UDP runs: allowed interfaces only, held
+    /// to the limits.
+    fn port_opener(&self) -> Arc<PortOpener> {
+        if self.limits.is_empty() {
+            return self.open_port.clone();
+        }
+        let open = self.open_port.clone();
+        let limits = self.limits.clone();
+        let guard = self.guard.clone();
+        Arc::new(
+            move |name: &str,
+                  s: &ferotrx_io::PortSettings|
+                  -> Result<Box<dyn ferotrx_core::PacketPort>, SinkError> {
+                limits
+                    .check_iface(name)
+                    .map_err(|e| SinkError::from(e.message))?;
+                Ok(limits::guard_port(&guard, open(name, s)?))
+            },
+        )
+    }
+
+    /// Opens interfaces to receive on: allowed ones only.
+    fn receiver_opener(&self) -> Arc<ReceiverOpener> {
+        if self.limits.interfaces.is_empty() {
+            return self.open_receiver.clone();
+        }
+        let open = self.open_receiver.clone();
+        let limits = self.limits.clone();
+        Arc::new(
+            move |name: &str| -> Result<Box<dyn PacketReceiver>, SinkError> {
+                limits
+                    .check_iface(name)
+                    .map_err(|e| SinkError::from(e.message))?;
+                open(name)
+            },
+        )
+    }
+
+    /// Opens the sending interfaces of benchmarks and Y.1564 tests.
+    fn bench_sink_opener(&self) -> Arc<BenchSinkOpener> {
+        if self.limits.is_empty() {
+            return self.open_bench_sinks.clone();
+        }
+        let open = self.open_bench_sinks.clone();
+        let limits = self.limits.clone();
+        let guard = self.guard.clone();
+        Arc::new(
+            move |name: &str, s: &SendSettings, linktype: u32, workers: usize| -> Result<(Vec<Box<dyn ferotrx_core::PacketSink + Send>>, String), SinkError> {
+                limits.check_iface(name).map_err(|e| SinkError::from(e.message))?;
+                let (sinks, detail) = open(name, s, linktype, workers)?;
+                let sinks = sinks
+                    .into_iter()
+                    .map(|k| limits::guard_sink(&guard, k, linktype))
+                    .collect();
+                Ok((sinks, detail))
+            },
+        )
+    }
+
+    /// The rates a stream profile asks for fit the limits, and so do the
+    /// destinations of a sample of its frames (rewrites and variations
+    /// applied; the guard checks every frame while it runs).
+    fn check_stream_limits(
+        &self,
+        profile: &Profile,
+        rate: Option<Rate>,
+        what: &str,
+    ) -> Result<(), RpcError> {
+        self.limits
+            .check_demand(Demand::of_profile(profile, rate), what)?;
+        if self.limits.destinations.is_empty() {
+            return Ok(());
+        }
+        /// Frames of each stream looked at before the run starts.
+        const SAMPLE: u64 = 4096;
+        struct Check<'a> {
+            limits: &'a Limits,
+            linktype: u32,
+            why: Option<String>,
+        }
+        impl ferotrx_core::PacketSink for Check<'_> {
+            fn send(&mut self, data: &[u8]) -> Result<(), SinkError> {
+                if let Err(why) = limits::check_frame(self.limits, data, self.linktype) {
+                    self.why = Some(why.clone());
+                    return Err(why.into());
+                }
+                Ok(())
+            }
+        }
+        let mut streams = profile.load().map_err(RpcError::failed)?;
+        let linktype = streams
+            .first()
+            .map_or(LINKTYPE_ETHERNET, ferotrx_core::Stream::linktype);
+        for s in &mut streams {
+            s.rate = Rate::TopSpeed;
+            s.limit = Some(SAMPLE);
+            s.delay = Duration::ZERO;
+            s.model = Default::default();
+            s.impair = None;
+            s.max_lag = None;
+        }
+        let mut check = Check {
+            limits: &self.limits,
+            linktype,
+            why: None,
+        };
+        let _ = ferotrx_core::run(&mut streams, &mut check, &RunConfig::default());
+        match check.why {
+            Some(why) => Err(limits::refused(
+                "destinations",
+                format!("{what} sends {why}"),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// A TCP profile fits the limits: its interfaces, where its client
+    /// connects, and its connections; a profile without a limit on open
+    /// connections gets `max_flows`.
+    fn check_tcp_limits(
+        &self,
+        profile: &mut TcpProfile,
+        iface: Option<&str>,
+        what: &str,
+    ) -> Result<(), RpcError> {
+        if self.limits.is_empty() {
+            return Ok(());
+        }
+        for i in profile.interfaces(iface).map_err(RpcError::failed)? {
+            self.limits.check_iface(&i)?;
+        }
+        if profile.client.is_none() {
+            return Ok(());
+        }
+        for t in profile
+            .templates
+            .iter()
+            .filter(|t| t.weight > 0 || t.cps.is_some())
+        {
+            let target = t
+                .connect
+                .or(profile.connect)
+                .map(|c| c.ip())
+                .or(profile.server.as_ref().map(|s| s.ip));
+            let ips = t
+                .connect_ips
+                .or(profile.connect_ips)
+                .or(profile
+                    .server
+                    .as_ref()
+                    .filter(|_| t.connect.or(profile.connect).is_none())
+                    .map(|s| s.ips))
+                .unwrap_or(1);
+            if let Some(ip) = target.filter(|ip| !ip.is_unspecified()) {
+                self.limits.check_dsts(ip, ips, what)?;
+            }
+        }
+        let cps = profile.cps + profile.templates.iter().filter_map(|t| t.cps).sum::<f64>();
+        profile.concurrency =
+            self.limits
+                .check_flows(cps, profile.concurrency, &format!("{what} (connections)"))?;
+        Ok(())
+    }
+
+    /// Like [`check_tcp_limits`](Controller::check_tcp_limits) for UDP:
+    /// transactions are its flows.
+    fn check_udp_limits(
+        &self,
+        profile: &mut UdpProfile,
+        iface: Option<&str>,
+        what: &str,
+    ) -> Result<(), RpcError> {
+        if self.limits.is_empty() {
+            return Ok(());
+        }
+        for i in profile.interfaces(iface).map_err(RpcError::failed)? {
+            self.limits.check_iface(&i)?;
+        }
+        if profile.client.is_none() {
+            return Ok(());
+        }
+        for t in profile
+            .templates
+            .iter()
+            .filter(|t| t.weight > 0 || t.rate.is_some())
+        {
+            let target = t
+                .connect
+                .or(profile.connect)
+                .map(|c| c.ip())
+                .or(profile.server.as_ref().map(|s| s.ip));
+            let ips = t
+                .connect_ips
+                .or(profile.connect_ips)
+                .or(profile
+                    .server
+                    .as_ref()
+                    .filter(|_| t.connect.or(profile.connect).is_none())
+                    .map(|s| s.ips))
+                .unwrap_or(1);
+            if let Some(ip) = target.filter(|ip| !ip.is_unspecified()) {
+                self.limits.check_dsts(ip, ips, what)?;
+            }
+        }
+        let rate = profile.rate + profile.templates.iter().filter_map(|t| t.rate).sum::<f64>();
+        profile.concurrency = self.limits.check_flows(
+            rate,
+            profile.concurrency,
+            &format!("{what} (transactions)"),
+        )?;
+        Ok(())
+    }
+
+    /// The checks of a scenario (those in `only`, or all) fit the limits;
+    /// checks without a duration get `max_duration`. Returns how many
+    /// checks may run, attempts counted: each gets `max_duration`.
+    fn check_scenario_limits(
+        &self,
+        scenario: &mut Scenario,
+        only: &[String],
+    ) -> Result<u32, RpcError> {
+        let mut runs = 0u32;
+        let unlimited = Demand {
+            unlimited: true,
+            ..Default::default()
+        };
+        for c in scenario
+            .checks
+            .iter_mut()
+            .filter(|c| only.is_empty() || only.contains(&c.name))
+        {
+            runs = runs.saturating_add(c.attempts.max(1));
+            if self.limits.is_empty() {
+                continue;
+            }
+            let what = format!("check '{}'", c.name);
+            for i in c.iface.iter().chain(c.rx.iter()) {
+                self.limits.check_iface(i)?;
+            }
+            self.limits.check_duration(c.duration)?;
+            let own = match &mut c.workload {
+                Workload::Traffic(t) => {
+                    self.check_stream_limits(t, None, &what)?;
+                    None
+                }
+                Workload::Tcp(t) => {
+                    self.check_tcp_limits(t, c.iface.as_deref(), &what)?;
+                    t.duration
+                }
+                Workload::Udp(u) => {
+                    self.check_udp_limits(u, c.iface.as_deref(), &what)?;
+                    u.duration
+                }
+                Workload::Y1564(_) => {
+                    self.limits.check_demand(
+                        unlimited,
+                        &format!("{what} (Y.1564 tests send bursts at the line rate)"),
+                    )?;
+                    None
+                }
+            };
+            self.limits.check_duration(own)?;
+            if c.duration.is_none() && own.is_none() {
+                c.duration = self.limits.max_duration();
+            }
+        }
+        Ok(runs.max(1))
     }
 
     /// Lets clients with the operator role build a lab router on this
@@ -554,6 +968,12 @@ impl Controller {
             connections: None,
             subscriptions: None,
             audit: None,
+            limits: (!self.limits.is_empty()).then(|| {
+                Box::new(LimitsInfo {
+                    limits: self.limits.clone(),
+                    refused_frames: self.guard.as_ref().map_or(0, |g| g.refused()),
+                })
+            }),
         }
     }
 
@@ -600,6 +1020,7 @@ impl Controller {
         if rotate.is_some() && p.file.is_none() {
             return Err(RpcError::invalid_params("rotate needs a file"));
         }
+        self.limits.check_iface(&p.iface)?;
         let running = lock(&self.captures)
             .values()
             .filter(|c| c.job.is_running())
@@ -677,7 +1098,9 @@ impl Controller {
                 .map_err(|e| RpcError::failed(e.to_string()))?;
         }
         let info = run.info();
-        lock(&self.captures).insert(id, run);
+        let mut captures = lock(&self.captures);
+        captures.insert(id, run);
+        prune(&mut captures, |c| c.job.is_running());
         Ok(info)
     }
 
@@ -845,9 +1268,18 @@ impl Controller {
             .map(parse_duration)
             .transpose()
             .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let starting = self.begin_start()?;
+        if let Some(spec) = &p.rx {
+            self.limits.check_iface(&spec.iface)?;
+        }
+        self.limits.check_duration(duration)?;
+        if let Output::Interface { name, .. } = &output {
+            self.limits.check_iface(name)?;
+            self.check_stream_limits(&profile, rate, "the run")?;
+        }
         let config = RunConfig {
             limit: p.limit,
-            duration,
+            duration: self.limits.duration_or_max(duration),
             ignore_send_errors: p.ignore_errors,
             stop: None,
             start_at,
@@ -870,15 +1302,15 @@ impl Controller {
                     .transpose()
                     .map_err(|e| RpcError::invalid_params(e.to_string()))?
                     .unwrap_or(RxSettings::DEFAULT_WAIT);
-                let receiver = (self.open_receiver)(&spec.iface).map_err(|e| {
+                let receiver = (self.receiver_opener())(&spec.iface).map_err(|e| {
                     RpcError::failed(format!("cannot receive on {}: {e}", spec.iface))
                 })?;
                 Some(RxSettings { receiver, wait })
             }
             None => None,
         };
-        let started =
-            start_run_with_rx(&profile, &output, rate, config, rx).map_err(RpcError::failed)?;
+        let started = start_run_guarded(&profile, &output, rate, config, rx, &self.guard)
+            .map_err(RpcError::failed)?;
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
         let run = Arc::new(Run {
             id,
@@ -889,7 +1321,24 @@ impl Controller {
             stopped_by_request: Default::default(),
         });
         let info = run.info();
-        lock(&self.runs).insert(id, run);
+        {
+            let mut runs = lock(&self.runs);
+            runs.insert(id, run.clone());
+            prune(&mut runs, |r| r.job.is_running());
+        }
+        let watched = run.clone();
+        self.track(
+            "run",
+            id,
+            start_at,
+            self.allowance(),
+            move || watched.job.is_running(),
+            move || {
+                run.stopped_by_request.store(true, Ordering::Relaxed);
+                run.job.stop();
+            },
+        );
+        drop(starting);
         Ok(info)
     }
 
@@ -1079,13 +1528,15 @@ impl Controller {
     /// Starts running a scenario's checks, one after the other, on a thread
     /// of its own; `scenario.get` follows it.
     pub fn scenario_start(&self, p: ScenarioStartParams) -> Result<ScenarioRunInfo, RpcError> {
-        let scenario = self.read_scenario(&p)?;
+        let mut scenario = self.read_scenario(&p)?;
+        let starting = self.begin_start()?;
+        let checks = self.check_scenario_limits(&mut scenario, &p.only)?;
         if let (Some(spec), true) = (&scenario.lab, p.lab.unwrap_or(true)) {
             self.scenario_lab(spec)?;
         }
-        let open_port = self.open_port.clone();
-        let open_receiver = self.open_receiver.clone();
-        let runner = LabRunner::new()
+        let open_port = self.port_opener();
+        let open_receiver = self.receiver_opener();
+        let mut runner = LabRunner::new()
             .with_port_opener(move |name, settings| open_port(name, settings))
             .with_receiver_opener(move |name| open_receiver(name))
             .with_runs(RunLists {
@@ -1094,11 +1545,39 @@ impl Controller {
                 udp: self.udp_runs.clone(),
                 next: self.next_run.clone(),
             });
+        if !self.limits.is_empty() {
+            let limits = self.limits.clone();
+            let guard = self.guard.clone();
+            runner = runner.with_sink_opener(move |name, send, linktype| {
+                limits
+                    .check_iface(name)
+                    .map_err(|e| SinkError::from(e.message))?;
+                let sink = crate::scenario::open_interface(name, send, linktype)?;
+                Ok(limits::guard_sink(&guard, sink, linktype))
+            });
+        }
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
         let run = ScenarioRun::spawn(id, scenario, p.only, runner)
             .map_err(|e| RpcError::failed(format!("cannot start the scenario: {e}")))?;
         let info = run.info();
-        lock(&self.scenario_runs).insert(id, run);
+        {
+            let mut runs = lock(&self.scenario_runs);
+            runs.insert(id, run.clone());
+            prune(&mut runs, |r| r.is_running());
+        }
+        // Each check may go for max_duration (a check's attempts each).
+        let watched = run.clone();
+        self.track(
+            "scenario",
+            id,
+            None,
+            self.limits
+                .max_duration()
+                .map(|m| m * checks + DURATION_GRACE),
+            move || watched.is_running(),
+            move || run.stop(),
+        );
+        drop(starting);
         Ok(info)
     }
 
@@ -1196,6 +1675,16 @@ impl Controller {
             c.repetitions = n;
         }
         c.validate().map_err(|e| bad(e.to_string()))?;
+        let starting = self.begin_start()?;
+        self.limits.check_iface(&p.iface)?;
+        self.limits.check_iface(&p.rx)?;
+        self.limits.check_demand(
+            Demand {
+                unlimited: true,
+                ..Default::default()
+            },
+            "a benchmark (it searches for the highest rate)",
+        )?;
         let send = OutputSpec {
             backend: p.backend,
             queue: p.queue,
@@ -1214,10 +1703,29 @@ impl Controller {
             rx: p.rx,
             send,
         };
-        let run = BenchRun::spawn(id, job, &*self.open_bench_sinks, &*self.open_receiver)
-            .map_err(RpcError::failed)?;
+        let run = BenchRun::spawn(
+            id,
+            job,
+            &*self.bench_sink_opener(),
+            &*self.receiver_opener(),
+        )
+        .map_err(RpcError::failed)?;
         let info = run.info();
-        lock(&self.bench_runs).insert(id, run);
+        {
+            let mut runs = lock(&self.bench_runs);
+            runs.insert(id, run.clone());
+            prune(&mut runs, |r| r.is_running());
+        }
+        let watched = run.clone();
+        self.track(
+            "bench",
+            id,
+            None,
+            self.limits.max_duration(),
+            move || watched.is_running(),
+            move || run.stop(),
+        );
+        drop(starting);
         Ok(info)
     }
 
@@ -1304,6 +1812,18 @@ impl Controller {
             c.performance_duration = parse_duration(d).map_err(|e| bad(e.to_string()))?;
         }
         c.validate().map_err(|e| bad(e.to_string()))?;
+        let starting = self.begin_start()?;
+        self.limits.check_iface(&p.iface)?;
+        self.limits.check_iface(&p.rx)?;
+        self.limits.check_demand(
+            Demand {
+                unlimited: true,
+                ..Default::default()
+            },
+            "a Y.1564 test (it sends bursts at the line rate)",
+        )?;
+        self.limits.check_duration(c.max_time)?;
+        c.max_time = self.limits.duration_or_max(c.max_time);
         let send = OutputSpec {
             backend: p.backend,
             queue: p.queue,
@@ -1322,10 +1842,29 @@ impl Controller {
             rx: p.rx,
             send,
         };
-        let run = Y1564Run::spawn(id, job, &*self.open_bench_sinks, &*self.open_receiver)
-            .map_err(RpcError::failed)?;
+        let run = Y1564Run::spawn(
+            id,
+            job,
+            &*self.bench_sink_opener(),
+            &*self.receiver_opener(),
+        )
+        .map_err(RpcError::failed)?;
         let info = run.info();
-        lock(&self.y1564_runs).insert(id, run);
+        {
+            let mut runs = lock(&self.y1564_runs);
+            runs.insert(id, run.clone());
+            prune(&mut runs, |r| r.is_running());
+        }
+        let watched = run.clone();
+        self.track(
+            "y1564",
+            id,
+            None,
+            self.allowance(),
+            move || watched.is_running(),
+            move || run.stop(),
+        );
+        drop(starting);
         Ok(info)
     }
 
@@ -1394,8 +1933,12 @@ impl Controller {
             .map(parse_duration)
             .transpose()
             .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let starting = self.begin_start()?;
+        self.check_tcp_limits(&mut profile, p.iface.as_deref(), "the TCP run")?;
+        self.limits.check_duration(duration)?;
+        self.limits.check_duration(profile.duration)?;
         let config = TcpRunConfig {
-            duration,
+            duration: self.limits.duration_or_max(duration.or(profile.duration)),
             stop: None,
             start_at,
         };
@@ -1417,7 +1960,7 @@ impl Controller {
             profile.options.ecn = e;
         }
         apply_impair(&mut profile.impair, &p.impair, &p.impair_rx)?;
-        let started = start_tcp_with(&profile, p.iface.as_deref(), config, &*self.open_port)
+        let started = start_tcp_with(&profile, p.iface.as_deref(), config, &*self.port_opener())
             .map_err(RpcError::failed)?;
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
         let run = Arc::new(TcpRun {
@@ -1429,7 +1972,21 @@ impl Controller {
             stopped_by_request: Default::default(),
         });
         let info = run.info();
-        lock(&self.tcp_runs).insert(id, run);
+        {
+            let mut runs = lock(&self.tcp_runs);
+            runs.insert(id, run.clone());
+            prune(&mut runs, |r| r.job.is_running());
+        }
+        let watched = run.clone();
+        self.track(
+            "tcp",
+            id,
+            start_at,
+            self.allowance(),
+            move || watched.job.is_running(),
+            move || run.stop(None),
+        );
+        drop(starting);
         Ok(info)
     }
 
@@ -1482,8 +2039,12 @@ impl Controller {
             .map(parse_duration)
             .transpose()
             .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let starting = self.begin_start()?;
+        self.check_udp_limits(&mut profile, p.iface.as_deref(), "the UDP run")?;
+        self.limits.check_duration(duration)?;
+        self.limits.check_duration(profile.duration)?;
         let config = TcpRunConfig {
-            duration,
+            duration: self.limits.duration_or_max(duration.or(profile.duration)),
             stop: None,
             start_at,
         };
@@ -1499,7 +2060,7 @@ impl Controller {
         .send_settings()?;
         profile.output = output.or(&profile.output);
         apply_impair(&mut profile.impair, &p.impair, &p.impair_rx)?;
-        let started = start_udp_with(&profile, p.iface.as_deref(), config, &*self.open_port)
+        let started = start_udp_with(&profile, p.iface.as_deref(), config, &*self.port_opener())
             .map_err(RpcError::failed)?;
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
         let run = Arc::new(UdpRun {
@@ -1511,7 +2072,21 @@ impl Controller {
             stopped_by_request: Default::default(),
         });
         let info = run.info();
-        lock(&self.udp_runs).insert(id, run);
+        {
+            let mut runs = lock(&self.udp_runs);
+            runs.insert(id, run.clone());
+            prune(&mut runs, |r| r.job.is_running());
+        }
+        let watched = run.clone();
+        self.track(
+            "udp",
+            id,
+            start_at,
+            self.allowance(),
+            move || watched.job.is_running(),
+            move || run.stop(None),
+        );
+        drop(starting);
         Ok(info)
     }
 
@@ -1542,6 +2117,7 @@ impl Controller {
             .map(parse_duration)
             .transpose()
             .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        self.limits.check_iface(&p.iface)?;
         let receiver = (self.open_receiver)(&p.iface)
             .map_err(|e| RpcError::failed(format!("cannot receive on {}: {e}", p.iface)))?;
         let job = RxJob::spawn(
@@ -1561,7 +2137,9 @@ impl Controller {
             stopped_by_request: Default::default(),
         });
         let info = run.info();
-        lock(&self.rx_runs).insert(id, run);
+        let mut runs = lock(&self.rx_runs);
+        runs.insert(id, run);
+        prune(&mut runs, |r| r.job.is_running());
         Ok(info)
     }
 
@@ -1868,6 +2446,21 @@ fn apply_impair(
 #[cfg(test)]
 mod lab_tests {
     use super::*;
+
+    #[test]
+    fn only_the_newest_finished_runs_are_kept() {
+        let mut map: BTreeMap<u64, Arc<bool>> = BTreeMap::new();
+        // Runs 0..300; every tenth one still running.
+        for id in 0..300u64 {
+            map.insert(id, Arc::new(id % 10 == 0));
+        }
+        prune(&mut map, |running| *running);
+        let finished = map.values().filter(|r| !***r).count();
+        assert_eq!(finished, MAX_FINISHED);
+        // The running ones all stay; the oldest finished go first.
+        assert_eq!(map.values().filter(|r| ***r).count(), 30);
+        assert!(!map.contains_key(&1) && map.contains_key(&299));
+    }
 
     #[test]
     fn labs_are_off_unless_asked_for() {

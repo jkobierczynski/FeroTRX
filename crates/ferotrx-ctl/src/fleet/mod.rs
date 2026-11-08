@@ -336,6 +336,7 @@ pub fn run_fleet(
     let stop = options.stop.clone().unwrap_or_default();
     let began = Instant::now();
     let mut agents = connect_all(plan, progress)?;
+    check_limits(plan, options, &agents)?;
     let deployed = deploy(plan, &mut agents, progress)?;
     let mut report = FleetReport::new(plan, &agents, deployed);
     if options.deploy_only {
@@ -430,6 +431,83 @@ pub fn run_fleet(
     report.captures = captures.into_iter().map(|c| c.record).collect();
     report.elapsed_s = began.elapsed().as_secs_f64();
     Ok(report)
+}
+
+/// Checks what the plan starts on each agent against the limits the agent
+/// reports (`server.info`, servers from 0.42.0), so that a plan an agent
+/// would refuse fails before anything is deployed or started. The agents
+/// check again at each start, also what is in the profiles.
+pub fn check_limits(plan: &FleetPlan, options: &FleetOptions, agents: &[Agent]) -> Result<()> {
+    for a in agents {
+        let Some(l) = a.info.limits.as_ref().map(|l| &l.limits) else {
+            continue;
+        };
+        let name = &a.spec.name;
+        let mut runs = 0usize;
+        for run in &plan.runs {
+            let st = &run.settings;
+            let ctx = |e: RpcError| {
+                failed(format!(
+                    "'{}' on '{name}': {} (a limit of that agent)",
+                    run.name, e.message
+                ))
+            };
+            // A receiver this agent runs for a run elsewhere.
+            if st.rx_agent.as_deref() == Some(name.as_str()) {
+                if let Some(rx) = &st.rx {
+                    l.check_iface(rx).map_err(ctx)?;
+                }
+            }
+            for inst in run.instances.iter().filter(|i| i.agent == *name) {
+                runs += 1;
+                if let Some(i) = &inst.iface {
+                    l.check_iface(i).map_err(ctx)?;
+                }
+                if let (Some(rx), None) = (&st.rx, &st.rx_agent) {
+                    l.check_iface(rx).map_err(ctx)?;
+                }
+                l.check_duration(options.duration.or(st.duration))
+                    .map_err(ctx)?;
+                match run.kind {
+                    CheckKind::Tcp => {
+                        if st.cps.is_some() || st.concurrency.is_some() {
+                            l.check_flows(
+                                st.cps.unwrap_or(0.0),
+                                st.concurrency.unwrap_or(0),
+                                "the run (connections)",
+                            )
+                            .map_err(ctx)?;
+                        }
+                    }
+                    CheckKind::Udp => {
+                        let rate = st.rate.as_deref().and_then(|r| r.parse::<f64>().ok());
+                        if rate.is_some() || st.concurrency.is_some() {
+                            l.check_flows(
+                                rate.unwrap_or(0.0),
+                                st.concurrency.unwrap_or(0),
+                                "the run (transactions)",
+                            )
+                            .map_err(ctx)?;
+                        }
+                    }
+                    _ => {
+                        if let Some(rate) = st.rate.as_deref().and_then(|r| r.parse().ok()) {
+                            let mut d = crate::Demand::default();
+                            d.add(rate);
+                            l.check_demand(d, "the run").map_err(ctx)?;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(max) = l.max_runs.filter(|&m| runs > m) {
+            return Err(failed(format!(
+                "the plan starts {runs} runs on '{name}' at once, and that agent runs at most \
+                 {max} (--max-runs)"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// A capture of the plan, on its agent.

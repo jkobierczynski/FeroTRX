@@ -67,7 +67,7 @@ impl Default for LabRunner {
     }
 }
 
-fn open_interface(
+pub(crate) fn open_interface(
     name: &str,
     send: &SendSettings,
     linktype: u32,

@@ -71,6 +71,19 @@ def test_unknown_state_and_missing_members() -> None:
     assert info.state == "paused"
     assert info.client.completed == 0 and info.templates == []
     assert ServerInfo.from_dict({"role": "operator"}).role == "operator"
+    assert ServerInfo.from_dict({}).limits is None
+
+
+def test_server_limits_and_refusals() -> None:
+    info = ServerInfo.from_dict(
+        {"limits": {"interfaces": ["eth1"], "max_pps": 1000.0, "refused_frames": 3}}
+    )
+    assert info.limits is not None
+    assert info.limits.interfaces == ["eth1"] and info.limits.max_pps == 1000.0
+    assert info.limits.refused_frames == 3 and info.limits.max_runs is None
+    e = RpcError.from_error({"code": -32004, "message": "no", "data": {"limit": "max_pps"}})
+    assert isinstance(e, Forbidden) and e.limit == "max_pps"
+    assert RpcError.from_error({"code": -32004, "message": "no"}).limit is None
 
 
 @pytest.mark.parametrize(
