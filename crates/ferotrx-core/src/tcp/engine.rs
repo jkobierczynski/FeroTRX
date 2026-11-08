@@ -68,6 +68,9 @@ pub(crate) fn ip_version(ip: IpAddr) -> &'static str {
 
 /// The MSS for connections over `ip`'s version: `mss` is for IPv4, and IPv6
 /// headers are 20 bytes longer.
+/// The smallest MSS taken from a peer (Linux's `TCP_MIN_MSS`).
+const MIN_MSS: usize = 88;
+
 pub(crate) fn mss_for(ip: IpAddr, mss: u16) -> u16 {
     if ip.is_ipv4() {
         mss
@@ -1035,7 +1038,11 @@ impl Conn {
     fn negotiate(&mut self, seg: &Segment) {
         self.irs = seg.seq;
         self.rcv_nxt = seg.seq.wrapping_add(1);
-        self.mss = self.mss.min(usize::from(seg.opts.mss.unwrap_or(536)));
+        // Never below Linux's TCP_MIN_MSS: an MSS of a few bytes (or less
+        // than the timestamp option) is a hostile peer's, not a path's.
+        self.mss = self
+            .mss
+            .min(usize::from(seg.opts.mss.unwrap_or(536)).max(MIN_MSS));
         match seg.opts.wscale {
             Some(ws) if self.ws_ok => self.snd_shift = ws.min(MAX_WSCALE),
             _ => {
@@ -1870,7 +1877,14 @@ impl Conn {
                 let seq = seg.seq;
                 let mut end = seq.wrapping_add(len as u32);
                 if wire::seq_lt(wnd_end, end) {
-                    end = wnd_end;
+                    // Trim to the window. A segment that ends past it but
+                    // does not reach into it (one beyond the window, or one
+                    // so old that sequence numbers wrapped) keeps nothing.
+                    end = if span(seq, wnd_end) <= len {
+                        wnd_end
+                    } else {
+                        seq
+                    };
                 }
                 if wire::seq_le(seq, self.rcv_nxt) && wire::seq_lt(self.rcv_nxt, end) {
                     let skip = span(seq, self.rcv_nxt);
