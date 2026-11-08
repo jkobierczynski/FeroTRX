@@ -232,13 +232,21 @@ id=$(ctl --json start steady -i c0 --ip "$(a 1 2)/$plen" --gateway "$(a 1 1)" | 
 ctl stats "$id" | sed -n '1,2p'
 # Packets and the run's own clock, from one snapshot of its counters.
 snap() { ctl --json stats "$id" | jq -r '"\(.total.packets) \(.total.elapsed_s)"'; }
-# Packets sent in 2 s, by the run's clock between two snapshots: a slow
-# `ctl` call (a busy VM) makes the window longer, not the rate higher.
+# Packets per 2 s: the median of three 1 s windows, each measured by the
+# run's clock between two snapshots. A slow `ctl` call (a busy VM) makes a
+# window longer, not the rate higher, and a window where the VM stalled the
+# sender (it catches up in the next) does not decide the result.
 rate2s() {
-    s0=$(snap)
-    sleep 2
-    s1=$(snap)
-    echo "$s0 $s1" | awk '{ d = $4 - $2; if (d <= 0) print $3 - $1; else printf "%d\n", ($3 - $1) * 2 / d }'
+    s0=$(snap); sleep 1; s1=$(snap); sleep 1; s2=$(snap); sleep 1; s3=$(snap)
+    echo "$s0 $s1 $s2 $s3" | awk '
+        function r(p0, e0, p1, e1) { return (e1 > e0) ? (p1 - p0) * 2 / (e1 - e0) : (p1 - p0) * 2 }
+        {
+            a = r($1, $2, $3, $4); b = r($3, $4, $5, $6); c = r($5, $6, $7, $8)
+            m = a
+            if ((b >= a && b <= c) || (b <= a && b >= c)) m = b
+            else if ((c >= a && c <= b) || (c <= a && c >= b)) m = c
+            printf "%d\n", m
+        }'
 }
 sleep 0.5
 before=$(rate2s)
