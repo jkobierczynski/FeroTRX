@@ -230,9 +230,16 @@ ctl() { "$BIN" ctl -c $CTL "$@"; }
 ctl load "$WORK/steady.toml" -n steady >/dev/null
 id=$(ctl --json start steady -i c0 --ip "$(a 1 2)/$plen" --gateway "$(a 1 1)" | jq .id)
 ctl stats "$id" | sed -n '1,2p'
-packets() { ctl --json stats "$id" | jq .total.packets; }
-# Packets sent in 2 s.
-rate2s() { p0=$(packets); sleep 2; p1=$(packets); echo $((p1 - p0)); }
+# Packets and the run's own clock, from one snapshot of its counters.
+snap() { ctl --json stats "$id" | jq -r '"\(.total.packets) \(.total.elapsed_s)"'; }
+# Packets sent in 2 s, by the run's clock between two snapshots: a slow
+# `ctl` call (a busy VM) makes the window longer, not the rate higher.
+rate2s() {
+    s0=$(snap)
+    sleep 2
+    s1=$(snap)
+    echo "$s0 $s1" | awk '{ d = $4 - $2; if (d <= 0) print $3 - $1; else printf "%d\n", ($3 - $1) * 2 / d }'
+}
 sleep 0.5
 before=$(rate2s)
 ctl update "$id" -m 3 >/dev/null
@@ -273,7 +280,7 @@ EOF
 if [ "${IPV6:-}" = 1 ]; then ipt=ip6tables; else ipt=iptables; fi
 probe() {
     "$BIN" run "$WORK/probe.toml" -i c0 --ip "$(a 1 2)/$plen" --gateway "$(a 1 1)" \
-        --rx s0 -d 3s -q --report "$1" > "$WORK/probe.txt" 2>&1 \
+        --rx s0 -d 3s -q --ignore-errors --report "$1" > "$WORK/probe.txt" 2>&1 \
         || { cat "$WORK/probe.txt"; exit 1; }
     grep "lost .* of" "$WORK/probe.txt" || true
 }
@@ -289,7 +296,10 @@ check "the router's drops are network loss" \
 flap=$!
 probe "$WORK/gen.json"
 wait $flap || true
-check "frames the sending veth dropped are generator loss" \
-    '.loss.generator > 100 and .loss.generator >= 0.9 * (.loss.generator + .loss.network) and .loss.receiver == 0 and .drops.nic_tx_errors > 0' \
+# Depending on the kernel, the sending veth drops the frames and counts them
+# (tx_dropped), or refuses them (ENOBUFS, a send error); both are the
+# generator's.
+check "frames the sending veth dropped or refused are generator loss" \
+    '.loss.generator > 100 and .loss.generator >= 0.9 * (.loss.generator + .loss.network) and .loss.receiver == 0 and (.drops.nic_tx_errors > 0 or .loss.send_errors > 0)' \
     "$WORK/gen.json" '{loss, drops}'
 exit $fail
