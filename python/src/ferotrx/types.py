@@ -207,6 +207,36 @@ class ServerInfo(Record):
     subscriptions: int | None = None
     #: The audit log's health, when the server keeps one (servers from 0.35.0).
     audit: AuditHealth | None = None
+    #: What remote operators may do at most, when the server's owner set
+    #: limits (servers from 0.42.0); ``None`` when nothing is limited.
+    limits: Limits | None = None
+
+
+@dataclass(kw_only=True)
+class Limits(Record):
+    """A server's traffic limits (``ferotrx serve --allow-iface``, ``--max-pps``, ...).
+
+    Empty lists and ``None`` are no limit. A start beyond one raises
+    :class:`~ferotrx.Forbidden` whose :attr:`~ferotrx.RpcError.limit` names it.
+    """
+
+    #: Interfaces runs, receivers and captures may use.
+    interfaces: list[str] = field(default_factory=list)
+    #: Address ranges frames may be sent to, such as ``192.168.20.0/24``.
+    destinations: list[str] = field(default_factory=list)
+    #: Packets and bits per second of all runs together.
+    max_pps: float | None = None
+    max_bps: float | None = None
+    #: Longest a run may go, in seconds.
+    max_duration: float | None = None
+    #: Runs that send going at once.
+    max_runs: int | None = None
+    #: A TCP/UDP run's flows open at once and new ones per second.
+    max_flows: int | None = None
+    #: Top-speed runs and benchmarks allowed despite the rate limits.
+    allow_unlimited: bool = False
+    #: Frames the server did not send because of where they went.
+    refused_frames: int = 0
 
 
 @dataclass(kw_only=True)

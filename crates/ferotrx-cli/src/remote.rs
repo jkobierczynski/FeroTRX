@@ -12,8 +12,8 @@ use ferotrx_ctl::protocol::{
     DEFAULT_PORT,
 };
 use ferotrx_ctl::{
-    AuditLog, Client, ClientTls, Controller, FilePolicy, LabPki, Role, Server, ServerConfig,
-    ServerTls, Token,
+    parse_bps, parse_limit_duration, parse_pps, AuditLog, Client, ClientTls, Controller,
+    FilePolicy, LabPki, Limits, Role, Server, ServerConfig, ServerTls, Token,
 };
 use serde_json::Value;
 
@@ -122,6 +122,48 @@ pub struct ServeArgs {
     #[arg(long)]
     lab: bool,
 
+    /// Server settings (TOML): its [limits] table sets the limits below;
+    /// options given here win over it. See docs/remote-control.md.
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Remote operators may only send, receive and capture on this
+    /// interface. Repeatable. Default: any.
+    #[arg(long = "allow-iface", value_name = "NAME")]
+    allow_ifaces: Vec<String>,
+
+    /// Remote operators may only send to these addresses (10.0.0.0/8,
+    /// 2001:db8::/32 or one address): built and replayed packets, and the
+    /// servers TCP and UDP clients reach. Repeatable. Default: any.
+    #[arg(long = "allow-dst", value_name = "CIDR")]
+    allow_dsts: Vec<String>,
+
+    /// Packets per second of all remote runs together, e.g. 50kpps.
+    #[arg(long, value_name = "RATE")]
+    max_pps: Option<String>,
+
+    /// Bits per second of all remote runs together, e.g. 200mbps or 1gbps.
+    #[arg(long, value_name = "RATE")]
+    max_bps: Option<String>,
+
+    /// Longest a remote run may go, e.g. 10m; runs without a duration end there.
+    #[arg(long, value_name = "TIME")]
+    max_duration: Option<String>,
+
+    /// Remote runs that send going at once.
+    #[arg(long, value_name = "N")]
+    max_runs: Option<usize>,
+
+    /// A remote TCP or UDP run's flows (connections, transactions) open at
+    /// once, and new ones per second.
+    #[arg(long, value_name = "N")]
+    max_flows: Option<u64>,
+
+    /// With --max-pps or --max-bps, still let operators ask for top speed
+    /// and run benchmarks and Y.1564 tests; they are held to the limits.
+    #[arg(long)]
+    allow_unlimited: bool,
+
     /// Load this profile at start, under its file name (or NAME=PATH). Repeatable.
     #[arg(short, long = "profile", value_name = "[NAME=]PATH")]
     profiles: Vec<String>,
@@ -177,6 +219,7 @@ pub fn cmd_serve(args: ServeArgs) -> Result<()> {
 /// Builds the server `args` describe and binds its address, ready to
 /// [`Server::serve`]; `ferotrx serve` and the Windows service share it.
 pub fn start_server(args: ServeArgs) -> Result<Server> {
+    let limits = serve_limits(&args)?;
     let mut tokens = Vec::new();
     if let Some(t) = env_or(args.token, TOKEN_ENV) {
         tokens.push(Token::new("operator", Role::Operator, t));
@@ -234,7 +277,8 @@ pub fn start_server(args: ServeArgs) -> Result<Server> {
 
     let controller = Controller::new()
         .with_file_policy(files.clone())
-        .with_lab(args.lab);
+        .with_lab(args.lab)
+        .with_limits(limits.clone());
     if args.lab {
         if let Some(why) = ferotrx_io::lab_unavailable() {
             eprintln!("warning: --lab: {why}");
@@ -292,6 +336,9 @@ pub fn start_server(args: ServeArgs) -> Result<Server> {
         .map(|d| d.display().to_string())
         .collect();
     eprintln!("data directories: {}", dirs.join(", "));
+    if !limits.is_empty() {
+        eprintln!("limits for remote runs: {}", limits.describe().join("; "));
+    }
     if let Some(f) = &args.port_file {
         // Write it whole, then rename, so a reader never sees half of it.
         let tmp = f.with_extension("tmp");
@@ -307,6 +354,49 @@ pub fn start_server(args: ServeArgs) -> Result<Server> {
         );
     }
     Ok(server)
+}
+
+/// The limits of `ferotrx serve`: the `--config` file's, with the options
+/// given on the command line instead.
+fn serve_limits(args: &ServeArgs) -> Result<Limits> {
+    let mut l = match &args.config {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("cannot read {}", path.display()))?;
+            Limits::from_toml(&text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?
+        }
+        None => Limits::default(),
+    };
+    let flag = |name: &str, e: String| anyhow::anyhow!("--{name}: {e}");
+    if !args.allow_ifaces.is_empty() {
+        l.interfaces = args.allow_ifaces.clone();
+    }
+    if !args.allow_dsts.is_empty() {
+        l.destinations = args
+            .allow_dsts
+            .iter()
+            .map(|d| d.parse().map_err(|e| flag("allow-dst", e)))
+            .collect::<Result<_>>()?;
+    }
+    if let Some(v) = &args.max_pps {
+        l.max_pps = Some(parse_pps(v).map_err(|e| flag("max-pps", e))?);
+    }
+    if let Some(v) = &args.max_bps {
+        l.max_bps = Some(parse_bps(v).map_err(|e| flag("max-bps", e))?);
+    }
+    if let Some(v) = &args.max_duration {
+        let d = parse_limit_duration(v).map_err(|e| flag("max-duration", e))?;
+        l.max_duration = Some(d.as_secs_f64());
+    }
+    if args.max_runs.is_some() {
+        l.max_runs = args.max_runs;
+    }
+    if args.max_flows.is_some() {
+        l.max_flows = args.max_flows;
+    }
+    l.allow_unlimited |= args.allow_unlimited;
+    l.validate().map_err(|e| anyhow::anyhow!("limits: {e}"))?;
+    Ok(l)
 }
 
 /// Stops the server when its port file is removed or its parent ends.
@@ -703,6 +793,18 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                 (Some(r), Some(u)) => println!("logged in as: {u} ({r})"),
                 (Some(r), None) => println!("access: {r}"),
                 _ => println!("logged in: no"),
+            }
+            if let Some(l) = &i.limits {
+                println!("limits:");
+                for line in l.limits.describe() {
+                    println!("  {line}");
+                }
+                if l.refused_frames > 0 {
+                    println!(
+                        "  {} frame(s) refused for their destination",
+                        l.refused_frames
+                    );
+                }
             }
         }
         CtlCommand::Interfaces => {
@@ -1348,6 +1450,40 @@ mod tests {
         assert_eq!(a.listen, "127.0.0.1:0");
         assert_eq!(a.parent, Some(42));
         assert!(parse_serve_args(&["--bogus".into()]).is_err());
+    }
+
+    #[test]
+    fn serve_limits_come_from_the_file_and_the_options() {
+        let dir = std::env::temp_dir().join(format!("ftrx-limits-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("server.toml");
+        std::fs::write(
+            &f,
+            "[limits]\ninterfaces = [\"eth1\"]\nmax_pps = \"5kpps\"\nmax_runs = 2\n",
+        )
+        .unwrap();
+        let args = parse_serve_args(&[
+            "--config".into(),
+            f.display().to_string(),
+            "--max-pps".into(),
+            "1000".into(),
+            "--allow-dst".into(),
+            "10.0.0.0/8".into(),
+            "--max-duration".into(),
+            "10m".into(),
+        ])
+        .unwrap();
+        let l = serve_limits(&args).unwrap();
+        assert_eq!(l.interfaces, ["eth1"]);
+        assert_eq!(l.max_pps, Some(1000.0));
+        assert_eq!(l.max_runs, Some(2));
+        assert_eq!(l.max_duration, Some(600.0));
+        assert_eq!(l.destinations.len(), 1);
+        let bad = parse_serve_args(&["--allow-dst".into(), "nowhere".into()]).unwrap();
+        assert!(serve_limits(&bad).is_err());
+        let none = parse_serve_args(&[]).unwrap();
+        assert!(serve_limits(&none).unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

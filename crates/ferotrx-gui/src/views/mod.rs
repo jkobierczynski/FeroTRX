@@ -234,6 +234,15 @@ impl FeroApp {
                                 .small()
                                 .weak(),
                             );
+                            if let Some(l) = &info.limits {
+                                // The owner's limits on what this GUI may start there.
+                                ui.label(
+                                    RichText::new("limits set by the server's owner")
+                                        .small()
+                                        .color(ui.visuals().warn_fg_color),
+                                )
+                                .on_hover_text(l.limits.describe().join("\n"));
+                            }
                         }
                         if let Some(hint) = s.local.as_ref().and_then(|l| l.hint.as_ref()) {
                             ui.label(RichText::new(hint).small().color(ui.visuals().warn_fg_color));

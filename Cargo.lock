@@ -1347,7 +1347,7 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 
 [[package]]
 name = "ferotrx-cli"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-core"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "ferotrx-packet",
  "pcap-file",
@@ -1379,7 +1379,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-ctl"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "base64",
  "ferotrx-core",
@@ -1396,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-gui"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "clap",
  "directories",
@@ -1422,7 +1422,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-io"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "cc",
  "ferotrx-core",
@@ -1434,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-packet"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "ferotrx-core",
 ]

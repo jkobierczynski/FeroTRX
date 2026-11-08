@@ -208,6 +208,20 @@ pub struct ServerInfo {
     /// The audit log's health, when the server keeps one (servers from 0.35.0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<Box<AuditHealth>>,
+    /// What remote operators may do at most on this server, when its owner
+    /// set limits (servers from 0.42.0; see [`Limits`](crate::Limits)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Box<LimitsInfo>>,
+}
+
+/// A server's limits as `server.info` reports them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LimitsInfo {
+    #[serde(flatten)]
+    pub limits: crate::Limits,
+    /// Frames the server did not send because of where they went.
+    #[serde(default)]
+    pub refused_frames: u64,
 }
 
 /// Whether the server's audit log is being written (`server.info`).

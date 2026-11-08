@@ -164,7 +164,8 @@ login timeouts, a pause and in the end a closed connection after wrong
 tokens). Every login, refusal and change is in the audit log.
 
 **What it does not protect against:** an operator, who by design can send
-any traffic the profiles allow and write pcap files anywhere in the data
+any traffic the profiles allow (within the [traffic limits](#traffic-limits)
+the server's owner set) and write pcap files anywhere in the data
 directories; anyone who has a token or key file (keep them private: `ferotrx
 certs` writes keys readable only by their owner); local users of the box
 (listen on 127.0.0.1, the default, when you do not need the network); and
@@ -236,12 +237,111 @@ the minute has passed. A connection may run `--max-subscriptions` (16)
 connection ends its subscriptions. `server.info` shows the connections and
 subscriptions open.
 
+### Traffic limits
+
+By default an operator may send any rate on any interface for as long as
+they like: benchmarking must work out of the box. A server's owner can set
+limits that remote operators cannot exceed, whoever they log in as (there is
+no role between read and operator for this; the limits cover every
+operator). The command line on the box itself (`ferotrx run`, `tcp`, `bench`
+and the rest) is not limited.
+
+| `ferotrx serve` option | `[limits]` key | Limit |
+| --- | --- | --- |
+| `--allow-iface NAME` (repeatable) | `interfaces` | the interfaces runs send on, receivers (`rx`) listen on and captures read |
+| `--allow-dst CIDR` (repeatable) | `destinations` | where frames go: built packets, rewrites and variations, replayed pcaps, and the servers TCP and UDP clients connect to |
+| `--max-pps RATE` | `max_pps` | packets per second, all runs together (`50kpps`, or a number) |
+| `--max-bps RATE` | `max_bps` | bits per second, all runs together (`200mbps`, `1gbps`, or a number); frame bytes without FCS, as `mbps` rates count them |
+| `--max-duration TIME` | `max_duration` | how long a run goes (`10m`) |
+| `--max-runs N` | `max_runs` | runs that send going at once: traffic, TCP, UDP, benchmarks, Y.1564 tests and scenarios |
+| `--max-flows N` | `max_flows` | a TCP or UDP run's connections (transactions) open at once, and new ones per second |
+| `--allow-unlimited` | `allow_unlimited` | with a rate limit, still allow top speed, benchmarks and Y.1564 tests |
+
+The same limits can sit in a file, given with `--config FILE`; options on
+the command line win over it:
+
+```toml
+format = 1
+
+[limits]
+interfaces = ["enp0s8", "enp0s9"]
+destinations = ["192.168.20.0/24", "2001:db8:20::/64"]
+max_pps = "50kpps"
+max_bps = "200mbps"
+max_duration = "10m"
+max_runs = 4
+max_flows = 2000
+```
+
+**At the start.** `run.start`, `tcp.start`, `udp.start`, `bench.start`,
+`y1564.start` and `scenario.start` check what they are asked for and refuse
+with `FORBIDDEN` (-32004), a message that names the option, and the limit in
+the error's `data` (`{"limit": "max_pps"}`; in Python `RpcError.limit`):
+
+* an interface outside `--allow-iface` (also for `rx.start` and
+  `capture.start`);
+* a profile whose streams add up to more than `--max-pps` or `--max-bps`
+  (`pps` and `mbps` rates; captures replayed at their own timing cannot be
+  known beforehand and are held while they run, see below);
+* top speed (`rate = "topspeed"`, `--topspeed`), benchmarks (they search for
+  the highest rate) and Y.1564 tests (bursts at the line rate) while a rate
+  is limited, unless `--allow-unlimited`;
+* a stream frame to an address outside `--allow-dst`: the first 4096 frames
+  of each stream are built, with rewrites and variations, and looked at; a
+  TCP or UDP client connecting outside it (every server address of the
+  range);
+* a duration longer than `--max-duration`;
+* a TCP run with more new connections per second (its `cps` and the
+  templates' own), or more open at once, than `--max-flows`; for UDP, its
+  transactions. A profile without a limit on open connections gets
+  `--max-flows`;
+* another run while `--max-runs` go.
+
+**While the traffic flows.** The interfaces of the server's runs send
+through one guard:
+
+* all runs together are paced below `--max-pps` and `--max-bps`, so a
+  capture replayed at its own timing, a run at top speed (with
+  `--allow-unlimited`) or several runs at once cannot go past them; after a
+  pause at most 5 ms of the rate goes out at once;
+* with `--allow-dst`, every frame is checked: IPv4 and IPv6 (also behind
+  VLAN tags) to an allowed address, ARP, and link-scoped addresses
+  (255.255.255.255, 224.0.0.0/24, ff01::/16, ff02::/16 for DHCP, IGMP,
+  NDP, MLD) go out; anything else does not, including frames that are
+  neither IP nor ARP, which cannot be checked. A stream's frame there fails
+  the run; a TCP or UDP port drops it (as a firewall would), so a server
+  end does not stop because some client outside the range reached it.
+  `server.info` counts these frames (`refused_frames`);
+* runs without a duration end at `--max-duration`, and anything still going
+  5 s after it (benchmarks, a TCP run closing its connections) is stopped
+  (`limit_stopped` in the audit log). A scenario may take
+  `--max-duration` for each of its checks and attempts; checks without a
+  duration get `--max-duration`.
+
+Files written by a run (`"file"` output) and the null output put nothing on
+the network: interfaces, destinations and rates do not apply to them, the
+duration and run limits do.
+
+`server.info` reports the limits (`limits`, with `refused_frames`), `ferotrx
+ctl info` prints them, the GUI shows "limits set by the server's owner"
+under the server with the list on hover, and [fleets](fleet.md) check each
+agent's limits before they deploy anything.
+
+Finished runs are kept for `*.list` and `*.get` until removed, at most 256
+of each kind (runs, TCP, UDP, receivers, captures, benchmarks, Y.1564,
+scenarios): starting more forgets the oldest finished ones, so a client
+cannot grow the server's memory by never removing runs. This holds with or
+without limits.
+
 **Audit log.** JSON lines on standard error, or appended to `--audit-log
 FILE`: `connect`, `refused`, `tls_error`, `login` (by token or certificate,
 with the certificate's SHA-256), `login_failed`, `denied`, `call` (every
 operator method with its parameters, uploaded profiles and `file.put` data by size, and whether
 it worked), `disconnect` (with the reason), `login_throttled`,
-`cleartext_tokens` and `audit_refused`. Tokens are never written.
+`cleartext_tokens`, `audit_refused`, `limit_refused` (a start beyond a
+[traffic limit](#traffic-limits), with the method and the limit) and
+`limit_stopped` (a run stopped at `--max-duration`, with its kind and id).
+Tokens are never written.
 
 A write that fails (a full disk) does not stop the server: it says so once
 on standard error (and again when writing works), and `server.info` shows

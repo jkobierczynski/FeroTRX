@@ -37,6 +37,7 @@ from .types import (
     ImpairCounters,
     InterfaceEntry,
     LatencyCounters,
+    Limits,
     MediaCounters,
     Notification,
     PortImpairCounters,
@@ -60,7 +61,7 @@ from .types import (
     Y1564RunInfo,
 )
 
-__version__ = "0.41.0"
+__version__ = "0.42.0"
 
 __all__ = [
     "__version__",
@@ -92,6 +93,7 @@ __all__ = [
     "StreamCounters",
     "ImpairCounters",
     "LatencyCounters",
+    "Limits",
     "PortImpairCounters",
     "MediaCounters",
     "FileInfo",

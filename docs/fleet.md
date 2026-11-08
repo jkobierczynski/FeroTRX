@@ -241,6 +241,14 @@ use the same calls ([remote control](remote-control.md)):
   bytes. `file.get` reads a file back in pieces (captures, reports).
 * `capture.start` captures on the agent's interface into a file in its
   data directory ([capturing](capture.md#on-a-remote-server)).
+* `server.info` reports the agent's [traffic limits](remote-control.md#traffic-limits)
+  (servers from 0.42.0). Before it deploys anything, the controller checks
+  what the plan starts on each agent against them: interfaces (also of
+  receivers), durations (the plan's or `--duration`), rates, `cps`,
+  `concurrency` and how many runs go at once. A plan an agent would refuse
+  fails there, naming the run, the agent and the option. The agents check
+  again at each start, also what is inside the profiles; a refusal then
+  stops what already started, as any failed start does.
 
 In Rust these are `ferotrx_ctl::fleet` (`run_fleet`, `connect_all`,
 `deploy`) and `ferotrx_core::fleet::FleetPlan`. In Python they are

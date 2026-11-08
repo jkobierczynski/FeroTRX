@@ -118,6 +118,11 @@
 //!   `stats` subscriptions per connection and in total; request size; idle
 //!   and login timeouts; a pause and in the end a closed connection after
 //!   wrong tokens, and wrong tokens per address and in total per minute.
+//! * **Traffic limits** ([`Limits`], [`Controller::with_limits`]): the
+//!   interfaces and destinations runs may use, packet and bit rates of all
+//!   runs together, how long a run goes, runs at once and TCP/UDP flows.
+//!   Starts beyond them answer `FORBIDDEN` with the limit in `data.limit`;
+//!   the frames of the server's runs are paced and checked while they go.
 //! * **Audit log** ([`AuditLog`]): logins, refusals and every operator call,
 //!   as JSON lines; its health in `server.info`, and with `audit_required`
 //!   no changes while it cannot be written.
@@ -136,6 +141,7 @@ pub mod fleet;
 #[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub mod fuzzing;
+mod limits;
 pub mod protocol;
 mod scenario;
 mod server;
@@ -153,6 +159,7 @@ pub use controller::{
     Started,
 };
 pub use files::{sha256_hex, FilePolicy, DEFAULT_MAX_FILE, DEFAULT_MAX_UPLOAD};
+pub use limits::{parse_bps, parse_limit_duration, parse_pps, refused_limit, Demand, Limits, Net};
 pub use protocol::{Role, RpcError};
 pub use scenario::{check_info, scenario_info, LabRunner, SinkOpener};
 pub use server::{Server, ServerConfig, MAX_LINE};
