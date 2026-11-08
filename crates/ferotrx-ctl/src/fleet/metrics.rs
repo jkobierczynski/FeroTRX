@@ -297,6 +297,17 @@ pub fn traffic_metrics(parts: &[TrafficPart<'_>]) -> Metrics {
     let (mut tx, mut got, mut lost, mut dup, mut ooo) = (0u64, 0u64, 0u64, 0u64, 0u64);
     let mut flows: Vec<&FlowCounters> = Vec::new();
     let mut any = false;
+    // Where the frames were lost, added up over the parts that say.
+    let mut loss: Option<ferotrx_core::LossReport> = None;
+    let mut add_loss = |l: ferotrx_core::LossReport| {
+        let t = loss.get_or_insert_with(Default::default);
+        t.offered += l.offered;
+        t.sent += l.sent;
+        t.received += l.received;
+        t.generator += l.generator;
+        t.network += l.network;
+        t.receiver += l.receiver;
+    };
     let mut rx_mbps = 0.0;
     for p in parts {
         match p.rx {
@@ -311,6 +322,15 @@ pub fn traffic_metrics(parts: &[TrafficPart<'_>]) -> Metrics {
                 dup += rx.flows.iter().map(|f| f.duplicates).sum::<u64>();
                 ooo += rx.flows.iter().map(|f| f.out_of_order).sum::<u64>();
                 flows.extend(&rx.flows);
+                let mut drops = p.run.drops.tx_side();
+                drops.add(&rx.counters.drops);
+                add_loss(ferotrx_core::LossReport::new(
+                    sent,
+                    r,
+                    p.run.total.send_errors,
+                    p.run.total.late_skipped,
+                    drops,
+                ));
                 if rx.counters.elapsed_s > 0.0 {
                     rx_mbps += rx.counters.bytes as f64 * 8.0 / 1e6 / rx.counters.elapsed_s;
                 }
@@ -324,6 +344,9 @@ pub fn traffic_metrics(parts: &[TrafficPart<'_>]) -> Metrics {
                     .collect();
                 if p.run.rx.is_some() {
                     any = true;
+                }
+                if let Some(l) = p.run.loss {
+                    add_loss(l);
                 }
                 for f in own {
                     tx += f.tx.unwrap_or(0);
@@ -351,6 +374,9 @@ pub fn traffic_metrics(parts: &[TrafficPart<'_>]) -> Metrics {
     put(&mut m, "out_of_order", ooo as f64);
     put(&mut m, "out_of_order_pct", pct(ooo, got));
     put(&mut m, "rx_mbps", rx_mbps);
+    if let Some(l) = &loss {
+        ferotrx_core::scenario::loss_metrics(&mut m, l);
+    }
     if let Some(l) = merge_latency(flows.iter().map(|f| (&f.latency, f.rx))) {
         for (name, v) in [
             ("latency_min", l.min_us),

@@ -80,8 +80,7 @@ impl Y1564Run {
         let mut info = RunInfo::new();
         ferotrx_io::describe_host(&mut info);
         info.command = Some("y1564.start".into());
-        info.profile = Some(job.profile_name.clone());
-        info.profile_text = Some(job.profile_text.clone());
+        info.set_profile(job.profile_name.clone(), Some(job.profile_text.clone()));
         info.backend = Some(detail);
         info.tx_interface = Some(ferotrx_io::describe_interface(&job.iface));
         info.rx_interface = Some(ferotrx_io::describe_interface(&job.rx));

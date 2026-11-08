@@ -129,8 +129,7 @@ pub fn cmd_y1564(args: Y1564Args) -> Result<()> {
     let mut info = RunInfo::new();
     ferotrx_io::describe_host(&mut info);
     info.command = Some(std::env::args().collect::<Vec<_>>().join(" "));
-    info.profile = Some(args.profile.display().to_string());
-    info.profile_text = Some(text);
+    info.set_profile(args.profile.display().to_string(), Some(text));
     info.backend = Some(details.join("; "));
     info.tx_interface = Some(ferotrx_io::describe_interface(&args.iface));
     info.rx_interface = Some(ferotrx_io::describe_interface(&args.rx));

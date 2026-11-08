@@ -39,6 +39,16 @@ pub struct RunInfo {
     pub profile: Option<String>,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub profile_text: Option<String>,
+    /// SHA-256 of `profile_text`, in hex: two runs of the same profile
+    /// have the same.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub profile_sha256: Option<String>,
+    /// Threads that sent (`--workers`).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub workers: Option<usize>,
+    /// The CPUs the process may run on, e.g. `0-3,8` (Linux).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub cpu_affinity: Option<String>,
 }
 
 /// A network interface as the report describes it.
@@ -73,6 +83,18 @@ impl RunInfo {
         }
     }
 
+    /// Sets the profile's name, text and hash.
+    pub fn set_profile(&mut self, name: impl Into<String>, text: Option<String>) {
+        self.profile = Some(name.into());
+        self.profile_sha256 = text.as_deref().map(|t| {
+            crate::app::sip::digest::sha256(t.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        });
+        self.profile_text = text;
+    }
+
     /// `key: value` lines for a text report.
     pub fn lines(&self) -> Vec<String> {
         let mut out = vec![
@@ -85,7 +107,13 @@ impl RunInfo {
             }
         };
         add("command", self.command.clone());
-        add("profile", self.profile.clone());
+        add(
+            "profile",
+            self.profile.clone().map(|p| match &self.profile_sha256 {
+                Some(h) => format!("{p} (sha256 {})", &h[..16]),
+                None => p,
+            }),
+        );
         add("host", self.hostname.clone());
         add(
             "system",
@@ -101,6 +129,11 @@ impl RunInfo {
                 None => format!("{} threads", self.cpus),
             }),
         );
+        add(
+            "affinity",
+            self.cpu_affinity.as_ref().map(|c| format!("CPUs {c}")),
+        );
+        add("workers", self.workers.map(|w| w.to_string()));
         add("sender", self.backend.clone());
         add(
             "tx iface",
@@ -199,5 +232,14 @@ mod tests {
             "{text}"
         );
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
+        info.set_profile("lab.toml", Some("abc".into()));
+        info.workers = Some(4);
+        assert_eq!(
+            info.profile_sha256.as_deref(),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+        let text = info.lines().join("\n");
+        assert!(text.contains("lab.toml (sha256 ba7816bf8f01cfea)"), "{text}");
+        assert!(text.contains("workers:    4"), "{text}");
     }
 }

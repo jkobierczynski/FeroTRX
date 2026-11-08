@@ -1537,6 +1537,11 @@ fn print_run(r: &RunInfo) {
             println!("{line}");
         }
     }
+    if let Some(loss) = &r.loss {
+        println!("  {}", loss.line());
+    } else if !r.drops.is_empty() {
+        println!("  dropped at: {}", r.drops.describe());
+    }
 }
 
 fn print_rx_run(r: &RxRunInfo) {
@@ -1556,6 +1561,12 @@ fn print_rx_run(r: &RxRunInfo) {
     for line in crate::latency::flow_lines(&rows) {
         println!("{line}");
     }
+    if !r.counters.drops.is_empty() {
+        println!(
+            "  dropped here before they were read: {}",
+            r.counters.drops.describe()
+        );
+    }
 }
 
 fn print_counters(label: &str, s: &Counters) {
@@ -1565,6 +1576,9 @@ fn print_counters(label: &str, s: &Counters) {
     );
     if s.send_errors > 0 {
         line.push_str(&format!(", {} send errors", s.send_errors));
+    }
+    if s.late_skipped > 0 {
+        line.push_str(&format!(", {} skipped late", s.late_skipped));
     }
     println!("{line}");
 }

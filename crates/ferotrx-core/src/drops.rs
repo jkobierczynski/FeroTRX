@@ -3,40 +3,40 @@
 //! splits what a run lost into what the generator never sent, what the
 //! network lost and what the receiver dropped before FeroTRX read it.
 
-use serde::{Deserialize, Serialize};
-
 /// Frames dropped on one side of a port, by layer, as the OS or driver
 /// counts them. Zero where a layer has no counter or the port does not
 /// pass through it. The NIC counters are deltas over the run, of everything
 /// on the interface (not only FeroTRX's frames).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct DropCounters {
     /// Received frames the NIC had no room for: Linux `rx_missed_errors`
     /// and `rx_fifo_errors`, Windows `InDiscards`, DPDK `imissed` and
     /// `rx_nombuf`.
-    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "is_zero"))]
     pub nic_rx_missed: u64,
     /// Received frames the NIC or driver dropped as bad or unwanted: Linux
     /// `rx_errors` and `rx_dropped`, Windows `InErrors`, DPDK `ierrors`.
-    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "is_zero"))]
     pub nic_rx_errors: u64,
     /// Received frames an AF_XDP socket lost: its ring was full, the fill
     /// ring was empty, or the kernel dropped them (`XDP_STATISTICS`).
-    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "is_zero"))]
     pub ring_rx_dropped: u64,
     /// Frames the capture buffer had no room for (libpcap/Npcap `ps_drop`).
-    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "is_zero"))]
     pub capture_dropped: u64,
     /// Frames the NIC failed to send: Linux `tx_errors` and `tx_dropped`,
     /// Windows `OutDiscards` and `OutErrors`, DPDK `oerrors`.
-    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "is_zero"))]
     pub nic_tx_errors: u64,
     /// Frames an AF_XDP socket refused to send (`tx_invalid_descs`).
-    #[serde(skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "is_zero"))]
     pub ring_tx_invalid: u64,
 }
 
+#[cfg(feature = "serde")]
 fn is_zero(n: &u64) -> bool {
     *n == 0
 }
@@ -143,8 +143,9 @@ impl DropCounters {
 /// flows and count everything on their interface: each is capped at the
 /// loss still unexplained, in the order receiver, then generator's
 /// sender drops, so other traffic never shows up as more loss than there is.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct LossReport {
     /// Frames the streams with signatures tried to send.
     pub offered: u64,
@@ -312,6 +313,17 @@ mod tests {
         let reset = DropCounters::default();
         assert_eq!(reset.since(&a), DropCounters::default());
         assert_eq!(a.tx_side(), DropCounters::default());
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn counters_in_json_leave_out_zeros() {
+        let a = DropCounters {
+            capture_dropped: 5,
+            nic_rx_missed: 7,
+            ..Default::default()
+        };
+        let reset = DropCounters::default();
         let json = serde_json::to_string(&a).unwrap();
         assert_eq!(json, r#"{"nic_rx_missed":7,"capture_dropped":5}"#);
         assert_eq!(serde_json::from_str::<DropCounters>("{}").unwrap(), reset);

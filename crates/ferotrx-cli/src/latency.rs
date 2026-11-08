@@ -8,7 +8,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use ferotrx_core::{
-    parse_duration, Capture, Job, Rate, ReplayStats, RunInfo, RxConfig, RxJob, RxSettings, RxStats,
+    parse_duration, Capture, DropCounters, Job, LossReport, Rate, ReplayStats, RunInfo, RxConfig,
+    RxJob, RxSettings, RxStats,
 };
 use ferotrx_ctl::protocol::FlowCounters;
 
@@ -33,8 +34,12 @@ pub struct RxArgs {
     #[arg(long, value_name = "TIME", default_value = "500ms", value_parser = parse_duration)]
     pub rx_wait: Duration,
 
-    /// With --rx: also write the loss and latency report to this file, as JSON.
-    #[arg(long, value_name = "FILE", requires = "rx")]
+    /// Write a record of the run to this file, as JSON: what ran where
+    /// (version, host, NIC and driver, backend, workers, CPU affinity,
+    /// profile and its hash), what each stream sent, what every layer
+    /// dropped, and with --rx the loss and latency of every flow and where
+    /// the frames were lost.
+    #[arg(long, value_name = "FILE")]
     pub report: Option<PathBuf>,
 }
 
@@ -85,15 +90,39 @@ fn pct(n: u64, of: u64) -> f64 {
     }
 }
 
-/// The final loss and latency table of a job with a receiver.
+/// The record of a run that has ended: what each stream sent, what every
+/// layer dropped and, with a receiver, the loss and latency table and where
+/// the frames were lost.
 pub struct Report {
     rows: Vec<(String, FlowCounters)>,
     /// Offered and achieved send rates, per row.
     rates: Vec<Option<SendRate>>,
     packets: u64,
     untagged: u64,
+    /// True when the job had a receiver.
+    rx: bool,
+    streams: Vec<StreamRecord>,
+    drops: DropCounters,
+    loss: Option<LossReport>,
+    workers: usize,
     /// Run metadata for the JSON report.
     pub info: Option<RunInfo>,
+}
+
+/// What one stream sent.
+#[derive(Clone, Debug, serde::Serialize)]
+struct StreamRecord {
+    name: String,
+    #[serde(flatten)]
+    send: SendRate,
+    #[serde(skip_serializing_if = "is_zero")]
+    send_errors: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    late_skipped: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// What a stream was asked to send and what it sent.
@@ -137,10 +166,22 @@ impl SendRate {
 struct JsonReport<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     info: Option<&'a RunInfo>,
+    /// What each stream sent (a run's record; not in `ferotrx rx` reports).
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    streams: &'a [StreamRecord],
+    /// What every layer dropped, both sides.
+    #[serde(skip_serializing_if = "DropCounters::is_empty")]
+    drops: DropCounters,
+    /// Where the frames of the streams with signatures were lost.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    loss: Option<&'a LossReport>,
     /// Frames received, and those without a signature.
-    packets: u64,
-    untagged: u64,
-    flows: Vec<JsonFlow<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    packets: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    untagged: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flows: Option<Vec<JsonFlow<'a>>>,
 }
 
 #[derive(serde::Serialize)]
@@ -152,30 +193,75 @@ struct JsonFlow<'a> {
     send: Option<&'a SendRate>,
 }
 
+/// What goes in a JSON report besides the flows.
+#[derive(Default)]
+struct Extra<'a> {
+    streams: &'a [StreamRecord],
+    drops: DropCounters,
+    loss: Option<&'a LossReport>,
+}
+
 fn write_report(
     path: &Path,
     info: Option<&RunInfo>,
-    packets: u64,
-    untagged: u64,
+    rx: Option<(u64, u64)>,
     rows: &[(String, FlowCounters)],
     rates: &[Option<SendRate>],
+    extra: Extra<'_>,
 ) -> Result<()> {
     let report = JsonReport {
         info,
-        packets,
-        untagged,
-        flows: rows
-            .iter()
-            .enumerate()
-            .map(|(i, (name, counters))| JsonFlow {
-                name,
-                counters,
-                send: rates.get(i).and_then(Option::as_ref),
-            })
-            .collect(),
+        streams: extra.streams,
+        drops: extra.drops,
+        loss: extra.loss,
+        packets: rx.map(|r| r.0),
+        untagged: rx.map(|r| r.1),
+        flows: rx.map(|_| {
+            rows.iter()
+                .enumerate()
+                .map(|(i, (name, counters))| JsonFlow {
+                    name,
+                    counters,
+                    send: rates.get(i).and_then(Option::as_ref),
+                })
+                .collect()
+        }),
     };
     let text = serde_json::to_string_pretty(&report)?;
     std::fs::write(path, text + "\n").with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// Writes the record of a TCP, UDP or other run to `path`, as JSON:
+/// `{"info": ..., KEY: counters}`.
+pub fn save_record<T: serde::Serialize>(
+    path: &Path,
+    info: &RunInfo,
+    key: &str,
+    counters: &T,
+) -> Result<()> {
+    let mut map = serde_json::Map::new();
+    map.insert("info".into(), serde_json::to_value(info)?);
+    map.insert(key.into(), serde_json::to_value(counters)?);
+    let text = serde_json::to_string_pretty(&serde_json::Value::Object(map))?;
+    std::fs::write(path, text + "\n").with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// Sets the profile of a record from a file, with its text and hash.
+pub fn set_profile_file(info: &mut RunInfo, path: &Path) {
+    info.set_profile(
+        path.display().to_string(),
+        std::fs::read_to_string(path).ok(),
+    );
+}
+
+/// The line on what the ports' layers dropped, when more than the capture
+/// buffer (which the summary line has) dropped anything.
+pub fn drops_line(drops: &DropCounters) -> Option<String> {
+    let only_capture = DropCounters {
+        capture_dropped: drops.capture_dropped,
+        ..Default::default()
+    };
+    (*drops != only_capture).then(|| format!("dropped at: {}", drops.describe()))
 }
 
 /// Run metadata for a report: this machine, and the interfaces sent and received on.
@@ -190,10 +276,26 @@ pub fn run_info(tx: Option<&str>, rx: Option<&str>, backend: Option<String>) -> 
 }
 
 impl Report {
-    /// The report of a job that has ended, if it has a receiver.
-    pub fn of(job: &Job) -> Option<Report> {
-        let rx = job.rx_stats()?;
+    /// The record of a job that has ended.
+    pub fn of(job: &Job) -> Report {
         let stats = job.stats();
+        let streams = job
+            .stream_names()
+            .iter()
+            .zip(job.rates())
+            .zip(&stats.streams)
+            .map(|((name, rate), st)| StreamRecord {
+                name: name.clone(),
+                send: SendRate::new(*rate, st),
+                send_errors: st.send_errors,
+                late_skipped: st.late_skipped,
+            })
+            .collect();
+        let mut drops = stats.drops.tx_side();
+        let rx = job.rx_stats();
+        if let Some(rx) = &rx {
+            drops.add(&rx.drops.rx_side());
+        }
         let reports = job.flow_reports();
         let rates = reports
             .iter()
@@ -202,39 +304,59 @@ impl Report {
                 Some(SendRate::new(*job.rates().get(i)?, stats.streams.get(i)?))
             })
             .collect();
-        Some(Report {
+        Report {
             rows: reports
                 .iter()
                 .map(|r| (r.stream.clone(), r.into()))
                 .collect(),
             rates,
-            packets: rx.packets,
-            untagged: rx.untagged,
+            packets: rx.as_ref().map_or(0, |r| r.packets),
+            untagged: rx.as_ref().map_or(0, |r| r.untagged),
+            rx: rx.is_some(),
+            streams,
+            drops,
+            loss: job.loss(),
+            workers: job.workers(),
             info: None,
-        })
+        }
     }
 
-    /// Writes the report as JSON.
-    pub fn save(&self, path: &Path) -> Result<()> {
+    /// Writes the report as JSON, with `info` (and the job's worker count).
+    pub fn save(&mut self, path: &Path, mut info: RunInfo) -> Result<()> {
+        info.workers = Some(self.workers);
+        self.info = Some(info);
         write_report(
             path,
             self.info.as_ref(),
-            self.packets,
-            self.untagged,
+            self.rx.then_some((self.packets, self.untagged)),
             &self.rows,
             &self.rates,
+            Extra {
+                streams: &self.streams,
+                drops: self.drops,
+                loss: self.loss.as_ref(),
+            },
         )
     }
 
+    /// Prints the loss and latency table (with a receiver) and where frames
+    /// were dropped.
     pub fn print(&self) {
-        eprintln!("loss and latency:");
-        for line in flow_lines(&self.rows) {
-            eprintln!("{line}");
+        if self.rx {
+            eprintln!("loss and latency:");
+            for line in flow_lines(&self.rows) {
+                eprintln!("{line}");
+            }
+            eprintln!(
+                "  received {} frames, {} without a signature",
+                self.packets, self.untagged
+            );
         }
-        eprintln!(
-            "  received {} frames, {} without a signature",
-            self.packets, self.untagged
-        );
+        if let Some(loss) = &self.loss {
+            eprintln!("  {}", loss.line());
+        } else if !self.drops.is_empty() {
+            eprintln!("dropped at: {}", self.drops.describe());
+        }
     }
 }
 
@@ -330,7 +452,7 @@ pub fn cmd_rx(args: RxCmdArgs) -> Result<()> {
             Capture::from_path(path).with_context(|| format!("cannot read {}", path.display()))?;
         let stats = RxStats::from_capture(&cap);
         let mut info = run_info(None, None, None);
-        info.profile = Some(format!("capture {}", path.display()));
+        info.set_profile(format!("capture {}", path.display()), None);
         return print_rx(&stats, args.report.as_deref(), Some(&info));
     }
     let Some(iface) = &args.iface else {
@@ -397,8 +519,25 @@ fn print_rx(stats: &RxStats, report: Option<&Path>, info: Option<&RunInfo>) -> R
             "  (lost = gaps in the sequence numbers between the first and the last packet seen)"
         );
     }
+    let drops = stats.drops.rx_side();
+    if !drops.is_empty() {
+        eprintln!(
+            "  dropped here before they were read: {}",
+            drops.describe()
+        );
+    }
     match report {
-        Some(path) => write_report(path, info, stats.packets, stats.untagged, &rows, &[]),
+        Some(path) => write_report(
+            path,
+            info,
+            Some((stats.packets, stats.untagged)),
+            &rows,
+            &[],
+            Extra {
+                drops,
+                ..Default::default()
+            },
+        ),
         None => Ok(()),
     }
 }

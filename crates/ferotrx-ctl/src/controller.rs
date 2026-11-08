@@ -2389,8 +2389,12 @@ impl Run {
             s.paused = c.paused;
             s.multiplier = c.multiplier;
         }
+        let mut drops = stats.drops.tx_side();
+        let mut loss = None;
         let rx = match (&self.rx_iface, self.job.rx_stats()) {
             (Some(iface), Some(rx)) => {
+                drops.add(&rx.drops.rx_side());
+                loss = ferotrx_core::LossReport::for_run(self.job.flows(), &stats, &rx);
                 let reports =
                     FlowReport::for_run(self.job.stream_names(), self.job.flows(), &stats, &rx);
                 for r in &reports {
@@ -2417,6 +2421,8 @@ impl Run {
             link: self.link.clone(),
             paused: control.paused,
             multiplier: control.multiplier,
+            drops,
+            loss,
         }
     }
 }
