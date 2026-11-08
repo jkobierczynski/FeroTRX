@@ -60,6 +60,8 @@ The [README](../README.md) has the overview and a quickstart.
 
 * [Fuzzing and hostile-input tests](fuzzing.md): the fuzz targets, running
   long campaigns, what to do with a crash.
+* [CI: what runs when](ci.md): which CI work is skipped because an
+  equivalent tree already passed, and what still runs in full.
 
 ## Automation
 
