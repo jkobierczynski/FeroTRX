@@ -66,6 +66,10 @@ const PROTOCOL_ERROR: u32 = 1;
 const FLOW_CONTROL_ERROR: u32 = 3;
 const STREAM_CLOSED: u32 = 5;
 const FRAME_SIZE_ERROR: u32 = 6;
+const ENHANCE_YOUR_CALM: u32 = 11;
+/// The longest header block (HEADERS and its CONTINUATION frames) taken:
+/// a peer that sends CONTINUATION without end would fill memory.
+const MAX_HEADER_BLOCK: usize = 256 * 1024;
 const REFUSED_STREAM: u32 = 7;
 const COMPRESSION_ERROR: u32 = 9;
 
@@ -628,6 +632,12 @@ impl Conn {
                 let Some((cid, end, mut block)) = self.cont.take() else {
                     return proto("CONTINUATION without HEADERS");
                 };
+                if block.len() + p.len() > MAX_HEADER_BLOCK {
+                    return Err((
+                        ENHANCE_YOUR_CALM,
+                        format!("a header block over {MAX_HEADER_BLOCK} bytes"),
+                    ));
+                }
                 block.extend_from_slice(p);
                 if flags & END_HEADERS != 0 {
                     self.head(cid, &block, end, events, cx)?;

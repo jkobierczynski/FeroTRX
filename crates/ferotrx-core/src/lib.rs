@@ -108,6 +108,14 @@ mod field_engine;
 #[cfg(feature = "profile")]
 pub mod fleet;
 mod flows;
+#[cfg(all(
+    any(test, feature = "fuzzing"),
+    feature = "profile",
+    feature = "ssh",
+    feature = "quic"
+))]
+#[doc(hidden)]
+pub mod fuzzing;
 mod host;
 mod impair;
 mod job;

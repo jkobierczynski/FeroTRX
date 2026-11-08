@@ -291,7 +291,7 @@ impl FlowStats {
             }
             let (word, bit) = self.bit(seq);
             *word |= bit;
-            self.next_seq = seq + 1;
+            self.next_seq = seq.saturating_add(1);
         } else if seq < self.first_seq {
             // From before the first packet seen: counting starts earlier.
             self.out_of_order += 1;
@@ -511,6 +511,17 @@ mod tests {
             seq,
             tx_time: Duration::from_secs(10),
         }
+    }
+
+    #[test]
+    fn the_highest_sequence_number_does_not_overflow() {
+        let mut f = FlowStats::new(4, u64::MAX);
+        let at = Duration::from_secs(11);
+        for s in [u64::MAX, 0, u64::MAX] {
+            f.record(&sig(s), 60, at, None);
+        }
+        assert_eq!(f.packets, 3);
+        assert_eq!(f.next_seq, u64::MAX);
     }
 
     #[test]
