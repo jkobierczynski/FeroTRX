@@ -73,7 +73,9 @@ real sessions between FeroTRX's own clients and servers, frames of real
 runs, the example profiles and captures), then runs
 `cargo +nightly fuzz run <target>` with `-rss_limit_mb=2048` (more memory
 is a finding), `-timeout=10` (one input taking longer is a finding) and
-`-max_len=65536`. New interesting inputs collect in `fuzz/corpus/<target>/`,
+`-max_len=65536` (and `-detect_leaks=0` for `ctl_server`, whose
+connection threads outlive an input, which LeakSanitizer reports as a
+leak). New interesting inputs collect in `fuzz/corpus/<target>/`,
 so the next run starts where this one stopped; keep that folder between
 campaigns. Anything after `--` goes to libFuzzer.
 

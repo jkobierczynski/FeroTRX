@@ -90,6 +90,9 @@ for t in "${targets[@]}"; do
   mkdir -p "fuzz/corpus/$t" "fuzz/artifacts/$t"
   dict=()
   [ -f "fuzz/dicts/$t.dict" ] && dict=("-dict=fuzz/dicts/$t.dict")
+  # The live server's connection threads outlive an input: LeakSanitizer
+  # takes their thread-local storage for leaks.
+  [ "$t" = ctl_server ] && dict+=("-detect_leaks=0")
   if ! cargo +nightly fuzz run "$t" "fuzz/corpus/$t" "fuzz/seeds/$t" -- \
       -max_total_time="$seconds" -rss_limit_mb=2048 -timeout=10 -max_len=65536 \
       -jobs="$jobs" -workers="$jobs" -print_final_stats=1 \

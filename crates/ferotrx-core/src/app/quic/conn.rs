@@ -1067,8 +1067,9 @@ impl Conn {
                 2 => Level::Handshake,
                 _ => {
                     // 0-RTT: we never accept early data.
-                    let len = r.varint()? as usize;
-                    return Some(r.pos() + len);
+                    // Skipped whole, if it is all there.
+                    let len = usize::try_from(r.varint()?).ok()?;
+                    return r.pos().checked_add(len).filter(|&end| end <= d.len());
                 }
             };
             let len = r.varint()? as usize;
