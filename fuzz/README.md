@@ -10,6 +10,7 @@ Quick start (nightly toolchain and `cargo install cargo-fuzz` once):
 fuzz/run.sh                  # every target, 60 s each
 fuzz/run.sh -t 3600 app      # one target for an hour
 fuzz/run.sh --list           # the targets
+fuzz/campaign.sh             # all of them, 8 hours in total
 ```
 
 * `fuzz_targets/`: one file per target; each calls a function of

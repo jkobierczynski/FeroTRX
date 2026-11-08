@@ -86,6 +86,25 @@ of them for 1 to 2 hours each with `-j` set to the cores you can spare, and
 once in a while a whole night on one. libFuzzer prints `cov:` (edges seen)
 every few seconds; when it stops growing for an hour, move on.
 
+### An overnight campaign
+
+`fuzz/campaign.sh` runs every target in turn for 8 hours in total,
+weighted toward the protocol targets: `app` 80 minutes, `tcp_engine`,
+`quic` and `ctl_server` 60, `udp_engine` and `ssh` 45, the rest 15 to 25.
+
+```sh
+fuzz/campaign.sh -n          # print the plan
+fuzz/campaign.sh             # 8 hours, one process per target
+fuzz/campaign.sh -j 4        # 8 hours, 4 processes per target
+fuzz/campaign.sh -H 4        # the same split over 4 hours
+nohup fuzz/campaign.sh -j 4 >/dev/null 2>&1 &   # and log out
+```
+
+A crash in one target does not stop the others. Everything goes to
+`fuzz/campaign-<date>.log`, and the last lines say which targets crashed
+(`grep -E 'FAILED|Crashes' fuzz/campaign-*.log`). Then follow the steps
+below for each file in `fuzz/artifacts/<target>/`.
+
 To run one target by hand:
 
 ```sh

@@ -84,6 +84,18 @@ FEROTRX_FUZZ_CORPUS="$PWD/fuzz/seeds" cargo test -q -p ferotrx-core --features f
 FEROTRX_FUZZ_CORPUS="$PWD/fuzz/seeds" cargo test -q -p ferotrx-ctl --no-default-features --features fuzzing --lib \
   fuzzing::tests::write_seed_corpora -- --ignored >/dev/null
 
+# The host's own triple: a prebuilt cargo-fuzz otherwise builds for the
+# triple it was itself built for (musl on CI), which has no sanitizers.
+triple=${FUZZ_TRIPLE:-$(rustc +nightly -vV | sed -n 's/^host: //p')}
+
+echo "== build"
+for t in "${targets[@]}"; do
+  if ! cargo +nightly fuzz build --target "$triple" "$t"; then
+    echo "Building fuzz target $t failed." >&2
+    exit 2
+  fi
+done
+
 # More than one process: libFuzzer writes their logs to fuzz-<n>.log here.
 par=()
 [ "$jobs" -gt 1 ] && par=("-jobs=$jobs" "-workers=$jobs")
@@ -97,7 +109,7 @@ for t in "${targets[@]}"; do
   # The live server's connection threads outlive an input: LeakSanitizer
   # takes their thread-local storage for leaks.
   [ "$t" = ctl_server ] && dict+=("-detect_leaks=0")
-  if ! cargo +nightly fuzz run "$t" "fuzz/corpus/$t" "fuzz/seeds/$t" -- \
+  if ! cargo +nightly fuzz run --target "$triple" "$t" "fuzz/corpus/$t" "fuzz/seeds/$t" -- \
       -max_total_time="$seconds" -rss_limit_mb=2048 -timeout=10 -max_len=65536 \
       -print_final_stats=1 "${par[@]+"${par[@]}"}" \
       "${dict[@]+"${dict[@]}"}" "${extra[@]+"${extra[@]}"}"; then
