@@ -84,6 +84,10 @@ FEROTRX_FUZZ_CORPUS="$PWD/fuzz/seeds" cargo test -q -p ferotrx-core --features f
 FEROTRX_FUZZ_CORPUS="$PWD/fuzz/seeds" cargo test -q -p ferotrx-ctl --features fuzzing --lib \
   fuzzing::tests::write_seed_corpora -- --ignored >/dev/null
 
+# More than one process: libFuzzer writes their logs to fuzz-<n>.log here.
+par=()
+[ "$jobs" -gt 1 ] && par=("-jobs=$jobs" "-workers=$jobs")
+
 failed=()
 for t in "${targets[@]}"; do
   echo "== $t: ${seconds}s"
@@ -95,7 +99,7 @@ for t in "${targets[@]}"; do
   [ "$t" = ctl_server ] && dict+=("-detect_leaks=0")
   if ! cargo +nightly fuzz run "$t" "fuzz/corpus/$t" "fuzz/seeds/$t" -- \
       -max_total_time="$seconds" -rss_limit_mb=2048 -timeout=10 -max_len=65536 \
-      -jobs="$jobs" -workers="$jobs" -print_final_stats=1 \
+      -print_final_stats=1 "${par[@]+"${par[@]}"}" \
       "${dict[@]+"${dict[@]}"}" "${extra[@]+"${extra[@]}"}"; then
     failed+=("$t")
   fi
