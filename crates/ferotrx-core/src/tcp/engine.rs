@@ -18,10 +18,14 @@ use super::program::{TcpProgram, TcpRole};
 use super::wire::{
     self, Path, Segment, TcpHeader, TcpOpts, ACK, CE, CWR, ECE, ECT0, FIN, PSH, RST, SYN,
 };
-use crate::app::{App, AppCx, AppRole, AppSession, Receive, SessionInit, Transport};
+use crate::app::{App, AppCx, AppRole, AppSession, Receive, SessionInit, SessionPlan, Transport};
 use crate::net::{ETHERTYPE_IPV4, ETHERTYPE_IPV6, IPPROTO_ICMPV6};
 use crate::traffic::EventClock;
-use crate::{AppStats, Error, LatencyStats, MacAddr, Result, TrafficModel};
+use crate::users::Users;
+use crate::{
+    AppStats, CountStats, Dist, DistRng, Error, LatencyStats, MacAddr, Result, SessionBudget,
+    SessionLength, TrafficModel, UserGroup, UserStats,
+};
 
 /// An address as a number, for address ranges of either IP version.
 pub(crate) fn ip_num(ip: IpAddr) -> u128 {
@@ -263,6 +267,20 @@ pub struct TcpTemplate {
     /// run's [`TcpOptions`].
     pub congestion: Option<Congestion>,
     pub ecn: Option<bool>,
+    /// How long each client session lasts, drawn per connection: a number
+    /// of requests, a time or a number of bytes. A captured or written
+    /// program is played again on the same connection (rounds) until the
+    /// session is over; an application protocol that can ([`App::plans`])
+    /// sends requests until then. `None`: the program once, or the
+    /// protocol's own count.
+    pub session: Option<SessionLength>,
+    /// This template's think time, instead of [`TcpOptions::think_time`]:
+    /// the pause before answering the other end, and between rounds and
+    /// requests.
+    pub think: Option<Dist>,
+    /// The user group (persona) whose users open this template's
+    /// connections, see [`TcpUsers`]; `None`: opened by the rate.
+    pub group: Option<usize>,
 }
 
 impl TcpTemplate {
@@ -282,6 +300,9 @@ impl TcpTemplate {
             concurrency: 0,
             congestion: None,
             ecn: None,
+            session: None,
+            think: None,
+            group: None,
         }
     }
 
@@ -306,6 +327,18 @@ impl TcpTemplate {
     }
 
     /// Spreads this template's own connections around its `cps` by `model`.
+    /// Sessions of this length (see [`session`](Self::session)).
+    pub fn with_session(mut self, session: SessionLength) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// Its own think time, fixed or drawn.
+    pub fn with_think(mut self, think: Dist) -> Self {
+        self.think = Some(think);
+        self
+    }
+
     pub fn with_model(mut self, model: TrafficModel) -> Self {
         self.model = model;
         self
@@ -372,6 +405,12 @@ pub struct TcpClientConfig {
     pub concurrency: usize,
     /// Source ports to use, in turn.
     pub source_ports: Range<u16>,
+    /// Groups of concurrent users; the templates with a `group` make their
+    /// sessions instead of opening connections at a rate.
+    pub users: Vec<UserGroup>,
+    /// The first client address (an index into the endpoint's) that users
+    /// get; workers each start from their own part.
+    pub user_address: u64,
 }
 
 impl TcpClientConfig {
@@ -383,6 +422,8 @@ impl TcpClientConfig {
             connections: 1,
             concurrency: 0,
             source_ports: 1024..65535,
+            users: Vec::new(),
+            user_address: 0,
         }
     }
 }
@@ -453,8 +494,9 @@ pub struct TcpOptions {
     /// [`TcpMessage::delay`](super::TcpMessage::delay); default false).
     pub keep_timing: bool,
     /// Think time: how long an end waits after the other end's message
-    /// before it sends its own (default 0). Adds to `keep_timing`'s gaps.
-    pub think_time: Duration,
+    /// before it sends its own (default 0), fixed or drawn each time from a
+    /// distribution. Adds to `keep_timing`'s gaps.
+    pub think_time: Dist,
     /// The congestion control: NewReno (default) or CUBIC with HyStart++.
     pub congestion: Congestion,
     /// Use ECN (RFC 3168) when the other end agrees: data goes out marked
@@ -483,7 +525,7 @@ impl Default for TcpOptions {
             sack: true,
             verify: true,
             keep_timing: false,
-            think_time: Duration::ZERO,
+            think_time: Dist::zero(),
             congestion: Congestion::NewReno,
             ecn: false,
             seed: 0x5eed_f00d,
@@ -593,6 +635,12 @@ pub struct TcpSideStats {
     pub connect_time: LatencyStats,
     /// Client: from the first SYN to the first byte from the server.
     pub first_byte: LatencyStats,
+    /// Client: requests per completed connection (application
+    /// transactions, or rounds of the program).
+    pub session_requests: CountStats,
+    /// Client: how long completed connections lasted, from the first SYN
+    /// to the close.
+    pub session_time: LatencyStats,
     /// What the application protocol counted, for templates that play one:
     /// requests and answers by status, failures, response times.
     pub app: AppStats,
@@ -642,6 +690,9 @@ pub struct TcpStats {
     /// addresses by DHCP, SLAAC or DHCPv6, announce them or join groups
     /// (see [`Hosted`](crate::Hosted)); empty otherwise.
     pub hosts: Vec<crate::HostStatus>,
+    /// The concurrent users, per group and then all together (`all`);
+    /// empty without users.
+    pub users: Vec<UserStats>,
 }
 
 impl TcpStats {
@@ -659,8 +710,8 @@ impl TcpStats {
 #[derive(Clone, Debug)]
 enum Action {
     /// Send this range of the own stream, after waiting this long (message
-    /// timing and think time).
-    Send(Range<usize>, Duration),
+    /// timing), and a think time on top if the flag says so.
+    Send(Range<usize>, Duration, bool),
     /// Wait for this many bytes from the other end.
     Recv(usize),
 }
@@ -673,6 +724,10 @@ struct Shared {
     options: TcpOptions,
     /// The application protocol that plays instead of the program.
     app: Option<App>,
+    /// The think time of this template.
+    think: Dist,
+    /// The client plays the program again until its session is over.
+    rounds: bool,
 }
 
 fn idx(role: TcpRole) -> usize {
@@ -691,6 +746,7 @@ impl Shared {
             options.ecn = e;
         }
         let program = &*t.program;
+        let think = t.think.unwrap_or(options.think_time);
         if let Some(app) = &t.app {
             return Shared {
                 actions: [Vec::new(), Vec::new()],
@@ -698,8 +754,11 @@ impl Shared {
                 closer: TcpRole::Client,
                 options,
                 app: Some(app.clone()),
+                think,
+                rounds: false,
             };
         }
+        let rounds = t.session.is_some();
         let mut actions = [Vec::new(), Vec::new()];
         let mut offsets = [0usize, 0usize];
         let mut previous: Option<TcpRole> = None;
@@ -707,16 +766,14 @@ impl Shared {
             let me = idx(m.from);
             let start = offsets[me];
             offsets[me] += m.data.len();
-            let mut wait = if options.keep_timing {
+            let wait = if options.keep_timing {
                 m.delay
             } else {
                 Duration::ZERO
             };
-            if previous == Some(m.from.peer()) {
-                wait += options.think_time;
-            }
+            let thinks = previous == Some(m.from.peer()) && !think.is_zero();
             previous = Some(m.from);
-            actions[me].push(Action::Send(start..offsets[me], wait));
+            actions[me].push(Action::Send(start..offsets[me], wait, thinks));
             actions[1 - me].push(Action::Recv(m.data.len()));
         }
         Shared {
@@ -725,9 +782,16 @@ impl Shared {
                 program.stream(TcpRole::Client),
                 program.stream(TcpRole::Server),
             ],
-            closer: program.closer,
+            // Rounds end when the client's session does: it closes.
+            closer: if rounds {
+                TcpRole::Client
+            } else {
+                program.closer
+            },
             options,
             app: None,
+            think,
+            rounds,
         }
     }
 }
@@ -858,6 +922,16 @@ struct Conn {
     /// The application said the other end said goodbye: a reset from it
     /// now ends the connection as completed.
     goodbye: bool,
+    /// Draws think times.
+    rng: DistRng,
+    /// Client: the session's drawn length, for templates with one.
+    budget: Option<SessionBudget>,
+    /// Client: rounds of the program played.
+    rounds: u64,
+    /// Bytes of the own stream queued to send.
+    tx_total: usize,
+    /// Client: transactions the application finished.
+    app_requests: u64,
 }
 
 type Key = (SocketAddr, SocketAddr);
@@ -1017,6 +1091,13 @@ impl Conn {
             app_told_closed: false,
             app_close: false,
             goodbye: false,
+            rng: DistRng::new(
+                (u64::from(i.iss) << 32 | u64::from(i.ts_offset)) ^ 0x7468_696e_6b5f_7469,
+            ),
+            budget: None,
+            rounds: 0,
+            tx_total: 0,
+            app_requests: 0,
         }
     }
 
@@ -1249,6 +1330,7 @@ impl Conn {
         }
         self.app_close |= cx.wants_close();
         self.goodbye |= cx.said_goodbye();
+        self.app_requests += cx.transactions().len() as u64;
         self.mismatched |= !cx.all_ok();
         let (role, tpl) = (self.role, self.tpl);
         out.add(role, tpl, |s| {
@@ -1295,19 +1377,25 @@ impl Conn {
         let me = idx(self.role);
         loop {
             match sh.actions[me].get(self.step) {
-                Some(Action::Send(r, wait)) => {
-                    if !wait.is_zero() {
-                        // Message timing: hold the message until its time.
-                        match self.hold {
-                            None => {
-                                self.hold = Some(now + *wait);
+                Some(Action::Send(r, wait, thinks)) => {
+                    // Message timing and think time: hold the message until
+                    // its time (a wait between rounds is already set).
+                    match self.hold {
+                        None => {
+                            let mut w = *wait;
+                            if *thinks {
+                                w += sh.think.sample_time(&mut self.rng);
+                            }
+                            if !w.is_zero() {
+                                self.hold = Some(now + w);
                                 break;
                             }
-                            Some(t) if now < t => break,
-                            Some(_) => self.hold = None,
                         }
+                        Some(t) if now < t => break,
+                        Some(_) => self.hold = None,
                     }
                     self.snd_buf.extend(&sh.streams[me][r.clone()]);
+                    self.tx_total += r.len();
                     let n = r.len() as u64;
                     out.add(self.role, self.tpl, |s| s.payload_tx += n);
                     self.step += 1;
@@ -1326,9 +1414,28 @@ impl Conn {
                 }
                 None => {
                     if self.unread > 0 {
+                        if sh.rounds && self.role == TcpRole::Server {
+                            // The client's next round.
+                            self.step = 0;
+                            continue;
+                        }
                         // More bytes than the program has.
                         self.mismatched = true;
                         self.unread = 0;
+                    }
+                    if sh.rounds && self.role == TcpRole::Client && !self.fin_queued {
+                        self.rounds += 1;
+                        let moved = (self.rx_total + self.tx_total) as u64;
+                        if !self.fin_rcvd
+                            && self.budget.is_some_and(|b| b.more(self.rounds, now, moved))
+                        {
+                            // Another round, after the think time.
+                            self.step = 0;
+                            if !sh.think.is_zero() {
+                                self.hold = Some(now + sh.think.sample_time(&mut self.rng));
+                            }
+                            continue;
+                        }
                     }
                     if !self.fin_queued && (sh.closer == self.role || self.fin_rcvd) {
                         self.fin_queued = true;
@@ -1584,7 +1691,7 @@ impl Conn {
             if self.goodbye || self.last_ack() {
                 // What it reset came after its goodbye, or after it closed
                 // and we sent all we had: the conversation was over.
-                self.finish(out);
+                self.finish(out, now);
             } else if !self.counted {
                 out.add(self.role, self.tpl, |s| s.reset += 1);
             }
@@ -1983,7 +2090,17 @@ impl Conn {
     fn verify_at(&mut self, sh: &Shared, at: usize, data: &[u8]) {
         if sh.options.verify && !self.mismatched && sh.app.is_none() {
             let expected = &sh.streams[idx(self.role.peer())];
-            if expected.get(at..at + data.len()) != Some(data) {
+            if sh.rounds && !expected.is_empty() {
+                // The program again and again: the stream repeats.
+                let n = expected.len();
+                let same = data
+                    .iter()
+                    .enumerate()
+                    .all(|(k, b)| expected[(at + k) % n] == *b);
+                if !same {
+                    self.mismatched = true;
+                }
+            } else if expected.get(at..at + data.len()) != Some(data) {
                 self.mismatched = true;
             }
         }
@@ -2005,7 +2122,7 @@ impl Conn {
         if !(self.fin_rcvd && self.fin_acked) {
             return Fate::Keep;
         }
-        self.finish(out);
+        self.finish(out, now);
         if self.closed_first {
             self.state = State::TimeWait;
             self.deadline = Some(now + o.time_wait);
@@ -2016,7 +2133,7 @@ impl Conn {
     }
 
     /// Counts a clean close.
-    fn finish(&mut self, out: &mut Out) {
+    fn finish(&mut self, out: &mut Out, now: Duration) {
         if self.counted {
             return;
         }
@@ -2027,6 +2144,18 @@ impl Conn {
             s.active = s.active.saturating_sub(1);
             s.mismatched += mismatched;
         });
+        if self.role == TcpRole::Client {
+            let n = if self.app.is_some() {
+                self.app_requests
+            } else {
+                self.rounds.max(1)
+            };
+            let t = now.saturating_sub(self.opened);
+            out.add(self.role, self.tpl, |s| {
+                s.session_requests.record(n);
+                s.session_time.record(Some(t));
+            });
+        }
     }
 
     /// Runs timers. Returns `Remove` when the connection is over.
@@ -2141,6 +2270,12 @@ pub struct TcpEngine {
     opened: Vec<u64>,
     /// When each template with its own `cps` opens its next connection.
     tpl_clock: Vec<Option<EventClock>>,
+    /// Draws session lengths.
+    dist_rng: DistRng,
+    /// Concurrent users, and the connection each busy one has open.
+    users: Users,
+    user_conns: Vec<(Key, usize)>,
+    next_user_scan: Duration,
     next_timer_scan: Duration,
     error: Option<String>,
     started: bool,
@@ -2148,6 +2283,10 @@ pub struct TcpEngine {
 
 /// How often connection timers are looked at.
 const TIMER_TICK: Duration = Duration::from_millis(1);
+/// How often the users' connections are looked at for an end.
+const USER_SCAN: Duration = Duration::from_millis(5);
+/// When a user that could not open a connection tries again.
+const USER_RETRY: Duration = Duration::from_millis(10);
 
 /// Queues `conn` in `timers` for when it next needs its timer, if that is
 /// sooner than it is queued for.
@@ -2237,6 +2376,26 @@ impl TcpEngine {
                     check(AppRole::Client)?;
                 }
             }
+            if t.session.is_some() && t.weight > 0 && client.is_some() {
+                match &t.app {
+                    Some(app) if !app.plans() => {
+                        return Err(Error::Tcp(format!(
+                            "{what}: {} does not take session lengths (http, https, h2 and h3 do)",
+                            app.name()
+                        )));
+                    }
+                    Some(_) => {}
+                    None => match t.program.messages.first() {
+                        Some(m) if m.from == TcpRole::Client => {}
+                        _ => {
+                            return Err(Error::Tcp(format!(
+                                "{what}: session lengths play the program again on one \
+                                 connection, so the client must speak first"
+                            )))
+                        }
+                    },
+                }
+            }
             if server.is_some() {
                 if let Some(j) = listen.insert(t.listen_port, i) {
                     return Err(Error::Tcp(format!(
@@ -2306,6 +2465,8 @@ impl TcpEngine {
             hosts.push(Host::new(TcpRole::Server, s.endpoint.clone(), Vec::new()));
         }
         let seed = options.seed | 1;
+        let groups = client.as_ref().map_or_else(Vec::new, |c| c.users.clone());
+        let first_address = client.as_ref().map_or(0, |c| c.user_address);
         let shared: Vec<Shared> = templates
             .iter()
             .map(|t| Shared::new(t, options.clone()))
@@ -2320,6 +2481,15 @@ impl TcpEngine {
                 .collect(),
             ..Default::default()
         };
+        if let Some(c) = &client {
+            crate::users::check_groups(
+                &c.users,
+                templates
+                    .iter()
+                    .map(|t| (t.name.as_str(), t.group, t.weight, t.cps.is_some())),
+            )
+            .map_err(|e| Error::Tcp(e.to_string()))?;
+        }
         Ok(Self {
             shared: shared.into(),
             wrr: vec![0; templates.len()],
@@ -2343,6 +2513,11 @@ impl TcpEngine {
             ip_id: 0,
             stats,
             rng: Rng(seed),
+            dist_rng: DistRng::new(seed.rotate_left(17) ^ 0x5e55_1047),
+            users: Users::new(groups, seed.rotate_left(29) ^ 0x05e2_5eed)
+                .first_address(first_address),
+            user_conns: Vec::new(),
+            next_user_scan: Duration::ZERO,
             port_cursor: 0,
             next_timer_scan: Duration::ZERO,
             error: None,
@@ -2414,6 +2589,10 @@ impl TcpEngine {
         // Or every template that opens connections has opened all of its own,
         // or its traffic model's ramp has ended.
         let each = self.templates.iter().enumerate().all(|(i, t)| {
+            if t.group.is_some() && t.weight > 0 {
+                // Users keep coming until the run stops.
+                return false;
+            }
             t.weight == 0
                 || (t.connections > 0 && self.opened[i] >= t.connections)
                 || self.tpl_clock[i]
@@ -2678,6 +2857,9 @@ impl TcpEngine {
         let ep = host.ep.clone();
         let (connections, concurrency) = (client.connections, client.concurrency);
         let ports = client.source_ports.clone();
+        if !self.users.is_empty() {
+            self.serve_users(&ep, &ports, now);
+        }
         // The run-wide limits, for all templates together.
         let room = |e: &Self| {
             !(connections > 0 && e.stats.client.started >= connections)
@@ -2686,6 +2868,9 @@ impl TcpEngine {
 
         // Templates with their own rate, each on its own schedule.
         for tpl in 0..self.templates.len() {
+            if self.templates[tpl].group.is_some() {
+                continue;
+            }
             let mut opened = 0;
             while self.tpl_clock[tpl].as_ref().is_some_and(|c| c.due(now))
                 && opened < 256
@@ -2698,7 +2883,7 @@ impl TcpEngine {
                     }
                     break;
                 }
-                if !self.open_one(tpl, &ep, &ports, now) {
+                if self.open_one(tpl, &ep, &ports, None, now).is_none() {
                     break;
                 }
                 if let Some(c) = &mut self.tpl_clock[tpl] {
@@ -2710,7 +2895,11 @@ impl TcpEngine {
 
         // The others share the client's rate, by weight.
         let shared: Vec<usize> = (0..self.templates.len())
-            .filter(|&i| self.templates[i].cps.is_none() && !self.template_exhausted(i))
+            .filter(|&i| {
+                self.templates[i].cps.is_none()
+                    && self.templates[i].group.is_none()
+                    && !self.template_exhausted(i)
+            })
             .collect();
         if shared.is_empty() {
             return;
@@ -2734,7 +2923,7 @@ impl TcpEngine {
                 return;
             }
             let tpl = self.pick_template(&ready);
-            if !self.open_one(tpl, &ep, &ports, now) {
+            if self.open_one(tpl, &ep, &ports, None, now).is_none() {
                 // Undo the pick, so the mix stays as weighted.
                 self.unpick_template(tpl, &ready);
                 return;
@@ -2774,26 +2963,81 @@ impl TcpEngine {
         }
     }
 
+    /// Users: notes the sessions that ended, and opens a connection for
+    /// every user that wants one now.
+    fn serve_users(&mut self, ep: &TcpEndpoint, ports: &Range<u16>, now: Duration) {
+        self.users.start(now);
+        let mut changed = false;
+        if now >= self.next_user_scan {
+            self.next_user_scan = now + USER_SCAN;
+            let conns = &self.conns;
+            let mut ended = Vec::new();
+            self.user_conns.retain(|(key, user)| {
+                let over = conns.get(key).is_none_or(|c| c.counted);
+                if over {
+                    ended.push(*user);
+                }
+                !over
+            });
+            for u in ended {
+                self.users.ended(u, now);
+                changed = true;
+            }
+        }
+        if self.users.next_due().is_some_and(|t| t <= now) {
+            for (user, group, address) in self.users.due(now).into_iter().take(256) {
+                let ready: Vec<usize> = (0..self.templates.len())
+                    .filter(|&i| self.templates[i].group == Some(group) && self.template_ready(i))
+                    .collect();
+                if ready.is_empty() {
+                    self.users.retry(user, now + USER_RETRY);
+                    continue;
+                }
+                let tpl = self.pick_template(&ready);
+                let ip = (address % u64::from(ep.ip_count.max(1))) as u32;
+                match self.open_one(tpl, ep, ports, Some(ip), now) {
+                    Some(key) => {
+                        self.users.busy(user);
+                        self.user_conns.push((key, user));
+                    }
+                    None => {
+                        self.unpick_template(tpl, &ready);
+                        self.users.retry(user, now + USER_RETRY);
+                    }
+                }
+                changed = true;
+            }
+        }
+        if changed || self.stats.users.is_empty() {
+            self.stats.users = self.users.stats().to_vec();
+        }
+    }
+
+    /// Opens a connection of template `tpl`, from the client address
+    /// `ip` (an index into the client's addresses) or any.
     fn open_one(
         &mut self,
         tpl: usize,
         ep: &TcpEndpoint,
         ports: &Range<u16>,
+        ip: Option<u32>,
         now: Duration,
-    ) -> bool {
+    ) -> Option<Key> {
         let t = &self.templates[tpl];
         let connect = SocketAddr::new(t.nth_server(self.opened[tpl]), t.connect.port());
         let hop = ep.next_hop(connect.ip());
-        let Some(mac) = self.hosts[0].hop_mac(hop) else {
-            return false;
-        };
+        let mac = self.hosts[0].hop_mac(hop)?;
         let span = u64::from(ports.end - ports.start);
-        let count = u64::from(ep.ip_count);
+        let count = if ip.is_some() {
+            1
+        } else {
+            u64::from(ep.ip_count)
+        };
         let mut found = None;
         for _ in 0..(span * count).min(1 << 20) {
             let k = self.port_cursor;
             self.port_cursor = self.port_cursor.wrapping_add(1);
-            let ip = ep.nth_ip((k % count) as u32);
+            let ip = ep.nth_ip(ip.unwrap_or((k % count) as u32));
             let port = ports.start + ((k / count) % span) as u16;
             let key = (SocketAddr::new(ip, port), connect);
             if !self.conns.contains_key(&key) {
@@ -2801,10 +3045,8 @@ impl TcpEngine {
                 break;
             }
         }
-        let Some(key) = found else {
-            // Every source address and port is in use.
-            return false;
-        };
+        // None: every source address and port is in use.
+        let key = found?;
         self.opened[tpl] += 1;
         let opts = &self.shared[tpl].options;
         let iss = self.rng.next();
@@ -2831,15 +3073,24 @@ impl TcpEngine {
             opts,
             now,
         );
+        let t = &self.templates[tpl];
+        conn.budget = t.session.map(|l| l.draw(&mut self.dist_rng, now));
         if let Some(app) = &self.shared[tpl].app {
-            conn.app = Some(app.session(&SessionInit {
-                role: AppRole::Client,
-                transport: Transport::Stream,
-                index: self.opened[tpl] - 1,
-                seed: u64::from(iss) << 32 | u64::from(ts_offset),
-                local: key.0,
-                remote: connect,
-            }));
+            let plan = SessionPlan {
+                budget: conn.budget.unwrap_or_default(),
+                think: t.think,
+            };
+            conn.app = Some(app.session_with(
+                &SessionInit {
+                    role: AppRole::Client,
+                    transport: Transport::Stream,
+                    index: self.opened[tpl] - 1,
+                    seed: u64::from(iss) << 32 | u64::from(ts_offset),
+                    local: key.0,
+                    remote: connect,
+                },
+                &plan,
+            ));
         }
         let mut out = Out {
             frames: &mut self.out,
@@ -2853,7 +3104,7 @@ impl TcpEngine {
         });
         schedule(&mut self.timers, key, &mut conn, opts);
         self.conns.insert(key, conn);
-        true
+        Some(key)
     }
 }
 

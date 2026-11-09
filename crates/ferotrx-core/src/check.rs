@@ -37,6 +37,9 @@ pub enum FileKind {
     Scenario,
     /// A fleet plan: `[[agent]]` and `[[run]]` tables.
     Fleet,
+    /// A persona: `[user]`, `[[tcp]]` and `[[udp]]` tables, used from TCP
+    /// and UDP profiles.
+    Persona,
 }
 
 impl FileKind {
@@ -50,11 +53,12 @@ impl FileKind {
             FileKind::Y1564 => "y1564",
             FileKind::Scenario => "scenario",
             FileKind::Fleet => "fleet",
+            FileKind::Persona => "persona",
         }
     }
 
     /// Every kind, in the order a person meets them.
-    pub const ALL: [FileKind; 8] = [
+    pub const ALL: [FileKind; 9] = [
         FileKind::Traffic,
         FileKind::Tcp,
         FileKind::Udp,
@@ -63,6 +67,7 @@ impl FileKind {
         FileKind::Bench,
         FileKind::Y1564,
         FileKind::Fleet,
+        FileKind::Persona,
     ];
 
     /// The file extension of this kind (without the dot). Every kind is
@@ -78,6 +83,7 @@ impl FileKind {
             FileKind::Y1564 => "fty1564",
             FileKind::Scenario => "ftscenario",
             FileKind::Fleet => "ftfleet",
+            FileKind::Persona => "ftpersona",
         }
     }
 
@@ -92,6 +98,7 @@ impl FileKind {
             FileKind::Y1564 => "Y.1564 profile",
             FileKind::Scenario => "scenario",
             FileKind::Fleet => "fleet plan",
+            FileKind::Persona => "persona",
         }
     }
 
@@ -142,9 +149,10 @@ impl FromStr for FileKind {
             "y1564" | "y.1564" => FileKind::Y1564,
             "scenario" => FileKind::Scenario,
             "fleet" => FileKind::Fleet,
+            "persona" => FileKind::Persona,
             other => {
                 return Err(Error::InvalidSpec(format!(
-                    "unknown file kind '{other}': use traffic, tcp, udp, hosts, bench, y1564, scenario or fleet"
+                    "unknown file kind '{other}': use traffic, tcp, udp, hosts, bench, y1564, scenario, fleet or persona"
                 )))
             }
         })
@@ -178,6 +186,10 @@ pub fn detect_kind(text: &str) -> Result<FileKind> {
     }
     if has(&table, &["agent"]) {
         return Ok(FileKind::Fleet);
+    }
+    let list = |k: &str| table.get(k).is_some_and(|v| v.is_array());
+    if table.get("user").is_some_and(|v| v.is_table()) || list("tcp") || list("udp") {
+        return Ok(FileKind::Persona);
     }
     if has(&table, &["benchmark"]) {
         return Ok(FileKind::Bench);
@@ -332,8 +344,44 @@ pub fn check_text(
             &crate::fleet::FleetPlan::from_toml(&text, dir, overrides)?,
             &mut out,
         ),
+        FileKind::Persona => persona(&crate::Persona::from_toml(&text, dir)?, &mut out)?,
     }
     Ok(out)
+}
+
+/// A persona: its templates must make a valid TCP and UDP profile.
+fn persona(p: &crate::Persona, out: &mut FileCheck) -> Result<()> {
+    out.summary.push(p.describe());
+    let dir = p.dir.to_string_lossy().into_owned();
+    for (kind, tables) in [("tcp", &p.tcp), ("udp", &p.udp)] {
+        if tables.is_empty() {
+            continue;
+        }
+        let mut doc = toml::Table::new();
+        doc.insert(
+            "template".into(),
+            toml::Value::Array(tables.iter().cloned().map(toml::Value::Table).collect()),
+        );
+        let mut server = toml::Table::new();
+        server.insert("ip".into(), "192.0.2.80/24".into());
+        doc.insert("server".into(), toml::Value::Table(server));
+        let text = toml::to_string(&doc).map_err(|e| Error::Profile(e.to_string()))?;
+        let ctx = |e: Error| Error::Profile(format!("[[{kind}]]: {e}"));
+        if kind == "tcp" {
+            let t = TcpProfile::from_toml(&text, Path::new(&dir)).map_err(ctx)?;
+            t.programs().map_err(ctx)?;
+            for (i, t) in t.templates.iter().enumerate() {
+                out.summary.push(format!("  tcp {}", t.name(i)));
+            }
+        } else {
+            let u = UdpProfile::from_toml(&text, Path::new(&dir)).map_err(ctx)?;
+            u.apps().map_err(ctx)?;
+            for (i, t) in u.templates.iter().enumerate() {
+                out.summary.push(format!("  udp {}", t.name(i)));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn traffic(p: &Profile, prefix: &str, out: &mut FileCheck) -> Result<()> {
@@ -505,6 +553,9 @@ fn tcp(p: &TcpProfile, prefix: &str, out: &mut FileCheck) -> Result<()> {
         (None, Some(_)) => "server only",
         (None, None) => "no hosts",
     };
+    for g in &p.users {
+        out.summary.push(format!("{prefix}users: {g}"));
+    }
     let mut line = format!("{prefix}tcp: {roles}, {} connections/s", p.cps);
     if !p.model.is_steady() {
         line += &format!(", model {}", p.model);
@@ -539,7 +590,17 @@ fn tcp(p: &TcpProfile, prefix: &str, out: &mut FileCheck) -> Result<()> {
         if !t.model.is_steady() {
             line += &format!(", model {}", t.model);
         }
+        line += &realism(t.session.as_ref(), t.think.as_ref(), t.group, &p.users);
         out.summary.push(line);
+        let idle = p.options.idle_timeout;
+        let think = t.think.as_ref().unwrap_or(&p.options.think_time);
+        if think.median() > idle.as_secs_f64() / 2.0 {
+            out.warnings.push(format!(
+                "{prefix}template '{}': think times ({think}) near or above [tcp] idle_timeout \
+                 ({idle:?}): quiet connections may be reset",
+                t.name(i)
+            ));
+        }
         if t.weight == 0 && t.cps.is_none() && p.server.is_none() {
             out.warnings.push(format!(
                 "{prefix}template '{}' has weight 0 and there is no server: it is never used",
@@ -569,6 +630,9 @@ fn udp(p: &UdpProfile, prefix: &str, out: &mut FileCheck) -> Result<()> {
         (None, Some(_)) => "server only",
         (None, None) => "no hosts",
     };
+    for g in &p.users {
+        out.summary.push(format!("{prefix}users: {g}"));
+    }
     let mut line = format!("{prefix}udp: {roles}, {} transactions/s", p.rate);
     if !p.model.is_steady() {
         line += &format!(", model {}", p.model);
@@ -599,6 +663,7 @@ fn udp(p: &UdpProfile, prefix: &str, out: &mut FileCheck) -> Result<()> {
         if !t.model.is_steady() {
             line += &format!(", model {}", t.model);
         }
+        line += &realism(t.session.as_ref(), t.think_time.as_ref(), t.group, &p.users);
         out.summary.push(line);
         if t.weight == 0 && t.rate.is_none() && p.server.is_none() {
             out.warnings.push(format!(
@@ -608,6 +673,26 @@ fn udp(p: &UdpProfile, prefix: &str, out: &mut FileCheck) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A template's session length, think time and users, for its line.
+fn realism(
+    session: Option<&crate::SessionLength>,
+    think: Option<&crate::Dist>,
+    group: Option<usize>,
+    users: &[crate::UserGroup],
+) -> String {
+    let mut s = String::new();
+    if let Some(l) = session {
+        s += &format!(", sessions of {l}");
+    }
+    if let Some(d) = think {
+        s += &format!(", think {d}");
+    }
+    if let Some(g) = group.and_then(|g| users.get(g)) {
+        s += &format!(", made by users '{}'", g.name);
+    }
+    s
 }
 
 fn bench(p: &BenchProfile, out: &mut FileCheck) -> Result<()> {

@@ -102,6 +102,12 @@ impl LatencyStats {
         })
     }
 
+    /// The mean in nanoseconds, with its fraction (counts kept as
+    /// nanoseconds, see [`CountStats`](crate::CountStats)).
+    pub(crate) fn mean_ns(&self) -> Option<f64> {
+        (self.count > 0).then(|| self.sum_ns as f64 / self.count as f64)
+    }
+
     /// Smoothed variation of latency from one packet to the next, as RTP
     /// measures it (RFC 3550, section 6.4.1).
     pub fn jitter(&self) -> Option<Duration> {

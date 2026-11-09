@@ -1,0 +1,30 @@
+# Persona: a machine talking to a service. Long HTTP/2 sessions with a
+# heavy tail (most short, a few with hundreds of calls), little pause
+# between calls. See examples/lab-personas.toml.
+format = 1
+name = "server"
+description = "machine-to-machine HTTP/2 API sessions with a heavy tail"
+
+[user]
+think = "exp(1s)"
+
+[[tcp]]
+name = "api"
+app = "h2c"
+port = 8082
+session_requests = "pareto(min=5, shape=1.5, max=500)"
+think_time = "exp(20ms)"
+
+[tcp.http2]
+requests = ["GET /api/items", "POST /api/items 201"]
+
+[[tcp.http2.route]]
+method = "GET"
+path = "/api/items"
+body_size = "1K"
+content_type = "application/json"
+
+[[tcp.http2.route]]
+method = "POST"
+path = "/api/items"
+status = 201

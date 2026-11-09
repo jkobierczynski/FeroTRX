@@ -101,6 +101,10 @@ timing). `udp.start` takes the same profile over the control API (`ferotrx
 ctl udp-start lab-dns.toml --upload -i enp0s3`), and `udp.stats` reports the
 counters with response times.
 
+`[users]` and `[[persona]]` keep users online that each start a transaction
+(or a call, or an HTTP/3 connection) and pause between them; see
+[traffic-models.md](traffic-models.md#sessions-and-users).
+
 ## Inside GTP-U tunnels
 
 UDP runs take the same `[gtpu]` table and `--client-gtpu`/`--server-gtpu`

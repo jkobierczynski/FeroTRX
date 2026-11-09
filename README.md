@@ -39,7 +39,9 @@ each milestone added and what comes next.
   a remote server or every agent of a fleet (collected and merged).
   [Guide](docs/capture.md)
 * **Traffic models**: Poisson arrivals, bursts, ramps and rate shapes for
-  streams, connections and transactions. [Guide](docs/traffic-models.md)
+  streams, connections and transactions; session lengths and think times
+  from distributions, users kept online, and personas (office, IoT, voice,
+  server). [Guide](docs/traffic-models.md)
 * **Stateful TCP**: real connections with handshakes, retransmits, window
   scaling, timestamps and SACK, from captures or written-out sessions,
   mixed from weighted templates. [Guide](docs/stateful-tcp.md)
@@ -167,7 +169,7 @@ The manual is in [docs/](docs/README.md):
 | [FeroTRX on Windows](docs/windows.md) | the installer, Npcap, interface names |
 | [Replaying captures, rewrites and profiles](docs/replay.md) | `replay`, `run`, rewrites, `--vary`, TOML profiles |
 | [Inspecting and building packets](docs/packets.md) | `inspect`, `build`, the packet syntax |
-| [Traffic models and file checks](docs/traffic-models.md) | Poisson, bursts, ramps, shapes; `check` |
+| [Traffic models and file checks](docs/traffic-models.md) | Poisson, bursts, ramps, shapes; sessions, users, personas; `check` |
 | [Fast send backends](docs/backends.md) | AF_XDP and DPDK |
 | [Stateful TCP](docs/stateful-tcp.md) and [the engine](docs/tcp-engine.md) | `tcp`, TCP profiles, templates |
 | [Stateful UDP and DNS](docs/stateful-udp.md) and [the engine](docs/udp-engine.md) | `udp`, DNS, NTP |

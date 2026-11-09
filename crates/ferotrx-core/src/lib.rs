@@ -105,6 +105,7 @@ mod capture;
 pub mod check;
 mod control;
 mod cpus;
+pub mod dist;
 mod drops;
 mod error;
 mod field_engine;
@@ -128,6 +129,7 @@ mod link;
 pub mod live;
 mod net;
 mod pacer;
+pub mod persona;
 #[cfg(feature = "profile")]
 mod profile;
 mod replay;
@@ -143,12 +145,13 @@ mod tcp;
 mod traffic;
 mod transform;
 mod udp;
+pub(crate) mod users;
 mod workers;
 mod y1564;
 
 pub use app::{
     App, AppHandshake, AppProtocol, AppSession, AppStats, MediaReport, MediaStats, RequestCounts,
-    Transport,
+    SessionPlan, Transport,
 };
 #[cfg(feature = "profile")]
 pub use bench::BenchProfile;
@@ -161,6 +164,7 @@ pub use bench::{
 pub use capture::{Capture, Packet, LINKTYPE_ETHERNET};
 pub use control::{ControlState, RunControl, StreamControl, MAX_MULTIPLIER};
 pub use cpus::{CpuList, CpuPinning, PinFn};
+pub use dist::{CountStats, Dist, DistRng, Quantity, SessionBudget, SessionLength};
 pub use drops::{DropCounters, LossReport};
 pub use error::{Error, Result};
 pub use field_engine::{FieldEngine, FieldVar, Side, VarField, VarOp};
@@ -202,6 +206,7 @@ pub use live::{
 };
 pub use net::{MacAddr, TPID_QINQ, TPID_VLAN};
 pub use pacer::{parse_duration, Pacer, Rate, RateSpec, WIRE_OVERHEAD};
+pub use persona::Persona;
 #[cfg(feature = "profile")]
 pub use profile::{
     check_format, parse_line_rate, parse_model, Profile, StreamSource, StreamSpec,
@@ -238,6 +243,7 @@ pub use udp::{
 };
 #[cfg(feature = "profile")]
 pub use udp::{UdpProfile, UdpSource, UdpTemplateSpec};
+pub use users::{UserGroup, UserStats};
 pub use workers::{merge_all, share, worker_seed, MergeStats};
 #[cfg(feature = "profile")]
 pub use y1564::Y1564Profile;

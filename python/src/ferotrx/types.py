@@ -1032,6 +1032,43 @@ class AppCounters(Record):
     failures: dict[str, int] = field(default_factory=dict)
 
 
+@dataclass(kw_only=True)
+class CountCounters(Record):
+    """A distribution of counts (requests per session, sessions per user;
+    servers from 0.50.0)."""
+
+    count: int = 0
+    min: int | None = None
+    avg: float | None = None
+    #: Percentiles, to within 12.5%.
+    p50: int | None = None
+    p99: int | None = None
+    max: int | None = None
+
+
+@dataclass(kw_only=True)
+class UserCounters(Record):
+    """One group of concurrent users (``[users]``, ``[[persona]]``; servers
+    from 0.50.0)."""
+
+    #: The persona, ``users`` for the profile's own, or ``all``.
+    name: str = ""
+    #: Users online now.
+    online: int = 0
+    #: Users that came, the first ones included.
+    arrived: int = 0
+    #: Users that left after their lifetime.
+    departed: int = 0
+    #: Sessions the users started.
+    sessions: int = 0
+    #: Sessions per user that left.
+    sessions_per_user: CountCounters | None = None
+    #: How long the users that left stayed.
+    lifetime: LatencyCounters | None = None
+    #: The think times drawn between sessions.
+    think: LatencyCounters | None = None
+
+
 # ----- tcp.* -----
 
 
@@ -1065,6 +1102,10 @@ class TcpCounters(Record):
     connect_time: LatencyCounters | None = None
     #: Client: from the first SYN to the first byte from the server.
     first_byte: LatencyCounters | None = None
+    #: Client: requests (or rounds of the program) per completed connection.
+    session_requests: CountCounters | None = None
+    #: Client: how long completed connections lasted.
+    session_time: LatencyCounters | None = None
     #: What the application protocol counted, for templates that play one.
     app: AppCounters | None = None
 
@@ -1106,6 +1147,8 @@ class TcpRunInfo(Record):
     #: The emulated hosts, when they get addresses by DHCP, SLAAC or DHCPv6,
     #: announce them or join groups.
     hosts: list[HostInfo] = field(default_factory=list)
+    #: The concurrent users: each group, then all together (``all``).
+    users: list[UserCounters] = field(default_factory=list)
     #: What the ports' impairments did (``impair``, ``impair_rx``).
     impair: PortImpairCounters | None = None
     #: When the run started sending, in seconds since 1970 by the server's
@@ -1186,6 +1229,8 @@ class UdpRunInfo(Record):
     tps: float = 0.0
     #: The emulated hosts, as for TCP runs.
     hosts: list[HostInfo] = field(default_factory=list)
+    #: The concurrent users: each group, then all together (``all``).
+    users: list[UserCounters] = field(default_factory=list)
     #: What the ports' impairments did (``impair``, ``impair_rx``).
     impair: PortImpairCounters | None = None
     #: When the run started sending, in seconds since 1970 by the server's

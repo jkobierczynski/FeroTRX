@@ -10,7 +10,7 @@ use super::conn::{Conn, Event};
 use super::frame::{put_varint, Reader};
 use super::qpack;
 use super::Http3;
-use crate::app::http::HttpRoute;
+use crate::app::http::{ClientPlan, HttpRoute};
 use crate::app::{AppCx, AppTransaction};
 
 // Frame types.
@@ -401,6 +401,10 @@ pub struct H3Client {
     pub common: H3Common,
     host: String,
     first: u64,
+    /// How many requests, and the pauses between them.
+    plan: Box<ClientPlan>,
+    /// The engine's clock at the last event, for a length in time.
+    now: Duration,
     sent: u32,
     pub answered: u32,
     /// Streams in flight: request index, when it went, the answer so far.
@@ -411,14 +415,21 @@ pub struct H3Client {
 }
 
 impl H3Client {
-    pub fn new(cfg: Arc<Http3>, host: String, index: u64) -> Self {
+    pub fn new(
+        cfg: Arc<Http3>,
+        host: String,
+        init: &crate::app::SessionInit,
+        plan: &crate::app::SessionPlan,
+    ) -> Self {
         let per = u64::from(cfg.http.client.per_connection.max(1));
         let huffman = cfg.huffman;
         Self {
+            plan: Box::new(ClientPlan::new(&cfg.http.client, plan, init.seed)),
+            now: Duration::ZERO,
             cfg,
             common: H3Common::new(huffman),
             host,
-            first: index * per,
+            first: init.index * per,
             sent: 0,
             answered: 0,
             inflight: BTreeMap::new(),
@@ -436,6 +447,7 @@ impl H3Client {
     pub fn fill(&mut self, conn: &mut Conn, cx: &mut AppCx) {
         let cfg = self.cfg.clone();
         let c = &cfg.http.client;
+        self.now = cx.now();
         if self.done || self.common.goaway.is_some() {
             return;
         }
@@ -446,7 +458,7 @@ impl H3Client {
             }
             self.gate = None;
         }
-        while (self.sent < c.per_connection || !self.retry.is_empty())
+        while (self.plan.more(self.sent, cx.now()) || !self.retry.is_empty())
             && self.inflight.len() < cfg.concurrent.max(1) as usize
             && conn.streams_left(true) > 0
         {
@@ -486,6 +498,7 @@ impl H3Client {
             if needs_length && !has("content-length") {
                 fields.push(("content-length".into(), req.body.len().to_string()));
             }
+            self.plan.bytes += req.body.len() as u64;
             let mut b = Vec::new();
             frame(&mut b, HEADERS, &self.common.encode(&fields));
             if !req.body.is_empty() {
@@ -493,7 +506,7 @@ impl H3Client {
             }
             conn.write(id, &b, true);
             self.inflight.insert(id, (i, cx.now(), Message::default()));
-            if !c.think_time.is_zero() {
+            if !self.plan.think.is_zero() {
                 break;
             }
         }
@@ -501,6 +514,7 @@ impl H3Client {
 
     /// Handles a connection event; Err is a connection error.
     pub fn event(&mut self, conn: &mut Conn, e: &Event, cx: &mut AppCx) -> Result<(), H3Error> {
+        self.now = cx.now();
         match *e {
             Event::Connected => {
                 self.common.open(conn);
@@ -516,6 +530,7 @@ impl H3Client {
             }
             Event::Readable(id) => {
                 let (d, fin) = conn.read(id);
+                self.plan.bytes += d.len() as u64;
                 let Some(entry) = self.inflight.get_mut(&id) else {
                     return Ok(());
                 };
@@ -553,9 +568,8 @@ impl H3Client {
                         }
                     }
                     self.answered += 1;
-                    let think = self.cfg.http.client.think_time;
-                    if !think.is_zero() {
-                        self.gate = Some(cx.now() + think);
+                    if let Some(t) = self.plan.pause() {
+                        self.gate = Some(cx.now() + t);
                     }
                     self.fill(conn, cx);
                 }
@@ -582,17 +596,17 @@ impl H3Client {
 
     /// All requests answered, or none can be sent any more.
     pub fn finished(&self) -> bool {
-        let per = self.cfg.http.client.per_connection;
-        self.answered >= per || (self.common.goaway.is_some() && self.inflight.is_empty())
+        let idle = self.inflight.is_empty() && self.retry.is_empty();
+        (idle && !self.plan.more(self.sent, self.now))
+            || (self.common.goaway.is_some() && self.inflight.is_empty())
     }
 
     /// Requests that will not get an answer now (the connection ended).
     pub fn unanswered(&self) -> u32 {
-        self.cfg
-            .http
-            .client
-            .per_connection
-            .saturating_sub(self.answered)
+        match self.plan.target() {
+            Some(n) => (n.min(u64::from(u32::MAX)) as u32).saturating_sub(self.answered),
+            None => self.sent.saturating_sub(self.answered),
+        }
     }
 }
 

@@ -176,6 +176,7 @@ impl UdpRun {
             elapsed_s: 0.0,
             tps: 0.0,
             hosts: Vec::new(),
+            users: Vec::new(),
             impair: None,
             started_at: self.job.started_at().map(ferotrx_core::unix_seconds),
             drops: Default::default(),

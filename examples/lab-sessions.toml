@@ -1,0 +1,62 @@
+# Realistic sessions on the lab router (`sudo ferotrx lab up`): 50 users
+# kept online, each with a client address of its own, browsing in visits of
+# a few pages (a log-normal number of them, with a long tail) and pausing
+# between pages and between visits; after a while a user leaves and a new
+# one comes. Beside them, http.pcap played in rounds on one connection for
+# 10 to 30 seconds. See docs/traffic-models.md#sessions-and-users.
+#
+#   sudo ferotrx tcp -p examples/lab-sessions.toml -i ftrx-lab -d 60s
+#
+# The summary shows requests per session, how long sessions lasted, and per
+# group of users how many came and left and the think times drawn.
+format = 1
+
+[users]
+count = 50                  # online at once
+think = "exp(5s)"           # between a user's sessions
+lifetime = "exp(5m)"        # how long a user stays, then a new one comes
+arrival = 10                # users per second at the start
+
+# A visit: a median of 5 pages, a tail up to 50, about a second between them.
+[[template]]
+name = "web"
+app = "http"
+weight = 4
+session_requests = "lognormal(median=5, sigma=0.8, max=50)"
+think_time = "exp(1s)"
+
+[template.http]
+host = "www.lab.local"
+requests = ["GET /", "GET /news", "GET /img/logo.png"]
+
+[[template.http.route]]
+path = "/img/logo.png"
+body_size = "40K"
+
+[[template.http.route]]
+path = "/"
+body_size = "12K"
+
+# A capture played again and again on one connection (the client speaks
+# first), for 10 to 30 seconds, 2 s apart.
+[[template]]
+name = "app"
+pcap = "http.pcap"
+port = 8080
+weight = 1
+session_duration = "uniform(10s, 30s)"
+think_time = "2s"
+
+[client]
+ip = "192.168.10.50/24"
+ips = 200                   # one address per user, 192.168.10.50-249
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20
+
+[tcp]
+idle_timeout = "2m"         # longer than a think time, or quiet connections are reset

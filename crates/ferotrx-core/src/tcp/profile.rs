@@ -8,8 +8,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::dist::{session_from, DistText};
 use crate::profile::OutputFile;
 use crate::{Addressing, Emulation, SendSettings};
+use crate::{Dist, Quantity, SessionLength, UserGroup};
 
 use super::cc::Congestion;
 use super::engine::{
@@ -165,6 +167,9 @@ pub struct TcpProfile {
     /// or server that gets its address by DHCP, SLAAC or DHCPv6, announces
     /// it or joins groups.
     pub host_options: crate::HostOptions,
+    /// Groups of concurrent users (`[users]`, `[[persona]]`); the templates
+    /// with a `group` make their sessions.
+    pub users: Vec<UserGroup>,
 }
 
 /// One template of a [`TcpProfile`]: a kind of connection.
@@ -193,6 +198,14 @@ pub struct TcpTemplateSpec {
     /// The template's own congestion control and ECN (default: `[tcp]`'s).
     pub congestion: Option<Congestion>,
     pub ecn: Option<bool>,
+    /// How long a connection lasts, in rounds of the program (requests for
+    /// an app), time or bytes; drawn per connection. `None`: one round.
+    pub session: Option<SessionLength>,
+    /// The pause between rounds (requests); default: `[tcp] think_time`.
+    pub think: Option<Dist>,
+    /// The group of users ([`TcpProfile::users`]) whose sessions this
+    /// template makes; `None`: the template opens connections at its rate.
+    pub group: Option<usize>,
 }
 
 impl TcpTemplateSpec {
@@ -211,6 +224,9 @@ impl TcpTemplateSpec {
             concurrency: None,
             congestion: None,
             ecn: None,
+            session: None,
+            think: None,
+            group: None,
         }
     }
 
@@ -445,6 +461,7 @@ impl Default for TcpProfile {
             impair: crate::PortImpair::default(),
             gtpu: crate::GtpuTunnels::default(),
             host_options: crate::HostOptions::for_endpoints(),
+            users: Vec::new(),
         }
     }
 }
@@ -479,6 +496,10 @@ struct RawProfile {
     impair: Option<crate::profile::ImpairFile>,
     impair_rx: Option<crate::profile::ImpairFile>,
     gtpu: Option<crate::gtpu::RawGtpu>,
+    session_requests: Option<DistText>,
+    session_duration: Option<DistText>,
+    session_bytes: Option<DistText>,
+    think_time: Option<DistText>,
 }
 
 #[derive(Deserialize)]
@@ -502,6 +523,13 @@ struct RawTemplate {
     concurrency: Option<usize>,
     congestion: Option<String>,
     ecn: Option<bool>,
+    session_requests: Option<DistText>,
+    session_duration: Option<DistText>,
+    session_bytes: Option<DistText>,
+    think_time: Option<DistText>,
+    /// Set by a persona: the group of users of the template.
+    #[serde(rename = "_group")]
+    group: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -564,7 +592,7 @@ struct RawOptions {
     sack: Option<bool>,
     verify: Option<bool>,
     keep_timing: Option<bool>,
-    think_time: Option<String>,
+    think_time: Option<DistText>,
     congestion: Option<String>,
     ecn: Option<bool>,
     seed: Option<u64>,
@@ -765,9 +793,22 @@ impl TcpProfile {
         base_dir: &Path,
         registry: &crate::app::AppRegistry,
     ) -> Result<Self> {
+        Self::from_toml_allowing(text, base_dir, registry, &crate::persona::any_file)
+    }
+
+    /// [`from_toml_with`](Self::from_toml_with), asking `allow` before a
+    /// persona file is read.
+    pub fn from_toml_allowing(
+        text: &str,
+        base_dir: &Path,
+        registry: &crate::app::AppRegistry,
+        allow: crate::persona::FileAllow<'_>,
+    ) -> Result<Self> {
         let mut doc = crate::app::document(text)?;
+        let (users, own_users) =
+            crate::persona::expand(&mut doc, base_dir, crate::persona::PersonaKind::Tcp, allow)?;
         let apps = crate::app::take_apps(&mut doc, registry, base_dir, |_, _| false)?;
-        let raw: RawProfile = apps.raw(text, doc)?;
+        let raw: RawProfile = apps.raw_edited(text, doc, !users.is_empty())?;
         check_format(raw.format)?;
         let model = parse_model(raw.model.as_deref(), &raw.shape)
             .map_err(|e| Error::Profile(e.to_string()))?;
@@ -776,6 +817,16 @@ impl TcpProfile {
             || raw.port.is_some()
             || raw.closer.is_some()
             || !raw.message.is_empty();
+        let top_session = session_from(
+            raw.session_requests.as_ref(),
+            raw.session_duration.as_ref(),
+            raw.session_bytes.as_ref(),
+        )?;
+        let top_think = raw
+            .think_time
+            .as_ref()
+            .map(|d| d.parse(Quantity::Time))
+            .transpose()?;
         let templates = if raw.template.is_empty() {
             if let Some(app) = apps.top {
                 if raw.pcap.is_some()
@@ -790,6 +841,8 @@ impl TcpProfile {
                 }
                 let mut t = TcpTemplateSpec::new(TcpSource::App(app));
                 t.port = raw.port;
+                t.session = top_session;
+                t.think = top_think;
                 vec![t]
             } else {
                 let source = source(
@@ -801,7 +854,10 @@ impl TcpProfile {
                     base_dir,
                     false,
                 )?;
-                vec![TcpTemplateSpec::new(source)]
+                let mut t = TcpTemplateSpec::new(source);
+                t.session = top_session;
+                t.think = top_think;
+                vec![t]
             }
         } else {
             if top_level || apps.top.is_some() {
@@ -855,15 +911,44 @@ impl TcpProfile {
                         .transpose()
                         .map_err(ctx)?,
                     ecn: t.ecn,
+                    session: session_from(
+                        t.session_requests
+                            .as_ref()
+                            .or(raw.session_requests.as_ref()),
+                        t.session_duration
+                            .as_ref()
+                            .or(raw.session_duration.as_ref()),
+                        t.session_bytes.as_ref().or(raw.session_bytes.as_ref()),
+                    )
+                    .map_err(ctx)?,
+                    think: t
+                        .think_time
+                        .as_ref()
+                        .or(raw.think_time.as_ref())
+                        .map(|d| d.parse(Quantity::Time))
+                        .transpose()
+                        .map_err(ctx)?,
+                    group: t.group,
                 });
             }
             out
         };
+        let mut templates = templates;
+        if own_users {
+            for t in templates.iter_mut().filter(|t| t.group.is_none()) {
+                t.group = Some(0);
+            }
+        }
         let mut p = TcpProfile {
             templates,
             model,
             ..Default::default()
         };
+        if !users.is_empty() {
+            // Users keep coming until the run's duration (or a limit given).
+            p.connections = 0;
+        }
+        p.users = users;
         p.client = raw.client.map(|h| h.spec("client")).transpose()?;
         p.server = raw.server.map(|h| h.spec("server")).transpose()?;
         p.connect = raw.connect.map(|c| parse_connect_addr(&c)).transpose()?;
@@ -921,7 +1006,9 @@ impl TcpProfile {
                 sack: o.sack.unwrap_or(defaults.sack),
                 verify: o.verify.unwrap_or(defaults.verify),
                 keep_timing: o.keep_timing.unwrap_or(defaults.keep_timing),
-                think_time: d(o.think_time, defaults.think_time)?,
+                think_time: o
+                    .think_time
+                    .map_or(Ok(defaults.think_time), |t| t.parse(Quantity::Time))?,
                 congestion: o
                     .congestion
                     .map_or(Ok(defaults.congestion), |c| parse_congestion(&c))?,
@@ -1071,6 +1158,9 @@ impl TcpProfile {
                 concurrency: t.concurrency.unwrap_or(0),
                 congestion: t.congestion,
                 ecn: t.ecn,
+                session: t.session,
+                think: t.think,
+                group: t.group,
             });
         }
         let server = match &self.server {
@@ -1085,6 +1175,7 @@ impl TcpProfile {
                 c.connections = self.connections;
                 c.concurrency = self.concurrency;
                 c.source_ports = self.source_ports.clone();
+                c.users = self.users.clone();
                 Some(c)
             }
             None => None,
@@ -1153,6 +1244,44 @@ mod tests {
             (client.endpoint.port, cfg.server.unwrap().endpoint.port),
             (0, 1)
         );
+    }
+
+    #[test]
+    fn a_capture_with_users_plays_rounds() {
+        let p = TcpProfile::from_toml(
+            r#"
+            pcap = "web.pcap"
+            session_duration = "1s"
+            think_time = "exp(100ms)"
+            [users]
+            count = 5
+            think = "200ms"
+            lifetime = "exp(1m)"
+            [client]
+            ip = "192.168.10.100/24"
+            [server]
+            ip = "192.168.20.50"
+            "#,
+            Path::new("/lab"),
+        )
+        .unwrap();
+        assert_eq!(p.users.len(), 1);
+        let g = &p.users[0];
+        assert_eq!((g.name.as_str(), g.users), ("users", 5));
+        assert_eq!(g.think.to_string(), "200ms");
+        assert_eq!(g.lifetime.as_ref().unwrap().to_string(), "exp(1m)");
+        let t = &p.templates[0];
+        assert_eq!(t.group, Some(0));
+        assert!(matches!(t.session, Some(SessionLength::Duration(_))));
+        assert_eq!(t.think.as_ref().unwrap().to_string(), "exp(100ms)");
+        // Users decide when sessions start: no connection count.
+        assert_eq!(p.connections, 0);
+
+        let bad = TcpProfile::from_toml(
+            "pcap = \"web.pcap\"\n[users]\ncount = 0\n",
+            Path::new("/lab"),
+        );
+        assert!(bad.is_err());
     }
 
     #[test]

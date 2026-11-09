@@ -180,7 +180,8 @@ fn profile_loads_and_runs() {
 fn example_profiles_run() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     let mut found = 0;
-    for entry in std::fs::read_dir(&dir).unwrap() {
+    let personas = std::fs::read_dir(dir.join("personas")).unwrap();
+    for entry in std::fs::read_dir(&dir).unwrap().chain(personas) {
         let path = entry.unwrap().path();
         let is_streams = || {
             std::fs::read_to_string(&path)
@@ -324,7 +325,8 @@ fn models_need_a_packet_or_bit_rate() {
 fn example_files_pass_the_check() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
     let mut found = 0;
-    for entry in std::fs::read_dir(&dir).unwrap() {
+    let personas = std::fs::read_dir(dir.join("personas")).unwrap();
+    for entry in std::fs::read_dir(&dir).unwrap().chain(personas) {
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|e| e == "toml") {
             found += 1;

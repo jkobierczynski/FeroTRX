@@ -1036,7 +1036,7 @@ fn keeps_message_timing_and_think_time() {
     });
     let thinking = run(TcpOptions {
         keep_timing: true,
-        think_time: Duration::from_millis(100),
+        think_time: ferotrx_core::Dist::time(Duration::from_millis(100)),
         ..Default::default()
     });
     assert!(plain < Duration::from_millis(100), "{plain:?}");
@@ -1123,4 +1123,73 @@ fn poisson_and_burst_models_open_connections() {
         options: TcpOptions::default(),
     })
     .is_err());
+}
+
+#[test]
+fn users_play_sessions_of_several_rounds_with_think_times() {
+    use ferotrx_core::{Dist, SessionLength, UserGroup};
+    let program = Arc::new(web_program(2000));
+    let template = || {
+        tpl(program.clone())
+            .with_session(SessionLength::Requests(Dist::fixed(
+                ferotrx_core::Quantity::Count,
+                3.0,
+            )))
+            .with_think(Dist::time(Duration::from_millis(20)))
+    };
+    let mut users = UserGroup::new("office", 4);
+    users.think = Dist::time(Duration::from_millis(100));
+    users.lifetime = Some(Dist::time(Duration::from_millis(900)));
+    let mut c = client(0, 1.0, 0);
+    c.endpoint = c.endpoint.with_ip_count(50);
+    c.users = vec![users];
+    let mut t = template();
+    t.group = Some(0);
+    let mut client = TcpEngine::new(TcpConfig {
+        templates: vec![t],
+        client: Some(c),
+        server: None,
+        options: TcpOptions::default(),
+    })
+    .unwrap();
+    let mut server = TcpEngine::new(TcpConfig {
+        templates: vec![template()],
+        client: None,
+        server: Some(TcpServerConfig::new(server_endpoint())),
+        options: TcpOptions::default(),
+    })
+    .unwrap();
+    let mut router = NatRouter::new(0);
+    simulate(
+        &mut [&mut client, &mut server],
+        &mut router,
+        Duration::from_secs(3),
+    );
+    assert!(!client.is_done(), "users keep coming");
+    let st = client.stats();
+    let c = &st.client;
+    assert_eq!((c.mismatched, c.failed()), (0, 0), "{c:?}");
+    // Every completed session played the program three times.
+    assert!(c.completed >= 20, "{c:?}");
+    assert_eq!(c.session_requests.mean(), Some(3.0));
+    assert_eq!(c.session_requests.max(), Some(3));
+    let s = &server.stats().server;
+    assert_eq!((s.mismatched, s.failed()), (0, 0), "{s:?}");
+    assert!(s.completed >= 20, "{s:?}");
+    // Two think times of 20 ms in each session.
+    let t = c.session_time.min().unwrap();
+    assert!(t >= Duration::from_millis(40), "{t:?}");
+    let all = st.users.last().unwrap();
+    assert_eq!(all.name, "all");
+    assert_eq!(all.online, 4);
+    assert!(all.departed >= 4, "{all:?}");
+    assert_eq!(all.arrived, 4 + all.departed);
+    assert!(all.sessions >= c.completed);
+    let think = all.think.min().unwrap();
+    assert_eq!(think, Duration::from_millis(100));
+    // One client address per user, for its whole stay.
+    let mut ips: Vec<_> = router.out_map.keys().map(|a| *a.ip()).collect();
+    ips.sort();
+    ips.dedup();
+    assert_eq!(ips.len() as u64, all.arrived);
 }

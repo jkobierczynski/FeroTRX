@@ -14,13 +14,18 @@ use std::time::Duration;
 
 use super::dns::DnsWorkload;
 use super::program::{UdpProgram, UdpRole};
+use crate::app::SessionPlan;
 use crate::app::{App, AppCx, AppRole, AppSession, Receive, SessionInit, Transport};
 use crate::net::{ETHERTYPE_IPV4, ETHERTYPE_IPV6, IPPROTO_ICMPV6};
 use crate::tcp::engine::{ip_add, ip_max, ip_num, ip_version, TcpEndpoint};
 use crate::tcp::hosts::{self, Host, MAX_HOPS};
 use crate::tcp::wire::{self, Path};
 use crate::traffic::EventClock;
-use crate::{Error, LatencyStats, PortEngine, Result, TrafficModel};
+use crate::users::Users;
+use crate::{
+    Dist, DistRng, Error, LatencyStats, PortEngine, Result, SessionLength, TrafficModel, UserGroup,
+    UserStats,
+};
 
 /// An emulated host of a UDP run: the same as a TCP one.
 pub type UdpEndpoint = TcpEndpoint;
@@ -118,7 +123,13 @@ pub struct UdpTemplate {
     /// Most of this template's transactions open at once; 0 is no limit.
     pub concurrency: usize,
     /// Think time for this template, instead of the options'.
-    pub think_time: Option<Duration>,
+    pub think_time: Option<Dist>,
+    /// How long a dialog lasts (requests, time or bytes), for protocols
+    /// that play one session per dialog and take a plan (h3).
+    pub session: Option<SessionLength>,
+    /// The group of users ([`UdpClientConfig::users`]) whose sessions this
+    /// template makes; `None`: the template starts transactions at its rate.
+    pub group: Option<usize>,
 }
 
 impl UdpTemplate {
@@ -136,6 +147,8 @@ impl UdpTemplate {
             transactions: 0,
             concurrency: 0,
             think_time: None,
+            session: None,
+            group: None,
         }
     }
 
@@ -182,7 +195,13 @@ impl UdpTemplate {
     }
 
     pub fn with_think_time(mut self, t: Duration) -> Self {
-        self.think_time = Some(t);
+        self.think_time = Some(Dist::time(t));
+        self
+    }
+
+    /// Draws the pause before answering from `think`.
+    pub fn with_think(mut self, think: Dist) -> Self {
+        self.think_time = Some(think);
         self
     }
 
@@ -209,6 +228,12 @@ pub struct UdpClientConfig {
     pub concurrency: usize,
     /// Source ports, in turn: each transaction gets its own.
     pub source_ports: Range<u16>,
+    /// Groups of concurrent users; the templates with a `group` make their
+    /// sessions (transactions, or dialogs) instead of starting at a rate.
+    pub users: Vec<UserGroup>,
+    /// The first client address (an index into the endpoint's) that users
+    /// get; workers each start from their own part.
+    pub user_address: u64,
 }
 
 impl UdpClientConfig {
@@ -220,6 +245,8 @@ impl UdpClientConfig {
             transactions: 1,
             concurrency: 0,
             source_ports: 1024..65535,
+            users: Vec::new(),
+            user_address: 0,
         }
     }
 }
@@ -255,8 +282,9 @@ pub struct UdpOptions {
     /// capture shows (default false).
     pub keep_timing: bool,
     /// How long an end waits after the other end's datagram before it sends
-    /// its own (default 0). Templates can set their own.
-    pub think_time: Duration,
+    /// its own (default 0), drawn from this distribution for each
+    /// datagram. Templates can set their own.
+    pub think_time: Dist,
     /// Check replayed datagrams byte for byte (default true).
     pub verify: bool,
     /// Seed for DNS transaction ids.
@@ -277,7 +305,7 @@ impl Default for UdpOptions {
             session_timeout: Duration::from_secs(5),
             arp_timeout: Duration::from_secs(5),
             keep_timing: false,
-            think_time: Duration::ZERO,
+            think_time: Dist::zero(),
             verify: true,
             seed: 0x5eed_d115,
             clock: Duration::ZERO,
@@ -374,6 +402,9 @@ pub struct UdpStats {
     /// addresses by DHCP, SLAAC or DHCPv6, announce them or join groups
     /// (see [`Hosted`](crate::Hosted)); empty otherwise.
     pub hosts: Vec<crate::HostStatus>,
+    /// The concurrent users, per group and then all together (`all`);
+    /// empty without users.
+    pub users: Vec<UserStats>,
 }
 
 impl UdpStats {
@@ -407,26 +438,31 @@ impl UdpStats {
 struct Step {
     from: UdpRole,
     wait: Duration,
+    /// A think time to draw and wait on top.
+    think: Option<Dist>,
 }
 
 fn plan(t: &UdpTemplate, o: &UdpOptions) -> Vec<Step> {
     let think = t.think_time.unwrap_or(o.think_time);
+    let think = (!think.is_zero()).then_some(think);
     match &t.app {
         UdpApp::Replay(p) => {
             let mut prev: Option<UdpRole> = None;
             p.messages
                 .iter()
                 .map(|m| {
-                    let mut wait = if o.keep_timing {
+                    let wait = if o.keep_timing {
                         m.delay
                     } else {
                         Duration::ZERO
                     };
-                    if prev == Some(m.from.peer()) {
-                        wait += think;
-                    }
+                    let answer = prev == Some(m.from.peer());
                     prev = Some(m.from);
-                    Step { from: m.from, wait }
+                    Step {
+                        from: m.from,
+                        wait,
+                        think: think.filter(|_| answer),
+                    }
                 })
                 .collect()
         }
@@ -434,10 +470,12 @@ fn plan(t: &UdpTemplate, o: &UdpOptions) -> Vec<Step> {
             Step {
                 from: UdpRole::Client,
                 wait: Duration::ZERO,
+                think: None,
             },
             Step {
                 from: UdpRole::Server,
-                wait: think,
+                wait: Duration::ZERO,
+                think,
             },
         ],
     }
@@ -499,6 +537,8 @@ struct Session {
     media: Option<(u16, u16)>,
     /// Dialogs: the protocol took the last datagram.
     taken: bool,
+    /// Draws think times.
+    rng: DistRng,
 }
 
 /// Small, fast, seeded random numbers for DNS ids.
@@ -797,15 +837,19 @@ impl Session {
             if step.from != self.role {
                 return Fate::Keep;
             }
-            if !step.wait.is_zero() {
-                match self.hold {
-                    None => {
-                        self.hold = Some(now + step.wait);
+            match self.hold {
+                None => {
+                    let think = step
+                        .think
+                        .map_or(Duration::ZERO, |d| d.sample_time(&mut self.rng));
+                    let wait = step.wait.saturating_add(think);
+                    if !wait.is_zero() {
+                        self.hold = Some(now + wait);
                         return Fate::Keep;
                     }
-                    Some(t) if now < t => return Fate::Keep,
-                    Some(_) => self.hold = None,
                 }
+                Some(t) if now < t => return Fate::Keep,
+                Some(_) => self.hold = None,
             }
             let Some(data) = self.payload(&mut *cx, now) else {
                 // Nothing to send (a request the server cannot answer).
@@ -1040,6 +1084,12 @@ pub struct UdpEngine {
     opened: Vec<u64>,
     tpl_clock: Vec<Option<EventClock>>,
     txn_count: u64,
+    /// Draws session lengths.
+    dist_rng: DistRng,
+    /// Concurrent users, and the session each busy one has open.
+    users: Users,
+    user_sessions: Vec<(Key, usize)>,
+    next_user_scan: Duration,
     next_timer_scan: Duration,
     error: Option<String>,
     started: bool,
@@ -1047,6 +1097,10 @@ pub struct UdpEngine {
 
 /// How often session timers are looked at.
 const TIMER_TICK: Duration = Duration::from_millis(1);
+/// How often the users' sessions are looked at for an end.
+const USER_SCAN: Duration = Duration::from_millis(5);
+/// When a user that could not start a session tries again.
+const USER_RETRY: Duration = Duration::from_millis(10);
 
 fn udp_err(e: Error) -> Error {
     match e {
@@ -1219,6 +1273,31 @@ impl UdpEngine {
             ..Default::default()
         };
         let n = templates.len();
+        let seed = options.seed | 1;
+        let groups = client.as_ref().map_or_else(Vec::new, |c| c.users.clone());
+        let first_address = client.as_ref().map_or(0, |c| c.user_address);
+        if let Some(c) = &client {
+            crate::users::check_groups(
+                &c.users,
+                templates
+                    .iter()
+                    .map(|t| (t.name.as_str(), t.group, t.weight, t.rate.is_some())),
+            )
+            .map_err(|e| Error::Udp(e.to_string()))?;
+        }
+        for t in &templates {
+            if t.session.is_none() {
+                continue;
+            }
+            let ok = matches!(&t.app, UdpApp::App(a) if a.protocol().dialog() && a.plans());
+            if !ok {
+                return Err(Error::Udp(format!(
+                    "template {}: session lengths need a protocol that plays a whole \
+                     session (h3); for others, use users and their think time",
+                    t.name
+                )));
+            }
+        }
         Ok(Self {
             plans: templates.iter().map(|t| plan(t, &options)).collect(),
             tpl_clock: templates
@@ -1245,6 +1324,11 @@ impl UdpEngine {
             wrr: vec![0; n],
             opened: vec![0; n],
             txn_count: 0,
+            dist_rng: DistRng::new(seed.rotate_left(17) ^ 0x5e55_1047),
+            users: Users::new(groups, seed.rotate_left(29) ^ 0x05e2_5eed)
+                .first_address(first_address),
+            user_sessions: Vec::new(),
+            next_user_scan: Duration::ZERO,
             next_timer_scan: Duration::ZERO,
             error: None,
             started: false,
@@ -1316,6 +1400,10 @@ impl UdpEngine {
         // Or every template has started all of its own, or its traffic
         // model's ramp has ended.
         let each = (0..self.templates.len()).all(|i| {
+            if self.templates[i].group.is_some() && self.templates[i].weight > 0 {
+                // Users keep coming until the run stops.
+                return false;
+            }
             self.exhausted(i)
                 || self.tpl_clock[i]
                     .as_ref()
@@ -1508,6 +1596,7 @@ impl UdpEngine {
             wake: None,
             media: None,
             taken: false,
+            rng: DistRng::new((now.as_nanos() as u64) ^ (u64::from(d.sport) << 17) ^ 0x7417),
         };
         if let UdpApp::App(a) = &cx.templates[tpl].app {
             if a.protocol().dialog() {
@@ -1656,7 +1745,13 @@ impl UdpEngine {
             !(total > 0 && e.stats.client.sent >= total)
                 && !(concurrency > 0 && e.stats.client.active as usize >= concurrency)
         };
+        if !self.users.is_empty() {
+            self.serve_users(now);
+        }
         for tpl in 0..self.templates.len() {
+            if self.templates[tpl].group.is_some() {
+                continue;
+            }
             let mut started = 0;
             while self.tpl_clock[tpl].as_ref().is_some_and(|c| c.due(now))
                 && started < 256
@@ -1668,7 +1763,7 @@ impl UdpEngine {
                     }
                     break;
                 }
-                if !self.start_one(tpl, now) {
+                if self.start_one(tpl, None, now).is_none() {
                     break;
                 }
                 if let Some(c) = &mut self.tpl_clock[tpl] {
@@ -1678,7 +1773,11 @@ impl UdpEngine {
             }
         }
         let shared: Vec<usize> = (0..self.templates.len())
-            .filter(|&i| self.templates[i].rate.is_none() && !self.exhausted(i))
+            .filter(|&i| {
+                self.templates[i].rate.is_none()
+                    && self.templates[i].group.is_none()
+                    && !self.exhausted(i)
+            })
             .collect();
         if shared.is_empty() {
             return;
@@ -1694,7 +1793,7 @@ impl UdpEngine {
                 return;
             }
             let tpl = self.pick(&ready);
-            if !self.start_one(tpl, now) {
+            if self.start_one(tpl, None, now).is_none() {
                 self.unpick(tpl, &ready);
                 return;
             }
@@ -1731,24 +1830,81 @@ impl UdpEngine {
         }
     }
 
-    fn start_one(&mut self, tpl: usize, now: Duration) -> bool {
-        let Some(client) = &self.client else {
-            return false;
-        };
+    /// Users: notes the sessions that ended, and starts one for every
+    /// user that wants one now.
+    fn serve_users(&mut self, now: Duration) {
+        self.users.start(now);
+        let mut changed = false;
+        if now >= self.next_user_scan {
+            self.next_user_scan = now + USER_SCAN;
+            let sessions = &self.sessions;
+            let mut ended = Vec::new();
+            self.user_sessions.retain(|(key, user)| {
+                let over = sessions.get(key).is_none_or(|s| s.done);
+                if over {
+                    ended.push(*user);
+                }
+                !over
+            });
+            for u in ended {
+                self.users.ended(u, now);
+                changed = true;
+            }
+        }
+        if self.users.next_due().is_some_and(|t| t <= now) {
+            let count = self
+                .client
+                .as_ref()
+                .map_or(1, |c| u64::from(c.endpoint.ip_count.max(1)));
+            for (user, group, address) in self.users.due(now).into_iter().take(256) {
+                let ready: Vec<usize> = (0..self.templates.len())
+                    .filter(|&i| self.templates[i].group == Some(group) && self.ready(i))
+                    .collect();
+                if ready.is_empty() {
+                    self.users.retry(user, now + USER_RETRY);
+                    continue;
+                }
+                let tpl = self.pick(&ready);
+                match self.start_one(tpl, Some((address % count) as u32), now) {
+                    Some(key) => {
+                        self.users.busy(user);
+                        // A transaction over at once (nothing to wait for)
+                        // is found gone on the next scan.
+                        self.user_sessions.push((key, user));
+                    }
+                    None => {
+                        self.unpick(tpl, &ready);
+                        self.users.retry(user, now + USER_RETRY);
+                    }
+                }
+                changed = true;
+            }
+        }
+        if changed || self.stats.users.is_empty() {
+            self.stats.users = self.users.stats().to_vec();
+        }
+    }
+
+    /// Starts a transaction of template `tpl` from the client address `ip`
+    /// (an index into the client's addresses) or any.
+    fn start_one(&mut self, tpl: usize, ip: Option<u32>, now: Duration) -> Option<Key> {
+        let client = self.client.as_ref()?;
         let ep = client.endpoint.clone();
         let ports = client.source_ports.clone();
         let t = &self.templates[tpl];
         let to = SocketAddr::new(t.nth_server(self.opened[tpl]), t.connect.port());
-        let Some(mac) = self.hosts[0].hop_mac(ep.next_hop(to.ip())) else {
-            return false;
-        };
+        let mac = self.hosts[0].hop_mac(ep.next_hop(to.ip()))?;
         let span = u64::from(ports.end - ports.start);
-        let count = u64::from(ep.ip_count);
+        let count = if ip.is_some() {
+            1
+        } else {
+            u64::from(ep.ip_count)
+        };
         let mut found = None;
         for _ in 0..(span * count).min(1 << 20) {
             let k = self.port_cursor;
             self.port_cursor = self.port_cursor.wrapping_add(1);
-            let ip = ep.nth_ip((k % count) as u32);
+            let ip = ep.nth_ip(ip.unwrap_or((k % count) as u32));
             let port = ports.start + ((k / count) % span) as u16;
             let key = (SocketAddr::new(ip, port), to);
             if !self.sessions.contains_key(&key) {
@@ -1756,23 +1912,32 @@ impl UdpEngine {
                 break;
             }
         }
-        let Some(key) = found else {
-            return false;
-        };
+        let key = found?;
         let index = self.opened[tpl];
         self.opened[tpl] += 1;
         let txn = self.txn_count;
         self.txn_count += 1;
         let r = self.rng.next();
-        let app = match &self.templates[tpl].app {
-            UdpApp::App(a) => Some(a.session(&SessionInit {
-                role: AppRole::Client,
-                transport: Transport::Datagram,
-                index,
-                seed: r ^ txn,
-                local: key.0,
-                remote: to,
-            })),
+        let t = &self.templates[tpl];
+        let plan = SessionPlan {
+            budget: t
+                .session
+                .map(|l| l.draw(&mut self.dist_rng, now))
+                .unwrap_or_default(),
+            think: t.think_time,
+        };
+        let app = match &t.app {
+            UdpApp::App(a) => Some(a.session_with(
+                &SessionInit {
+                    role: AppRole::Client,
+                    transport: Transport::Datagram,
+                    index,
+                    seed: r ^ txn,
+                    local: key.0,
+                    remote: to,
+                },
+                &plan,
+            )),
             UdpApp::Replay(_) => None,
         };
         let mut s = Session {
@@ -1808,6 +1973,7 @@ impl UdpEngine {
             wake: None,
             media: None,
             taken: false,
+            rng: DistRng::new(r.rotate_left(23) ^ txn),
         };
         let (mut cx, sessions) = self.ctx();
         if let UdpApp::App(a) = &cx.templates[tpl].app {
@@ -1815,10 +1981,7 @@ impl UdpEngine {
                 s.dialog = true;
                 let n = a.protocol().media_ports();
                 if n > 0 {
-                    let Some(first) = cx.media.take(&cx.options.media_ports, key.0.ip(), n, key)
-                    else {
-                        return false;
-                    };
+                    let first = cx.media.take(&cx.options.media_ports, key.0.ip(), n, key)?;
                     s.media = Some((first, n));
                 }
             }
@@ -1841,7 +2004,7 @@ impl UdpEngine {
         } else {
             cx.media.free(&s);
         }
-        true
+        Some(key)
     }
 }
 

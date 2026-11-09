@@ -136,9 +136,10 @@ pub struct UdpArgs {
     #[arg(long)]
     keep_timing: bool,
 
-    /// Pause this long before answering the other end, e.g. 20ms.
-    #[arg(long, value_parser = parse_duration)]
-    think_time: Option<Duration>,
+    /// Pause this long before answering the other end, e.g. 20ms, or a
+    /// distribution such as exp(20ms) (see docs/traffic-models.md).
+    #[arg(long, value_parser = crate::tcp::parse_think)]
+    think_time: Option<ferotrx_core::Dist>,
 
     /// Do not check replayed datagrams against the capture.
     #[arg(long)]
@@ -392,6 +393,9 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
                 eprintln!("{line}");
             }
         }
+        for g in &profile.users {
+            eprintln!("users: {g}");
+        }
         if profile.client.is_some() {
             let n = if profile.transactions == 0 {
                 "until stopped".to_string()
@@ -421,6 +425,7 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
         c.finish(args.quiet)?;
     }
     print_summary(&stats);
+    crate::tcp::print_users(&stats.users);
     crate::host::print_hosts(&stats.hosts, "  ");
     if let Some(path) = &args.report {
         let mut info = crate::latency::run_info(
@@ -467,7 +472,13 @@ fn template_line(t: &UdpTemplateSpec, i: usize) -> String {
         line.push_str(&format!(", at most {n} open"));
     }
     if let Some(d) = t.think_time {
-        line.push_str(&format!(", think time {d:?}"));
+        line.push_str(&format!(", think time {d}"));
+    }
+    if let Some(l) = &t.session {
+        line.push_str(&format!(", sessions of {l}"));
+    }
+    if let Some(g) = t.group {
+        line.push_str(&format!(", users group {}", g + 1));
     }
     line
 }
@@ -730,5 +741,6 @@ pub fn print_udp_run(r: &UdpRunInfo) {
         "  frames: {} sent ({} bytes), {} received ({} bytes)",
         r.tx_packets, r.tx_bytes, r.rx_packets, r.rx_bytes
     );
+    crate::tcp::print_user_counters(&r.users);
     crate::host::print_host_infos(&r.hosts, "  ");
 }

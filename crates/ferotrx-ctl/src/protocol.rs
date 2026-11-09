@@ -1023,6 +1023,77 @@ pub struct LatencyCounters {
     pub negative: u64,
 }
 
+/// A distribution of counts (requests per session, sessions per user).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CountCounters {
+    pub count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg: Option<f64>,
+    /// Percentiles, to within 12.5%.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p50: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p99: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<u64>,
+}
+
+impl CountCounters {
+    /// From `s`, unless it counted nothing.
+    pub fn of(s: &ferotrx_core::CountStats) -> Option<Self> {
+        (s.count() > 0).then(|| Self {
+            count: s.count(),
+            min: s.min(),
+            avg: s.mean(),
+            p50: s.percentile(0.5),
+            p99: s.percentile(0.99),
+            max: s.max(),
+        })
+    }
+}
+
+/// One group of concurrent users of a TCP or UDP run; see
+/// `ferotrx_core::UserStats`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct UserCounters {
+    /// The persona, `users` for the profile's own `[users]`, or `all`.
+    pub name: String,
+    /// Users online now.
+    pub online: u64,
+    /// Users that came, the first ones included.
+    pub arrived: u64,
+    /// Users that left after their lifetime.
+    pub departed: u64,
+    /// Sessions the users started.
+    pub sessions: u64,
+    /// Sessions per user that left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions_per_user: Option<CountCounters>,
+    /// How long the users that left stayed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifetime: Option<LatencyCounters>,
+    /// The think times drawn between sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub think: Option<LatencyCounters>,
+}
+
+impl From<&ferotrx_core::UserStats> for UserCounters {
+    fn from(u: &ferotrx_core::UserStats) -> Self {
+        Self {
+            name: u.name.clone(),
+            online: u.online,
+            arrived: u.arrived,
+            departed: u.departed,
+            sessions: u.sessions,
+            sessions_per_user: CountCounters::of(&u.sessions_per_user),
+            lifetime: (u.lifetime.count() > 0).then(|| (&u.lifetime).into()),
+            think: (u.think.count() > 0).then(|| (&u.think).into()),
+        }
+    }
+}
+
 impl From<&LatencyStats> for LatencyCounters {
     fn from(l: &LatencyStats) -> Self {
         let us = |d: Option<std::time::Duration>| d.map(|d| d.as_nanos() as f64 / 1000.0);
@@ -1207,6 +1278,10 @@ pub struct TcpRunInfo {
     pub elapsed_s: f64,
     /// Completed client connections per second.
     pub cps: f64,
+    /// The concurrent users (`[users]`, `[[persona]]`): each group, then
+    /// all together (`all`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<UserCounters>,
     /// The emulated hosts of the client and server, when they get their
     /// addresses by DHCP, SLAAC or DHCPv6, announce them or join groups.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1269,6 +1344,12 @@ pub struct TcpCounters {
     /// Client: from the first SYN to the first byte from the server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_byte: Option<LatencyCounters>,
+    /// Client: requests (or rounds of the program) per completed connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_requests: Option<CountCounters>,
+    /// Client: how long completed connections lasted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_time: Option<LatencyCounters>,
     /// What the application protocol counted, for templates that play one
     /// (`app = "http"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1508,6 +1589,8 @@ impl From<&TcpSideStats> for TcpCounters {
             ecn_reductions: s.ecn_reductions,
             connect_time: (s.connect_time.count() > 0).then(|| (&s.connect_time).into()),
             first_byte: (s.first_byte.count() > 0).then(|| (&s.first_byte).into()),
+            session_requests: CountCounters::of(&s.session_requests),
+            session_time: (s.session_time.count() > 0).then(|| (&s.session_time).into()),
             app: AppCounters::of(&s.app),
         }
     }
@@ -1534,6 +1617,7 @@ impl TcpRunInfo {
         self.elapsed_s = s.elapsed.as_secs_f64();
         self.cps = s.cps();
         self.hosts = s.hosts.iter().map(HostInfo::from).collect();
+        self.users = s.users.iter().map(UserCounters::from).collect();
         self.impair = PortImpairCounters::of(&s.impair);
         self.drops = s.drops;
     }
@@ -1637,6 +1721,10 @@ pub struct UdpRunInfo {
     pub elapsed_s: f64,
     /// Answered client transactions per second.
     pub tps: f64,
+    /// The concurrent users (`[users]`, `[[persona]]`): each group, then
+    /// all together (`all`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<UserCounters>,
     /// The emulated hosts of the client and server, when they get their
     /// addresses by DHCP, SLAAC or DHCPv6, announce them or join groups.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1731,6 +1819,7 @@ impl UdpRunInfo {
         self.elapsed_s = s.elapsed.as_secs_f64();
         self.tps = s.tps();
         self.hosts = s.hosts.iter().map(HostInfo::from).collect();
+        self.users = s.users.iter().map(UserCounters::from).collect();
         self.impair = PortImpairCounters::of(&s.impair);
         self.drops = s.drops;
     }

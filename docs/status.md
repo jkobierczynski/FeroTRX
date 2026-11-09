@@ -37,6 +37,7 @@ protocol is tested against is in [interop.md](interop.md).
 |---|---|---|
 | TCP engine (SACK, window scaling, timestamps, RTO, NewReno, CUBIC, ECN) | Partial | no BBR, Accurate ECN or L4S; no cap on half-open connections in the server |
 | TCP templates, rates, concurrency, think time | Done | [stateful-tcp.md](stateful-tcp.md) |
+| Session lengths, think times, users, personas | Partial | [traffic-models.md](traffic-models.md#sessions-and-users); session lengths only for HTTP, HTTPS, HTTP/2, HTTP/3 and captures; personas not in the GUI's editors |
 | TCP, UDP and applications inside GTP-U, a TEID per client | Partial | [stateful-tcp.md](stateful-tcp.md#inside-gtp-u-tunnels); no GTP-C, echo requests or fragmentation; ports are shared among `--workers` |
 | UDP engine, DNS, NTP | Done | [stateful-udp.md](stateful-udp.md) |
 | HTTP/1.1 with response checks | Done | |
@@ -76,7 +77,6 @@ protocol is tested against is in [interop.md](interop.md).
 ## Planned
 
 From the comparison with TRex and Ostinato:
-[#106](https://github.com/jkobierczynski/FeroTRX/issues/106) realism (M53),
 [#108](https://github.com/jkobierczynski/FeroTRX/issues/108) accurate latency
 and [#109](https://github.com/jkobierczynski/FeroTRX/issues/109) fleet
 robustness (M55, M56).

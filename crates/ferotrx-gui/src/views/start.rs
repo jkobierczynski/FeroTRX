@@ -143,6 +143,11 @@ impl FeroApp {
                     "{shown} is a fleet plan: run it with `ferotrx fleet run {shown}`, or use the Multi-server tab"
                 ))
             }
+            FileKind::Persona => {
+                return Err(format!(
+                    "{shown} is a persona: use it from a TCP or UDP profile's [[persona]] table"
+                ))
+            }
         };
         self.tab = tab;
         self.opened_from_start = true;

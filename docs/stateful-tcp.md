@@ -294,7 +294,14 @@ runs it on the VLAN trunk, and on two links with 3% loss.
 * **Message timing.** By default each end answers as soon as the other
   end's message is in. `--keep-timing` (`[tcp] keep_timing`) waits the gaps
   the capture shows between messages, and `--think-time 50ms` adds a pause
-  before every answer; `--show` lists the gaps.
+  before every answer (a distribution too: `--think-time "exp(50ms)"`);
+  `--show` lists the gaps.
+* **Sessions and users.** `session_requests`, `session_duration` or
+  `session_bytes` play a capture again in rounds on one connection, or make
+  an HTTP session of that many requests; `[users]` keeps users online that
+  pause between sessions, and `[[persona]]` takes users and templates from
+  a persona file. See
+  [traffic-models.md](traffic-models.md#sessions-and-users).
 
 Sending and receiving goes through libpcap or Npcap by default; `-B af_xdp`
 or `-B dpdk` uses the fast ports for higher connection rates (see

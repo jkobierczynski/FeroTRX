@@ -44,6 +44,15 @@ each file says which.
 | [lab-udp-mix.toml](lab-udp-mix.toml) | DNS from a capture, NTP and a written echo, with timing |
 | [lab-ntp.toml](lab-ntp.toml) | NTP clients and a server, Poisson arrivals |
 
+## Sessions, users and personas
+
+| File | What it shows |
+| --- | --- |
+| [lab-sessions.toml](lab-sessions.toml) | 50 users kept online: log-normal session lengths, think times, lifetimes; a capture in rounds |
+| [lab-personas.toml](lab-personas.toml) | office, IoT and server personas mixed in one TCP run |
+| [lab-personas-udp.toml](lab-personas-udp.toml) | the same personas' UDP side (DNS, NTP) |
+| [personas/](personas) | persona files: `office`, `iot`, `voice`, `server` |
+
 ## Application protocols
 
 | File | Protocol |

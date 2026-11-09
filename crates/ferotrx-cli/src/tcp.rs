@@ -159,9 +159,10 @@ pub struct TcpArgs {
     #[arg(long)]
     keep_timing: bool,
 
-    /// Pause this long before answering the other end's message, e.g. 50ms.
-    #[arg(long, value_parser = parse_duration)]
-    think_time: Option<Duration>,
+    /// Pause this long before answering the other end's message, e.g. 50ms,
+    /// or a distribution such as exp(50ms) (see docs/traffic-models.md).
+    #[arg(long, value_parser = parse_think)]
+    think_time: Option<ferotrx_core::Dist>,
 
     /// Stop after this long, e.g. 30s or 5m.
     #[arg(short, long, value_parser = parse_duration)]
@@ -349,6 +350,11 @@ fn emulation(h: &mut TcpHostSpec, join: &[IpAddr], announce: bool, n: u8) {
     if h.is_dynamic() && h.mac.is_none() {
         h.mac = Some(MacAddr([0x02, 0xdc, 0, 0, 0, n]));
     }
+}
+
+/// A think time: a duration or a distribution of them.
+pub(crate) fn parse_think(s: &str) -> Result<ferotrx_core::Dist, String> {
+    ferotrx_core::Dist::parse(ferotrx_core::Quantity::Time, s).map_err(|e| e.to_string())
 }
 
 pub(crate) fn set<T>(slot: &mut T, v: Option<T>) {
@@ -563,6 +569,9 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
                 eprintln!("{line}");
             }
         }
+        for g in &profile.users {
+            eprintln!("users: {g}");
+        }
         if profile.client.is_some() {
             let n = if profile.connections == 0 {
                 "until stopped".to_string()
@@ -592,6 +601,7 @@ pub fn cmd_tcp(args: TcpArgs) -> Result<()> {
         c.finish(args.quiet)?;
     }
     print_summary(&stats);
+    print_users(&stats.users);
     crate::host::print_hosts(&stats.hosts, "  ");
     if let Some(path) = &args.report {
         let mut info = crate::latency::run_info(
@@ -639,6 +649,15 @@ fn template_line(t: &TcpTemplateSpec, i: usize) -> String {
     }
     if let Some(n) = t.concurrency {
         line.push_str(&format!(", at most {n} open"));
+    }
+    if let Some(l) = &t.session {
+        line.push_str(&format!(", sessions of {l}"));
+    }
+    if let Some(d) = &t.think {
+        line.push_str(&format!(", think {d}"));
+    }
+    if let Some(g) = t.group {
+        line.push_str(&format!(", users group {}", g + 1));
     }
     line
 }
@@ -767,6 +786,23 @@ fn side_line(c: &TcpCounters) -> String {
                 crate::udp::ms(l.max_us)
             ));
         }
+    }
+    if let Some(n) = &c.session_requests {
+        line.push_str(&format!(
+            "; requests per session avg {} p50 {} p99 {} max {}",
+            n.avg.map_or("-".into(), |a| format!("{a:.2}")),
+            n.p50.map_or("-".into(), |v| v.to_string()),
+            n.p99.map_or("-".into(), |v| v.to_string()),
+            n.max.map_or("-".into(), |v| v.to_string()),
+        ));
+    }
+    if let Some(l) = &c.session_time {
+        line.push_str(&format!(
+            "; sessions s avg {} p99 {} max {}",
+            secs(l.avg_us),
+            secs(l.p99_us),
+            secs(l.max_us)
+        ));
     }
     if let Some(h) = c.app.as_ref().and_then(|a| a.tls.as_ref()) {
         line.push_str(&format!("; {}", tls_line(h)));
@@ -922,5 +958,54 @@ pub fn print_tcp_run(r: &TcpRunInfo) {
         "  frames: {} sent ({} bytes), {} received ({} bytes)",
         r.tx_packets, r.tx_bytes, r.rx_packets, r.rx_bytes
     );
+    print_user_counters(&r.users);
     crate::host::print_host_infos(&r.hosts, "  ");
+}
+
+/// The users of a run, a line per group (and all together when several).
+pub(crate) fn print_users(users: &[ferotrx_core::UserStats]) {
+    let c: Vec<ferotrx_ctl::protocol::UserCounters> = users.iter().map(Into::into).collect();
+    print_user_counters(&c);
+}
+
+pub(crate) fn print_user_counters(users: &[ferotrx_ctl::protocol::UserCounters]) {
+    let several = users.len() > 2;
+    for u in users {
+        if u.name == "all" && !several {
+            continue;
+        }
+        if u.name == "users" {
+            println!("  users: {}", user_line(u));
+        } else {
+            println!("  users {}: {}", u.name, user_line(u));
+        }
+    }
+}
+
+fn user_line(u: &ferotrx_ctl::protocol::UserCounters) -> String {
+    let mut line = format!(
+        "{} online, {} came, {} left; {} sessions",
+        u.online, u.arrived, u.departed, u.sessions
+    );
+    if let Some(n) = &u.sessions_per_user {
+        line.push_str(&format!(
+            ", {} per user that left (avg)",
+            n.avg.map_or("-".into(), |a| format!("{a:.1}"))
+        ));
+    }
+    if let Some(t) = &u.think {
+        line.push_str(&format!(
+            "; think s avg {} p99 {}",
+            secs(t.avg_us),
+            secs(t.p99_us)
+        ));
+    }
+    if let Some(l) = &u.lifetime {
+        line.push_str(&format!("; stayed s avg {}", secs(l.avg_us)));
+    }
+    line
+}
+
+fn secs(us: Option<f64>) -> String {
+    us.map_or("-".into(), |u| format!("{:.3}", u / 1e6))
 }

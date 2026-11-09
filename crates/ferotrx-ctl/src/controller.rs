@@ -2209,18 +2209,20 @@ impl Controller {
     /// Starts a stateful TCP run from a TCP profile.
     pub fn tcp_start(&self, p: TcpStartParams) -> Result<TcpRunInfo, RpcError> {
         let start_at = start_time(p.start_at)?;
+        let registry = ferotrx_core::app::AppRegistry::builtin();
+        let allow = |path: &Path| self.files.readable(path).map_err(|e| e.message);
         let failed = |e: ferotrx_core::Error| RpcError::failed(e);
         let mut profile = match (p.path, p.toml) {
             (Some(path), None) => {
                 let (text, file) = self.files.read_text(&path)?;
                 let base = file.parent().unwrap_or(Path::new(""));
-                TcpProfile::from_toml(&text, base)
+                TcpProfile::from_toml_allowing(&text, base, &registry, &allow)
                     .map_err(|e| RpcError::failed(format!("{}: {e}", path.display())))?
             }
             (None, Some(text)) => {
                 self.files.upload(&text)?;
                 let base = self.files.base_dir(p.base_dir.as_deref())?;
-                TcpProfile::from_toml(&text, &base).map_err(failed)?
+                TcpProfile::from_toml_allowing(&text, &base, &registry, &allow).map_err(failed)?
             }
             _ => return Err(RpcError::invalid_params("give either path or toml")),
         };
@@ -2326,18 +2328,20 @@ impl Controller {
     /// Starts a stateful UDP run from a UDP profile.
     pub fn udp_start(&self, p: UdpStartParams) -> Result<UdpRunInfo, RpcError> {
         let start_at = start_time(p.start_at)?;
+        let registry = ferotrx_core::app::AppRegistry::builtin();
+        let allow = |path: &Path| self.files.readable(path).map_err(|e| e.message);
         let failed = |e: ferotrx_core::Error| RpcError::failed(e);
         let mut profile = match (p.path, p.toml) {
             (Some(path), None) => {
                 let (text, file) = self.files.read_text(&path)?;
                 let base = file.parent().unwrap_or(Path::new(""));
-                UdpProfile::from_toml(&text, base)
+                UdpProfile::from_toml_allowing(&text, base, &registry, &allow)
                     .map_err(|e| RpcError::failed(format!("{}: {e}", path.display())))?
             }
             (None, Some(text)) => {
                 self.files.upload(&text)?;
                 let base = self.files.base_dir(p.base_dir.as_deref())?;
-                UdpProfile::from_toml(&text, &base).map_err(failed)?
+                UdpProfile::from_toml_allowing(&text, &base, &registry, &allow).map_err(failed)?
             }
             _ => return Err(RpcError::invalid_params("give either path or toml")),
         };

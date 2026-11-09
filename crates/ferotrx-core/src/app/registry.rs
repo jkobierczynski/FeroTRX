@@ -263,10 +263,16 @@ impl ProfileApps {
     }
 
     /// Reads a profile's raw form: from `doc` (without the protocols'
-    /// tables) if protocols were taken out, else from `text`, whose errors
-    /// say where they are.
-    pub fn raw<T: serde::de::DeserializeOwned>(&self, text: &str, doc: toml::Table) -> Result<T> {
-        let r = if self.any() {
+    /// tables) if protocols were taken out or `edited` says something else
+    /// changed it (users, personas), else from `text`, whose errors say
+    /// where they are.
+    pub fn raw_edited<T: serde::de::DeserializeOwned>(
+        &self,
+        text: &str,
+        doc: toml::Table,
+        edited: bool,
+    ) -> Result<T> {
+        let r = if edited || self.any() {
             toml::Value::Table(doc).try_into()
         } else {
             toml::from_str(text)

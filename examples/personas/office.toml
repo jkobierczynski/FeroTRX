@@ -1,0 +1,75 @@
+# Persona: an office worker. Browses an intranet over HTTPS (several pages
+# a visit, reading in between), posts to an API now and then, and looks up
+# names. Used from a TCP or UDP profile with [[persona]]; see
+# examples/lab-personas.toml and docs/traffic-models.md#personas.
+format = 1
+name = "office"
+description = "intranet browsing over HTTPS, API posts, DNS lookups"
+
+[user]
+think = "lognormal(median=10s, sigma=1, max=2m)"   # between visits
+lifetime = "exp(30m)"                              # then goes home; another comes
+arrival = 2                                        # users per second at the start
+
+# A visit: 6 pages or so, a long tail of longer ones, a few seconds each.
+[[tcp]]
+name = "intranet"
+app = "https"
+port = 443
+weight = 6
+session_requests = "lognormal(median=6, sigma=0.8, max=60)"
+think_time = "exp(3s)"
+
+[tcp.http]
+host = "intranet.lab.local"
+requests = ["GET /", "GET /news", "GET /static/app.js", "GET /search?q=lab"]
+
+[[tcp.http.route]]
+path = "/static/app.js"
+body_size = "120K"
+
+[[tcp.http.route]]
+path = "/news"
+body_size = "40K"
+content_type = "text/html"
+
+[[tcp.http.route]]
+path = "/search"
+body_size = "8K"
+content_type = "text/html"
+delay = "50ms"
+
+[[tcp.http.route]]
+path = "/"
+body_size = "24K"
+content_type = "text/html"
+
+# An API call or two: a form posted.
+[[tcp]]
+name = "api"
+app = "http"
+port = 8080
+weight = 2
+session_requests = "uniform(1, 3)"
+think_time = "500ms"
+
+[[tcp.http.request]]
+method = "POST"
+path = "/api/forms"
+body_size = "2K"
+content_type = "application/json"
+expect = 201
+
+[[tcp.http.route]]
+method = "POST"
+path = "/api/forms"
+status = 201
+delay = "20ms"
+
+# Name lookups, between the rest.
+[[udp]]
+name = "dns"
+app = "dns"
+port = 53
+queries = ["intranet.lab.local A", "mail.lab.local MX", "wpad.lab.local A NXDOMAIN"]
+records = ["intranet.lab.local A 192.168.20.80", "mail.lab.local MX 10 mx.lab.local"]

@@ -230,6 +230,19 @@ web = done.template("web").client.app
 assert web.failed == 0 and web.codes.get("404", 0) > 0
 ```
 
+A profile with [users or personas](traffic-models.md#sessions-and-users)
+(servers from 0.50.0) has `users` on the run info, a `UserCounters` per
+group and one named `all` (`online`, `arrived`, `departed`, `sessions`,
+`sessions_per_user`, and the `think` and `lifetime` drawn), and the TCP
+client counters have `session_requests` (a `CountCounters`: `count`, `min`,
+`avg`, `p50`, `p99`, `max`) and `session_time`:
+
+```python
+done = c.tcp_wait(c.tcp_start("lab-sessions.toml", upload=True, duration=60).id)
+office = next(u for u in done.users if u.name == "office")
+office.online, office.sessions, done.client.session_requests.p50
+```
+
 ## Y.1564
 
 ```python

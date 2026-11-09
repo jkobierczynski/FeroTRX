@@ -26,7 +26,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    AppCx, AppProtocol, AppRole, AppSession, AppTransaction, Receive, SessionInit, Transport,
+    AppCx, AppProtocol, AppRole, AppSession, AppTransaction, Receive, SessionInit, SessionPlan,
+    Transport,
 };
 use crate::{Error, Result};
 
@@ -523,8 +524,9 @@ pub struct HttpClient {
     pub host: Option<String>,
     /// The `User-Agent` header; empty: none.
     pub user_agent: String,
-    /// Pause between an answer and the next request.
-    pub think_time: Duration,
+    /// Pause between an answer and the next request: fixed, or drawn for
+    /// each pause from a distribution (`exp(2s)`).
+    pub think_time: crate::Dist,
 }
 
 impl Default for HttpClient {
@@ -535,7 +537,7 @@ impl Default for HttpClient {
             pipeline: false,
             host: None,
             user_agent: format!("FeroTRX/{}", env!("CARGO_PKG_VERSION")),
-            think_time: Duration::ZERO,
+            think_time: crate::Dist::zero(),
         }
     }
 }
@@ -636,6 +638,14 @@ impl AppProtocol for Http {
     }
 
     fn session(&self, init: &SessionInit) -> Box<dyn AppSession> {
+        self.session_with(init, &SessionPlan::default())
+    }
+
+    fn plans(&self) -> bool {
+        true
+    }
+
+    fn session_with(&self, init: &SessionInit, plan: &SessionPlan) -> Box<dyn AppSession> {
         let cfg = Arc::new(self.clone());
         match init.role {
             AppRole::Client => {
@@ -654,6 +664,10 @@ impl AppProtocol for Http {
                     first: init.index * u64::from(self.client.per_connection.max(1)),
                     sent: 0,
                     answered: 0,
+                    budget: plan.budget,
+                    think: plan.think.unwrap_or(self.client.think_time),
+                    rng: crate::DistRng::new(init.seed),
+                    bytes: 0,
                     outstanding: VecDeque::new(),
                     parser: if self.client.requests.iter().any(|r| r.checks.need_body()) {
                         Parser::keep_bodies()
@@ -1020,6 +1034,61 @@ fn response_framing(h: &Head, method: &str) -> std::result::Result<Framing, Stri
         .map_or(Framing::UntilClose, Framing::Length))
 }
 
+/// What an HTTP client session (HTTP/1.1, HTTP/2, HTTP/3) follows: how many
+/// requests, or how long, or how many bytes, and the pause between them.
+#[derive(Clone, Debug)]
+pub(crate) struct ClientPlan {
+    budget: crate::SessionBudget,
+    per_connection: u32,
+    pub(crate) think: crate::Dist,
+    rng: crate::DistRng,
+    /// Bytes sent and received so far.
+    pub(crate) bytes: u64,
+}
+
+impl ClientPlan {
+    pub(crate) fn new(client: &HttpClient, plan: &SessionPlan, seed: u64) -> Self {
+        Self {
+            budget: plan.budget,
+            per_connection: client.per_connection,
+            think: plan.think.unwrap_or(client.think_time),
+            rng: crate::DistRng::new(seed),
+            bytes: 0,
+        }
+    }
+
+    /// The requests the session sends, when that is known beforehand.
+    pub(crate) fn target(&self) -> Option<u64> {
+        if self.budget.is_open() {
+            Some(u64::from(self.per_connection))
+        } else {
+            self.budget.requests
+        }
+    }
+
+    /// Whether another request may start after `n` started.
+    pub(crate) fn more(&self, n: u32, now: Duration) -> bool {
+        if self.budget.is_open() {
+            n < self.per_connection
+        } else {
+            self.budget.more(u64::from(n), now, self.bytes)
+        }
+    }
+
+    /// The pause before the next request; `None` for none.
+    pub(crate) fn pause(&mut self) -> Option<Duration> {
+        (!self.think.is_zero()).then(|| self.think.sample_time(&mut self.rng))
+    }
+
+    /// "after 3 of 5 requests" / "after 3 requests".
+    pub(crate) fn short_of(&self, answered: u32) -> Option<String> {
+        match self.target() {
+            Some(n) if u64::from(answered) < n => Some(format!("after {answered} of {n} requests")),
+            _ => None,
+        }
+    }
+}
+
 // ----- sessions -----
 
 struct ClientSession {
@@ -1029,6 +1098,13 @@ struct ClientSession {
     first: u64,
     sent: u32,
     answered: u32,
+    /// The session's drawn length; open: `per_connection` requests.
+    budget: crate::SessionBudget,
+    /// The pause before each request after an answer.
+    think: crate::Dist,
+    rng: crate::DistRng,
+    /// Bytes sent and received, for a length in bytes.
+    bytes: u64,
     /// Requests sent and not answered yet: which, and when it went.
     outstanding: VecDeque<(usize, Duration)>,
     parser: Parser,
@@ -1046,14 +1122,34 @@ impl ClientSession {
         ((self.first + u64::from(k)) % self.cfg.client.requests.len() as u64) as usize
     }
 
+    /// The requests this session sends, when that is known beforehand.
+    fn target(&self) -> Option<u64> {
+        if self.budget.is_open() {
+            Some(u64::from(self.cfg.client.per_connection))
+        } else {
+            self.budget.requests
+        }
+    }
+
+    /// Whether another request may go after `n` were sent.
+    fn more(&self, n: u32, now: Duration) -> bool {
+        if self.budget.is_open() {
+            n < self.cfg.client.per_connection
+        } else {
+            self.budget.more(u64::from(n), now, self.bytes)
+        }
+    }
+
     fn send_next(&mut self, cx: &mut AppCx) {
         let c = &self.cfg.client;
-        if self.stop || self.sent >= c.per_connection {
+        if self.stop || !self.more(self.sent, cx.now()) {
             return;
         }
         let i = self.request_index(self.sent);
         let ua = c.user_agent.clone();
-        cx.send(c.requests[i].bytes(&self.host, &ua));
+        let req = c.requests[i].bytes(&self.host, &ua);
+        self.bytes += req.len() as u64;
+        cx.send(req);
         self.outstanding.push_back((i, cx.now()));
         self.sent += 1;
     }
@@ -1100,20 +1196,22 @@ impl ClientSession {
                 }
             }
         }
-        let c = &self.cfg.client;
-        if self.answered >= c.per_connection || (self.stop && self.outstanding.is_empty()) {
-            if self.answered < c.per_connection {
+        let pipeline = self.cfg.client.pipeline;
+        let done = self.outstanding.is_empty() && !self.more(self.answered, cx.now());
+        if done || (self.stop && self.outstanding.is_empty()) {
+            if let Some(n) = self.target().filter(|&n| u64::from(self.answered) < n) {
                 cx.protocol_error(format!(
-                    "the server closed after {} of {} requests",
-                    self.answered, c.per_connection
+                    "the server closed after {} of {n} requests",
+                    self.answered
                 ));
             }
             cx.close();
-        } else if !c.pipeline && self.outstanding.is_empty() {
-            if c.think_time.is_zero() {
+        } else if !pipeline && self.outstanding.is_empty() {
+            if self.think.is_zero() {
                 self.send_next(cx);
             } else {
-                cx.wake_at(cx.now() + c.think_time);
+                let t = self.think.sample_time(&mut self.rng);
+                cx.wake_at(cx.now() + t);
             }
         }
     }
@@ -1122,7 +1220,10 @@ impl ClientSession {
 impl AppSession for ClientSession {
     fn start(&mut self, cx: &mut AppCx) {
         if self.cfg.client.pipeline {
-            for _ in 0..self.cfg.client.per_connection {
+            let n = self
+                .target()
+                .unwrap_or(u64::from(self.cfg.client.per_connection));
+            for _ in 0..n {
                 self.send_next(cx);
             }
         } else {
@@ -1135,6 +1236,7 @@ impl AppSession for ClientSession {
             self.fail(cx, "the server sent before it was asked".into());
             return Receive::Taken;
         }
+        self.bytes += data.len() as u64;
         let reqs = &self.cfg.client.requests;
         let method = |o: &VecDeque<(usize, Duration)>| {
             o.front()
@@ -1158,11 +1260,12 @@ impl AppSession for ClientSession {
                 return;
             }
         }
-        if self.answered < self.cfg.client.per_connection && !self.stop {
+        let short = self.target().filter(|&n| u64::from(self.answered) < n);
+        if let (Some(n), false) = (short, self.stop) {
             self.stop = true;
             cx.protocol_error(format!(
-                "the server closed after {} of {} requests",
-                self.answered, self.cfg.client.per_connection
+                "the server closed after {} of {n} requests",
+                self.answered
             ));
         }
         cx.close();
@@ -1515,7 +1618,7 @@ pub fn parse(t: &toml::Table, base: &std::path::Path) -> Result<Http> {
         c.user_agent = ua;
     }
     if let Some(t) = r.think_time {
-        c.think_time = crate::parse_duration(&t)?;
+        c.think_time = crate::Dist::parse(crate::Quantity::Time, &t)?;
     }
     if let Some(s) = r.server {
         http.server.server = s;
