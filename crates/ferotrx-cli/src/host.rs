@@ -1,5 +1,6 @@
 //! `ferotrx host`: emulated hosts on their own (DHCP, SLAAC, DHCPv6,
-//! announcements, multicast groups, router advertisements).
+//! announcements, multicast groups, router advertisements, DHCP servers,
+//! LLDP/CDP, mDNS, 802.1X and flow export).
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -10,9 +11,10 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use ferotrx_core::{
-    parse_duration, parse_ipv4_mode, parse_ipv6_mode, parse_pool, parse_prefix6, DhcpServerConfig,
-    Dhcpv6ServerConfig, HostConfig, HostEngine, HostProfile, HostSpec, HostState, HostStats,
-    HostStatus, MacAddr, PortJob, RouterConfig, TcpRunConfig,
+    parse_collector, parse_duration, parse_ipv4_mode, parse_ipv6_mode, parse_pool, parse_prefix6,
+    AuthenticatorConfig, DhcpServerConfig, Dhcpv6ServerConfig, Dot1xConfig, FlowExportConfig,
+    FlowVersion, HostConfig, HostEngine, HostProfile, HostSpec, HostState, HostStats, HostStatus,
+    LldpConfig, MacAddr, MdnsConfig, MdnsService, PortJob, RouterConfig, TcpRunConfig,
 };
 use ferotrx_ctl::protocol::{DhcpServerInfo, HostAddressInfo, HostInfo};
 
@@ -90,6 +92,23 @@ pub struct HostArgs {
     #[arg(long)]
     ra_other: bool,
 
+    /// Advertise this link MTU (the MTU option).
+    #[arg(long, value_name = "BYTES")]
+    ra_mtu: Option<u32>,
+
+    /// Advertise this DNS server (RDNSS); repeat for more.
+    #[arg(long, value_name = "IP")]
+    ra_dns: Vec<std::net::Ipv6Addr>,
+
+    /// Advertise this search domain (DNSSL); repeat for more.
+    #[arg(long, value_name = "NAME")]
+    ra_search: Vec<String>,
+
+    /// Ask a DHCPv6 server for a delegated prefix of this length (0: the
+    /// server's choice), as a requesting router.
+    #[arg(long, value_name = "LENGTH")]
+    pd: Option<u8>,
+
     /// Serve DHCP (an IPv4 range, needs a static --ipv4) or DHCPv6 (an IPv6
     /// range) from this pool, e.g. 10.0.0.100-10.0.0.199; give one of each
     /// for both.
@@ -111,6 +130,79 @@ pub struct HostArgs {
     /// Domain name the DHCP servers hand out.
     #[arg(long, value_name = "NAME")]
     dhcp_domain: Option<String>,
+
+    /// Delegate prefixes from this pool (e.g. fd00:2000::/40), with an IPv6
+    /// --dhcp-pool.
+    #[arg(long, value_name = "PREFIX")]
+    pd_pool: Option<String>,
+
+    /// Length of the delegated prefixes (default 56).
+    #[arg(long, value_name = "LENGTH")]
+    pd_length: Option<u8>,
+
+    /// Announce the hosts by LLDP and list their neighbors.
+    #[arg(long)]
+    lldp: bool,
+
+    /// Announce the hosts by CDP (also with --lldp).
+    #[arg(long)]
+    cdp: bool,
+
+    /// LLDP/CDP system name (default: the host name); {n} is the host's number.
+    #[arg(long, value_name = "NAME")]
+    system_name: Option<String>,
+
+    /// Time between LLDP/CDP announcements (default 30s).
+    #[arg(long, value_parser = parse_duration, value_name = "TIME")]
+    lldp_interval: Option<Duration>,
+
+    /// Answer mDNS for the host's name (NAME.local).
+    #[arg(long)]
+    mdns: bool,
+
+    /// The host's mDNS name (default: the host name); {n} is the host's number.
+    #[arg(long, value_name = "NAME")]
+    mdns_name: Option<String>,
+
+    /// Publish a DNS-SD service, TYPE:PORT[:INSTANCE], e.g.
+    /// "_http._tcp:80:Lab web"; repeat for more.
+    #[arg(long, value_name = "SERVICE")]
+    mdns_service: Vec<String>,
+
+    /// Look up a name (printer.local) or service type (_ipp._tcp) by mDNS;
+    /// repeat for more.
+    #[arg(long, value_name = "NAME")]
+    mdns_query: Vec<String>,
+
+    /// Authenticate by 802.1X (EAP-MD5) first, IDENTITY:PASSWORD; {n} in the
+    /// identity is the host's number.
+    #[arg(long, value_name = "IDENTITY:PASSWORD")]
+    dot1x: Option<String>,
+
+    /// Go on without 802.1X when no authenticator answers.
+    #[arg(long)]
+    dot1x_optional: bool,
+
+    /// Be an 802.1X authenticator with this user, IDENTITY:PASSWORD; repeat
+    /// for more.
+    #[arg(long, value_name = "IDENTITY:PASSWORD")]
+    dot1x_user: Vec<String>,
+
+    /// Export made-up flow records to this collector, IP[:PORT] (default port 4739).
+    #[arg(long, value_name = "COLLECTOR")]
+    flow_export: Option<String>,
+
+    /// Flow export version: ipfix (default) or netflow9.
+    #[arg(long, value_name = "VERSION")]
+    flow_version: Option<FlowVersion>,
+
+    /// Flow records in each export packet (default 10).
+    #[arg(long, value_name = "N")]
+    flow_records: Option<u32>,
+
+    /// Time between export packets (default 1s).
+    #[arg(long, value_parser = parse_duration, value_name = "TIME")]
+    flow_interval: Option<Duration>,
 
     /// Hosts started per second (default: all at once).
     #[arg(long, value_name = "N")]
@@ -176,6 +268,15 @@ impl HostArgs {
             || self.hostname.is_some()
             || !self.ra.is_empty()
             || !self.dhcp_pool.is_empty()
+            || self.pd.is_some()
+            || self.lldp
+            || self.cdp
+            || self.mdns
+            || !self.mdns_service.is_empty()
+            || !self.mdns_query.is_empty()
+            || self.dot1x.is_some()
+            || !self.dot1x_user.is_empty()
+            || self.flow_export.is_some()
     }
 
     /// The hosts the command line describes.
@@ -224,15 +325,23 @@ impl HostArgs {
             }
             r.managed = self.ra_managed;
             r.other = self.ra_other;
+            r.mtu = self.ra_mtu;
+            r.dns = self.ra_dns.clone();
+            r.search = self.ra_search.clone();
             h.router = Some(r);
         } else if self.ra_interval.is_some()
             || self.ra_lifetime.is_some()
             || self.ra_managed
             || self.ra_other
+            || self.ra_mtu.is_some()
+            || !self.ra_dns.is_empty()
+            || !self.ra_search.is_empty()
         {
             bail!("the --ra-* options go with --ra PREFIX");
         }
+        h.prefix_delegation = self.pd;
         self.dhcp_servers(&mut h)?;
+        self.services(&mut h)?;
         let mut spec = HostSpec::new(h);
         spec.count = self.count.unwrap_or(1);
         if spec.count == 0 {
@@ -302,9 +411,108 @@ impl HostArgs {
         if let Some(s) = h.dhcpv6_server.as_mut() {
             crate::tcp::set(&mut s.lease, self.dhcp_lease);
             s.domain = self.dhcp_domain.clone();
+            s.pd_pool = self.pd_pool.as_deref().map(parse_prefix6).transpose()?;
+            if let Some(l) = self.pd_length {
+                s.pd_length = l;
+            }
+        } else if self.pd_pool.is_some() || self.pd_length.is_some() {
+            bail!("--pd-pool and --pd-length go with an IPv6 --dhcp-pool");
+        }
+        if self.pd_length.is_some() && self.pd_pool.is_none() {
+            bail!("--pd-length goes with --pd-pool");
         }
         Ok(())
     }
+
+    /// LLDP/CDP, mDNS, 802.1X and flow export.
+    fn services(&self, h: &mut HostConfig) -> Result<()> {
+        if self.lldp || self.cdp {
+            let mut l = LldpConfig {
+                lldp: self.lldp,
+                cdp: self.cdp,
+                system_name: self.system_name.clone(),
+                ..LldpConfig::default()
+            };
+            crate::tcp::set(&mut l.interval, self.lldp_interval);
+            h.lldp = Some(l);
+        } else if self.system_name.is_some() || self.lldp_interval.is_some() {
+            bail!("--system-name and --lldp-interval go with --lldp or --cdp");
+        }
+        if self.mdns
+            || self.mdns_name.is_some()
+            || !self.mdns_service.is_empty()
+            || !self.mdns_query.is_empty()
+        {
+            h.mdns = Some(MdnsConfig {
+                name: self.mdns_name.clone(),
+                services: self
+                    .mdns_service
+                    .iter()
+                    .map(|s| parse_service(s))
+                    .collect::<Result<_>>()?,
+                queries: self.mdns_query.clone(),
+                ..MdnsConfig::default()
+            });
+        }
+        if let Some(d) = &self.dot1x {
+            let (id, pw) = user(d, "--dot1x")?;
+            h.dot1x = Some(Dot1xConfig {
+                required: !self.dot1x_optional,
+                ..Dot1xConfig::new(id, pw)
+            });
+        } else if self.dot1x_optional {
+            bail!("--dot1x-optional goes with --dot1x");
+        }
+        if !self.dot1x_user.is_empty() {
+            h.dot1x_authenticator = Some(AuthenticatorConfig {
+                users: self
+                    .dot1x_user
+                    .iter()
+                    .map(|u| user(u, "--dot1x-user"))
+                    .collect::<Result<_>>()?,
+            });
+        }
+        if let Some(c) = &self.flow_export {
+            let mut f = FlowExportConfig::new(parse_collector(c)?);
+            if let Some(v) = self.flow_version {
+                f.version = v;
+            }
+            crate::tcp::set(&mut f.records, self.flow_records);
+            crate::tcp::set(&mut f.interval, self.flow_interval);
+            h.flow_export = Some(f);
+        } else if self.flow_version.is_some()
+            || self.flow_records.is_some()
+            || self.flow_interval.is_some()
+        {
+            bail!("the --flow-* options go with --flow-export COLLECTOR");
+        }
+        Ok(())
+    }
+}
+
+/// `IDENTITY:PASSWORD`.
+fn user(s: &str, what: &str) -> Result<(String, String)> {
+    match s.split_once(':') {
+        Some((id, pw)) if !id.is_empty() => Ok((id.to_string(), pw.to_string())),
+        _ => bail!("{what} wants IDENTITY:PASSWORD, not '{s}'"),
+    }
+}
+
+/// `TYPE:PORT[:INSTANCE]`, e.g. `_http._tcp:80:Lab web`; the instance
+/// defaults to the host's mDNS name.
+fn parse_service(s: &str) -> Result<MdnsService> {
+    let mut it = s.splitn(3, ':');
+    let service = it.next().unwrap_or_default().trim().to_string();
+    let port = it
+        .next()
+        .and_then(|p| p.trim().parse::<u16>().ok())
+        .with_context(|| format!("--mdns-service wants TYPE:PORT[:INSTANCE], not '{s}'"))?;
+    Ok(MdnsService {
+        instance: it.next().unwrap_or_default().trim().to_string(),
+        service,
+        port,
+        txt: Vec::new(),
+    })
 }
 
 pub fn cmd_host(args: HostArgs) -> Result<()> {
@@ -466,6 +674,12 @@ fn address(kind: &str, a: &HostAddressInfo) -> String {
     if !a.dns.is_empty() {
         s.push_str(&format!(", dns {}", a.dns.join(" ")));
     }
+    if !a.domains.is_empty() {
+        s.push_str(&format!(", search {}", a.domains.join(" ")));
+    }
+    if let Some(m) = a.mtu {
+        s.push_str(&format!(", mtu {m}"));
+    }
     s.push(')');
     s
 }
@@ -498,10 +712,62 @@ pub(crate) fn host_line(h: &HostInfo) -> String {
             g.group, g.reports, g.rx_packets
         ));
     }
+    if let Some(p) = &h.delegated_prefix {
+        parts.push(address("delegated prefix", p));
+    }
     for (kind, s) in [("dhcp", &h.dhcp_server), ("dhcpv6", &h.dhcpv6_server)] {
         if let Some(s) = s {
             parts.push(server_summary(kind, s));
         }
+    }
+    if let Some(d) = &h.dot1x {
+        let mut t = format!("802.1X {} as {}", d.state, d.identity);
+        if let Some(a) = &d.authenticator {
+            t.push_str(&format!(" with {a}"));
+        }
+        if let Some(t2) = d.auth_time_s {
+            t.push_str(&format!(" in {:.0} ms", t2 * 1000.0));
+        }
+        parts.push(t);
+    }
+    if let Some(a) = &h.dot1x_authenticator {
+        parts.push(format!(
+            "802.1X authenticator ({} starts, {} authorized, {} refused, {} logoffs)",
+            a.starts, a.successes, a.failures, a.logoffs
+        ));
+    }
+    if let Some(l) = &h.lldp {
+        parts.push(format!(
+            "lldp {} sent, cdp {} sent, {} heard, {} neighbors",
+            l.lldp_sent,
+            l.cdp_sent,
+            l.received,
+            l.neighbors.len()
+        ));
+    }
+    if let Some(m) = &h.mdns {
+        let mut t = format!(
+            "mdns {} ({} answers, {} queries, {} found",
+            m.name,
+            m.answers_sent,
+            m.queries_sent,
+            m.found.len()
+        );
+        if m.conflicts > 0 {
+            t.push_str(&format!(", {} conflicts", m.conflicts));
+        }
+        t.push(')');
+        parts.push(t);
+    }
+    if let Some(f) = &h.flow_export {
+        let mut t = format!(
+            "{} to {} ({} packets, {} records)",
+            f.version, f.collector, f.packets, f.records
+        );
+        if f.waiting {
+            t.push_str(", collector not resolved");
+        }
+        parts.push(t);
     }
     if !parts.is_empty() {
         line.push_str(": ");
@@ -539,11 +805,12 @@ fn server_summary(kind: &str, s: &DhcpServerInfo) -> String {
     t
 }
 
-/// The leases of a host's DHCP server roles, one line each.
+/// The leases and delegated prefixes of a host's DHCP server roles, its
+/// LLDP/CDP neighbors, mDNS finds and 802.1X sessions, one line each.
 pub(crate) fn lease_lines(h: &HostInfo) -> Vec<String> {
     let mut out = Vec::new();
     for s in [&h.dhcp_server, &h.dhcpv6_server].into_iter().flatten() {
-        for l in &s.leases {
+        for l in s.leases.iter().chain(&s.delegations) {
             let mut line = format!(
                 "lease {} to {}",
                 l.address,
@@ -555,6 +822,39 @@ pub(crate) fn lease_lines(h: &HostInfo) -> Vec<String> {
             line.push_str(&format!(", {:.0} s left", l.remaining_s));
             out.push(line);
         }
+    }
+    for n in h.lldp.iter().flat_map(|l| &l.neighbors) {
+        let mut line = format!(
+            "{} neighbor {} port {}",
+            n.protocol,
+            n.system_name.as_deref().unwrap_or(&n.chassis),
+            n.port
+        );
+        if !n.addresses.is_empty() {
+            line.push_str(&format!(" at {}", n.addresses.join(" ")));
+        }
+        if let Some(p) = &n.platform {
+            line.push_str(&format!(" ({p})"));
+        }
+        line.push_str(&format!(", {} frames from {}", n.frames, n.mac));
+        out.push(line);
+    }
+    for f in h.mdns.iter().flat_map(|m| &m.found) {
+        out.push(format!(
+            "mdns {} {} {} (from {})",
+            f.name, f.kind, f.data, f.source
+        ));
+    }
+    for s in h.dot1x_authenticator.iter().flat_map(|a| &a.sessions) {
+        out.push(format!(
+            "802.1X {} {}{}",
+            s.mac,
+            s.state,
+            s.identity
+                .as_deref()
+                .map(|i| format!(" as {i}"))
+                .unwrap_or_default()
+        ));
     }
     out
 }

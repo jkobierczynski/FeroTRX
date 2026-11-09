@@ -683,6 +683,10 @@ class HostAddressInfo(Record):
     dns: list[str] = field(default_factory=list)
     lease_s: float | None = None
     renewals: int = 0
+    #: The link MTU a router advertised.
+    mtu: int | None = None
+    #: Search domains (DHCP, DHCPv6 or a router's DNSSL).
+    domains: list[str] = field(default_factory=list)
 
 
 @dataclass(kw_only=True)
@@ -729,6 +733,116 @@ class DhcpServerInfo(Record):
     informs: int = 0
     #: Discovers and solicits left unanswered: no free address.
     exhausted: int = 0
+    #: Delegated prefixes (DHCPv6; ``address`` is ``PREFIX/LENGTH``).
+    delegations: list[DhcpLeaseInfo] = field(default_factory=list)
+
+
+@dataclass(kw_only=True)
+class LldpNeighborInfo(Record):
+    """A neighbor an emulated host heard by LLDP or CDP."""
+
+    #: ``lldp`` or ``cdp``.
+    protocol: str = ""
+    mac: str = ""
+    chassis: str = ""
+    port: str = ""
+    system_name: str | None = None
+    description: str | None = None
+    platform: str | None = None
+    capabilities: list[str] = field(default_factory=list)
+    addresses: list[str] = field(default_factory=list)
+    ttl_s: float = 0.0
+    remaining_s: float = 0.0
+    frames: int = 0
+
+
+@dataclass(kw_only=True)
+class LldpInfo(Record):
+    """LLDP and CDP of an emulated host."""
+
+    lldp_sent: int = 0
+    cdp_sent: int = 0
+    received: int = 0
+    neighbors: list[LldpNeighborInfo] = field(default_factory=list)
+
+
+@dataclass(kw_only=True)
+class MdnsRecordInfo(Record):
+    """A record an emulated host found by mDNS."""
+
+    name: str = ""
+    #: ``A``, ``AAAA``, ``PTR``, ``SRV`` or ``TXT``.
+    kind: str = ""
+    data: str = ""
+    #: Who answered.
+    source: str = ""
+
+
+@dataclass(kw_only=True)
+class MdnsInfo(Record):
+    """The mDNS responder and queries of an emulated host."""
+
+    #: The host's ``.local`` name.
+    name: str = ""
+    announcements: int = 0
+    queries_sent: int = 0
+    answers_sent: int = 0
+    received: int = 0
+    conflicts: int = 0
+    found: list[MdnsRecordInfo] = field(default_factory=list)
+
+
+@dataclass(kw_only=True)
+class Dot1xInfo(Record):
+    """The 802.1X supplicant of an emulated host."""
+
+    #: ``connecting``, ``authenticating``, ``authorized``, ``refused`` or
+    #: ``no authenticator``.
+    state: str = ""
+    identity: str = ""
+    authenticator: str | None = None
+    method: str | None = None
+    starts: int = 0
+    responses: int = 0
+    successes: int = 0
+    failures: int = 0
+    #: Seconds from the first EAPOL-Start to EAP-Success.
+    auth_time_s: float | None = None
+
+
+@dataclass(kw_only=True)
+class Dot1xSessionInfo(Record):
+    """A supplicant an emulated 802.1X authenticator dealt with."""
+
+    mac: str = ""
+    identity: str | None = None
+    state: str = ""
+
+
+@dataclass(kw_only=True)
+class Dot1xAuthenticatorInfo(Record):
+    """The 802.1X authenticator role of an emulated host."""
+
+    sessions: list[Dot1xSessionInfo] = field(default_factory=list)
+    starts: int = 0
+    successes: int = 0
+    failures: int = 0
+    logoffs: int = 0
+
+
+@dataclass(kw_only=True)
+class FlowExportInfo(Record):
+    """The NetFlow v9 / IPFIX exporter of an emulated host."""
+
+    collector: str = ""
+    #: ``netflow9`` or ``ipfix``.
+    version: str = ""
+    packets: int = 0
+    bytes: int = 0
+    records: int = 0
+    templates: int = 0
+    #: True while the collector's next hop is not resolved.
+    waiting: bool = False
 
 
 @dataclass(kw_only=True)
@@ -748,6 +862,13 @@ class HostInfo(Record):
     groups: list[HostGroupInfo] = field(default_factory=list)
     dhcp_server: DhcpServerInfo | None = None
     dhcpv6_server: DhcpServerInfo | None = None
+    #: A prefix delegated by DHCPv6 (``address`` is ``PREFIX/LENGTH``).
+    delegated_prefix: HostAddressInfo | None = None
+    lldp: LldpInfo | None = None
+    mdns: MdnsInfo | None = None
+    dot1x: Dot1xInfo | None = None
+    dot1x_authenticator: Dot1xAuthenticatorInfo | None = None
+    flow_export: FlowExportInfo | None = None
 
 
 # ----- application protocols -----

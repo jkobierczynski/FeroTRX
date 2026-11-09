@@ -256,6 +256,43 @@ def test_tcp_run_hosts() -> None:
     assert h.groups[0].rx_packets == 5 and h.ipv6 is None
 
 
+def test_host_link_services() -> None:
+    h = ferotrx.HostInfo.from_dict(
+        {
+            "mac": "02:dc:00:00:00:01",
+            "state": "ready",
+            "ipv6": {"address": "fd00::5/64", "source": "slaac", "mtu": 1400, "domains": ["lab"]},
+            "delegated_prefix": {"address": "fd00:aa00::/56", "source": "dhcpv6"},
+            "lldp": {
+                "lldp_sent": 3,
+                "cdp_sent": 0,
+                "received": 2,
+                "neighbors": [{"protocol": "lldp", "mac": "02:00:00:00:00:09", "frames": 2}],
+            },
+            "mdns": {
+                "name": "lab.local",
+                "found": [{"name": "x.local", "kind": "A", "source": "10.0.0.9"}],
+            },
+            "dot1x": {"state": "authorized", "identity": "alice", "auth_time_s": 0.01},
+            "dot1x_authenticator": {"sessions": [{"mac": "02:00:00:00:00:02", "state": "refused"}]},
+            "flow_export": {"collector": "10.0.0.9:4739", "version": "ipfix", "packets": 4},
+            "dhcpv6_server": {"pool": "a-b", "delegations": [{"address": "fd00:aa00::/56"}]},
+        }
+    )
+    assert h.ipv6 is not None and h.ipv6.mtu == 1400 and h.ipv6.domains == ["lab"]
+    assert h.delegated_prefix is not None and h.delegated_prefix.address == "fd00:aa00::/56"
+    assert h.lldp is not None and h.lldp.neighbors[0].frames == 2
+    assert h.mdns is not None and h.mdns.found[0].source == "10.0.0.9"
+    assert h.dot1x is not None and h.dot1x.state == "authorized"
+    assert (
+        h.dot1x_authenticator is not None and h.dot1x_authenticator.sessions[0].state == "refused"
+    )
+    assert h.flow_export is not None and h.flow_export.packets == 4
+    assert (
+        h.dhcpv6_server is not None and h.dhcpv6_server.delegations[0].address == "fd00:aa00::/56"
+    )
+
+
 def test_tcp_run_app_and_tls_counters() -> None:
     info = TcpRunInfo.from_dict(
         {

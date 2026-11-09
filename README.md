@@ -60,9 +60,10 @@ each milestone added and what comes next.
   file clients and a file server (NTLMv2 logins, signing, files and
   directories) that work with smbclient and Samba; an interface for protocols of your own.
   [Guide](docs/app-protocols.md)
-* **Host emulation**: emulated hosts get addresses by DHCP, SLAAC or DHCPv6,
-  announce them, join multicast groups and act as IPv6 routers and DHCP or
-  DHCPv6 servers.
+* **Host emulation**: emulated hosts get addresses by DHCP, SLAAC or DHCPv6
+  (with prefix delegation), announce them, join multicast groups, act as IPv6
+  routers and DHCP or DHCPv6 servers, and run LLDP/CDP, mDNS, 802.1X and
+  NetFlow/IPFIX export.
   [Guide](docs/host-emulation.md)
 * **Loss and latency** per stream, from a signature in each packet, with
   the loss split into what the generator never sent, what the network lost
@@ -170,7 +171,7 @@ The manual is in [docs/](docs/README.md):
 | [Stateful TCP](docs/stateful-tcp.md) and [the engine](docs/tcp-engine.md) | `tcp`, TCP profiles, templates |
 | [Stateful UDP and DNS](docs/stateful-udp.md) and [the engine](docs/udp-engine.md) | `udp`, DNS, NTP |
 | [Application protocols](docs/app-protocols.md) | HTTP/1.1 and HTTP/2, HTTPS and TLS, DNS over UDP, TCP and TLS, MQTT, SSH, SIP and RTP, SMB, NTP, your own |
-| [Host emulation](docs/host-emulation.md) | `host`, DHCP, SLAAC, IGMP/MLD |
+| [Host emulation](docs/host-emulation.md) | `host`, DHCP, SLAAC, IGMP/MLD, LLDP, mDNS, 802.1X |
 | [TCP and UDP over AF_XDP and DPDK](docs/fast-ports.md) | fast ports for stateful runs |
 | [One run on several cores](docs/multi-core.md) | `--workers`, `--cpus`, splitting streams and flows |
 | [Performance](docs/performance.md) | `bench --sweep`, repeatability, measured numbers |

@@ -28,9 +28,13 @@ from .types import (
     Counters,
     DhcpLeaseInfo,
     DhcpServerInfo,
+    Dot1xAuthenticatorInfo,
+    Dot1xInfo,
+    Dot1xSessionInfo,
     DropCounters,
     FileInfo,
     FlowCounters,
+    FlowExportInfo,
     HandshakeCounters,
     HostAddressInfo,
     HostGroupInfo,
@@ -39,7 +43,11 @@ from .types import (
     InterfaceEntry,
     LatencyCounters,
     Limits,
+    LldpInfo,
+    LldpNeighborInfo,
     LossReport,
+    MdnsInfo,
+    MdnsRecordInfo,
     MediaCounters,
     Notification,
     PortImpairCounters,
@@ -64,7 +72,7 @@ from .types import (
     Y1564RunInfo,
 )
 
-__version__ = "0.47.0"
+__version__ = "0.48.0"
 
 __all__ = [
     "__version__",
@@ -112,6 +120,14 @@ __all__ = [
     "DhcpServerInfo",
     "HostAddressInfo",
     "HostGroupInfo",
+    "Dot1xAuthenticatorInfo",
+    "Dot1xInfo",
+    "Dot1xSessionInfo",
+    "FlowExportInfo",
+    "LldpInfo",
+    "LldpNeighborInfo",
+    "MdnsInfo",
+    "MdnsRecordInfo",
     "AppCounters",
     "RequestCounters",
     "HandshakeCounters",

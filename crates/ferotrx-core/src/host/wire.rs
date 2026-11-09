@@ -179,6 +179,8 @@ pub(crate) struct Dhcp4In {
     pub lease: Option<u32>,
     pub t1: Option<u32>,
     pub t2: Option<u32>,
+    /// The domain name (option 15).
+    pub domain: Option<String>,
 }
 
 /// Parses a DHCPv4 reply (op 2) with its options.
@@ -200,6 +202,7 @@ pub(crate) fn parse_dhcp4(p: &[u8]) -> Option<Dhcp4In> {
         lease: None,
         t1: None,
         t2: None,
+        domain: None,
     };
     m.chaddr.copy_from_slice(&p[28..34]);
     let mut o = &p[240..];
@@ -223,6 +226,13 @@ pub(crate) fn parse_dhcp4(p: &[u8]) -> Option<Dhcp4In> {
             (51, 4) => m.lease = Some(u32_at(v)),
             (58, 4) => m.t1 = Some(u32_at(v)),
             (59, 4) => m.t2 = Some(u32_at(v)),
+            (15, l) if l > 0 => {
+                let name = String::from_utf8_lossy(v);
+                let name = name.trim_end_matches('\0').trim_end_matches('.');
+                if !name.is_empty() {
+                    m.domain = Some(name.to_string());
+                }
+            }
             _ => {}
         }
         o = &o[2 + len..];
@@ -249,6 +259,8 @@ const OPT_ORO: u16 = 6;
 const OPT_ELAPSED: u16 = 8;
 const OPT_STATUS: u16 = 13;
 const OPT_DNS: u16 = 23;
+const OPT_IA_PD: u16 = 25;
+const OPT_IAPREFIX: u16 = 26;
 
 /// The client's DUID: link-layer address type (3), Ethernet, the MAC.
 pub(crate) fn duid(mac: MacAddr) -> Vec<u8> {
@@ -272,8 +284,13 @@ pub(crate) struct Dhcp6Out<'a> {
     /// Hundredths of a second since the exchange began.
     pub elapsed: u16,
     pub server_id: Option<&'a [u8]>,
+    /// Ask for an address (an IA_NA).
+    pub want_address: bool,
     /// The address asked for or held.
     pub address: Option<Ipv6Addr>,
+    /// Ask for a delegated prefix (an IA_PD, RFC 8415): the prefix held, or
+    /// the length wanted (0: the server's choice).
+    pub pd: Option<(Option<(Ipv6Addr, u8)>, u8)>,
 }
 
 pub(crate) fn dhcp6_message(m: &Dhcp6Out) -> Vec<u8> {
@@ -284,15 +301,30 @@ pub(crate) fn dhcp6_message(m: &Dhcp6Out) -> Vec<u8> {
     if let Some(s) = m.server_id {
         opt6(&mut p, OPT_SERVERID, s);
     }
-    let mut ia = Vec::with_capacity(40);
-    ia.extend_from_slice(&m.iaid.to_be_bytes());
-    ia.extend_from_slice(&[0; 8]); // T1, T2: the server's choice
-    if let Some(a) = m.address {
-        let mut addr = a.octets().to_vec();
-        addr.extend_from_slice(&[0; 8]); // lifetimes: the server's choice
-        opt6(&mut ia, OPT_IAADDR, &addr);
+    if m.want_address {
+        let mut ia = Vec::with_capacity(40);
+        ia.extend_from_slice(&m.iaid.to_be_bytes());
+        ia.extend_from_slice(&[0; 8]); // T1, T2: the server's choice
+        if let Some(a) = m.address {
+            let mut addr = a.octets().to_vec();
+            addr.extend_from_slice(&[0; 8]); // lifetimes: the server's choice
+            opt6(&mut ia, OPT_IAADDR, &addr);
+        }
+        opt6(&mut p, OPT_IA_NA, &ia);
     }
-    opt6(&mut p, OPT_IA_NA, &ia);
+    if let Some((held, hint)) = m.pd {
+        let mut ia = Vec::with_capacity(41);
+        ia.extend_from_slice(&m.iaid.to_be_bytes());
+        ia.extend_from_slice(&[0; 8]);
+        let (prefix, len) = held.unwrap_or((Ipv6Addr::UNSPECIFIED, hint));
+        if held.is_some() || hint > 0 {
+            let mut x = vec![0; 8]; // lifetimes: the server's choice
+            x.push(len);
+            x.extend_from_slice(&prefix.octets());
+            opt6(&mut ia, OPT_IAPREFIX, &x);
+        }
+        opt6(&mut p, OPT_IA_PD, &ia);
+    }
     opt6(&mut p, OPT_ELAPSED, &m.elapsed.to_be_bytes());
     if m.kind != DHCP6_RELEASE {
         opt6(&mut p, OPT_ORO, &OPT_DNS.to_be_bytes());
@@ -331,6 +363,11 @@ pub(crate) struct Dhcp6In {
     pub t2: u32,
     /// The address with its preferred and valid lifetimes.
     pub address: Option<(Ipv6Addr, u32, u32)>,
+    /// A delegated prefix, its length, preferred and valid lifetimes.
+    pub prefix: Option<(Ipv6Addr, u8, u32, u32)>,
+    /// T1 and T2 of the IA_PD.
+    pub pd_t1: u32,
+    pub pd_t2: u32,
     pub dns: Vec<Ipv6Addr>,
 }
 
@@ -378,6 +415,25 @@ pub(crate) fn parse_dhcp6(p: &[u8]) -> Option<Dhcp6In> {
                 OPT_IAADDR if v.len() >= 24 => {
                     if m.address.is_none() {
                         m.address = Some((addr(v), u32_at(v, 16), u32_at(v, 20)));
+                    }
+                }
+                OPT_STATUS if v.len() >= 2 => {
+                    let s = u16::from_be_bytes([v[0], v[1]]);
+                    if s != 0 {
+                        m.status = Some(s);
+                    }
+                }
+                _ => {}
+            });
+            ok &= r.is_some();
+        }
+        OPT_IA_PD if v.len() >= 12 => {
+            m.pd_t1 = u32_at(v, 4);
+            m.pd_t2 = u32_at(v, 8);
+            let r = options6(&v[12..], |code, v| match code {
+                OPT_IAPREFIX if v.len() >= 25 => {
+                    if m.prefix.is_none() {
+                        m.prefix = Some((addr(&v[9..]), v[8], u32_at(v, 0), u32_at(v, 4)));
                     }
                 }
                 OPT_STATUS if v.len() >= 2 => {
@@ -447,6 +503,10 @@ pub(crate) struct RouterAdvert {
     pub lladdr: Option<MacAddr>,
     pub mtu: Option<u32>,
     pub prefixes: Vec<PrefixInfo>,
+    /// Recursive DNS servers (RFC 8106), with a lifetime above zero.
+    pub dns: Vec<Ipv6Addr>,
+    /// The DNS search list (RFC 8106), with a lifetime above zero.
+    pub search: Vec<String>,
 }
 
 /// Parses a router advertisement, with the checks RFC 4861 asks for: a
@@ -473,6 +533,8 @@ pub(crate) fn parse_ra(ip: &wire::Ip) -> Option<RouterAdvert> {
         lladdr: None,
         mtu: None,
         prefixes: Vec::new(),
+        dns: Vec::new(),
+        search: Vec::new(),
     };
     let mut o = &p[16..];
     while o.len() >= 8 {
@@ -496,11 +558,44 @@ pub(crate) fn parse_ra(ip: &wire::Ip) -> Option<RouterAdvert> {
                     preferred: u32_at(8),
                 });
             }
+            (OPT_RDNSS, _) if len >= 24 && u32_at(4) > 0 => {
+                for c in o[8..len].as_chunks::<16>().0 {
+                    ra.dns.push(Ipv6Addr::from(*c));
+                }
+            }
+            (OPT_DNSSL, _) if u32_at(4) > 0 => {
+                ra.search.extend(dnssl_names(&o[8..len]));
+            }
             _ => {}
         }
         o = &o[len..];
     }
     Some(ra)
+}
+
+/// The names of a DNS search list option (RFC 8106): uncompressed names,
+/// padded with zeros.
+fn dnssl_names(mut b: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut labels: Vec<String> = Vec::new();
+    while let Some(&len) = b.first() {
+        let len = usize::from(len);
+        if len == 0 {
+            if labels.is_empty() {
+                break; // padding
+            }
+            out.push(labels.join("."));
+            labels.clear();
+            b = &b[1..];
+            continue;
+        }
+        let Some(label) = b.get(1..1 + len) else {
+            break;
+        };
+        labels.push(String::from_utf8_lossy(label).into_owned());
+        b = &b[1 + len..];
+    }
+    out
 }
 
 /// True for a router solicitation (with the RFC 4861 checks).
@@ -522,7 +617,19 @@ pub(crate) struct AdvertOut<'a> {
     pub prefixes: &'a [(Ipv6Addr, u8)],
     pub valid: u32,
     pub preferred: u32,
+    /// The link MTU option, if any.
+    pub mtu: Option<u32>,
+    /// Recursive DNS servers (RFC 8106) and their lifetime.
+    pub dns: &'a [Ipv6Addr],
+    /// The DNS search list (RFC 8106).
+    pub search: &'a [String],
+    pub dns_lifetime: u32,
 }
+
+/// RA option: recursive DNS servers (RFC 8106).
+const OPT_RDNSS: u8 = 25;
+/// RA option: DNS search list (RFC 8106).
+const OPT_DNSSL: u8 = 31;
 
 /// A router advertisement from `src` (link-local) to all nodes.
 pub(crate) fn router_advert(
@@ -550,6 +657,34 @@ pub(crate) fn router_advert(
         b.extend_from_slice(&a.preferred.to_be_bytes());
         b.extend_from_slice(&[0; 4]);
         b.extend_from_slice(&mask6(*prefix, *len).octets());
+    }
+    if let Some(mtu) = a.mtu {
+        b.extend_from_slice(&[5, 1, 0, 0]);
+        b.extend_from_slice(&mtu.to_be_bytes());
+    }
+    if !a.dns.is_empty() {
+        b.extend_from_slice(&[OPT_RDNSS, (1 + 2 * a.dns.len()) as u8, 0, 0]);
+        b.extend_from_slice(&a.dns_lifetime.to_be_bytes());
+        for d in a.dns {
+            b.extend_from_slice(&d.octets());
+        }
+    }
+    if !a.search.is_empty() {
+        let mut names = Vec::new();
+        for n in a.search {
+            for label in n.trim_end_matches('.').split('.').filter(|l| !l.is_empty()) {
+                let l = &label.as_bytes()[..label.len().min(63)];
+                names.push(l.len() as u8);
+                names.extend_from_slice(l);
+            }
+            names.push(0);
+        }
+        while (8 + names.len()) % 8 != 0 {
+            names.push(0);
+        }
+        b.extend_from_slice(&[OPT_DNSSL, ((8 + names.len()) / 8) as u8, 0, 0]);
+        b.extend_from_slice(&a.dns_lifetime.to_be_bytes());
+        b.extend_from_slice(&names);
     }
     icmp6_frame(&path, 255, &b, false)
 }
@@ -918,7 +1053,9 @@ mod tests {
             iaid: 5,
             elapsed: 12,
             server_id: Some(&sid),
+            want_address: true,
             address: Some("fd00:77::150".parse().unwrap()),
+            pd: Some((None, 56)),
         };
         let f = dhcp6_frame(MAC, None, link_local(MAC), &m);
         let ip = ip_of(&f);
@@ -936,6 +1073,17 @@ mod tests {
             Some("fd00:77::150".parse().unwrap())
         );
         assert_eq!(back.status, None);
+        // The IA_PD asks for a /56 (a server answer has the same layout).
+        let mut ia = Vec::new();
+        options6(&udp.data[4..], |code, v| {
+            if code == OPT_IA_PD {
+                ia = v.to_vec();
+            }
+        });
+        assert_eq!(&ia[..4], &5u32.to_be_bytes());
+        assert_eq!(ia[12..16], [0, 26, 0, 25]);
+        assert_eq!(ia[16 + 8], 56);
+        assert_eq!(back.prefix, Some((Ipv6Addr::UNSPECIFIED, 56, 0, 0)));
     }
 
     #[test]
@@ -952,10 +1100,26 @@ mod tests {
                 prefixes: &prefixes,
                 valid: 86400,
                 preferred: 14400,
+                mtu: Some(1400),
+                dns: &[
+                    "fd00:99::53".parse().unwrap(),
+                    "fd00:99::54".parse().unwrap(),
+                ],
+                search: &["lab.test".into(), "example.org".into()],
+                dns_lifetime: 600,
             },
         );
         let ip = ip_of(&f);
         let ra = parse_ra(&ip).unwrap();
+        assert_eq!(ra.mtu, Some(1400));
+        assert_eq!(
+            ra.dns,
+            vec![
+                "fd00:99::53".parse::<Ipv6Addr>().unwrap(),
+                "fd00:99::54".parse().unwrap()
+            ]
+        );
+        assert_eq!(ra.search, vec!["lab.test", "example.org"]);
         assert!(ra.managed && !ra.other);
         assert_eq!(ra.lifetime, 1800);
         assert_eq!(ra.lladdr, Some(MAC));

@@ -47,8 +47,9 @@ protocol is tested against is in [interop.md](interop.md).
 | SSH | Partial | no sftp/scp, forwarding, RSA/ECDSA keys |
 | SIP and RTP, call quality (E-model) | Partial | UDP only (no TCP/TLS), no SRTP, DTMF or proxy role |
 | SMB 2 and 3 | Partial | no encryption, Kerberos, leases, durable handles |
-| Host emulation (DHCP, SLAAC, DHCPv6, IGMP/MLD, RA) | Partial | no ARP probes, prefix delegation, `host.*` control methods |
-| DHCP server role (v4, v6) | Partial | no pools per relay, DHCPv6 relay messages or prefix delegation |
+| Host emulation (DHCP, SLAAC, DHCPv6 with prefix delegation, IGMP/MLD, RA with MTU/RDNSS/DNSSL) | Partial | no ARP probes, `host.*` control methods |
+| DHCP server role (v4, v6, prefix delegation) | Partial | no pools per relay or DHCPv6 relay messages |
+| Link services (LLDP/CDP, mDNS/DNS-SD, 802.1X EAP-MD5, NetFlow v9/IPFIX export) | Partial | no LLDP-MED, mDNS probing, other EAP methods or RADIUS; exported flows are made up |
 
 ## Measurement methods
 

@@ -4,7 +4,11 @@ FeroTRX 0.12.0 (M19) makes its emulated hosts behave on the link like real
 ones: they can get their addresses from the lab's DHCP server or router,
 announce them, join multicast groups and keep the memberships alive, and one
 can act as an IPv6 router for others. Since 0.25.0 (M29) a host can also be
-the [DHCP or DHCPv6 server](#dhcp-servers) of its link. It works in two
+the [DHCP or DHCPv6 server](#dhcp-servers) of its link. Since 0.48.0 (M57)
+hosts also run the [link services](#link-services) that real devices run:
+LLDP and CDP, mDNS and DNS-SD, 802.1X authentication, and NetFlow v9 / IPFIX
+export; DHCPv6 [prefix delegation](#prefix-delegation) and the MTU, DNS and
+search list options of router advertisements came with it. It works in two
 places:
 
 * **`ferotrx host`** runs hosts on their own, as many as you like, until
@@ -26,6 +30,11 @@ sudo ferotrx host -i enp0s3 --vlan 10 -n 20 --ipv4 dhcp --join 239.1.2.3 -d 1m
 sudo ferotrx host examples/lab-hosts.toml -i enp0s3
 # a router that advertises fd00:99::/64 every 5 s
 sudo ferotrx host -i enp0s3 --ra fd00:99::/64 --ra-interval 5s
+# a host that switches see by LLDP and CDP, and that answers lab-1.local
+sudo ferotrx host -i enp0s3 --ipv4 10.77.0.5/24 --hostname lab-1 --lldp --cdp \
+     --mdns --mdns-service "_http._tcp:80:Lab web"
+# 802.1X first (EAP-MD5), then DHCP
+sudo ferotrx host -i enp0s3 --dot1x alice:secret --ipv4 dhcp
 # a DHCP server for a segment, 10 minute leases
 sudo ferotrx host -i enp0s3 --ipv4 10.88.0.1/24 --dhcp-pool 10.88.0.100-10.88.0.199 \
      --dhcp-router 10.88.0.1 --dhcp-dns 10.88.0.1 --dhcp-lease 10m
@@ -143,7 +152,10 @@ advertisements from its link-local address to ff02::1: at start, every
 a second). They carry its MAC, each prefix as on-link and for
 autoconfiguration (valid 1 day, preferred 4 hours), the router `lifetime`
 (default 30 min; 0 advertises the prefixes without being a default router),
-and the `managed` (M) and `other` (O) flags. At the end it sends a last
+and the `managed` (M) and `other` (O) flags; with `mtu`, `dns` and
+`search` (`--ra-mtu`, `--ra-dns`, `--ra-search`) also the MTU option and
+RDNSS and DNSSL options (lifetime three intervals, at least a minute). At
+the end it sends a last
 advertisement with router lifetime 0, so hosts drop it as their default
 router. It answers neighbor solicitations for its link-local address, so
 hosts can reach it. It does not route.
@@ -176,6 +188,8 @@ domain = "lab.test"           # the domain search list
 reservations = { "02:dc:00:00:0e:07" = "fd00:88::7" }
 rapid_commit = true           # answer a solicit that asks for it at once
 prefix = 64                   # the on-link prefix, for confirm messages
+pd_pool = "fd00:8800::/40"    # delegate prefixes from this pool (--pd-pool)
+pd_length = 56                # of this length (default 56; --pd-length)
 [host.router]                 # DHCPv6 clients take the gateway from adverts
 prefixes = ["fd00:88::/64"]
 managed = true
@@ -204,7 +218,11 @@ The DHCPv6 server answers on its link-local address: solicits with an
 advertise (or, with rapid commit, a reply), requests, renews and rebinds
 with a reply (an address the client may not keep with lifetimes 0),
 releases and declines, confirms (on link or not) and information requests
-(DNS and domain only). A full pool gives `NoAddrsAvail`. It joins
+(DNS and domain only). A full pool gives `NoAddrsAvail`. With a `pd_pool`
+it also delegates prefixes to requesting routers (IA_PD): the one the client
+had, else the next free one, with the same lifetimes as addresses; renews,
+rebinds and releases them like addresses, and answers `NoPrefixAvail` when
+the pool is full. The delegations are `delegations` in its status. It joins
 ff02::1:2 (all DHCP servers) over MLD, so snooping switches send the
 clients' messages its way.
 
@@ -221,6 +239,134 @@ each lease, at the end:
 
 The same is in `hosts` of the control server's run info (`dhcp_server`,
 `dhcpv6_server`) and the Python client's `HostInfo`.
+
+## Link services
+
+[`examples/lab-services.toml`](../examples/lab-services.toml) has a host of
+each kind. Every service is a table of the `[[host]]` (or `ferotrx host` options) and
+reports in the host's status, in `ferotrx host`'s lines, the control
+server's `HostInfo` and Python's `HostInfo` (`lldp`, `mdns`, `dot1x`,
+`dot1x_authenticator`, `flow_export`).
+
+### LLDP and CDP
+
+```toml
+lldp = true                   # the defaults; or a table:
+[host.lldp]
+lldp = true                   # send LLDP (default true)
+cdp = true                    # send CDP version 2 (default false)
+system_name = "lab-{n}"       # default: the host name, else ferotrx-XXXXXX
+description = "FeroTRX emulated host"
+port_id = "eth0"              # default: the MAC
+port_description = "uplink"
+platform = "FeroTRX"          # CDP
+capabilities = ["station"]    # other, repeater, bridge, wlan, router, telephone, docsis, station
+interval = "30s"
+hold = 4                      # time to live = interval x hold
+```
+
+The host sends LLDP (802.1AB, to 01:80:c2:00:00:0e) with chassis ID (its
+MAC), port ID, time to live, port description, system name and description,
+capabilities and its IPv4 and IPv6 addresses as management addresses; and
+CDP version 2 (to 01:00:0c:cc:cc:cc, SNAP) with device ID, addresses, port
+ID, capabilities, software version and platform. It sends four frames a
+second apart at the start and after it hears a new neighbor (802.1AB fast
+transmission), then one every `interval`, and frames with time to live 0
+at the end (LLDP only: CDP has no shutdown frame). It lists the LLDP and CDP neighbors it hears with their names,
+ports, addresses, capabilities and time left (`--lldp`, `--cdp`,
+`--system-name`, `--lldp-interval`):
+
+```text
+host 02:dc:00:00:01:01 ready after 0.00 s: ipv4 10.77.0.5/24 (static); lldp 6 sent, cdp 6 sent, 4 heard, 1 neighbors
+    lldp neighbor switch1 port Gi1/0/3 at 10.77.0.2, 4 frames from 52:54:00:12:34:56
+```
+
+The host needs no address for LLDP or CDP.
+
+### mDNS and DNS-SD
+
+```toml
+[host.mdns]
+name = "lab-{n}"              # NAME.local; default: the host name, else ferotrx-XXXXXX
+services = [{ instance = "Lab web", service = "_http._tcp", port = 80, txt = ["path=/"] }]
+queries = ["_ipp._tcp", "printer.local"]   # service types (PTR) or names (A, AAAA)
+interval = "10s"              # between rounds of queries
+ttl = 120                     # of the host's records
+```
+
+The host answers mDNS (RFC 6762) on 224.0.0.251 and ff02::fb port 5353 for
+its name (A, AAAA), its services (DNS-SD, RFC 6763: PTR with SRV, TXT and
+its addresses as additional records) and `_services._dns-sd._udp.local`.
+It announces its records twice once its
+addresses are set and says goodbye (time to live 0) at the end. A query from
+a port other than 5353 (a "legacy unicast" one, like `dig -p 5353
+@10.77.0.5 lab-1.local` to the host's address) gets a unicast answer to its
+sender with its id and question. (Newer dig versions do not take the answer
+to a query sent to 224.0.0.251, since it comes from the host's address.) Queries run every `interval` and the answers are `found`
+(name, kind, data, who answered); goodbyes remove them. An answer from
+someone else for one of the host's names counts as a conflict; the host
+keeps its name. `--mdns`, `--mdns-name`, `--mdns-service TYPE:PORT[:INSTANCE]`
+and `--mdns-query` set it from the command line. The host needs an address.
+
+### 802.1X
+
+```toml
+[host.dot1x]                  # a supplicant
+identity = "user-{n}"
+password = "secret"
+required = true               # without an authenticator: fail (default), or go on
+logoff = true                 # EAPOL-Logoff at the end (default true)
+
+[host.dot1x_authenticator]    # an authenticator, to test supplicants
+users = { alice = "secret", bob = "hunter2" }
+```
+
+A host with `[host.dot1x]` (`--dot1x IDENTITY:PASSWORD`) authenticates the
+port before it uses it (IEEE 802.1X-2010, EAPOL to 01:80:c2:00:00:03): it
+sends EAPOL-Start (again after `retry`, doubling), answers the EAP Identity
+request, answers EAP-MD5 challenges (RFC 3748; to another method it answers
+with a Nak asking for MD5), and only after EAP-Success gets its addresses
+(DHCP, SLAAC and the rest), sends announcements or joins groups. EAP-Failure
+fails the host. Without an answer to three EAPOL-Starts, a host with
+`required = false` (`--dot1x-optional`) goes on unauthenticated, as a
+supplicant on a port without 802.1X does; else it keeps trying until the
+setup timeout. The status has the state (`connecting`, `authenticating`,
+`authorized`, `refused`, `no authenticator`), the authenticator's MAC, the
+method and the time it took.
+
+A host with `[host.dot1x_authenticator]` (`--dot1x-user IDENTITY:PASSWORD`)
+answers supplicants on its link with Identity and MD5 requests and checks
+the answers against its users, like a switch with a RADIUS server. It
+lists each supplicant and its state. It does not block a refused
+supplicant's traffic: it is something to test supplicants against, not a
+switch.
+
+### NetFlow v9 and IPFIX export
+
+```toml
+[host.flow_export]
+collector = "10.77.0.9:4739"  # without a port: 4739
+version = "ipfix"             # or "netflow9"
+interval = "1s"               # between export packets
+records = 10                  # flow records in each
+template_interval = "10s"     # templates again (UDP collectors need them)
+domain = 1                    # observation domain (IPFIX) or source ID (v9)
+src = "10.1.0.0/16"           # the flows' addresses come from these
+dst = "10.2.0.0/16"
+seed = 1
+```
+
+The host exports flow records to a collector over UDP like a router or a
+probe would, for testing collectors and the path to them: NetFlow version 9
+(RFC 3954) or IPFIX (RFC 7011), a template first (and every
+`template_interval`), then data records with addresses, ports, protocol,
+TOS, TCP flags, interfaces, bytes, packets and start and end times. The
+flows are made up from the ranges and the seed, not taken from the run's
+traffic. The host finds the collector, or its gateway when the collector is
+off its subnet, by ARP or neighbor solicitation (again every second while
+it does not answer), and counts packets, records and templates sent
+(`--flow-export`, `--flow-version`, `--flow-records`, `--flow-interval`).
+It needs an address of the collector's family.
 
 ## Answering
 
@@ -319,12 +465,15 @@ managed = false
 other = false
 ```
 
-A host needs at least an address, a group, a router table or a DHCPv6
-server table; a host with a DHCP server table is one host (no `count`). The `ferotrx
+A host needs at least an address, a group, a router table, a DHCPv6
+server table or a link service; a host with a DHCP server table is one host
+(no `count`). `{n}` in `hostname`, the mDNS `name` and service instances,
+the LLDP `system_name` and the 802.1X `identity` is the host's number. The `ferotrx
 host` options (`-n`, `--mac`, `--vlan`, `--ipv4`, `--gateway`, `--ipv6`,
 `--gateway6`, `--join`, `--announce`, `--hostname`, `--ra` and the `--ra-*`
-options, `--dhcp-pool` and the `--dhcp-*` options) make one table instead
-of a profile; `--rate`, `--igmp-version`,
+options, `--pd`, `--dhcp-pool` and the `--dhcp-*` and `--pd-*` options, and
+the service options `--lldp`, `--cdp`, `--mdns*`, `--dot1x*` and
+`--flow-*`) make one table instead of a profile; `--rate`, `--igmp-version`,
 `--mld-version`, `--setup-timeout`, `--no-release`, `--no-dad`, `--broadcast`
 and `-B` etc. go with either.
 
@@ -356,14 +505,40 @@ router advertisements). It checks that:
 Extra arguments go to each `ferotrx` command (`-B af_xdp`). CI runs it over
 IPv4 and IPv6, with libpcap and AF_XDP.
 
+`sudo scripts/services-netns.sh` checks the link services against the
+usual tools, in namespaces on a bridge:
+
+* lldpd and FeroTRX see each other by LLDP and CDP (`lldpcli show
+  neighbors`, and the host's neighbor list);
+* `dig -p 5353` finds a FeroTRX host's name and DNS-SD service, and
+  FeroTRX finds a service avahi publishes;
+* `wpa_supplicant` (wired, EAP-MD5) authenticates against a FeroTRX
+  authenticator and is refused with a wrong password, and a FeroTRX
+  supplicant authenticates against hostapd's wired authenticator with its
+  internal EAP server before it takes its address (and fails with a wrong
+  password);
+* tshark (or nfcapd) decodes the IPFIX and NetFlow v9 records a FeroTRX
+  host exports;
+* with `IPV6=1`: `rdisc6` sees the MTU, RDNSS and DNSSL of a FeroTRX router,
+  and `dhcpcd` gets a delegated prefix from a FeroTRX DHCPv6 server, as does
+  a FeroTRX requesting router.
+
+Tools that are not installed skip their check with a note
+(`SKIP_MISSING=0` fails instead, as in CI). avahi runs without D-Bus, from a
+configuration in `/etc/netns/ferotrx-svc/avahi` that `ip netns exec` puts
+over `/etc/avahi`.
+
 ## Not done yet
 
 ARP probes before using a DHCP address (RFC 5227, DHCPDECLINE), DHCP relay
-agent options in the clients, DHCPv6 prefix delegation, rapid commit and
+agent options in the clients, rapid commit and
 stateless DHCPv6 (information-request) in the clients; for the servers,
-pools per relay or subnet, DHCPv6 relay messages, prefix delegation, ping
+pools per relay or subnet, DHCPv6 relay messages, ping
 or ARP checks before an offer, leases that outlive the run, and static
 options beyond router, DNS and domain; source-specific multicast (IGMPv3/MLDv2 include
 lists), more than one address per dynamic TCP/UDP end, `host.*` methods on
 the control server (`tcp.*` and `udp.*` report hosts), and the RFC timers
-for leaving a compatibility mode.
+for leaving a compatibility mode. For the link services: LLDP-MED and
+organizational TLVs, mDNS probing and renaming on a conflict, EAP methods
+other than MD5 (TLS, PEAP, TTLS) and a RADIUS client, blocking refused
+supplicants, and flow records from the run's own traffic.

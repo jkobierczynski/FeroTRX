@@ -592,7 +592,7 @@ fn be16(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_be_bytes([*b.get(at)?, *b.get(at + 1)?]))
 }
 
-fn put_name(m: &mut Vec<u8>, name: &str) {
+pub(crate) fn put_name(m: &mut Vec<u8>, name: &str) {
     for label in name
         .trim_end_matches('.')
         .split('.')
@@ -606,9 +606,14 @@ fn put_name(m: &mut Vec<u8>, name: &str) {
 }
 
 fn put_record(m: &mut Vec<u8>, r: &DnsRecord) {
+    put_record_class(m, r, 1);
+}
+
+/// A resource record with `class` (mDNS sets its top bit to flush caches).
+pub(crate) fn put_record_class(m: &mut Vec<u8>, r: &DnsRecord, class: u16) {
     put_name(m, &r.name);
     m.extend_from_slice(&r.rtype.0.to_be_bytes());
-    m.extend_from_slice(&1u16.to_be_bytes());
+    m.extend_from_slice(&class.to_be_bytes());
     m.extend_from_slice(&r.ttl.to_be_bytes());
     let len_at = m.len();
     m.extend_from_slice(&[0, 0]);
@@ -648,7 +653,7 @@ fn put_record(m: &mut Vec<u8>, r: &DnsRecord) {
 }
 
 /// Reads a possibly compressed name at `at`. Returns it and the offset after it.
-fn read_name(m: &[u8], mut at: usize) -> Option<(String, usize)> {
+pub(crate) fn read_name(m: &[u8], mut at: usize) -> Option<(String, usize)> {
     let mut labels: Vec<String> = Vec::new();
     let mut after = None;
     for _ in 0..128 {
@@ -669,6 +674,60 @@ fn read_name(m: &[u8], mut at: usize) -> Option<(String, usize)> {
         }
     }
     None
+}
+
+/// Reads the resource record at `at`: the record (`None` when its data does
+/// not parse) and the offset after it; `None` when the message ends early.
+pub(crate) fn read_record(m: &[u8], at: usize) -> Option<(Option<DnsRecord>, usize)> {
+    let (name, next) = read_name(m, at)?;
+    let rtype = be16(m, next)?;
+    let ttl_hi = be16(m, next + 4)?;
+    let ttl_lo = be16(m, next + 6)?;
+    let len = be16(m, next + 8)?;
+    let start = next + 10;
+    let end = start + usize::from(len);
+    let rdata = m.get(start..end)?;
+    let rtype = DnsType(rtype);
+    let name_at = |off: usize| read_name(m, off).map(|(n, _)| n);
+    let data = (|| match rtype {
+        DnsType::A if rdata.len() == 4 => Some(DnsData::A(Ipv4Addr::new(
+            rdata[0], rdata[1], rdata[2], rdata[3],
+        ))),
+        DnsType::AAAA if rdata.len() == 16 => {
+            let b: [u8; 16] = rdata.try_into().ok()?;
+            Some(DnsData::Aaaa(Ipv6Addr::from(b)))
+        }
+        DnsType::CNAME | DnsType::NS | DnsType::PTR => name_at(start).map(DnsData::Name),
+        DnsType::MX if rdata.len() >= 3 => name_at(start + 2).map(|e| DnsData::Mx {
+            preference: u16::from_be_bytes([rdata[0], rdata[1]]),
+            exchange: e,
+        }),
+        DnsType::TXT => {
+            let mut t = Vec::new();
+            let mut i = 0;
+            while i < rdata.len() {
+                let l = usize::from(rdata[i]);
+                let s = rdata.get(i + 1..i + 1 + l)?;
+                t.push(String::from_utf8_lossy(s).into_owned());
+                i += 1 + l;
+            }
+            Some(DnsData::Txt(t))
+        }
+        DnsType::SRV if rdata.len() >= 7 => name_at(start + 6).map(|t| DnsData::Srv {
+            priority: u16::from_be_bytes([rdata[0], rdata[1]]),
+            weight: u16::from_be_bytes([rdata[2], rdata[3]]),
+            port: u16::from_be_bytes([rdata[4], rdata[5]]),
+            target: t,
+        }),
+        _ => Some(DnsData::Raw(rdata.to_vec())),
+    })();
+    let record = data.map(|data| DnsRecord {
+        name,
+        rtype,
+        ttl: (u32::from(ttl_hi) << 16) | u32::from(ttl_lo),
+        data,
+    });
+    Some((record, end))
 }
 
 /// The parts of a DNS message the engine looks at.
@@ -713,63 +772,11 @@ impl Message {
             }
         }
         for _ in 0..an {
-            let Some((name, next)) = read_name(m, at) else {
+            let Some((record, end)) = read_record(m, at) else {
                 break;
             };
-            let (Some(rtype), Some(ttl_hi), Some(ttl_lo), Some(len)) = (
-                be16(m, next),
-                be16(m, next + 4),
-                be16(m, next + 6),
-                be16(m, next + 8),
-            ) else {
-                break;
-            };
-            let start = next + 10;
-            let end = start + usize::from(len);
-            let Some(rdata) = m.get(start..end) else {
-                break;
-            };
-            let rtype = DnsType(rtype);
-            let name_at = |off: usize| read_name(m, off).map(|(n, _)| n);
-            let data = match rtype {
-                DnsType::A if rdata.len() == 4 => Some(DnsData::A(Ipv4Addr::new(
-                    rdata[0], rdata[1], rdata[2], rdata[3],
-                ))),
-                DnsType::AAAA if rdata.len() == 16 => {
-                    let b: [u8; 16] = rdata.try_into().ok()?;
-                    Some(DnsData::Aaaa(Ipv6Addr::from(b)))
-                }
-                DnsType::CNAME | DnsType::NS | DnsType::PTR => name_at(start).map(DnsData::Name),
-                DnsType::MX if rdata.len() >= 3 => name_at(start + 2).map(|e| DnsData::Mx {
-                    preference: u16::from_be_bytes([rdata[0], rdata[1]]),
-                    exchange: e,
-                }),
-                DnsType::TXT => {
-                    let mut t = Vec::new();
-                    let mut i = 0;
-                    while i < rdata.len() {
-                        let l = usize::from(rdata[i]);
-                        let s = rdata.get(i + 1..i + 1 + l)?;
-                        t.push(String::from_utf8_lossy(s).into_owned());
-                        i += 1 + l;
-                    }
-                    Some(DnsData::Txt(t))
-                }
-                DnsType::SRV if rdata.len() >= 7 => name_at(start + 6).map(|t| DnsData::Srv {
-                    priority: u16::from_be_bytes([rdata[0], rdata[1]]),
-                    weight: u16::from_be_bytes([rdata[2], rdata[3]]),
-                    port: u16::from_be_bytes([rdata[4], rdata[5]]),
-                    target: t,
-                }),
-                _ => Some(DnsData::Raw(rdata.to_vec())),
-            };
-            if let Some(data) = data {
-                msg.answers.push(DnsRecord {
-                    name,
-                    rtype,
-                    ttl: (u32::from(ttl_hi) << 16) | u32::from(ttl_lo),
-                    data,
-                });
+            if let Some(r) = record {
+                msg.answers.push(r);
             }
             at = end;
         }
