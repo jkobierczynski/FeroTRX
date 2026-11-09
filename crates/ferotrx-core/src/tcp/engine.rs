@@ -1385,10 +1385,10 @@ impl Conn {
                         None => {
                             let mut w = *wait;
                             if *thinks {
-                                w += sh.think.sample_time(&mut self.rng);
+                                w = w.saturating_add(sh.think.sample_time(&mut self.rng));
                             }
                             if !w.is_zero() {
-                                self.hold = Some(now + w);
+                                self.hold = Some(now.saturating_add(w));
                                 break;
                             }
                         }
@@ -1433,7 +1433,8 @@ impl Conn {
                             // Another round, after the think time.
                             self.step = 0;
                             if !sh.think.is_zero() {
-                                self.hold = Some(now + sh.think.sample_time(&mut self.rng));
+                                self.hold =
+                                    Some(now.saturating_add(sh.think.sample_time(&mut self.rng)));
                             }
                             continue;
                         }
