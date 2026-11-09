@@ -20,12 +20,14 @@ from .types import (
     FileInfo,
     InterfaceEntry,
     Notification,
+    PortInfo,
     ProfileInfo,
     Record,
     ReloadInfo,
     RunInfo,
     RxRunInfo,
     ServerInfo,
+    SessionInfo,
     StatsUpdate,
     TcpRunInfo,
     UdpRunInfo,
@@ -42,6 +44,7 @@ TOKEN_ENV = "FEROTRX_TOKEN"
 CA_ENV = "FEROTRX_CA"
 CERT_ENV = "FEROTRX_CERT"
 KEY_ENV = "FEROTRX_KEY"
+USER_ENV = "FEROTRX_USER"
 
 #: Longest line read from the server (its own request limit is 4 MiB).
 MAX_LINE = 64 * 1024 * 1024
@@ -136,6 +139,7 @@ def env_options() -> dict[str, Any]:
         "ca": env(CA_ENV),
         "cert": env(CERT_ENV),
         "key": env(KEY_ENV),
+        "user": env(USER_ENV),
     }
 
 
@@ -258,6 +262,40 @@ def auth(token: str) -> Call[None]:
 
 def interfaces() -> Call[list[InterfaceEntry]]:
     return Call("interfaces.list", None, _records(InterfaceEntry))
+
+
+def session_name(user: str) -> Call[SessionInfo]:
+    return Call("session.name", {"user": user}, _record(SessionInfo))
+
+
+def session_info() -> Call[SessionInfo]:
+    return Call("session.info", None, _record(SessionInfo))
+
+
+def session_list() -> Call[list[SessionInfo]]:
+    return Call("session.list", None, _records(SessionInfo))
+
+
+def ports_list() -> Call[list[PortInfo]]:
+    return Call("ports.list", None, _records(PortInfo))
+
+
+def ports_acquire(
+    ports: str | Sequence[str], force: bool, note: str | None
+) -> Call[list[PortInfo]]:
+    params = _drop_none(ports=_str_list(ports), force=force, note=note)
+    return Call("ports.acquire", params, _records(PortInfo))
+
+
+def _strings(v: Any) -> list[str]:
+    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+        raise ProtocolError(f"expected a list of strings, got {v!r}")
+    return list(v)
+
+
+def ports_release(ports: str | Sequence[str] | None, force: bool) -> Call[list[str]]:
+    params = _drop_none(ports=_str_list(ports) or None, force=force)
+    return Call("ports.release", params, _strings)
 
 
 def load_profile(

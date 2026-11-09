@@ -20,6 +20,7 @@ use crate::bench::{open_bench_sinks, BenchJob, BenchRun, BenchSinkOpener};
 use crate::capture::{CaptureOpener, CaptureRun, MAX_CAPTURES};
 use crate::files::FilePolicy;
 use crate::limits::{self, Demand, Guard, Limits};
+use crate::ports::{self, Ports, Who};
 use crate::protocol::*;
 use crate::scenario::{scenario_info, LabRunner, RunLists, ScenarioRun};
 use crate::tcp::{start_tcp_with, PortOpener, TcpRun};
@@ -273,6 +274,8 @@ pub struct Controller {
     /// Starts one at a time while `max_runs` is checked.
     start_lock: Mutex<()>,
     audit: Option<AuditLog>,
+    /// Port reservations, the runs that send on ports, and users' sessions.
+    ports: Ports,
 }
 
 /// Tells whether a run still goes.
@@ -355,6 +358,7 @@ impl Controller {
             active: Mutex::default(),
             start_lock: Mutex::default(),
             audit: None,
+            ports: Ports::default(),
         }
     }
 
@@ -366,6 +370,24 @@ impl Controller {
         self.guard = Guard::new(&limits);
         self.limits = limits;
         self
+    }
+
+    /// Lets runs send only on ports their user acquired first
+    /// (`ports.acquire`); without it, any port nobody else holds or sends
+    /// on will do.
+    pub fn with_require_acquire(mut self, yes: bool) -> Self {
+        self.ports.require_acquire = yes;
+        self
+    }
+
+    pub(crate) fn ports(&self) -> &Ports {
+        &self.ports
+    }
+
+    /// Refuses a start that would send on a port another user reserved or
+    /// sends on now (see [`crate::ports`]). Call it with the start lock held.
+    fn check_ports(&self, ports: &[String]) -> Result<(), RpcError> {
+        self.ports.check_send(&ports::caller(), ports)
     }
 
     pub fn limits(&self) -> &Limits {
@@ -398,17 +420,26 @@ impl Controller {
 
     /// Counts a started run for `max_runs` and stops it once it has gone
     /// for `allowance` after `start_at` (see [`allowance`](Controller::allowance)).
+    ///
+    /// The run belongs to the caller and holds `ports` while it goes.
+    #[allow(clippy::too_many_arguments)]
     fn track(
         &self,
         kind: &'static str,
         id: u64,
+        ports: Vec<String>,
         start_at: Option<std::time::SystemTime>,
         allowance: Option<Duration>,
         running: impl Fn() -> bool + Send + Sync + 'static,
-        stop: impl Fn() + Send + 'static,
+        stop: impl Fn() + Send + Sync + 'static,
     ) {
         let running: Arc<RunningFn> = Arc::new(running);
+        let stop: Arc<dyn Fn() + Send + Sync> = Arc::new(stop);
         lock(&self.active).push(running.clone());
+        let owner = ports::caller().user;
+        self.ports.record_owner(kind, id, &owner);
+        self.ports
+            .lease(&owner, kind, id, ports, running.clone(), stop.clone());
         let (Some(allowance), Some(max)) = (allowance, self.limits.max_duration()) else {
             return;
         };
@@ -886,6 +917,15 @@ impl Controller {
     /// are handled by the server, not here.
     pub fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         match method {
+            "ports.list" => to_value(self.ports.list()),
+            "ports.acquire" => to_value(self.acquire(parse(params)?)?),
+            "ports.release" => {
+                let p: ReleaseParams = parse(params)?;
+                let who = ports::caller();
+                to_value(self.ports.release(&who, &p.ports, p.force)?)
+            }
+            "session.info" => to_value(self.ports.session(&ports::caller().user)),
+            "session.list" => to_value(self.ports.sessions()),
             "server.info" => to_value(self.info()),
             "interfaces.list" => to_value(self.interfaces()?),
             "profile.load" => to_value(self.load_profile(parse(params)?)?),
@@ -1044,6 +1084,48 @@ impl Controller {
         }
     }
 
+    /// Handles a call on behalf of `who`: their runs and ports, and only
+    /// their runs to stop, change or remove (see [`crate::ports`]).
+    pub(crate) fn call_as(
+        &self,
+        who: &Who,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, RpcError> {
+        ports::as_caller(who, || {
+            let (kind, verb) = method.split_once('.').unwrap_or((method, ""));
+            let known = ports::KINDS.contains(&kind);
+            if known && matches!(verb, "stop" | "remove" | "pause" | "resume" | "update") {
+                if let Some(id) = params.get("id").and_then(Value::as_u64) {
+                    self.ports.check_owner(who, kind, id)?;
+                }
+            }
+            let r = self.call(method, params)?;
+            // Sending runs are recorded when they are tracked; these only
+            // listen.
+            if verb == "start" && matches!(kind, "rx" | "capture") {
+                if let Some(id) = r.get("id").and_then(Value::as_u64) {
+                    self.ports.record_owner(kind, id, &who.user);
+                }
+            }
+            Ok(r)
+        })
+    }
+
+    /// Reserves ports for the caller (`ports.acquire`).
+    pub fn acquire(&self, p: AcquireParams) -> Result<Vec<PortInfo>, RpcError> {
+        for name in &p.ports {
+            if name.trim().is_empty() {
+                return Err(RpcError::invalid_params("a port name is empty"));
+            }
+            self.limits.check_iface(name)?;
+        }
+        // No start slips in between the check and the reservation.
+        let _starting = lock(&self.start_lock);
+        self.ports
+            .acquire(&ports::caller(), &p.ports, p.force, p.note)
+    }
+
     pub fn info(&self) -> ServerInfo {
         ServerInfo {
             name: "ferotrx".into(),
@@ -1073,6 +1155,7 @@ impl Controller {
                 })
             }),
             certificate_expires: None,
+            require_acquire: self.ports.require_acquire,
         }
     }
 
@@ -1385,6 +1468,11 @@ impl Controller {
             .transpose()
             .map_err(|e| RpcError::invalid_params(e.to_string()))?;
         let starting = self.begin_start()?;
+        let sends_on: Vec<String> = match &output {
+            Output::Interface { name, .. } => vec![name.clone()],
+            _ => Vec::new(),
+        };
+        self.check_ports(&sends_on)?;
         if let Some(spec) = &p.rx {
             self.limits.check_iface(&spec.iface)?;
         }
@@ -1450,6 +1538,7 @@ impl Controller {
         self.track(
             "run",
             id,
+            sends_on,
             start_at,
             self.allowance(),
             move || watched.job.is_running(),
@@ -1739,6 +1828,8 @@ impl Controller {
     pub fn scenario_start(&self, p: ScenarioStartParams) -> Result<ScenarioRunInfo, RpcError> {
         let mut scenario = self.read_scenario(&p)?;
         let starting = self.begin_start()?;
+        let sends_on = scenario_ports(&scenario, &p.only)?;
+        self.check_ports(&sends_on)?;
         let checks = self.check_scenario_limits(&mut scenario, &p.only)?;
         if let (Some(spec), true) = (&scenario.lab, p.lab.unwrap_or(true)) {
             self.scenario_lab(spec)?;
@@ -1779,6 +1870,7 @@ impl Controller {
         self.track(
             "scenario",
             id,
+            sends_on,
             None,
             self.limits
                 .max_duration()
@@ -1882,6 +1974,7 @@ impl Controller {
         }
         c.validate().map_err(|e| bad(e.to_string()))?;
         let starting = self.begin_start()?;
+        self.check_ports(std::slice::from_ref(&p.iface))?;
         self.limits.check_iface(&p.iface)?;
         self.limits.check_iface(&p.rx)?;
         self.limits.check_demand(
@@ -1901,6 +1994,7 @@ impl Controller {
         }
         .send_settings()?
         .or(&profile.output);
+        let iface = p.iface.clone();
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
         let job = BenchJob {
             profile,
@@ -1927,6 +2021,7 @@ impl Controller {
         self.track(
             "bench",
             id,
+            vec![iface.clone()],
             None,
             self.limits.max_duration(),
             move || watched.is_running(),
@@ -2017,6 +2112,7 @@ impl Controller {
         }
         c.validate().map_err(|e| bad(e.to_string()))?;
         let starting = self.begin_start()?;
+        self.check_ports(std::slice::from_ref(&p.iface))?;
         self.limits.check_iface(&p.iface)?;
         self.limits.check_iface(&p.rx)?;
         self.limits.check_demand(
@@ -2038,6 +2134,7 @@ impl Controller {
         }
         .send_settings()?
         .or(&profile.output);
+        let iface = p.iface.clone();
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
         let job = Y1564Job {
             profile,
@@ -2064,6 +2161,7 @@ impl Controller {
         self.track(
             "y1564",
             id,
+            vec![iface.clone()],
             None,
             self.allowance(),
             move || watched.is_running(),
@@ -2143,6 +2241,10 @@ impl Controller {
             .transpose()
             .map_err(|e| RpcError::invalid_params(e.to_string()))?;
         let starting = self.begin_start()?;
+        let sends_on = profile
+            .interfaces(p.iface.as_deref())
+            .map_err(RpcError::failed)?;
+        self.check_ports(&sends_on)?;
         self.check_tcp_limits(&mut profile, p.iface.as_deref(), "the TCP run")?;
         self.limits.check_duration(duration)?;
         self.limits.check_duration(profile.duration)?;
@@ -2192,6 +2294,7 @@ impl Controller {
         self.track(
             "tcp",
             id,
+            sends_on,
             start_at,
             self.allowance(),
             move || watched.job.is_running(),
@@ -2255,6 +2358,10 @@ impl Controller {
             .transpose()
             .map_err(|e| RpcError::invalid_params(e.to_string()))?;
         let starting = self.begin_start()?;
+        let sends_on = profile
+            .interfaces(p.iface.as_deref())
+            .map_err(RpcError::failed)?;
+        self.check_ports(&sends_on)?;
         self.check_udp_limits(&mut profile, p.iface.as_deref(), "the UDP run")?;
         self.limits.check_duration(duration)?;
         self.limits.check_duration(profile.duration)?;
@@ -2298,6 +2405,7 @@ impl Controller {
         self.track(
             "udp",
             id,
+            sends_on,
             start_at,
             self.allowance(),
             move || watched.job.is_running(),
@@ -2544,6 +2652,28 @@ fn scale_rate(rate: Rate, speed: f64) -> Rate {
         },
         Rate::TopSpeed => Rate::TopSpeed,
     }
+}
+
+/// The ports the selected checks of a scenario send on.
+fn scenario_ports(scenario: &Scenario, only: &[String]) -> Result<Vec<String>, RpcError> {
+    let mut out: Vec<String> = Vec::new();
+    for c in scenario
+        .checks
+        .iter()
+        .filter(|c| only.is_empty() || only.contains(&c.name))
+    {
+        let names = match &c.workload {
+            Workload::Tcp(t) => t.interfaces(c.iface.as_deref()).map_err(RpcError::failed)?,
+            Workload::Udp(u) => u.interfaces(c.iface.as_deref()).map_err(RpcError::failed)?,
+            Workload::Traffic(_) | Workload::Y1564(_) => c.iface.iter().cloned().collect(),
+        };
+        for n in names {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn display_path(p: &Path) -> String {

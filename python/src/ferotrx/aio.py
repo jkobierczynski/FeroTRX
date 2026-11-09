@@ -10,7 +10,7 @@ from typing import Any, TypeVar
 
 from . import _wire
 from ._wire import Address, Call, PathLike
-from .errors import ConnectionClosed, FerotrxError, NotFound, ProtocolError
+from .errors import ConnectionClosed, FerotrxError, Forbidden, NotFound, ProtocolError
 from .types import (
     CaptureInfo,
     CaptureRead,
@@ -18,11 +18,13 @@ from .types import (
     FileInfo,
     InterfaceEntry,
     Notification,
+    PortInfo,
     ProfileInfo,
     ReloadInfo,
     RunInfo,
     RxRunInfo,
     ServerInfo,
+    SessionInfo,
     StatsUpdate,
     TcpRunInfo,
     UdpRunInfo,
@@ -87,6 +89,8 @@ class AsyncClient:
         key: PathLike | None = None,
         server_name: str | None = None,
         timeout: float | None = 30.0,
+        user: str | None = None,
+        _env_user: bool = False,
     ) -> AsyncClient:
         """Connects, over TLS when asked as for :class:`ferotrx.Client`, and
         logs in with ``token`` if one is given."""
@@ -110,6 +114,12 @@ class AsyncClient:
         try:
             if opts.token is not None:
                 await client.auth(opts.token)
+            if user is not None:
+                try:
+                    await client.name_session(user)
+                except Forbidden:
+                    if not _env_user:
+                        raise
         except BaseException:
             await client.close()
             raise
@@ -118,10 +128,12 @@ class AsyncClient:
     @classmethod
     async def from_env(cls, address: Address | None = None, **kw: Any) -> AsyncClient:
         """Connects as ``ferotrx ctl`` does, from ``FEROTRX_CTL``,
-        ``FEROTRX_TOKEN``, ``FEROTRX_CA``, ``FEROTRX_CERT`` and ``FEROTRX_KEY``."""
+        ``FEROTRX_TOKEN``, ``FEROTRX_CA``, ``FEROTRX_CERT``, ``FEROTRX_KEY``
+        and ``FEROTRX_USER``."""
         opts = _wire.env_options()
         if address is not None:
             opts["address"] = address
+        opts["_env_user"] = "user" not in kw
         opts.update(kw)
         address = opts.pop("address")
         return await cls.connect(address, **opts)
@@ -314,6 +326,41 @@ class AsyncClient:
 
     async def interfaces(self) -> list[InterfaceEntry]:
         return await self._run(_wire.interfaces())
+
+    # ----- ports.*, session.* (servers from 0.49.0) -----
+
+    async def name_session(self, user: str) -> SessionInfo:
+        """On a server without logins: the user name this connection's port
+        reservations and runs go under (servers with logins name users by
+        their token or certificate and refuse this)."""
+        return await self._run(_wire.session_name(user))
+
+    async def session(self) -> SessionInfo:
+        """This connection's user: connections, reserved ports and runs."""
+        return await self._run(_wire.session_info())
+
+    async def sessions(self) -> list[SessionInfo]:
+        """Every user on the server with their connections, ports and runs."""
+        return await self._run(_wire.session_list())
+
+    async def ports(self) -> list[PortInfo]:
+        """The ports that are reserved or that runs send on now."""
+        return await self._run(_wire.ports_list())
+
+    async def acquire(
+        self, ports: str | Sequence[str], *, force: bool = False, note: str | None = None
+    ) -> list[PortInfo]:
+        """Reserves ports for this user, all or none: other users' runs may
+        not send on them until :meth:`release`. ``force`` takes them from
+        other users and stops their runs on them (admin role)."""
+        return await self._run(_wire.ports_acquire(ports, force, note))
+
+    async def release(
+        self, ports: str | Sequence[str] | None = None, *, force: bool = False
+    ) -> list[str]:
+        """Gives ports back (all of this user's when ``ports`` is None);
+        returns those released."""
+        return await self._run(_wire.ports_release(ports, force))
 
     # ----- file.* -----
 

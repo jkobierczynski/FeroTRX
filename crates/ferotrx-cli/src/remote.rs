@@ -7,19 +7,22 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use ferotrx_core::{parse_duration, parse_size, Profile};
 use ferotrx_ctl::protocol::{
-    CaptureInfo, CaptureStartParams, Counters, LoadProfileParams, OutputSpec, ProfileInfo,
-    ReloadInfo, RunInfo, RunState, RunUpdateParams, RxRunInfo, RxSpec, RxStartParams, StartParams,
-    StreamUpdate, TcpStartParams, UdpStartParams, DEFAULT_PORT,
+    AcquireParams, CaptureInfo, CaptureStartParams, Counters, LoadProfileParams, OutputSpec,
+    PortInfo, ProfileInfo, ReloadInfo, RunInfo, RunState, RunUpdateParams, RxRunInfo, RxSpec,
+    RxStartParams, SessionInfo, StartParams, StreamUpdate, TcpStartParams, UdpStartParams,
+    DEFAULT_PORT,
 };
 use ferotrx_ctl::{
-    parse_bps, parse_limit_duration, parse_pps, AuditLog, Client, ClientTls, Controller,
-    Credentials, FilePolicy, LabPki, Limits, Reloader, Role, Server, ServerConfig, ServerTls,
-    Token,
+    parse_bps, parse_limit_duration, parse_pps, AuditLog, Client, ClientError, ClientTls,
+    Controller, Credentials, FilePolicy, LabPki, Limits, Reloader, Role, RpcError, Server,
+    ServerConfig, ServerTls, Token,
 };
 use serde_json::Value;
 
 const TOKEN_ENV: &str = "FEROTRX_TOKEN";
 const READ_TOKEN_ENV: &str = "FEROTRX_READ_TOKEN";
+const ADMIN_TOKEN_ENV: &str = "FEROTRX_ADMIN_TOKEN";
+const USER_ENV: &str = "FEROTRX_USER";
 const ADDR_ENV: &str = "FEROTRX_CTL";
 const CA_ENV: &str = "FEROTRX_CA";
 const CERT_ENV: &str = "FEROTRX_CERT";
@@ -43,8 +46,15 @@ pub struct ServeArgs {
     #[arg(long)]
     read_token: Option<String>,
 
+    /// Token that logs in as admin: an operator that may also take ports
+    /// and runs from other users (`ctl acquire --force`). Also read from
+    /// FEROTRX_ADMIN_TOKEN.
+    #[arg(long)]
+    admin_token: Option<String>,
+
     /// TOML file of named tokens: [[token]] tables with name, role
-    /// ("read" or "operator") and secret, or sha256 of the secret.
+    /// ("read", "operator" or "admin") and secret, or sha256 of the secret.
+    /// Each name is a user with its own session and port reservations.
     #[arg(long, value_name = "FILE")]
     tokens: Option<PathBuf>,
 
@@ -63,6 +73,10 @@ pub struct ServeArgs {
     /// Client certificates from this CA log in read-only.
     #[arg(long, value_name = "FILE", requires = "tls_cert")]
     read_client_ca: Option<PathBuf>,
+
+    /// Client certificates from this CA log in as admin.
+    #[arg(long, value_name = "FILE", requires = "tls_cert")]
+    admin_client_ca: Option<PathBuf>,
 
     /// Refuse client certificates this revocation list names (PEM or DER;
     /// `ferotrx certs --revoke` writes crl.pem and read-crl.pem).
@@ -139,6 +153,12 @@ pub struct ServeArgs {
     /// VLAN 20 on the link ftrx-lab, see `ferotrx lab`). Linux, as root.
     #[arg(long)]
     lab: bool,
+
+    /// Runs may only send on ports their user reserved first (`ferotrx ctl
+    /// acquire IFACE`, `ports.acquire`). Without it, runs may send on any
+    /// port that no other user reserved or sends on now.
+    #[arg(long)]
+    require_acquire: bool,
 
     /// Server settings (TOML): its [limits] table sets the limits below;
     /// options given here win over it. See docs/remote-control.md.
@@ -281,11 +301,13 @@ fn describe_reload(r: &ReloadInfo) -> String {
 struct LoginFiles {
     token: Option<String>,
     read_token: Option<String>,
+    admin_token: Option<String>,
     tokens: Option<PathBuf>,
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
     client_ca: Option<PathBuf>,
     read_client_ca: Option<PathBuf>,
+    admin_client_ca: Option<PathBuf>,
     crls: Vec<PathBuf>,
     deny_certs: Vec<String>,
     deny_file: Option<PathBuf>,
@@ -296,11 +318,13 @@ impl LoginFiles {
         Self {
             token: env_or(args.token.clone(), TOKEN_ENV),
             read_token: env_or(args.read_token.clone(), READ_TOKEN_ENV),
+            admin_token: env_or(args.admin_token.clone(), ADMIN_TOKEN_ENV),
             tokens: args.tokens.clone(),
             tls_cert: args.tls_cert.clone(),
             tls_key: args.tls_key.clone(),
             client_ca: args.client_ca.clone(),
             read_client_ca: args.read_client_ca.clone(),
+            admin_client_ca: args.admin_client_ca.clone(),
             crls: args.crls.clone(),
             deny_certs: args.deny_certs.clone(),
             deny_file: args.deny_file.clone(),
@@ -315,6 +339,9 @@ impl LoginFiles {
         if let Some(t) = &self.read_token {
             tokens.push(Token::new("read", Role::Read, t));
         }
+        if let Some(t) = &self.admin_token {
+            tokens.push(Token::new("admin", Role::Admin, t));
+        }
         if let Some(f) = &self.tokens {
             tokens.extend(Token::from_file(f)?);
         }
@@ -326,6 +353,9 @@ impl LoginFiles {
                 }
                 if let Some(ca) = &self.read_client_ca {
                     t = t.with_client_ca_file(Role::Read, ca)?;
+                }
+                if let Some(ca) = &self.admin_client_ca {
+                    t = t.with_client_ca_file(Role::Admin, ca)?;
                 }
                 for crl in &self.crls {
                     t = t.with_crl_file(crl)?;
@@ -414,7 +444,8 @@ pub fn start_server(args: ServeArgs) -> Result<Server> {
     let controller = Controller::new()
         .with_file_policy(files.clone())
         .with_lab(args.lab)
-        .with_limits(limits.clone());
+        .with_limits(limits.clone())
+        .with_require_acquire(args.require_acquire);
     if args.lab {
         if let Some(why) = ferotrx_io::lab_unavailable() {
             eprintln!("warning: --lab: {why}");
@@ -600,6 +631,12 @@ pub struct CtlArgs {
     #[arg(long, value_name = "NAME")]
     server_name: Option<String>,
 
+    /// On a server without logins: the user name your port reservations
+    /// and runs go under (servers with logins name you by your token or
+    /// certificate). Also read from FEROTRX_USER.
+    #[arg(long, value_name = "NAME")]
+    user: Option<String>,
+
     /// Print the server's JSON answers instead of text.
     #[arg(long, global = true)]
     json: bool,
@@ -618,6 +655,34 @@ enum CtlCommand {
     Reload,
     /// List the interfaces the server can send on.
     Interfaces,
+    /// List the ports that are reserved or that runs send on now, and who
+    /// has them.
+    Ports,
+    /// Reserve ports (interfaces of the server) for yourself: other users'
+    /// runs cannot send on them until you release them. All or none.
+    Acquire {
+        #[arg(required = true, value_delimiter = ',')]
+        ports: Vec<String>,
+        /// Take them even from other users, stopping their runs that send
+        /// on them (admin role, or anyone on a server without logins).
+        #[arg(long)]
+        force: bool,
+        /// Why, for the others to read in `ferotrx ctl ports`.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Give reserved ports back; without PORTS, all of yours.
+    Release {
+        #[arg(value_delimiter = ',')]
+        ports: Vec<String>,
+        /// Release ports other users hold (admin role).
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show your session: who you are, your connections, ports and runs.
+    Session,
+    /// List the users on the server with their connections, ports and runs.
+    Sessions,
     /// Load a profile. PATH is on the server, unless --upload sends the local file.
     Load {
         path: PathBuf,
@@ -942,6 +1007,16 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
     if let Some(token) = env_or(args.token, TOKEN_ENV) {
         c.auth(&token)?;
     }
+    let given = args.user.is_some();
+    if let Some(user) = env_or(args.user, USER_ENV) {
+        match c.name_session(&user) {
+            Ok(_) => {}
+            // FEROTRX_USER set for every server: those with logins name
+            // users themselves.
+            Err(ClientError::Rpc(e)) if e.code == RpcError::FORBIDDEN && !given => {}
+            Err(e) => return Err(e).context("--user"),
+        }
+    }
     let json = args.json;
     match args.command {
         CtlCommand::Info => {
@@ -974,6 +1049,9 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                 (Some(r), None) => println!("access: {r}"),
                 _ => println!("logged in: no"),
             }
+            if i.require_acquire {
+                println!("ports: runs send only on ports their user acquired");
+            }
             if let Some(l) = &i.limits {
                 println!("limits:");
                 for line in l.limits.describe() {
@@ -993,6 +1071,54 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                 return print_json(&r);
             }
             println!("{}", describe_reload(&r));
+        }
+        CtlCommand::Ports => {
+            let list = c.ports()?;
+            if json {
+                return print_json(&list);
+            }
+            if list.is_empty() {
+                println!("no port is reserved or sent on");
+            }
+            for p in list {
+                print_port(&p);
+            }
+        }
+        CtlCommand::Acquire { ports, force, note } => {
+            let list = c.acquire(&AcquireParams { ports, force, note })?;
+            if json {
+                return print_json(&list);
+            }
+            for p in list {
+                print_port(&p);
+            }
+        }
+        CtlCommand::Release { ports, force } => {
+            let list = c.release(&ports, force)?;
+            if json {
+                return print_json(&list);
+            }
+            if list.is_empty() {
+                println!("you hold no ports");
+            } else {
+                println!("released {}", list.join(", "));
+            }
+        }
+        CtlCommand::Session => {
+            let s = c.session()?;
+            if json {
+                return print_json(&s);
+            }
+            print_session(&s);
+        }
+        CtlCommand::Sessions => {
+            let list = c.sessions()?;
+            if json {
+                return print_json(&list);
+            }
+            for s in list {
+                print_session(&s);
+            }
         }
         CtlCommand::Interfaces => {
             let list = c.interfaces()?;
@@ -1431,6 +1557,51 @@ fn follow(c: &mut Client, id: Option<u64>, interval: u64, json: bool) -> Result<
     }
 }
 
+fn print_port(p: &PortInfo) {
+    let mut line = p.name.clone();
+    match &p.owner {
+        Some(o) => {
+            line.push_str(&format!("\treserved by {o}"));
+            if let Some(t) = p.since {
+                line.push_str(&format!(" since {}", ferotrx_ctl::utc_text(t)));
+            }
+        }
+        None => line.push_str("\tnot reserved"),
+    }
+    if let Some(n) = &p.note {
+        line.push_str(&format!(" ({n})"));
+    }
+    for r in &p.runs {
+        line.push_str(&format!(
+            "; {}'s {} sends",
+            r.owner,
+            ferotrx_ctl::run_name(&r.kind, r.id)
+        ));
+    }
+    println!("{line}");
+}
+
+fn print_session(s: &SessionInfo) {
+    let role = s.role.map(|r| format!(" ({r})")).unwrap_or_default();
+    println!(
+        "{}{role}: {} connection(s), ports: {}",
+        s.user,
+        s.connections,
+        if s.ports.is_empty() {
+            "none".to_string()
+        } else {
+            s.ports.join(", ")
+        }
+    );
+    for r in &s.runs {
+        println!(
+            "  {} sends on {}",
+            ferotrx_ctl::run_name(&r.kind, r.id),
+            r.ports.join(", ")
+        );
+    }
+}
+
 fn print_json(v: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
     Ok(())
@@ -1604,6 +1775,11 @@ pub struct CertsArgs {
     #[arg(long, value_name = "NAME", value_delimiter = ',')]
     read_client: Vec<String>,
 
+    /// Issue an admin client certificate with this name (signed by
+    /// admin-ca.pem: give the server --admin-client-ca). Repeatable.
+    #[arg(long, value_name = "NAME", value_delimiter = ',')]
+    admin_client: Vec<String>,
+
     /// Revoke the certificate NAME.pem: add it to crl.pem (or read-crl.pem
     /// for a read-only one), done before issuing so `--revoke alice
     /// --client alice` replaces her certificate. Repeatable.
@@ -1619,10 +1795,12 @@ pub fn cmd_certs(args: CertsArgs) -> Result<()> {
     if args.server.is_empty()
         && args.client.is_empty()
         && args.read_client.is_empty()
+        && args.admin_client.is_empty()
         && args.revoke.is_empty()
     {
         bail!(
-            "say what to issue: --server HOST, --client NAME or --read-client NAME, \
+            "say what to issue: --server HOST, --client NAME, --read-client NAME or \
+             --admin-client NAME, \
              or what to revoke: --revoke NAME"
         );
     }
@@ -1641,6 +1819,9 @@ pub fn cmd_certs(args: CertsArgs) -> Result<()> {
     for n in &args.read_client {
         files.extend(pki.issue_client(n, Role::Read)?.files);
     }
+    for n in &args.admin_client {
+        files.extend(pki.issue_client(n, Role::Admin)?.files);
+    }
     for f in &files {
         println!("wrote {}", f.display());
     }
@@ -1651,7 +1832,10 @@ pub fn cmd_certs(args: CertsArgs) -> Result<()> {
     } else {
         String::new()
     };
-    for crl in ["crl.pem", "read-crl.pem"] {
+    if pki.path("admin-ca.pem").exists() {
+        read_ca.push_str(&format!(" --admin-client-ca {d}/admin-ca.pem"));
+    }
+    for crl in ["crl.pem", "read-crl.pem", "admin-crl.pem"] {
         if pki.path(crl).exists() {
             read_ca.push_str(&format!(" --crl {d}/{crl}"));
         }

@@ -175,7 +175,11 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].role, Role::Operator);
         assert!(list[1].matches("test"));
-        assert!(Token::from_toml("[[token]]\nname='x'\nrole='admin'\nsecret='s'").is_err());
+        assert_eq!(
+            Token::from_toml("[[token]]\nname='x'\nrole='admin'\nsecret='s'").unwrap()[0].role,
+            Role::Admin
+        );
+        assert!(Token::from_toml("[[token]]\nname='x'\nrole='root'\nsecret='s'").is_err());
         assert!(Token::from_toml("[[token]]\nname='x'\nrole='read'").is_err());
     }
 }

@@ -12,7 +12,7 @@ from typing import Any, TypeVar
 
 from . import _wire
 from ._wire import Address, Call, PathLike
-from .errors import ConnectionClosed, NotFound, ProtocolError
+from .errors import ConnectionClosed, Forbidden, NotFound, ProtocolError
 from .types import (
     CaptureInfo,
     CaptureRead,
@@ -20,11 +20,13 @@ from .types import (
     FileInfo,
     InterfaceEntry,
     Notification,
+    PortInfo,
     ProfileInfo,
     ReloadInfo,
     RunInfo,
     RxRunInfo,
     ServerInfo,
+    SessionInfo,
     StatsUpdate,
     TcpRunInfo,
     UdpRunInfo,
@@ -42,7 +44,9 @@ class Client:
 
     Connects on creation, over TLS when ``tls`` is true or an SSLContext,
     or when ``ca``, ``cert`` or ``key`` is given, then logs in with ``token``
-    if one is given. A client certificate logs in by itself.
+    if one is given. A client certificate logs in by itself. On a server
+    without logins, ``user`` names this connection's session (its port
+    reservations and runs, see :meth:`acquire`).
 
     >>> with Client("192.168.56.10", token="s3cret") as c:  # doctest: +SKIP
     ...     c.load_profile("lab-two-vlans.toml")
@@ -71,6 +75,8 @@ class Client:
         key: PathLike | None = None,
         server_name: str | None = None,
         timeout: float | None = 30.0,
+        user: str | None = None,
+        _env_user: bool = False,
     ) -> None:
         opts = _wire.connect_options(
             address, token=token, tls=tls, ca=ca, cert=cert, key=key, server_name=server_name
@@ -95,6 +101,14 @@ class Client:
         try:
             if opts.token is not None:
                 self.auth(opts.token)
+            if user is not None:
+                try:
+                    self.name_session(user)
+                except Forbidden:
+                    # FEROTRX_USER set for every server: those with logins
+                    # name users themselves.
+                    if not _env_user:
+                        raise
         except BaseException:
             self.close()
             raise
@@ -103,10 +117,12 @@ class Client:
     def from_env(cls, address: Address | None = None, **kw: Any) -> Client:
         """Connects as ``ferotrx ctl`` does: the address from ``FEROTRX_CTL``,
         the token from ``FEROTRX_TOKEN``, TLS with ``FEROTRX_CA`` (and
-        ``FEROTRX_CERT``/``FEROTRX_KEY``). Keyword arguments win."""
+        ``FEROTRX_CERT``/``FEROTRX_KEY``), and on a server without logins the
+        session's name from ``FEROTRX_USER``. Keyword arguments win."""
         opts = _wire.env_options()
         if address is not None:
             opts["address"] = address
+        opts["_env_user"] = "user" not in kw
         opts.update(kw)
         address = opts.pop("address")
         return cls(address, **opts)
@@ -303,6 +319,41 @@ class Client:
     def interfaces(self) -> list[InterfaceEntry]:
         """The interfaces the server can send on."""
         return self._run(_wire.interfaces())
+
+    # ----- ports.*, session.* (servers from 0.49.0) -----
+
+    def name_session(self, user: str) -> SessionInfo:
+        """On a server without logins: the user name this connection's port
+        reservations and runs go under (servers with logins name users by
+        their token or certificate and refuse this)."""
+        return self._run(_wire.session_name(user))
+
+    def session(self) -> SessionInfo:
+        """This connection's user: connections, reserved ports and runs."""
+        return self._run(_wire.session_info())
+
+    def sessions(self) -> list[SessionInfo]:
+        """Every user on the server with their connections, ports and runs."""
+        return self._run(_wire.session_list())
+
+    def ports(self) -> list[PortInfo]:
+        """The ports that are reserved or that runs send on now."""
+        return self._run(_wire.ports_list())
+
+    def acquire(
+        self, ports: str | Sequence[str], *, force: bool = False, note: str | None = None
+    ) -> list[PortInfo]:
+        """Reserves ports for this user, all or none: other users' runs may
+        not send on them until :meth:`release`. ``force`` takes them from
+        other users and stops their runs on them (admin role)."""
+        return self._run(_wire.ports_acquire(ports, force, note))
+
+    def release(
+        self, ports: str | Sequence[str] | None = None, *, force: bool = False
+    ) -> list[str]:
+        """Gives ports back (all of this user's when ``ports`` is None);
+        returns those released."""
+        return self._run(_wire.ports_release(ports, force))
 
     # ----- file.* -----
 

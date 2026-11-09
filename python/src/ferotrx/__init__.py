@@ -43,6 +43,8 @@ from .types import (
     MediaCounters,
     Notification,
     PortImpairCounters,
+    PortInfo,
+    PortRun,
     ProfileInfo,
     ReloadInfo,
     RequestCounters,
@@ -52,6 +54,7 @@ from .types import (
     RxCounters,
     RxRunInfo,
     ServerInfo,
+    SessionInfo,
     StatsUpdate,
     StreamCounters,
     StreamInfo,
@@ -64,7 +67,7 @@ from .types import (
     Y1564RunInfo,
 )
 
-__version__ = "0.47.0"
+__version__ = "0.49.0"
 
 __all__ = [
     "__version__",
@@ -91,6 +94,9 @@ __all__ = [
     "ReloadInfo",
     "AuditHealth",
     "InterfaceEntry",
+    "PortInfo",
+    "PortRun",
+    "SessionInfo",
     "StreamInfo",
     "ProfileInfo",
     "Counters",

@@ -87,8 +87,9 @@ each milestone added and what comes next.
   queue per worker, pinned to CPUs with `--cpus`. [Guide](docs/multi-core.md),
   [performance](docs/performance.md)
 * **Remote control**: a JSON-RPC server with TLS, client certificates,
-  read-only and operator roles and an audit log; a command line client and a
-  Python package. [Guide](docs/remote-control.md),
+  read-only, operator and admin roles and an audit log; sessions per user
+  with port reservations, so two people cannot send on the same interface;
+  a command line client and a Python package. [Guide](docs/remote-control.md),
   [Python](docs/python-client.md)
 * **Desktop GUI**: `ferotrx-gui` drives local and remote servers: ports,
   streams built layer by layer with a live packet view, captures turned into

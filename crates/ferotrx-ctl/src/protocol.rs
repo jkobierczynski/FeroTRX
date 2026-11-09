@@ -218,6 +218,10 @@ pub struct ServerInfo {
     /// (servers from 0.43.0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub certificate_expires: Option<String>,
+    /// True when runs may only send on ports the user acquired first
+    /// (`ferotrx serve --require-acquire`, servers from 0.49.0).
+    #[serde(default)]
+    pub require_acquire: bool,
 }
 
 /// What `server.reload` read again (servers from 0.43.0).
@@ -276,13 +280,17 @@ impl ServerInfo {
 /// What a connection may do.
 ///
 /// `read` sees everything (`server.info`, `interfaces.list`, `*.get`,
-/// `*.list`, `*.stats`, `stats.subscribe`) and changes nothing; `operator`
-/// may also load profiles and start, stop and remove runs.
+/// `*.list`, `*.stats`, `stats.subscribe`, `ports.list`, `session.*`) and
+/// changes nothing; `operator` may also load profiles, reserve ports and
+/// start, stop and remove its own runs; `admin` may also take ports and runs
+/// from other users (`ports.acquire` and `ports.release` with `force`, and
+/// stopping their runs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Read,
     Operator,
+    Admin,
 }
 
 impl Role {
@@ -290,6 +298,7 @@ impl Role {
         match self {
             Role::Read => "read",
             Role::Operator => "operator",
+            Role::Admin => "admin",
         }
     }
 
@@ -302,7 +311,8 @@ impl Role {
             | "tcp.stats" | "tcp.list" | "udp.stats" | "udp.list" | "rx.stats" | "rx.list"
             | "lab.get" | "scenario.get" | "scenario.list" | "bench.get" | "bench.list"
             | "y1564.get" | "y1564.list" | "capture.get" | "capture.list" | "stats.subscribe"
-            | "stats.unsubscribe" => Some(Role::Read),
+            | "stats.unsubscribe" | "ports.list" | "session.info" | "session.list"
+            | "session.name" => Some(Role::Read),
             _ => Some(Role::Operator),
         }
     }
@@ -321,7 +331,8 @@ impl std::str::FromStr for Role {
         match s.trim().to_ascii_lowercase().as_str() {
             "read" | "read-only" | "readonly" => Ok(Role::Read),
             "operator" => Ok(Role::Operator),
-            _ => Err(format!("unknown role '{s}' (use read or operator)")),
+            "admin" => Ok(Role::Admin),
+            _ => Err(format!("unknown role '{s}' (use read, operator or admin)")),
         }
     }
 }
@@ -2455,4 +2466,97 @@ pub struct FileChunk {
     pub size: u64,
     /// True if this piece reaches the end of the file.
     pub eof: bool,
+}
+
+// ----- port reservations and sessions -----
+
+/// Parameters of `ports.acquire`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcquireParams {
+    /// Interface names, as runs name them (`iface`).
+    pub ports: Vec<String>,
+    /// Take the ports even from other users, stopping their runs that send
+    /// on them (admins, or anyone on a server without logins).
+    #[serde(default)]
+    pub force: bool,
+    /// Why, for the others to read in `ports.list`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Parameters of `ports.release`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseParams {
+    /// The ports to give back; empty gives back all of this user's.
+    #[serde(default)]
+    pub ports: Vec<String>,
+    /// Release ports other users hold (admins, or anyone on a server
+    /// without logins).
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// A run that sends on a port, as `ports.list` and `session.*` show it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PortRun {
+    /// `run`, `tcp`, `udp`, `scenario`, `bench` or `y1564`.
+    pub kind: String,
+    pub id: u64,
+    /// Who started it.
+    pub owner: String,
+    /// The ports it sends on.
+    #[serde(default)]
+    pub ports: Vec<String>,
+}
+
+/// A port that is reserved or in use (`ports.list`, `ports.acquire`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PortInfo {
+    pub name: String,
+    /// Who reserved it with `ports.acquire`, if anyone did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// When, in seconds since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Runs that send on it now.
+    #[serde(default)]
+    pub runs: Vec<PortRun>,
+}
+
+/// One user's session on the server: connections, ports and runs
+/// (`session.info`, `session.list`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    /// The login's name (token name or certificate common name), the name
+    /// given with `session.name`, or `anonymous`.
+    pub user: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
+    /// Connections logged in as this user now.
+    pub connections: usize,
+    /// Ports the user reserved.
+    #[serde(default)]
+    pub ports: Vec<String>,
+    /// The user's runs that send now.
+    #[serde(default)]
+    pub runs: Vec<PortRun>,
+    /// When the user's first connection of this session logged in, and
+    /// when one of them last asked something, in seconds since the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<f64>,
+}
+
+/// Parameters of `session.name`: on a server without logins, the name
+/// this connection's reservations and runs go under.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionNameParams {
+    pub user: String,
 }
