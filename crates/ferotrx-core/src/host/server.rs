@@ -77,6 +77,11 @@ pub struct Dhcpv6ServerConfig {
     /// Length of the on-link prefix of the pool, for confirm messages
     /// (default 64).
     pub prefix: u8,
+    /// Prefix delegation (RFC 8415): the prefix to delegate parts of, e.g.
+    /// `2001:db8:100::/40`, to requesting routers (clients with an IA_PD).
+    pub pd_pool: Option<(Ipv6Addr, u8)>,
+    /// Length of each delegated prefix (default 56).
+    pub pd_length: u8,
 }
 
 impl Dhcpv6ServerConfig {
@@ -89,6 +94,8 @@ impl Dhcpv6ServerConfig {
             reservations: Vec::new(),
             rapid_commit: true,
             prefix: 64,
+            pd_pool: None,
+            pd_length: 56,
         }
     }
 }
@@ -120,7 +127,10 @@ pub struct DhcpServerCounters {
 /// A lease a DHCP server role gave.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DhcpLease {
+    /// The address, or a delegated prefix.
     pub ip: IpAddr,
+    /// The length of a delegated prefix; `None` for an address.
+    pub prefix: Option<u8>,
     /// The client's MAC, when known.
     pub mac: Option<MacAddr>,
     /// The client identifier (DHCPv6: DUID and IAID), in hex.
@@ -138,6 +148,8 @@ pub struct DhcpServerStatus {
     pub pool_size: u64,
     /// Bound leases, by address.
     pub leases: Vec<DhcpLease>,
+    /// Delegated prefixes (DHCPv6 prefix delegation), by prefix.
+    pub delegations: Vec<DhcpLease>,
     pub counters: DhcpServerCounters,
 }
 
@@ -226,6 +238,25 @@ pub(crate) fn validate6(cfg: &Dhcpv6ServerConfig) -> Result<()> {
     if let Some(d) = &cfg.domain {
         if dns_name(d).is_none() {
             return Err(Error::Host(format!("'{d}' is not a domain name")));
+        }
+    }
+    if let Some((p, len)) = cfg.pd_pool {
+        if cfg.pd_length < len || cfg.pd_length > 128 || len == 0 {
+            return Err(Error::Host(format!(
+                "cannot delegate /{} prefixes from {p}/{len}: the delegated length must be from /{len} to /128",
+                cfg.pd_length
+            )));
+        }
+        if cfg.pd_length - len > 32 {
+            return Err(Error::Host(format!(
+                "{p}/{len} holds more than 2^32 /{} prefixes; give a longer pool prefix",
+                cfg.pd_length
+            )));
+        }
+        if p.is_multicast() || hw::is_link_local(p) || p.is_loopback() {
+            return Err(Error::Host(format!(
+                "{p}/{len} is not a prefix to delegate"
+            )));
         }
     }
     Ok(())
@@ -800,6 +831,7 @@ impl Server4 {
 
     pub(crate) fn status(&self, now: Duration) -> DhcpServerStatus {
         DhcpServerStatus {
+            delegations: Vec::new(),
             pool: format!("{}-{}", self.cfg.pool.0, self.cfg.pool.1),
             pool_size: self.pool.size() as u64,
             leases: self
@@ -807,6 +839,7 @@ impl Server4 {
                 .bound(now)
                 .map(|(a, l)| DhcpLease {
                     ip: IpAddr::V4(Ipv4Addr::from(a as u32)),
+                    prefix: None,
                     mac: l.mac,
                     client: hex(&l.client),
                     hostname: l.hostname.clone(),
@@ -831,6 +864,8 @@ const OPT_STATUS: u16 = 13;
 const OPT_RAPID_COMMIT: u16 = 14;
 const OPT_DNS: u16 = 23;
 const OPT_DOMAIN_LIST: u16 = 24;
+const OPT_IA_PD: u16 = 25;
+const OPT_IAPREFIX: u16 = 26;
 
 const CONFIRM: u8 = 4;
 const DECLINE: u8 = 9;
@@ -840,12 +875,21 @@ const STATUS_SUCCESS: u16 = 0;
 const STATUS_NO_ADDRS: u16 = 2;
 const STATUS_NO_BINDING: u16 = 3;
 const STATUS_NOT_ON_LINK: u16 = 4;
+const STATUS_NO_PREFIX: u16 = 6;
 
 /// An IA_NA of a client message.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct IaNa {
     pub iaid: u32,
     pub addresses: Vec<Ipv6Addr>,
+}
+
+/// An IA_PD of a client message: the prefixes it holds or asks for (a
+/// zero prefix with a length is a hint).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct IaPd {
+    pub iaid: u32,
+    pub prefixes: Vec<(Ipv6Addr, u8)>,
 }
 
 /// A DHCPv6 client message.
@@ -856,6 +900,7 @@ pub(crate) struct Dhcp6Request {
     pub client_id: Option<Vec<u8>>,
     pub server_id: Option<Vec<u8>>,
     pub ias: Vec<IaNa>,
+    pub pds: Vec<IaPd>,
     pub rapid_commit: bool,
 }
 
@@ -916,6 +961,19 @@ pub(crate) fn parse_dhcp6_request(p: &[u8]) -> Option<Dhcp6Request> {
             .is_some();
             m.ias.push(ia);
         }
+        OPT_IA_PD if v.len() >= 12 => {
+            let mut ia = IaPd {
+                iaid: u32::from_be_bytes([v[0], v[1], v[2], v[3]]),
+                prefixes: Vec::new(),
+            };
+            ok &= options6(&v[12..], |code, v| {
+                if code == OPT_IAPREFIX && v.len() >= 25 {
+                    ia.prefixes.push((addr6(&v[9..]), v[8]));
+                }
+            })
+            .is_some();
+            m.pds.push(ia);
+        }
         _ => {}
     })?;
     ok.then_some(m)
@@ -947,13 +1005,65 @@ fn status_opt(code: u16, text: &str) -> Vec<u8> {
     v
 }
 
-/// An IA_NA in an answer: its addresses with lifetimes, or a status.
+/// An IA_NA in an answer: its addresses with lifetimes, or a status; an
+/// IA_PD (`pd`) with prefixes in `addresses` and their lengths in `lens`.
 struct IaOut {
     iaid: u32,
     t1: u32,
     t2: u32,
     addresses: Vec<(Ipv6Addr, u32, u32)>,
     status: Option<u16>,
+    pd: bool,
+    lens: Vec<u8>,
+}
+
+impl IaOut {
+    fn na(iaid: u32, t1: u32, t2: u32) -> Self {
+        Self {
+            iaid,
+            t1,
+            t2,
+            addresses: Vec::new(),
+            status: None,
+            pd: false,
+            lens: Vec::new(),
+        }
+    }
+}
+
+/// Delegated prefixes, as numbers in a [`Pool`]: prefix `n` is the pool's
+/// base plus `n` times the size of one delegated prefix.
+struct PdPool {
+    base: u128,
+    len: u8,
+    pool: Pool,
+}
+
+impl PdPool {
+    fn new(base: Ipv6Addr, pool_len: u8, len: u8) -> Self {
+        let count = 1u128 << (len - pool_len);
+        Self {
+            base: u128::from(hw::mask6(base, pool_len)),
+            len,
+            pool: Pool::new(0, count - 1, Vec::new(), Vec::new()),
+        }
+    }
+
+    fn prefix(&self, n: u128) -> Ipv6Addr {
+        let shift = 128 - u32::from(self.len);
+        Ipv6Addr::from(self.base + n.checked_shl(shift).unwrap_or(0))
+    }
+
+    /// The number of `prefix`, if it is one of the pool's.
+    fn number(&self, prefix: Ipv6Addr, len: u8) -> Option<u128> {
+        let shift = 128 - u32::from(self.len);
+        let a = u128::from(prefix);
+        if len != self.len || a < self.base || hw::mask6(prefix, self.len) != prefix {
+            return None;
+        }
+        let n = (a - self.base).checked_shr(shift).unwrap_or(0);
+        self.pool.in_pool(n).then_some(n)
+    }
 }
 
 /// The DHCPv6 server role of one host.
@@ -961,6 +1071,7 @@ pub(crate) struct Server6 {
     cfg: Dhcpv6ServerConfig,
     duid: Vec<u8>,
     pool: Pool,
+    pd: Option<PdPool>,
     pub(crate) counters: DhcpServerCounters,
 }
 
@@ -975,10 +1086,14 @@ impl Server6 {
                 .map(|(m, a)| (*m, u128::from(*a)))
                 .collect(),
         );
+        let pd = cfg
+            .pd_pool
+            .map(|(base, len)| PdPool::new(base, len, cfg.pd_length));
         Self {
             cfg,
             duid: hw::duid(mac),
             pool,
+            pd,
             counters: DhcpServerCounters::default(),
         }
     }
@@ -1090,22 +1205,19 @@ impl Server6 {
                                     now + OFFER_HOLD.min(lease),
                                 );
                             }
-                            ias.push(IaOut {
-                                iaid: ia.iaid,
-                                t1,
-                                t2,
-                                addresses: vec![(Ipv6Addr::from(a), preferred, valid)],
-                                status: None,
-                            });
+                            let mut out = IaOut::na(ia.iaid, t1, t2);
+                            out.addresses = vec![(Ipv6Addr::from(a), preferred, valid)];
+                            ias.push(out);
                         }
-                        None => ias.push(IaOut {
-                            iaid: ia.iaid,
-                            t1: 0,
-                            t2: 0,
-                            addresses: Vec::new(),
-                            status: Some(STATUS_NO_ADDRS),
-                        }),
+                        None => {
+                            let mut out = IaOut::na(ia.iaid, 0, 0);
+                            out.status = Some(STATUS_NO_ADDRS);
+                            ias.push(out);
+                        }
                     }
+                }
+                for ia in &m.pds {
+                    ias.push(self.delegate(&key(ia.iaid), mac, ia, commit, now));
                 }
                 let granted = ias.iter().any(|ia| !ia.addresses.is_empty());
                 if !granted {
@@ -1133,15 +1245,15 @@ impl Server6 {
                 }
                 let mut granted = false;
                 let mut refused = false;
+                for ia in &m.pds {
+                    let out = self.renew_prefixes(&key(ia.iaid), mac, ia, now);
+                    granted |= out.addresses.iter().any(|a| a.2 > 0);
+                    refused |= out.status.is_some() || out.addresses.iter().any(|a| a.2 == 0);
+                    ias.push(out);
+                }
                 for ia in &m.ias {
                     let k = key(ia.iaid);
-                    let mut out = IaOut {
-                        iaid: ia.iaid,
-                        t1,
-                        t2,
-                        addresses: Vec::new(),
-                        status: None,
-                    };
+                    let mut out = IaOut::na(ia.iaid, t1, t2);
                     for &a in &ia.addresses {
                         let x = in_pool(a);
                         if self.pool.usable(x, &k, Some(mac), now) {
@@ -1188,6 +1300,23 @@ impl Server6 {
                         }
                     }
                 }
+                for ia in &m.pds {
+                    let k = key(ia.iaid);
+                    let Some(pd) = self.pd.as_mut() else { break };
+                    for &(p, len) in &ia.prefixes {
+                        let Some(n) = pd.number(p, len) else { continue };
+                        let done = if m.kind == DECLINE {
+                            pd.pool.decline(n, &k, now)
+                        } else {
+                            pd.pool.release(n, &k, now)
+                        };
+                        if done && m.kind == DECLINE {
+                            self.counters.declines += 1;
+                        } else if done {
+                            self.counters.releases += 1;
+                        }
+                    }
+                }
                 status = Some((STATUS_SUCCESS, "done"));
             }
             CONFIRM => {
@@ -1230,21 +1359,30 @@ impl Server6 {
             v.extend_from_slice(&ia.iaid.to_be_bytes());
             v.extend_from_slice(&ia.t1.to_be_bytes());
             v.extend_from_slice(&ia.t2.to_be_bytes());
-            for (a, pref, valid) in &ia.addresses {
-                let mut x = a.octets().to_vec();
-                x.extend_from_slice(&pref.to_be_bytes());
-                x.extend_from_slice(&valid.to_be_bytes());
-                opt6(&mut v, OPT_IAADDR, &x);
+            for (i, (a, pref, valid)) in ia.addresses.iter().enumerate() {
+                if ia.pd {
+                    let mut x = pref.to_be_bytes().to_vec();
+                    x.extend_from_slice(&valid.to_be_bytes());
+                    x.push(ia.lens[i]);
+                    x.extend_from_slice(&a.octets());
+                    opt6(&mut v, OPT_IAPREFIX, &x);
+                } else {
+                    let mut x = a.octets().to_vec();
+                    x.extend_from_slice(&pref.to_be_bytes());
+                    x.extend_from_slice(&valid.to_be_bytes());
+                    opt6(&mut v, OPT_IAADDR, &x);
+                }
             }
             if let Some(s) = ia.status {
                 let text = match s {
                     STATUS_NO_ADDRS => "no addresses available",
                     STATUS_NO_BINDING => "no binding",
+                    STATUS_NO_PREFIX => "no prefixes available",
                     _ => "",
                 };
                 opt6(&mut v, OPT_STATUS, &status_opt(s, text));
             }
-            opt6(&mut p, OPT_IA_NA, &v);
+            opt6(&mut p, if ia.pd { OPT_IA_PD } else { OPT_IA_NA }, &v);
         }
         if let Some((code, text)) = status {
             opt6(&mut p, OPT_STATUS, &status_opt(code, text));
@@ -1269,8 +1407,95 @@ impl Server6 {
         p
     }
 
+    /// A prefix for an IA_PD of a solicit or request: the one the client
+    /// had, its hint, or the next free one.
+    fn delegate(
+        &mut self,
+        k: &[u8],
+        mac: MacAddr,
+        ia: &IaPd,
+        commit: bool,
+        now: Duration,
+    ) -> IaOut {
+        let (t1, t2, preferred, valid) = self.lifetimes();
+        let lease = self.cfg.lease;
+        let mut out = IaOut::na(ia.iaid, t1, t2);
+        out.pd = true;
+        let Some(pd) = self.pd.as_mut() else {
+            (out.t1, out.t2) = (0, 0);
+            out.status = Some(STATUS_NO_PREFIX);
+            return out;
+        };
+        let hint = ia.prefixes.iter().find_map(|&(p, len)| pd.number(p, len));
+        match pd.pool.pick(k, Some(mac), hint, now) {
+            Some(n) => {
+                let live = pd
+                    .pool
+                    .held(n, k)
+                    .is_some_and(|l| l.bound && l.expires > now);
+                if commit {
+                    pd.pool.bind(n, k, Some(mac), None, true, now + lease);
+                } else if !live {
+                    pd.pool
+                        .bind(n, k, Some(mac), None, false, now + OFFER_HOLD.min(lease));
+                }
+                out.addresses.push((pd.prefix(n), preferred, valid));
+                out.lens.push(pd.len);
+            }
+            None => {
+                (out.t1, out.t2) = (0, 0);
+                out.status = Some(STATUS_NO_PREFIX);
+            }
+        }
+        out
+    }
+
+    /// The answer to an IA_PD of a renew or rebind: the prefixes it holds
+    /// extended, others with zero lifetimes.
+    fn renew_prefixes(&mut self, k: &[u8], mac: MacAddr, ia: &IaPd, now: Duration) -> IaOut {
+        let (t1, t2, preferred, valid) = self.lifetimes();
+        let lease = self.cfg.lease;
+        let mut out = IaOut::na(ia.iaid, t1, t2);
+        out.pd = true;
+        let Some(pd) = self.pd.as_mut() else {
+            out.status = Some(STATUS_NO_BINDING);
+            return out;
+        };
+        for &(p, len) in &ia.prefixes {
+            match pd.number(p, len) {
+                Some(n) if pd.pool.usable(n, k, Some(mac), now) => {
+                    pd.pool.bind(n, k, Some(mac), None, true, now + lease);
+                    out.addresses.push((p, preferred, valid));
+                }
+                _ => out.addresses.push((p, 0, 0)),
+            }
+            out.lens.push(len);
+        }
+        if ia.prefixes.is_empty() {
+            out.status = Some(STATUS_NO_BINDING);
+        }
+        out
+    }
+
     pub(crate) fn status(&self, now: Duration) -> DhcpServerStatus {
         DhcpServerStatus {
+            delegations: self
+                .pd
+                .as_ref()
+                .map(|pd| {
+                    pd.pool
+                        .bound(now)
+                        .map(|(n, l)| DhcpLease {
+                            ip: IpAddr::V6(pd.prefix(n)),
+                            prefix: Some(pd.len),
+                            mac: l.mac,
+                            client: hex(&l.client),
+                            hostname: None,
+                            remaining: l.expires.saturating_sub(now),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             pool: format!("{}-{}", self.cfg.pool.0, self.cfg.pool.1),
             pool_size: self.pool.size().min(u128::from(u64::MAX)) as u64,
             leases: self
@@ -1278,6 +1503,7 @@ impl Server6 {
                 .bound(now)
                 .map(|(a, l)| DhcpLease {
                     ip: IpAddr::V6(Ipv6Addr::from(a)),
+                    prefix: None,
                     mac: l.mac,
                     client: hex(&l.client),
                     hostname: l.hostname.clone(),

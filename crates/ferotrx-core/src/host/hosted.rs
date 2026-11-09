@@ -300,6 +300,8 @@ impl EndpointHosts {
                     dns: Vec::new(),
                     lease: None,
                     renewals: 0,
+                    mtu: None,
+                    domains: Vec::new(),
                 };
                 HostStatus {
                     port: cfg.port,
@@ -321,6 +323,12 @@ impl EndpointHosts {
                     dhcp_server: None,
                     dhcpv6_server: None,
                     counters: Default::default(),
+                    delegated_prefix: None,
+                    lldp: None,
+                    mdns: None,
+                    dot1x: None,
+                    dot1x_authenticator: None,
+                    flow_export: None,
                 }
             })
             .collect();

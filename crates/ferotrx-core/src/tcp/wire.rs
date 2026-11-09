@@ -573,9 +573,21 @@ pub(crate) fn parse_udp<'a>(ip: &Ip<'a>, verify: bool) -> Option<Datagram<'a>> {
 
 /// A UDP datagram on `path`, from `sport` to `dport`.
 pub(crate) fn udp_frame(path: &Path, sport: u16, dport: u16, data: &[u8], ip_id: u16) -> Vec<u8> {
+    udp_frame_ttl(path, sport, dport, data, ip_id, 64)
+}
+
+/// [`udp_frame`] with a TTL (hop limit) of `ttl`.
+pub(crate) fn udp_frame_ttl(
+    path: &Path,
+    sport: u16,
+    dport: u16,
+    data: &[u8],
+    ip_id: u16,
+    ttl: u8,
+) -> Vec<u8> {
     let udp_len = 8 + data.len();
     let mut f = Vec::with_capacity(18 + 40 + udp_len);
-    push_ip(&mut f, path, 17, udp_len, ip_id, 64);
+    push_ip(&mut f, path, 17, udp_len, ip_id, ttl);
     let start = f.len();
     f.extend_from_slice(&sport.to_be_bytes());
     f.extend_from_slice(&dport.to_be_bytes());

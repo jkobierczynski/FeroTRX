@@ -170,13 +170,17 @@ pub use gtpu::{
 };
 #[cfg(feature = "profile")]
 pub use host::{
-    parse_ipv4_mode, parse_ipv6_mode, parse_pool, parse_prefix6, HostProfile, HostSpec,
+    parse_collector, parse_ipv4_mode, parse_ipv6_mode, parse_pool, parse_prefix6, HostProfile,
+    HostSpec,
 };
 pub use host::{
-    AddressSource, Addressing, DhcpLease, DhcpServerConfig, DhcpServerCounters, DhcpServerStatus,
-    Dhcpv6ServerConfig, Emulation, EndpointConfig, EndpointHosts, GroupStatus, HostAddress,
-    HostConfig, HostCounters, HostEngine, HostOptions, HostState, HostStats, HostStatus, Hosted,
-    HostedStats, Ipv4Mode, Ipv6Mode, RouterConfig,
+    AddressSource, Addressing, AuthenticatorConfig, AuthenticatorStatus, DhcpLease,
+    DhcpServerConfig, DhcpServerCounters, DhcpServerStatus, Dhcpv6ServerConfig, Dot1xConfig,
+    Dot1xSession, Dot1xState, Dot1xStatus, Emulation, EndpointConfig, EndpointHosts,
+    FlowExportConfig, FlowExportStatus, FlowVersion, GroupStatus, HostAddress, HostConfig,
+    HostCounters, HostEngine, HostOptions, HostState, HostStats, HostStatus, Hosted, HostedStats,
+    Ipv4Mode, Ipv6Mode, LldpConfig, LldpNeighbor, LldpStatus, MdnsConfig, MdnsRecord, MdnsService,
+    MdnsStatus, RouterConfig,
 };
 pub use impair::{
     impair_port, parse_bit_rate, run_bridge, BridgeConfig, BridgeStats, ImpairMonitor, ImpairPort,
