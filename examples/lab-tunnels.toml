@@ -7,7 +7,7 @@
 #   ferotrx inspect web.pcap -r 'encap=eth/ipv4(src=192.168.10.40,dst=192.168.20.2)/udp/vxlan(vni=100)' -c 1
 #
 # Rewrites and `vary` change the innermost headers (the phones' addresses in
-# GTP-U, the VM's in VXLAN); `outer_ip_src`, `teid`, `vni`, `gre_key` and
+# GTP-U, the VM's in VXLAN); `teid`, `vni`, `gre_key` and
 # `mpls` vary the tunnel itself. Latency signatures sit at the end of the
 # innermost payload, so --rx measures through the tunnel as well.
 # See docs/replay.md#tunnels.
@@ -37,7 +37,9 @@ rewrite = [
 ]
 vary = ["ip_src=172.16.0.100..172.16.0.149,every=21", "teid=1000..1049,every=21"]
 
-# GRE with a key per site, from 8 site routers (outer sources).
+# GRE with a key per site, to one hub. (A GRE packet has no ports, so behind
+# the lab router's NAT only one outer source can reach 192.168.20.2: vary
+# `outer_ip_src` as well where the path does not translate addresses.)
 [[stream]]
 name = "gre"
 pcap = "web.pcap"
@@ -45,7 +47,7 @@ rate = "500pps"
 loops = 0
 latency = true
 rewrite = ["encap=eth(src=02:00:00:00:10:42,dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.42,dst=192.168.20.2)/gre(key=1)"]
-vary = ["outer_ip_src=192.168.10.42..192.168.10.49,every=21", "gre_key=1..8,every=21"]
+vary = ["gre_key=1..8,every=21"]
 
 # Two MPLS labels on top of the frame, as an LSR would see it. The lab
 # router does not do MPLS: this one is for the receiver's capture (or your

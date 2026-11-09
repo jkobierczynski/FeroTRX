@@ -30,10 +30,11 @@ duration = "4s"
 require = ["rx_packets > 3000", "loss_pct < 1%"]
 
 # The voice stream is 40 ms late and loses about 2%; the video stream is cut
-# to 5 Mbit/s by the queue limit.
+# to 5 Mbit/s by the queue limit (FeroTRX drops those frames itself:
+# impair_dropped, not loss in the network).
 [[check]]
 name = "impaired streams"
 traffic = "lab-impair.toml"
 rx = "ftrx-lab"
 duration = "5s"
-require = ["latency_p50 > 20ms", "generator_loss > 0"]
+require = ["latency_p50 > 20ms", "impair_dropped > 0"]

@@ -21,9 +21,11 @@ name = "TCP over a poor last mile"
 tcp = "lab-tcp-impair.toml"
 require = ["retransmits > 0", "timed_out == 0"]
 
-# The router does not police: every step passes.
+# The router does not police: every step meets the SAC, and only the two
+# policing steps fail ("not policed": more than CIR + EIR got through).
 [[check]]
 name = "Y.1564 service activation"
 y1564 = "lab-y1564.toml"
 rx = "ftrx-lab"
-expect = "pass"
+expect = "any"
+require = ["steps_failed == 2", "flr_pct < 0.1%", "availability_pct >= 99%"]

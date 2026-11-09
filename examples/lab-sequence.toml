@@ -8,7 +8,7 @@
 #
 # What it sends, in order:
 #   1. "probe": 10 bursts of 32 small frames, 20 ms apart, then "bulk";
-#   2. "bulk": web.pcap at 2% of the line (20 Mbit/s of a 1 Gbit/s line,
+#   2. "bulk": dns.pcap at 2% of the line (20 Mbit/s of a 1 Gbit/s line,
 #      preamble, gap and FCS counted), 4000 frames, then "probe" again: four
 #      rounds of the two in all (the first and `next_count = 3` more).
 #   3. "beacon" runs beside them from the start, 1 Mbit/s on the wire (about
@@ -34,7 +34,9 @@ next = "bulk"
 
 [[stream]]
 name = "bulk"
-pcap = "web.pcap"
+# UDP: the router's firewall drops TCP segments replayed out of their
+# connection (conntrack INVALID), so a TCP capture would not get through.
+pcap = "dns.pcap"
 rate = "2%"                  # of line_rate, counted on the wire (L1)
 limit = 4000                 # about 0.2 s
 loops = 0

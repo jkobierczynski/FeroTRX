@@ -4,7 +4,8 @@
 #
 #   sudo ferotrx y1564 examples/lab-y1564.toml -i ftrx-lab --rx ftrx-lab --report y1564.json
 #
-# The lab router does not police, so every step passes; break it with
+# The lab router does not police, so the policing steps fail ("not
+# policed": more than CIR + EIR got through) and the others pass; break it with
 # `ferotrx lab up --loss 0.01` to see the frame loss ratio fail, or `--delay
 # 30ms` for the transfer delay. Steps of 3 s instead of Y.1564's 60, and a
 # 15 s performance test instead of 15 minutes, to try it quickly; see
