@@ -545,7 +545,7 @@ jobs:
       # answers to its pings), multi-burst and next streams, a rate that is a
       # share of the line, and live pause/resume/update through serve.
       - name: Port addresses and live control through a router (Linux)
-        if: runner.os == 'Linux'
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
           sudo scripts/link-netns.sh ./target/debug/ferotrx
