@@ -1,0 +1,39 @@
+# Stateful TCP inside GTP-U through the lab router: the HTTP session of
+# http.pcap between emulated phones and an emulated server, each phone with
+# a TEID of its own, as between a base station and a UPF. The router only
+# sees the outer addresses (192.168.10.30 and 192.168.20.30); the phones'
+# 172.16.0.0/24 and the server's 172.16.1.0/24 exist only inside the tunnel.
+#
+# The two tunnel ends must reach each other by their own addresses, so start
+# the lab without NAT (the router then only routes):
+#
+#   sudo ferotrx lab up --no-nat
+#   sudo ferotrx tcp -p examples/lab-gtpu.toml -i ftrx-lab
+#
+# examples/lab-scenario-tunnels.toml runs it as a scenario check. To send to
+# a real UPF, leave out `server` in [gtpu] and [server], and set `connect`.
+# See docs/stateful-tcp.md#inside-gtp-u-tunnels.
+format = 1
+pcap = "http.pcap"
+cps = 50
+connections = 200
+concurrency = 50
+
+[client]
+ip = "172.16.0.100/24"       # the phones (inner addresses)
+ips = 20
+gateway = "172.16.0.1"
+
+[server]
+ip = "172.16.1.50/24"
+gateway = "172.16.1.1"
+
+[gtpu]
+# The base station's end: outer addresses on VLAN 10, the first phone's
+# TEID (phone N uses 1000 + N both ways), and a QoS flow.
+client = "local=192.168.10.30,remote=192.168.20.30,gateway=192.168.10.1,vlan=10,teid=1000,qfi=9"
+# The UPF's end, on VLAN 20.
+server = "local=192.168.20.30,remote=192.168.10.30,gateway=192.168.20.1,vlan=20,teid=1000,qfi=9"
+
+[tcp]
+verify = true

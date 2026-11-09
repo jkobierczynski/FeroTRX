@@ -440,6 +440,10 @@ max_runs = 4
 max_flows = 2000
 ```
 
+[`examples/server/serve.toml`](../examples/server/serve.toml) holds limits for
+the lab router, and [`examples/server/tokens.toml`](../examples/server/tokens.toml)
+logins with each role.
+
 **At the start.** `run.start`, `tcp.start`, `udp.start`, `bench.start`,
 `y1564.start` and `scenario.start` check what they are asked for and refuse
 with `FORBIDDEN` (-32004), a message that names the option, and the limit in

@@ -1,0 +1,24 @@
+# A performance sweep of the lab router (`sudo ferotrx lab up`): one frame
+# size at a time, at a set share of the line, several times over, with the
+# spread of the rates and the loss and latency of every trial. The frames go
+# through the router to its stream receiver, 192.168.20.2, which sends them
+# back on VLAN 20:
+#
+#   sudo ferotrx bench examples/lab-bench-sweep.toml -i ftrx-lab --rx ftrx-lab --report sweep.json
+#   ... --load 20 --size 1514 -B af_xdp --workers 2 --cpus 2-3
+#
+# Writes sweep.json, sweep.txt and sweep.md (with the test conditions:
+# version, kernel, CPU, workers, pinning, backend). A veth link has no speed
+# of its own: `line_rate` says what 100% is. See docs/performance.md.
+format = 1
+
+[benchmark]
+packet = "eth(src=02:00:00:00:10:05,dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.5,dst=192.168.20.2)/udp(sport=4000,dport=9000)"
+vary = ["port_src=4000..4063"]  # 64 flows, so queues and workers share them
+tests = ["sweep"]
+sizes = [124, 508, 1514]        # without the FCS
+line_rate = "100mbps"           # what a small VM keeps up with on a veth link
+max_load = 50                   # percent of line_rate: the sweep's load (--load)
+trial_duration = "3s"
+warmup = "1s"                   # learning frames first
+repetitions = 3

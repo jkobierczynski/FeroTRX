@@ -9,6 +9,8 @@ The [README](../README.md) has the overview and a quickstart.
   DPDK, permissions to send.
 * [Lab scripts](lab-scripts.md): try every feature in Linux network
   namespaces, without a lab.
+* [Examples](../examples/README.md): a profile, scenario or plan for every
+  feature, each fitting the lab router as it is.
 * [Feature status](status.md): what is done, partial, experimental or
   planned; [interoperability](interop.md): the real implementations each
   protocol is tested against.

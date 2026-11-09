@@ -80,6 +80,9 @@ sudo ferotrx replay web.pcap -i eth0 --loop 50 \
 ferotrx inspect gre.pcap -r decap -r mpls_push=100 -r mpls_push=200:5
 ```
 
+[`examples/lab-tunnels.toml`](../examples/lab-tunnels.toml) has VXLAN,
+GTP-U, GRE and MPLS streams for the lab router.
+
 Plain rewrites changed the outer headers of tunneled captures before 0.47.0;
 use `outer_ip_src` and friends in `--vary` for the tunnel itself.
 
@@ -234,6 +237,9 @@ next = "probe"               # and back, three more times
 next_count = 3
 ```
 
+[`examples/lab-sequence.toml`](../examples/lab-sequence.toml) combines bursts,
+a `next` loop and a share of the line.
+
 ### The port's own addresses (L3 mode)
 
 Instead of writing MACs into every packet, a port can have an address of
@@ -260,6 +266,8 @@ answer = ["10.0.1.1-10.0.1.254"]
 sudo ferotrx run lab.toml -i eth0 --ip 10.0.0.2/24 --gateway 10.0.0.1
 sudo ferotrx build 'eth/ipv4(src=10.0.0.2,dst=10.0.2.2)/udp' -i eth0 --ip 10.0.0.2/24 --gateway 10.0.0.1 --load 10
 ```
+
+[`examples/lab-l3-port.toml`](../examples/lab-l3-port.toml) does this on the lab router.
 
 `replay`, `build`, `run`, `bench`, and `run.start` and `bench.start` of the
 control server take the same; it fails with a clear error when the gateway

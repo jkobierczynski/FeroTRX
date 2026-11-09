@@ -90,6 +90,9 @@ rate. The run's report adds a line per stream:
 
     done impairments: 4001 in, 3923 out, 78 lost, held ms avg 15.71 min 12.04 max 18.00
 
+[`examples/lab-impair.toml`](../examples/lab-impair.toml) has impaired streams
+for the lab router.
+
 ## TCP, UDP and host runs
 
 ```sh
@@ -106,6 +109,9 @@ they did:
 
     impaired sent frames: 3608 in, 3548 out, 60 lost, held ms avg 5.00 min 5.00 max 5.00
     impaired received frames: 3549 in, 3464 out, 85 lost
+
+[`examples/lab-tcp-impair.toml`](../examples/lab-tcp-impair.toml) is a TCP
+profile with both.
 
 Impaired ports cannot split for `--workers` the way AF_XDP ports do; the
 workers share the port, which is slower but keeps one rate limit.

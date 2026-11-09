@@ -1,0 +1,47 @@
+# A poor last mile on the sending port itself, for TCP through the lab router
+# (`sudo ferotrx lab up`): FeroTRX delays, jitters and drops the frames its
+# emulated hosts send (`impair`) and receive (`impair_rx`), so the router
+# needs no netem. CUBIC and ECN show how the engine copes.
+#
+#   sudo ferotrx tcp -p examples/lab-tcp-impair.toml -i ftrx-lab
+#   ... --impair "loss=5%"       overrides the profile's
+#
+# The summary has a line for each, such as
+#   impaired sent frames: 3608 in, 3548 out, 60 lost, held ms avg 25.0 ...
+# See docs/impairments.md.
+format = 1
+pcap = "http.pcap"
+cps = 20
+connections = 200
+concurrency = 50
+
+# What the hosts send: 25 ms +- 5 ms (normal), 2% lost in bursts of about 3
+# frames (Gilbert-Elliott), on a 20 Mbit/s link with a 200 frame queue.
+# Seeded, so a run can be repeated.
+impair = "delay=25ms jitter=5ms distribution=normal loss=2% loss_burst=3 rate=20mbit limit=200 seed=7"
+
+# What they receive: 1% lost, held 2 ms, and now and then a frame skips the
+# wait and overtakes the others.
+[impair_rx]
+loss = "1%"
+delay = "2ms"
+reorder = "1%"
+seed = 8
+
+[client]
+ip = "192.168.10.100/24"
+ips = 10
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.50/24"
+gateway = "192.168.20.1"
+vlan = 20
+
+[tcp]
+verify = true
+congestion = "cubic"         # RFC 9438, with HyStart++
+ecn = true                   # both ends emulated: they agree on ECN
+rto = "300ms"
+max_retries = 10

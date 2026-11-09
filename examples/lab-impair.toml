@@ -1,0 +1,44 @@
+# Impaired streams on the lab router (`sudo ferotrx lab up`): FeroTRX itself
+# delays, drops, duplicates and rate-limits each stream before it leaves the
+# port, so the effect shows in --rx without netem on the router. The streams
+# go to the router's stream receiver, 192.168.20.2, and come back on VLAN 20.
+#
+#   sudo ferotrx run examples/lab-impair.toml -i ftrx-lab --rx ftrx-lab -d 20s
+#   sudo ferotrx run examples/lab-two-vlans.toml -i ftrx-lab --impair "loss=1%"   (every stream)
+#
+# The run's report has a line per impaired stream:
+#   done impairments: 4001 in, 3923 out, 78 lost, held ms avg 15.71 ...
+# See docs/impairments.md.
+format = 1
+
+# Voice over a mobile link: 40 ms +- 10 ms, 2% lost in bursts.
+[[stream]]
+name = "voice"
+packet = "eth(src=02:00:00:00:10:02,dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.2,dst=192.168.20.2,dscp=46)/udp(sport=4000,dport=5004)/raw(len=160)"
+rate = "50pps"
+loops = 0
+latency = true
+impair = "delay=40ms jitter=10ms distribution=normal loss=2% loss_burst=2 seed=1"
+
+# Video through a 5 Mbit/s shaper with a short queue: what does not fit is
+# dropped at the tail, as a policer would.
+[[stream]]
+name = "video"
+packet = "eth(src=02:00:00:00:10:03,dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.3,dst=192.168.20.2,dscp=34)/udp(sport=4002,dport=5006)/raw(len=1200)"
+rate = "8mbps"
+loops = 0
+latency = true
+[stream.impair]
+rate = "5mbit"
+limit = 50
+seed = 2
+
+# A flaky path: duplicates and corrupted frames (checksums fixed again, so
+# only the payload is wrong).
+[[stream]]
+name = "flaky"
+pcap = "dns.pcap"
+rate = "100pps"
+loops = 0
+rewrite = ["vlan_push=10", "mac_dst=02:00:00:00:00:01", "ip_src=192.168.10.4", "ip_dst=192.168.20.2"]
+impair = "duplicate=2% corrupt=1% fix_checksums=true seed=3"

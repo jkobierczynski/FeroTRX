@@ -1,0 +1,40 @@
+# Stream profiles through the lab router, each checked at its receiver:
+# bursts and streams that start each other, tunnels, and FeroTRX's own
+# impairments. The streams go to the router's stream receiver,
+# 192.168.20.2, which sends them back on VLAN 20 to ftrx-lab.
+#
+#   sudo ferotrx scenario run examples/lab-scenario-streams.toml --lab
+format = 1
+name = "lab-streams"
+description = "Bursts and stream sequences, tunnels and impaired streams through the lab router"
+iface = "ftrx-lab"
+attempts = 2
+
+[lab]
+
+# Every burst and every round of lab-sequence.toml gets through.
+[[check]]
+name = "bursts and sequences"
+traffic = "lab-sequence.toml"
+rx = "ftrx-lab"
+duration = "4s"
+require = ["tx_packets > 10000", "loss_pct < 1%"]
+
+# VXLAN, GTP-U and GRE frames are routed by their outer headers, and the
+# receiver finds the signatures inside.
+[[check]]
+name = "tunnels are routed"
+traffic = "lab-tunnels.toml"
+rx = "ftrx-lab"
+duration = "4s"
+require = ["rx_packets > 3000", "loss_pct < 1%"]
+
+# The voice stream is 40 ms late and loses about 2%; the video stream is cut
+# to 5 Mbit/s by the queue limit (FeroTRX drops those frames itself:
+# impair_dropped, not loss in the network).
+[[check]]
+name = "impaired streams"
+traffic = "lab-impair.toml"
+rx = "ftrx-lab"
+duration = "5s"
+require = ["latency_p50 > 20ms", "impair_dropped > 0"]

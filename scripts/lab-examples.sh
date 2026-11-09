@@ -105,6 +105,33 @@ echo "the router sent $routed packets out of rt.20"
 # emulated MAC again.
 ip netns exec ferotrx-lab ip neigh del 192.168.20.50 dev rt.20 || true
 
+echo "== L3 port: examples/lab-l3-port.toml (ARP for the router's MAC)"
+"$BIN" run examples/lab-l3-port.toml -i ftrx-lab --rx ftrx-lab -d 3s --report "$tmp/l3.json" >"$tmp/l3.log" 2>&1 ||
+    { cat "$tmp/l3.log" >&2; fail "lab-l3-port.toml failed"; }
+jq -c '.loss | {offered, received}' "$tmp/l3.json" || true
+received=$(jq '.loss.received // 0' "$tmp/l3.json" 2>/dev/null || echo 0)
+# 400 frames a second for 3 s, back through the router.
+[ "$received" -ge 1000 ] || fail "only $received frames of lab-l3-port.toml came back"
+# The router learnt the port's address from its ARP answers.
+ip netns exec ferotrx-lab ip neigh show 192.168.10.9 | grep -q lladdr ||
+    fail "the router has no neighbor entry for the port's address 192.168.10.9"
+
+echo "== sweep: examples/lab-bench-sweep.toml (one size, two trials)"
+"$BIN" bench examples/lab-bench-sweep.toml -i ftrx-lab --rx ftrx-lab --size 508 --repetitions 2 \
+    --report "$tmp/sweep.json" >"$tmp/sweep.log" 2>&1 || { cat "$tmp/sweep.log" >&2; fail "lab-bench-sweep.toml failed"; }
+jq -c '.sizes[]? | {size, rx_pps: .sweep.rx_pps.median, loss_pct: .sweep.loss_pct.median}' "$tmp/sweep.json" || true
+[ "$(jq '[.sizes[]?.sweep.rx_pps.median] | min // 0 | floor' "$tmp/sweep.json" 2>/dev/null || echo 0)" -gt 1000 ] ||
+    fail "the sweep received too little"
+
+if [ -e /proc/sys/net/ipv6 ]; then
+    echo "== hosts: examples/lab-prefix-delegation.toml (DHCPv6 server and three CPEs)"
+    "$BIN" host examples/lab-prefix-delegation.toml -i ftrx-lab -d 8s >"$tmp/pd.log" 2>&1 ||
+        { cat "$tmp/pd.log" >&2; fail "lab-prefix-delegation.toml failed"; }
+    n=$(sed -n '/^stopped/,$p' "$tmp/pd.log" | grep -c "delegated prefix fd00:6100:" || true)
+    echo "$n prefixes delegated"
+    [ "$n" = 3 ] || { tail -5 "$tmp/pd.log" >&2; fail "$n of 3 CPEs got a prefix"; }
+fi
+
 # Waits for a scenario run to end and prints its JSON.
 wait_scenario() { # id
     i=0

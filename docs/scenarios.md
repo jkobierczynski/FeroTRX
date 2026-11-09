@@ -141,6 +141,9 @@ Scenarios for the lab router, each naming the router it needs:
 | [`lab-scenario-apps.toml`](../examples/lab-scenario-apps.toml) | resets TCP 8080 | HTTP (keep-alive, uploads, chunked answers) and DNS over TCP, HTTPS with verified certificates, the DNS zone of `lab-dns.toml`, HTTP on 8080 refused |
 | [`lab-scenario-impaired.toml`](../examples/lab-scenario-impaired.toml) | 2% loss, 20 ms delay | TCP and DNS recover by retransmitting; the stream shows the loss and the delay |
 | [`lab-scenario-ipv6.toml`](../examples/lab-scenario-ipv6.toml) | IPv6, routed without NAT | web, DNS and a stream over IPv6 |
+| [`lab-scenario-streams.toml`](../examples/lab-scenario-streams.toml) | as built | multi-burst and `next` streams with a share of the line, VXLAN/GTP-U/GRE streams routed by their outer headers, FeroTRX's own stream impairments |
+| [`lab-scenario-tunnels.toml`](../examples/lab-scenario-tunnels.toml) | routed without NAT | TCP and DNS inside GTP-U, a TEID per client |
+| [`lab-scenario-services.toml`](../examples/lab-scenario-services.toml) | as built | NTP, TCP over an impaired port with CUBIC and ECN, a short Y.1564 test |
 
 While a scenario runs on a control server, each check is also a TCP, UDP
 or stream run of the server (`tcp.list`, `udp.list`, `run.list`, named after

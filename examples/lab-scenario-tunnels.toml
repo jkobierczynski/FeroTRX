@@ -1,0 +1,37 @@
+# Stateful traffic inside GTP-U through the lab router, built without NAT so
+# the tunnel ends reach each other by their own addresses: TCP (the HTTP
+# session of http.pcap) and DNS, each phone with its own TEID.
+#
+#   sudo ferotrx scenario run examples/lab-scenario-tunnels.toml --lab
+format = 1
+name = "lab-tunnels"
+description = "TCP and DNS inside GTP-U, through the lab router without NAT"
+iface = "ftrx-lab"
+attempts = 2
+
+[lab]
+nat = false
+
+[[check]]
+name = "web inside GTP-U"
+tcp = "lab-gtpu.toml"
+require = ["timed_out == 0"]
+
+[[check]]
+name = "DNS inside GTP-U"
+[check.udp]
+app = "dns"
+queries = ["www.lab.local A", "lab.local MX"]
+records = ["www.lab.local 300 A 172.16.1.80", "lab.local MX 10 mail.lab.local"]
+rate = 50
+transactions = 200
+[check.udp.client]
+ip = "172.16.0.100/24"
+ips = 20
+gateway = "172.16.0.1"
+[check.udp.server]
+ip = "172.16.1.53/24"
+gateway = "172.16.1.1"
+[check.udp.gtpu]
+client = "local=192.168.10.31,remote=192.168.20.31,gateway=192.168.10.1,vlan=10,teid=2000"
+server = "local=192.168.20.31,remote=192.168.10.31,gateway=192.168.20.1,vlan=20,teid=2000"

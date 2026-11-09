@@ -132,7 +132,7 @@ Details, and the permissions sending needs: [docs/install.md](docs/install.md).
 
 ## Quickstart
 
-The sample files in [`examples/`](examples) work as they are. Without root
+The sample files in [`examples/`](examples) work as they are ([the list](examples/README.md)). Without root
 and without sending anything:
 
 ```sh
