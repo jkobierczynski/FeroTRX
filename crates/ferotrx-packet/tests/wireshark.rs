@@ -92,8 +92,8 @@ const CASES: &[Case] = &[
         spec: "eth/vlan(id=5)/mpls(label=100,tc=5)/mpls(label=200,ttl=1)/ipv4/udp/raw(len=4)",
         opts: &[],
         want: &[
-            // Not frame.protocols: Wireshark 4.0 leaves `ip` out of it after
-            // MPLS, though it dissects the IPv4 header.
+            // Not frame.protocols: Wireshark 4.4 leaves `ip` out of it after
+            // MPLS (4.2 has it), though it dissects the IPv4 header.
             ("vlan.id", "5"),
             ("ip.version", "4"),
             ("ip.checksum.status", "1"),
