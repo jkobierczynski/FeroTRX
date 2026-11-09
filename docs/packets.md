@@ -104,7 +104,7 @@ ferotrx build 'eth/ipv4(dst=224.0.0.22,ttl=1)/igmp(rec=join@239.1.2.3,rec=allow@
               'eth/ipv4/igmp(type=v3query,group=0.0.0.0)' -o mcast.pcap
 
 # Spanning tree BPDU over 802.3/LLC
-ferotrx build 'eth(dst=01:80:c2:00:00:00)/llc(dsap=0x42,ssap=0x42)/raw(hex=0000000000)' -v
+ferotrx build 'eth(dst=01:80:c2:00:00:00)/llc(dsap=0x42,ssap=0x42)/raw(hex=000000000080000000000000000000000080000000000000008001000014000200000f00)' -v
 ```
 
 Every tunnel and multicast header the builder makes is checked against
