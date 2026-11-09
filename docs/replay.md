@@ -41,9 +41,47 @@ ferotrx replay capture.pcap -i eth0 \
 | `vlan_push=ID[:PCP]`, `qinq_push=ID[:PCP]` | Add an outer 802.1Q or 802.1ad tag. |
 | `vlan_set=ID[:PCP]` | Change the outer tag. |
 | `vlan_pop` | Remove the outer tag. |
-| `fix_checksums` | Recompute IPv4, TCP, UDP and ICMPv6 checksums (for captures taken with checksum offload). |
+| `fix_checksums` | Recompute IPv4, TCP, UDP and ICMPv6 checksums (for captures taken with checksum offload), and those of the tunnels around them. |
+| `encap=SPEC` | Put the packet in a tunnel. `SPEC` is a [packet description](packets.md) of the outer headers, such as `eth/ipv4(dst=10.0.0.2)/udp/vxlan(vni=100)`. |
+| `decap` | Take the outermost tunnel or MPLS label stack off. |
+| `mpls_push=LABEL[:TC[:TTL]]` | Add an MPLS label in front of the IP header or the labels already there (TTL 64 unless given). |
+| `mpls_pop` | Remove the outermost MPLS label. |
 
 Without `_src` or `_dst`, a rewrite changes both.
+
+### Tunnels
+
+Packets inside MPLS, IP in IP (4in4, 6in4, 4in6, 6in6), GRE, VXLAN (UDP
+4789), Geneve (UDP 6081) and GTP-U (UDP 2152) are rewritten inside: `ip_src`,
+`port_dst` and the other address, port and payload rewrites and `--vary`
+fields change the innermost headers, and the tunnel's UDP and GRE checksums
+are kept right with them. Latency signatures go at the end of the innermost
+payload too, so `--rx` measures through a tunnel endpoint that decapsulates.
+
+`encap=` takes the outer headers as a packet description. When it ends with
+`vxlan`, or with `eth` (`.../gre/eth` for Ethernet over GRE, `.../mpls/eth`
+for an Ethernet pseudowire with a control word), the whole Ethernet frame is
+carried; otherwise the IP datagram is, and the tunnel's protocol field (GRE
+protocol, Geneve protocol, IP protocol 4 or 41) follows each packet's IP
+version. Lengths and the tunnel's checksums are set for every packet.
+
+```sh
+# A capture through a VXLAN tunnel to 10.0.0.2, one VNI per 100 packets
+sudo ferotrx replay web.pcap -i eth0 \
+  -r 'encap=eth(dst=02:00:00:00:00:01)/ipv4(src=10.0.0.1,dst=10.0.0.2)/udp/vxlan(vni=100)' \
+  --vary vni=100..199,every=100
+
+# The same capture as GTP-U from a base station, one TEID per client
+sudo ferotrx replay web.pcap -i eth0 --loop 50 \
+  -r 'encap=eth/ipv4(src=10.1.0.1,dst=10.2.0.1)/udp/gtpu(teid=1000,qfi=9,pdu=ul)' \
+  --vary ip_src+=0..49,every=21 --vary teid=1000..1049,every=21
+
+# Two MPLS labels on top, then take the tunnel off a GRE capture
+ferotrx inspect gre.pcap -r decap -r mpls_push=100 -r mpls_push=200:5
+```
+
+Plain rewrites changed the outer headers of tunneled captures before 0.47.0;
+use `outer_ip_src` and friends in `--vary` for the tunnel itself.
 
 ## Field engine
 
@@ -52,7 +90,8 @@ packet gets the first value of the range, the next packet the next value, and
 so on. Repeat it for more fields. It runs after the rewrites and works on
 `replay`, `build` and `inspect` (to preview), and as `vary` in profiles.
 IPv4, TCP, UDP, ICMP and ICMPv6 checksums are kept right; a length change also
-fixes the IP and UDP length fields.
+fixes the IP and UDP length fields. In tunneled packets the plain fields are
+the innermost headers' and the tunnel's lengths and checksums follow.
 
 ```sh
 # 20000 SYNs from 200 clients and random source ports, through the NAT router
@@ -79,6 +118,10 @@ The form is `FIELD=MIN..MAX`, then options separated by commas:
 | `ip_id`, `ttl` | IPv4 identification; IPv4 TTL or IPv6 hop limit |
 | `payload@OFFSET[:SIZE]` | SIZE bytes (1 to 16, default 1), big endian, OFFSET bytes after the TCP, UDP or ICMP header |
 | `len` | Frame length without FCS: the payload is cut or padded with zeros, never the headers |
+| `outer_ip_src`, `outer_ip_dst` | Addresses of the outermost tunnel |
+| `outer_port_src`, `outer_port_dst` | UDP ports of the outermost VXLAN, Geneve or GTP-U tunnel |
+| `teid`, `vni`, `gre_key` | GTP-U TEID, VXLAN or Geneve VNI, GRE key (when the header has one) |
+| `mpls` | The outermost MPLS label (TC, S and TTL kept) |
 
 | Option | Effect |
 | --- | --- |

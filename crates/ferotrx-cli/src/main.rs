@@ -153,7 +153,11 @@ struct ReplayArgs {
     /// Rewrite packets before sending; repeat to chain. Examples:
     /// mac_dst=02:00:00:00:00:01, ip_dst=10.0.0.0/8->192.168.20.0,
     /// port_dst=53->5353, vlan_push=20[:PCP], qinq_push=100, vlan_set=30,
-    /// vlan_pop, fix_checksums. `_src`/`_dst` can be left off to change both.
+    /// vlan_pop, fix_checksums, encap=eth/ipv4(dst=10.0.0.2)/udp/vxlan(vni=100)
+    /// (any packet description; ending in vxlan or eth carries the whole frame),
+    /// decap, mpls_push=LABEL[:TC[:TTL]], mpls_pop. `_src`/`_dst` can be left
+    /// off to change both. In tunneled packets addresses and ports are the
+    /// innermost ones.
     #[arg(short, long = "rewrite", value_name = "SPEC")]
     rewrites: Vec<Rewrite>,
 
@@ -162,7 +166,9 @@ struct ReplayArgs {
     /// ip_src=10.0.0.1..10.0.0.254, ip_dst=192.168.20.0/24,random,
     /// port_src=1024..65535, vlan=10..20, mac_src+=0..99, payload@0:4=0..1000,
     /// len=64..1518,random. Fields: mac_src/dst, ip_src/dst, port_src/dst, vlan,
-    /// ip_id, ttl, payload@OFFSET[:SIZE], len. Runs after the rewrites.
+    /// ip_id, ttl, payload@OFFSET[:SIZE], len (innermost headers of tunneled
+    /// packets), outer_ip_src/dst, outer_port_src/dst, teid, vni, gre_key, mpls
+    /// (the tunnel). Runs after the rewrites.
     #[arg(long = "vary", value_name = "SPEC")]
     vary: Vec<FieldVar>,
 

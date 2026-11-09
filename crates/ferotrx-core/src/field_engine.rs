@@ -45,6 +45,19 @@ pub enum VarField {
     /// Frame length in bytes, without FCS. The payload is cut or padded with
     /// zeros and the IP and UDP lengths follow.
     Len,
+    /// Address of the outermost tunnel's IP header; [`VarField::Ip`] writes
+    /// the innermost.
+    OuterIp(Side),
+    /// UDP port of the outermost UDP tunnel (VXLAN, Geneve, GTP-U).
+    OuterPort(Side),
+    /// GTP-U tunnel endpoint ID (32 bits).
+    Teid,
+    /// VXLAN or Geneve network identifier (24 bits).
+    Vni,
+    /// GRE key (32 bits), when the GRE header has one.
+    GreKey,
+    /// Outermost MPLS label (20 bits).
+    Mpls,
 }
 
 impl VarField {
@@ -52,8 +65,11 @@ impl VarField {
     fn bits(self) -> u32 {
         match self {
             VarField::Mac(_) => 48,
-            VarField::Ip(_) => 128,
-            VarField::Port(_) | VarField::IpId | VarField::Len => 16,
+            VarField::Ip(_) | VarField::OuterIp(_) => 128,
+            VarField::Port(_) | VarField::OuterPort(_) | VarField::IpId | VarField::Len => 16,
+            VarField::Teid | VarField::GreKey => 32,
+            VarField::Vni => 24,
+            VarField::Mpls => 20,
             VarField::Vlan => 12,
             VarField::Ttl => 8,
             VarField::Payload { size, .. } => size as u32 * 8,
@@ -91,7 +107,11 @@ pub enum VarOp {
 ///
 /// Fields: `mac_src`, `mac_dst`, `ip_src`, `ip_dst`, `port_src`, `port_dst`,
 /// `vlan`, `ip_id`, `ttl`, `payload@OFFSET[:SIZE]` (SIZE 1 to 16 bytes,
-/// default 1) and `len`. With `+=` the value is added to what the packet
+/// default 1) and `len`. In tunneled packets these change the innermost
+/// headers; `outer_ip_src`, `outer_ip_dst`, `outer_port_src` and
+/// `outer_port_dst` change the outermost tunnel, and `teid` (GTP-U), `vni`
+/// (VXLAN, Geneve), `gre_key` and `mpls` (the outermost label) the tunnel
+/// headers themselves. With `+=` the value is added to what the packet
 /// holds (wrapping around), and `mac`, `ip` and `port` shift both sides.
 ///
 /// Options: `inc` (the default), `dec`, `random`, `step=N` (default 1),
@@ -140,7 +160,7 @@ impl FieldVar {
             }
         }
         let bits = match self.field {
-            VarField::Ip(_) if !self.add && self.ipv4 => 32,
+            VarField::Ip(_) | VarField::OuterIp(_) if !self.add && self.ipv4 => 32,
             f => f.bits(),
         };
         let limit = u128::MAX >> (128 - bits);
@@ -164,7 +184,11 @@ impl FieldVar {
         if !self.add
             && matches!(
                 self.field,
-                VarField::Mac(Side::Both) | VarField::Ip(Side::Both) | VarField::Port(Side::Both)
+                VarField::Mac(Side::Both)
+                    | VarField::Ip(Side::Both)
+                    | VarField::Port(Side::Both)
+                    | VarField::OuterIp(Side::Both)
+                    | VarField::OuterPort(Side::Both)
             )
         {
             return bad("setting both sides to the same value makes no sense; use _src or _dst, or += to shift both".into());
@@ -192,37 +216,79 @@ impl FieldVar {
                     }
                 }
             }
-            VarField::Ip(side) => {
-                let Some(ip) = ip_layer(data) else { return };
+            VarField::Ip(side) | VarField::OuterIp(side) => {
+                let Some(layers) = net::parse(data) else {
+                    return;
+                };
+                let ip = match self.field {
+                    VarField::Ip(_) => layers.ip.as_ref(),
+                    _ => layers.tunnels.first().map(|t| &t.ip),
+                };
+                let Some(ip) = ip else { return };
                 let width = ip.src.len();
                 if !self.add && self.ipv4 != (width == 4) {
                     return;
                 }
-                let mut sums = Vec::with_capacity(2);
-                if let Some(at) = ip.header_checksum {
-                    sums.push((0, at));
-                }
-                sums.extend(ip.l4_checksum(data));
+                let sums = layers.sums(data);
                 for (wanted, range) in [
                     (side_src(side), ip.src.clone()),
                     (side_dst(side), ip.dst.clone()),
                 ] {
                     if wanted {
                         let v = self.value_for(&data[range.clone()], value);
-                        net::replace(data, range, &v, &sums);
+                        net::write_with(data, range, &v, &sums);
                     }
                 }
             }
-            VarField::Port(side) => {
-                let Some(ip) = ip_layer(data) else { return };
-                let Some(at) = ip.ports(data) else { return };
-                let sums: Vec<_> = ip.l4_checksum(data).into_iter().collect();
+            VarField::Port(side) | VarField::OuterPort(side) => {
+                let Some(layers) = net::parse(data) else {
+                    return;
+                };
+                let at = match self.field {
+                    VarField::Port(_) => layers.ip.as_ref().and_then(|ip| ip.ports(data)),
+                    _ => layers.tunnels.first().and_then(|t| t.udp),
+                };
+                let Some(at) = at else { return };
+                let sums = layers.sums(data);
                 for (wanted, off) in [(side_src(side), at), (side_dst(side), at + 2)] {
                     if wanted {
                         let v = self.value_for(&data[off..off + 2], value);
-                        net::replace(data, off..off + 2, &v, &sums);
+                        net::write_with(data, off..off + 2, &v, &sums);
                     }
                 }
+            }
+            VarField::Teid | VarField::Vni | VarField::GreKey => {
+                let Some(layers) = net::parse(data) else {
+                    return;
+                };
+                let t = layers.tunnels.iter().find(|t| match self.field {
+                    VarField::Teid => t.gtp_len.is_some(),
+                    VarField::Vni => t.udp.is_some() && t.gtp_len.is_none(),
+                    _ => t.gre.is_some(),
+                });
+                let Some(range) = t.and_then(|t| t.key.clone()) else {
+                    return;
+                };
+                let v = self.value_for(&data[range.clone()], value);
+                layers.write(data, range, &v);
+            }
+            VarField::Mpls => {
+                let Some(layers) = net::parse(data) else {
+                    return;
+                };
+                let Some(&at) = layers.mpls.first() else {
+                    return;
+                };
+                let entry = u32::from_be_bytes(data[at..at + 4].try_into().expect("4 bytes"));
+                let label = u128::from(entry >> 12);
+                let label = if self.add {
+                    label.wrapping_add(value)
+                } else {
+                    value
+                } as u32
+                    & 0xf_ffff;
+                let v = ((label << 12) | (entry & 0xfff)).to_be_bytes();
+                layers.write(data, at..at + 4, &v);
             }
             VarField::Vlan => {
                 if !net::be16(data, 12).is_some_and(net::is_vlan_tpid) {
@@ -241,40 +307,44 @@ impl FieldVar {
                 net::put16(data, 14, (tci & 0xf000) | id);
             }
             VarField::IpId => {
-                let Some(ip) = ip_layer(data) else { return };
-                let Some(sum) = ip.header_checksum else {
+                let Some(layers) = net::parse(data) else {
                     return;
                 };
+                let Some(ip) = &layers.ip else { return };
+                if ip.version != 4 {
+                    return;
+                }
                 let at = ip.start + 4;
                 let v = self.value_for(&data[at..at + 2], value);
-                net::replace(data, at..at + 2, &v, &[(0, sum)]);
+                layers.write(data, at..at + 2, &v);
             }
             VarField::Ttl => {
-                let Some(ip) = ip_layer(data) else { return };
-                match ip.header_checksum {
-                    Some(sum) => {
-                        let at = ip.start + 8;
-                        let v = self.value_for(&data[at..at + 1], value);
-                        net::replace_any(data, at..at + 1, &v, &[(0, sum)]);
-                    }
-                    None => {
-                        let at = ip.start + 7;
-                        data[at] = self.value_for(&data[at..at + 1], value)[0];
-                    }
-                }
+                let Some(layers) = net::parse(data) else {
+                    return;
+                };
+                let Some(ip) = &layers.ip else { return };
+                let at = if ip.version == 4 {
+                    ip.start + 8
+                } else {
+                    ip.start + 7
+                };
+                let v = self.value_for(&data[at..at + 1], value);
+                layers.write(data, at..at + 1, &v);
             }
             VarField::Payload { offset, size } => {
-                let (start, end, sums) = payload_start(data);
+                let (start, end, layers) = payload_start(data);
                 let Some(at) = start.checked_add(offset) else {
                     return;
                 };
                 if at.saturating_add(size) > data.len() {
                     return;
                 }
-                // Ethernet padding after the datagram is not covered by any checksum.
-                let sums = if at + size <= end { sums } else { Vec::new() };
                 let v = self.value_for(&data[at..at + size], value);
-                net::replace_any(data, at..at + size, &v, &sums);
+                match layers {
+                    // Ethernet padding after the datagram is not covered by any checksum.
+                    Some(layers) if at + size <= end => layers.write(data, at..at + size, &v),
+                    _ => data[at..at + size].copy_from_slice(&v),
+                }
             }
             VarField::Len => set_len(data, value as usize),
         }
@@ -301,8 +371,10 @@ impl FieldVar {
                 m.copy_from_slice(&b[10..]);
                 MacAddr(m).to_string()
             }
-            VarField::Ip(_) if !self.add && self.ipv4 => Ipv4Addr::from(v as u32).to_string(),
-            VarField::Ip(_) if !self.add => Ipv6Addr::from(v).to_string(),
+            VarField::Ip(_) | VarField::OuterIp(_) if !self.add && self.ipv4 => {
+                Ipv4Addr::from(v as u32).to_string()
+            }
+            VarField::Ip(_) | VarField::OuterIp(_) if !self.add => Ipv6Addr::from(v).to_string(),
             _ => v.to_string(),
         }
     }
@@ -316,10 +388,6 @@ fn side_dst(s: Side) -> bool {
     matches!(s, Side::Dst | Side::Both)
 }
 
-fn ip_layer(data: &[u8]) -> Option<net::IpLayer> {
-    net::parse(data)?.ip
-}
-
 /// Length of the TCP, UDP or ICMP header at `at`, when the packet holds it.
 fn l4_header_len(data: &[u8], proto: u8, at: usize) -> Option<usize> {
     let len = match proto {
@@ -330,37 +398,43 @@ fn l4_header_len(data: &[u8], proto: u8, at: usize) -> Option<usize> {
     (at + len <= data.len()).then_some(len)
 }
 
-/// Where the payload starts, where the IP datagram ends, and the checksums
-/// that cover the payload.
-fn payload_start(data: &[u8]) -> (usize, usize, Vec<(u8, usize)>) {
+/// Where the payload starts, where the IP datagram ends, and the layers
+/// whose checksums cover the payload.
+fn payload_start(data: &[u8]) -> (usize, usize, Option<net::Layers>) {
     let len = data.len();
     let Some((l3, _)) = net::l3_offset(data) else {
-        return (net::ETH_HEADER, len, Vec::new());
+        return (net::ETH_HEADER, len, None);
     };
-    let Some(ip) = ip_layer(data) else {
-        return (l3, len, Vec::new());
+    let Some(layers) = net::parse(data) else {
+        return (l3, len, None);
+    };
+    let Some(ip) = layers.ip.clone() else {
+        return (l3, len, None);
     };
     let end = ip.end.unwrap_or(len);
     let Some((proto, at)) = ip.l4 else {
         // A later fragment: its payload starts right after the IP header.
-        return (ip.start + ip.header_len, end, Vec::new());
+        return (ip.start + ip.header_len, end, Some(layers));
     };
     let Some(hdr) = l4_header_len(data, proto, at) else {
         // The capture is cut inside the transport header: nothing to write.
-        return (len, len, Vec::new());
+        return (len, len, None);
     };
-    let mut sums: Vec<_> = ip.l4_checksum(data).into_iter().collect();
-    if proto == IPPROTO_ICMP && ip.version == 4 && at + 4 <= len {
-        sums.push((IPPROTO_ICMP, at + 2));
-    }
-    (at + hdr, end, sums)
+    (at + hdr, end, Some(layers))
 }
 
 /// Cuts or pads the frame to `len` bytes and makes the IP and UDP lengths and
-/// all checksums match. IP fragments only change length if they are not IP.
+/// all checksums match, of the innermost datagram and of the tunnels around
+/// it. IP fragments only change length if they are not IP.
 pub(crate) fn set_len(data: &mut Vec<u8>, len: usize) {
-    let Some(ip) = ip_layer(data) else {
+    let Some(layers) = net::parse(data) else {
         data.resize(len.max(net::ETH_HEADER), 0);
+        return;
+    };
+    let Some(ip) = layers.ip.clone() else {
+        if layers.tunnels.is_empty() {
+            data.resize(len.max(net::ETH_HEADER), 0);
+        }
         return;
     };
     if ip.fragmented {
@@ -389,7 +463,14 @@ pub(crate) fn set_len(data: &mut Vec<u8>, len: usize) {
     if let Some((IPPROTO_UDP, at, _)) = l4 {
         net::put16(data, at + 4, (len - at).min(0xffff) as u16);
     }
-    net::fix_checksums(data);
+    net::fix_tunnel_lengths(data, &layers, len);
+    // The tunnel lengths moved the datagram ends: parse again.
+    let Some(layers) = net::parse(data) else {
+        return;
+    };
+    if let Some(ip) = &layers.ip {
+        net::fix_ip(data, ip, false);
+    }
     // ICMPv4 has no pseudo header, so fix_checksums leaves it; recompute it here.
     if let Some((IPPROTO_ICMP, at, _)) = l4 {
         if ip.version == 4 {
@@ -398,6 +479,7 @@ pub(crate) fn set_len(data: &mut Vec<u8>, len: usize) {
             net::put16(data, at + 2, sum);
         }
     }
+    net::fix_tunnels(data, &layers);
 }
 
 impl FromStr for FieldVar {
@@ -428,6 +510,12 @@ impl FromStr for FieldVar {
             "ip_id" => VarField::IpId,
             "ttl" => VarField::Ttl,
             "len" => VarField::Len,
+            "outer_ip" | "outer_ip_src" | "outer_ip_dst" => VarField::OuterIp(side(name)),
+            "outer_port" | "outer_port_src" | "outer_port_dst" => VarField::OuterPort(side(name)),
+            "teid" => VarField::Teid,
+            "vni" => VarField::Vni,
+            "gre_key" => VarField::GreKey,
+            "mpls" => VarField::Mpls,
             p if p.starts_with("payload@") => {
                 let rest = &p["payload@".len()..];
                 let (off, size) = match rest.split_once(':') {
@@ -447,7 +535,7 @@ impl FromStr for FieldVar {
             }
             _ => {
                 return Err(err(
-                    "unknown field (try mac_src, mac_dst, ip_src, ip_dst, port_src, port_dst, vlan, ip_id, ttl, payload@OFFSET[:SIZE], len)",
+                    "unknown field (try mac_src, mac_dst, ip_src, ip_dst, port_src, port_dst, vlan, ip_id, ttl, payload@OFFSET[:SIZE], len, outer_ip_src, outer_ip_dst, outer_port_src, outer_port_dst, teid, vni, gre_key, mpls)",
                 ))
             }
         };
@@ -457,7 +545,7 @@ impl FromStr for FieldVar {
 
         let mut ipv4 = false;
         let (min, max) = match field {
-            VarField::Ip(_) if !add => {
+            VarField::Ip(_) | VarField::OuterIp(_) if !add => {
                 let (min, max, v4) = parse_ip_range(values).map_err(|m| err(&m))?;
                 ipv4 = v4;
                 (min, max)
@@ -559,6 +647,12 @@ impl fmt::Display for FieldVar {
             VarField::IpId => f.write_str("ip_id")?,
             VarField::Ttl => f.write_str("ttl")?,
             VarField::Len => f.write_str("len")?,
+            VarField::OuterIp(s) => write!(f, "outer_ip{}", side(s))?,
+            VarField::OuterPort(s) => write!(f, "outer_port{}", side(s))?,
+            VarField::Teid => f.write_str("teid")?,
+            VarField::Vni => f.write_str("vni")?,
+            VarField::GreKey => f.write_str("gre_key")?,
+            VarField::Mpls => f.write_str("mpls")?,
             VarField::Payload { offset, size: 1 } => write!(f, "payload@{offset}")?,
             VarField::Payload { offset, size } => write!(f, "payload@{offset}:{size}")?,
         }
@@ -1003,6 +1097,71 @@ mod tests {
             "mac_src=zz..02:00:00:00:00:01",
         ] {
             assert!(s.parse::<FieldVar>().is_err(), "{s} should fail");
+        }
+    }
+
+    #[cfg(feature = "build")]
+    #[test]
+    fn tunnels_vary_inside_and_out() {
+        let clean = |f: &[u8]| ferotrx_packet::decode(1, f).problems.is_empty();
+        for spec in [
+            "eth/ipv4(src=10.0.0.1,dst=10.0.0.2)/udp/vxlan(vni=5)/eth/ipv4(src=192.168.1.1,dst=192.168.1.2)/udp(sport=1,dport=2)/raw(len=40)",
+            "eth/ipv4/udp/gtpu(teid=9,qfi=1,seq=1)/ipv4(src=192.168.1.1,dst=192.168.1.2)/tcp/raw(len=40)",
+            "eth/ipv6/udp/geneve(vni=3)/ipv6(src=fd00::1)/udp/raw(len=40)",
+            "eth/ipv4/gre(csum=1,key=4)/ipv4(src=192.168.1.1)/udp/raw(len=40)",
+            "eth/mpls(label=9)/mpls(label=10)/ipv4/udp/raw(len=40)",
+            "eth/ipv6/ipv4/icmp/raw(len=40)",
+        ] {
+            let f: Vec<u8> = spec
+                .parse::<ferotrx_packet::PacketSpec>()
+                .unwrap()
+                .build()
+                .unwrap();
+            for var in [
+                "ip_src+=0..300",
+                "port_dst=1000..1003",
+                "ttl=1..3",
+                "ip_id=7..9",
+                "payload@3:5=0..0xffffffffff,random,seed=1",
+                "len=90..300,random,seed=2",
+                "outer_ip_dst+=0..3",
+                "outer_port_src=40000..40003",
+                "teid=100..103",
+                "vni=0xfffff0..0xffffff",
+                "gre_key=1..4",
+                "mpls=16..19",
+            ] {
+                for out in run(&[var], f.clone(), 4) {
+                    assert!(clean(&out), "{spec} {var}");
+                }
+            }
+        }
+        let f: Vec<u8> = "eth/ipv4(dst=10.0.0.2)/udp/gtpu(teid=1)/ipv4/udp/raw(len=4)"
+            .parse::<ferotrx_packet::PacketSpec>()
+            .unwrap()
+            .build()
+            .unwrap();
+        let out = run(&["teid=7..8", "outer_ip_dst=10.9.9.9"], f, 2);
+        let l = net::parse(&out[1]).unwrap();
+        let t = &l.tunnels[0];
+        assert_eq!(&out[1][t.key.clone().unwrap()], &[0, 0, 0, 8]);
+        assert_eq!(&out[1][t.ip.dst.clone()], &[10, 9, 9, 9]);
+        let out = run(&["mpls=99"], net::tests::udp4(), 1);
+        assert_eq!(out[0], net::tests::udp4());
+        for s in [
+            "teid=1..0x100000000",
+            "vni=0x1000000",
+            "mpls=0x100000",
+            "outer_ip=10.0.0.1",
+        ] {
+            assert!(s.parse::<FieldVar>().is_err(), "{s}");
+        }
+        for s in [
+            "outer_ip_src=10.0.0.1..10.0.0.9",
+            "teid=1..9,random",
+            "mpls+=1",
+        ] {
+            assert_eq!(s.parse::<FieldVar>().unwrap().to_string(), s);
         }
     }
 }
