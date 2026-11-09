@@ -1226,9 +1226,13 @@ impl ClientSession {
 impl AppSession for ClientSession {
     fn start(&mut self, cx: &mut AppCx) {
         if self.cfg.client.pipeline {
+            // The whole session at once, up to a bounded batch (a drawn
+            // length can be huge); `take` and `timer` send the next batch
+            // while the session allows more.
             let n = self
                 .target()
-                .unwrap_or(u64::from(self.cfg.client.per_connection));
+                .unwrap_or(u64::from(self.cfg.client.per_connection))
+                .min(PIPELINE_BATCH);
             for _ in 0..n {
                 self.send_next(cx);
             }
@@ -1292,6 +1296,9 @@ impl AppSession for ClientSession {
         }
     }
 }
+
+/// The most requests a pipelined client sends at once.
+const PIPELINE_BATCH: u64 = 1024;
 
 struct ServerSession {
     cfg: Arc<Http>,

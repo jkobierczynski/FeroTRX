@@ -279,7 +279,8 @@ pub struct TcpTemplate {
     /// requests.
     pub think: Option<Dist>,
     /// The user group (persona) whose users open this template's
-    /// connections, see [`TcpUsers`]; `None`: opened by the rate.
+    /// connections, see [`TcpClientConfig::users`]; `None`: opened by the
+    /// rate.
     pub group: Option<usize>,
 }
 
@@ -326,7 +327,6 @@ impl TcpTemplate {
         }
     }
 
-    /// Spreads this template's own connections around its `cps` by `model`.
     /// Sessions of this length (see [`session`](Self::session)).
     pub fn with_session(mut self, session: SessionLength) -> Self {
         self.session = Some(session);
@@ -339,6 +339,7 @@ impl TcpTemplate {
         self
     }
 
+    /// Spreads this template's own connections around its `cps` by `model`.
     pub fn with_model(mut self, model: TrafficModel) -> Self {
         self.model = model;
         self

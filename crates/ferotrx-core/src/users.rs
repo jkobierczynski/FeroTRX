@@ -292,7 +292,11 @@ impl Users {
             let (n, rate) = (self.groups[g].users, self.groups[g].arrival);
             for k in 0..n {
                 let at = match rate {
-                    Some(r) => now + Duration::from_secs_f64(f64::from(k) / r),
+                    Some(r) => now.saturating_add(
+                        Duration::try_from_secs_f64(f64::from(k) / r)
+                            .unwrap_or(crate::dist::MAX_TIME)
+                            .min(crate::dist::MAX_TIME),
+                    ),
                     None => now,
                 };
                 let slot = self.arrive(g, at);
