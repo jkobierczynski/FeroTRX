@@ -1765,6 +1765,137 @@ pub struct HostInfo {
     /// Its DHCPv6 server role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dhcpv6_server: Option<DhcpServerInfo>,
+    /// A prefix delegated to it by DHCPv6 (`address` is `PREFIX/LENGTH`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_prefix: Option<HostAddressInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lldp: Option<LldpInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mdns: Option<MdnsInfo>,
+    /// Its 802.1X supplicant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dot1x: Option<Dot1xInfo>,
+    /// Its 802.1X authenticator role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dot1x_authenticator: Option<Dot1xAuthenticatorInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_export: Option<FlowExportInfo>,
+}
+
+/// LLDP/CDP of a [`HostInfo`] (`ferotrx_core::LldpStatus`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LldpInfo {
+    pub lldp_sent: u64,
+    pub cdp_sent: u64,
+    /// LLDP and CDP frames heard.
+    pub received: u64,
+    #[serde(default)]
+    pub neighbors: Vec<LldpNeighborInfo>,
+}
+
+/// A neighbor an [`LldpInfo`] heard.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LldpNeighborInfo {
+    /// `lldp` or `cdp`.
+    pub protocol: String,
+    pub mac: String,
+    /// Chassis ID (CDP: device ID).
+    pub chassis: String,
+    pub port: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<String>,
+    pub ttl_s: f64,
+    pub remaining_s: f64,
+    pub frames: u64,
+}
+
+/// mDNS of a [`HostInfo`] (`ferotrx_core::MdnsStatus`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MdnsInfo {
+    /// The host's `.local` name.
+    pub name: String,
+    pub announcements: u64,
+    pub queries_sent: u64,
+    pub answers_sent: u64,
+    pub received: u64,
+    /// Others that claimed the host's names.
+    pub conflicts: u64,
+    /// Answers to its queries.
+    #[serde(default)]
+    pub found: Vec<MdnsRecordInfo>,
+}
+
+/// A record an [`MdnsInfo`] found.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MdnsRecordInfo {
+    pub name: String,
+    /// `A`, `AAAA`, `PTR`, `SRV` or `TXT`.
+    pub kind: String,
+    pub data: String,
+    /// Who answered.
+    pub source: String,
+}
+
+/// An 802.1X supplicant of a [`HostInfo`] (`ferotrx_core::Dot1xStatus`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Dot1xInfo {
+    /// `connecting`, `authenticating`, `authorized`, `refused` or `no authenticator`.
+    pub state: String,
+    pub identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticator: Option<String>,
+    /// The EAP method used (`MD5`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    pub starts: u64,
+    pub responses: u64,
+    pub successes: u64,
+    pub failures: u64,
+    /// Seconds from the first EAPOL-Start to EAP-Success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_time_s: Option<f64>,
+}
+
+/// An 802.1X authenticator role of a [`HostInfo`] (`ferotrx_core::AuthenticatorStatus`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Dot1xAuthenticatorInfo {
+    #[serde(default)]
+    pub sessions: Vec<Dot1xSessionInfo>,
+    pub starts: u64,
+    pub successes: u64,
+    pub failures: u64,
+    pub logoffs: u64,
+}
+
+/// A supplicant a [`Dot1xAuthenticatorInfo`] dealt with.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Dot1xSessionInfo {
+    pub mac: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    pub state: String,
+}
+
+/// A flow exporter of a [`HostInfo`] (`ferotrx_core::FlowExportStatus`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FlowExportInfo {
+    pub collector: String,
+    /// `netflow9` or `ipfix`.
+    pub version: String,
+    pub packets: u64,
+    pub bytes: u64,
+    pub records: u64,
+    pub templates: u64,
+    /// True while the collector's next hop is not resolved.
+    pub waiting: bool,
 }
 
 /// A DHCP or DHCPv6 server role of a [`HostInfo`] (`ferotrx_core::DhcpServerStatus`).
@@ -1801,6 +1932,9 @@ pub struct DhcpServerInfo {
     /// Discovers and solicits left unanswered: no free address.
     #[serde(default)]
     pub exhausted: u64,
+    /// Delegated prefixes (DHCPv6; `address` is `PREFIX/LENGTH`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delegations: Vec<DhcpLeaseInfo>,
 }
 
 /// A lease of a [`DhcpServerInfo`].
@@ -1820,20 +1954,21 @@ pub struct DhcpLeaseInfo {
 impl From<&DhcpServerStatus> for DhcpServerInfo {
     fn from(s: &DhcpServerStatus) -> Self {
         let c = &s.counters;
+        let lease = |l: &ferotrx_core::DhcpLease| DhcpLeaseInfo {
+            address: match l.prefix {
+                Some(len) => format!("{}/{len}", l.ip),
+                None => l.ip.to_string(),
+            },
+            mac: l.mac.map(|m| m.to_string()),
+            client: l.client.clone(),
+            hostname: l.hostname.clone(),
+            remaining_s: l.remaining.as_secs_f64(),
+        };
         Self {
             pool: s.pool.clone(),
             pool_size: s.pool_size,
-            leases: s
-                .leases
-                .iter()
-                .map(|l| DhcpLeaseInfo {
-                    address: l.ip.to_string(),
-                    mac: l.mac.map(|m| m.to_string()),
-                    client: l.client.clone(),
-                    hostname: l.hostname.clone(),
-                    remaining_s: l.remaining.as_secs_f64(),
-                })
-                .collect(),
+            leases: s.leases.iter().map(lease).collect(),
+            delegations: s.delegations.iter().map(lease).collect(),
             received: c.received,
             discovers: c.discovers,
             offers: c.offers,
@@ -1865,6 +2000,12 @@ pub struct HostAddressInfo {
     pub lease_s: Option<f64>,
     #[serde(default)]
     pub renewals: u64,
+    /// The link MTU a router advertised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u32>,
+    /// Search domains (DHCP option 15, DHCPv6, or a router's DNSSL).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domains: Vec<String>,
 }
 
 /// A group a [`HostInfo`] joined.
@@ -1886,6 +2027,8 @@ impl From<&HostAddress> for HostAddressInfo {
             dns: a.dns.iter().map(|d| d.to_string()).collect(),
             lease_s: a.lease.map(|l| l.as_secs_f64()),
             renewals: a.renewals,
+            mtu: a.mtu,
+            domains: a.domains.clone(),
         }
     }
 }
@@ -1913,6 +2056,86 @@ impl From<&HostStatus> for HostInfo {
                 .collect(),
             dhcp_server: h.dhcp_server.as_ref().map(Into::into),
             dhcpv6_server: h.dhcpv6_server.as_ref().map(Into::into),
+            delegated_prefix: h.delegated_prefix.as_ref().map(Into::into),
+            lldp: h.lldp.as_ref().map(|l| LldpInfo {
+                lldp_sent: l.lldp_sent,
+                cdp_sent: l.cdp_sent,
+                received: l.received,
+                neighbors: l
+                    .neighbors
+                    .iter()
+                    .map(|n| LldpNeighborInfo {
+                        protocol: n.protocol.clone(),
+                        mac: n.mac.to_string(),
+                        chassis: n.chassis.clone(),
+                        port: n.port.clone(),
+                        system_name: n.system_name.clone(),
+                        description: n.description.clone(),
+                        platform: n.platform.clone(),
+                        capabilities: n.capabilities.clone(),
+                        addresses: n.addresses.iter().map(|a| a.to_string()).collect(),
+                        ttl_s: n.ttl.as_secs_f64(),
+                        remaining_s: n.remaining.as_secs_f64(),
+                        frames: n.frames,
+                    })
+                    .collect(),
+            }),
+            mdns: h.mdns.as_ref().map(|m| MdnsInfo {
+                name: m.name.clone(),
+                announcements: m.announcements,
+                queries_sent: m.queries_sent,
+                answers_sent: m.answers_sent,
+                received: m.received,
+                conflicts: m.conflicts,
+                found: m
+                    .found
+                    .iter()
+                    .map(|f| MdnsRecordInfo {
+                        name: f.name.clone(),
+                        kind: f.kind.clone(),
+                        data: f.data.clone(),
+                        source: f.from.to_string(),
+                    })
+                    .collect(),
+            }),
+            dot1x: h.dot1x.as_ref().map(|d| Dot1xInfo {
+                state: d.state.to_string(),
+                identity: d.identity.clone(),
+                authenticator: d.authenticator.map(|m| m.to_string()),
+                method: d.method.clone(),
+                starts: d.starts,
+                responses: d.responses,
+                successes: d.successes,
+                failures: d.failures,
+                auth_time_s: d.auth_time.map(|t| t.as_secs_f64()),
+            }),
+            dot1x_authenticator: h
+                .dot1x_authenticator
+                .as_ref()
+                .map(|a| Dot1xAuthenticatorInfo {
+                    sessions: a
+                        .sessions
+                        .iter()
+                        .map(|s| Dot1xSessionInfo {
+                            mac: s.mac.to_string(),
+                            identity: s.identity.clone(),
+                            state: s.state.clone(),
+                        })
+                        .collect(),
+                    starts: a.starts,
+                    successes: a.successes,
+                    failures: a.failures,
+                    logoffs: a.logoffs,
+                }),
+            flow_export: h.flow_export.as_ref().map(|f| FlowExportInfo {
+                collector: f.collector.clone(),
+                version: f.version.clone(),
+                packets: f.packets,
+                bytes: f.bytes,
+                records: f.records,
+                templates: f.templates,
+                waiting: f.waiting,
+            }),
         }
     }
 }

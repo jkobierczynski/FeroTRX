@@ -63,6 +63,12 @@ pub struct RouterConfig {
     pub managed: bool,
     /// The O flag: other settings are available by DHCPv6.
     pub other: bool,
+    /// The link MTU to advertise (the MTU option).
+    pub mtu: Option<u32>,
+    /// DNS servers to advertise (RDNSS, RFC 8106).
+    pub dns: Vec<Ipv6Addr>,
+    /// Domain search list to advertise (DNSSL, RFC 8106).
+    pub search: Vec<String>,
 }
 
 impl RouterConfig {
@@ -73,7 +79,19 @@ impl RouterConfig {
             lifetime: Duration::from_secs(1800),
             managed: false,
             other: false,
+            mtu: None,
+            dns: Vec::new(),
+            search: Vec::new(),
         }
+    }
+
+    /// The lifetime of the DNS options: three advertisement intervals, at
+    /// least a minute (RFC 8106 asks for at least the maximum interval).
+    fn dns_lifetime(&self) -> u32 {
+        (self.interval * 3)
+            .max(Duration::from_secs(60))
+            .as_secs()
+            .min(u64::from(u32::MAX)) as u32
     }
 }
 
@@ -100,6 +118,20 @@ pub struct HostConfig {
     pub dhcp_server: Option<DhcpServerConfig>,
     /// Lease IPv6 addresses as a DHCPv6 server.
     pub dhcpv6_server: Option<Dhcpv6ServerConfig>,
+    /// Ask a DHCPv6 server for a delegated prefix (a requesting router,
+    /// RFC 8415) of this length (0: the server's choice). Works with any
+    /// `ipv6` mode, or without one.
+    pub prefix_delegation: Option<u8>,
+    /// Announce the host with LLDP and/or CDP, and list the neighbors heard.
+    pub lldp: Option<super::lldp::LldpConfig>,
+    /// Answer and ask multicast DNS (mDNS, DNS-SD).
+    pub mdns: Option<super::mdns::MdnsConfig>,
+    /// Authenticate the port by 802.1X (EAPOL) before using it.
+    pub dot1x: Option<super::eapol::Dot1xConfig>,
+    /// Act as an 802.1X authenticator for supplicants on the link.
+    pub dot1x_authenticator: Option<super::eapol::AuthenticatorConfig>,
+    /// Export NetFlow v9 or IPFIX records to a collector.
+    pub flow_export: Option<super::flow::FlowExportConfig>,
 }
 
 impl HostConfig {
@@ -117,6 +149,12 @@ impl HostConfig {
             router: None,
             dhcp_server: None,
             dhcpv6_server: None,
+            prefix_delegation: None,
+            lldp: None,
+            mdns: None,
+            dot1x: None,
+            dot1x_authenticator: None,
+            flow_export: None,
         }
     }
 
@@ -165,6 +203,26 @@ impl HostConfig {
         self.router.is_some() || self.dhcp_server.is_some() || self.dhcpv6_server.is_some()
     }
 
+    /// True if the host runs a service that talks to the other hosts on
+    /// its link: a server role, LLDP/CDP, mDNS or an 802.1X authenticator.
+    fn talks(&self) -> bool {
+        self.serves()
+            || self.lldp.is_some()
+            || self.mdns.is_some()
+            || self.dot1x_authenticator.is_some()
+    }
+
+    /// True if the host runs one of the link services (LLDP/CDP, mDNS,
+    /// 802.1X, flow export), which give it something to do without an
+    /// address of its own.
+    fn has_service(&self) -> bool {
+        self.lldp.is_some()
+            || self.mdns.is_some()
+            || self.dot1x.is_some()
+            || self.dot1x_authenticator.is_some()
+            || self.prefix_delegation.is_some()
+    }
+
     fn validate(&self) -> Result<()> {
         let what = format!("host {}", self.mac);
         let err = |m: String| Err(Error::Host(format!("{what}: {m}")));
@@ -174,8 +232,36 @@ impl HostConfig {
         if matches!(self.vlan, Some(v) if v == 0 || v > 4094) {
             return err("VLAN must be 1-4094".into());
         }
-        if self.ipv4.is_none() && self.ipv6.is_none() && !self.serves() && self.groups.is_empty() {
-            return err("give it an IPv4 or IPv6 address (static, dhcp, slaac or dhcpv6), groups to join, router advertisements or a DHCPv6 server".into());
+        if self.ipv4.is_none()
+            && self.ipv6.is_none()
+            && !self.serves()
+            && !self.has_service()
+            && self.groups.is_empty()
+        {
+            return err("give it an IPv4 or IPv6 address (static, dhcp, slaac or dhcpv6), groups to join, router advertisements, a DHCP server or a link service (lldp, mdns, dot1x)".into());
+        }
+        if matches!(self.prefix_delegation, Some(l) if l > 128) {
+            return err("the delegated prefix length is at most 128".into());
+        }
+        if let Some(l) = &self.lldp {
+            if let Err(Error::Host(m)) = l.validate() {
+                return err(m);
+            }
+        }
+        if let Some(m) = &self.mdns {
+            if let Err(Error::Host(m)) = m.validate(self) {
+                return err(m);
+            }
+        }
+        if let Some(d) = &self.dot1x {
+            if let Err(Error::Host(m)) = d.validate() {
+                return err(m);
+            }
+        }
+        if let Some(f) = &self.flow_export {
+            if let Err(Error::Host(m)) = f.validate(self) {
+                return err(m);
+            }
         }
         if let Some(s) = &self.dhcp_server {
             let own = match &self.ipv4 {
@@ -239,6 +325,19 @@ impl HostConfig {
             }
             if r.lifetime > Duration::from_secs(9000) {
                 return err("the router lifetime is at most 9000s (RFC 4861)".into());
+            }
+            if matches!(r.mtu, Some(m) if m < 1280) {
+                return err("the advertised MTU must be at least 1280 (IPv6's minimum)".into());
+            }
+            if r.dns.len() > 127 {
+                return err("at most 127 DNS servers in an advertisement".into());
+            }
+            if let Some(n) = r.search.iter().find(|n| {
+                n.trim_end_matches('.')
+                    .split('.')
+                    .any(|l| l.is_empty() || l.len() > 63)
+            }) {
+                return err(format!("'{n}' is not a domain name"));
             }
         }
         Ok(())
@@ -372,6 +471,10 @@ pub struct HostAddress {
     pub lease: Option<Duration>,
     /// Times the lease was renewed (or rebound).
     pub renewals: u64,
+    /// The link MTU a router advertised (IPv6).
+    pub mtu: Option<u32>,
+    /// The DNS search list (DHCP's domain name; a router's DNSSL for IPv6).
+    pub domains: Vec<String>,
 }
 
 /// Where a host is.
@@ -452,6 +555,18 @@ pub struct HostStatus {
     pub dhcp_server: Option<DhcpServerStatus>,
     /// The leases and counters of its DHCPv6 server role.
     pub dhcpv6_server: Option<DhcpServerStatus>,
+    /// The prefix a DHCPv6 server delegated to it (`prefix_delegation`).
+    pub delegated_prefix: Option<HostAddress>,
+    /// LLDP and CDP neighbors heard, and what it sent.
+    pub lldp: Option<super::lldp::LldpStatus>,
+    /// Its mDNS responder and queries.
+    pub mdns: Option<super::mdns::MdnsStatus>,
+    /// Its 802.1X supplicant.
+    pub dot1x: Option<super::eapol::Dot1xStatus>,
+    /// Its 802.1X authenticator role.
+    pub dot1x_authenticator: Option<super::eapol::AuthenticatorStatus>,
+    /// Its flow exporter.
+    pub flow_export: Option<super::flow::FlowExportStatus>,
 }
 
 /// Counters of a [`HostEngine`].
@@ -547,6 +662,8 @@ struct Dhcp6 {
     tries: u32,
     server_id: Vec<u8>,
     addr: Option<Ipv6Addr>,
+    /// The delegated prefix asked for or held.
+    pd: Option<(Ipv6Addr, u8)>,
     bound_at: Duration,
     t1: Duration,
     t2: Duration,
@@ -567,6 +684,10 @@ struct V6 {
     tentative: Option<(Ipv6Addr, u8, Duration)>,
     address: Option<(Ipv6Addr, u8)>,
     d6: Option<Dhcp6>,
+    /// What router advertisements said: MTU, DNS servers, search list.
+    ra_mtu: Option<u32>,
+    ra_dns: Vec<Ipv6Addr>,
+    ra_search: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -607,6 +728,17 @@ struct Emu {
     ra_last: Option<Duration>,
     srv4: Option<Server4>,
     srv6: Option<Server6>,
+    /// The delegated prefix is bound (or none was asked for).
+    pd_ready: bool,
+    /// The host started using IP (after 802.1X, when it has that).
+    ip_started: bool,
+    lldp: Option<super::lldp::Lldp>,
+    mdns: Option<super::mdns::Mdns>,
+    dot1x: Option<super::eapol::Supplicant>,
+    auth: Option<super::eapol::Authenticator>,
+    flow: Option<super::flow::Exporter>,
+    /// Unicast next hops the services resolve (the flow collector's).
+    resolver: super::Resolver,
 }
 
 impl Emu {
@@ -628,7 +760,10 @@ impl Emu {
     }
 
     fn ready(&self) -> bool {
-        (self.cfg.ipv4.is_none() || self.v4_ready) && (self.cfg.ipv6.is_none() || self.v6_ready)
+        (self.cfg.ipv4.is_none() || self.v4_ready)
+            && (self.cfg.ipv6.is_none() || self.v6_ready)
+            && (self.cfg.prefix_delegation.is_none() || self.pd_ready)
+            && self.dot1x.as_ref().is_none_or(|d| d.authorized())
     }
 
     fn ip4(&self) -> Option<Ipv4Addr> {
@@ -640,6 +775,31 @@ impl Emu {
 
     fn ip6(&self) -> Option<Ipv6Addr> {
         self.v6.address.map(|(a, _)| a)
+    }
+
+    /// What the link services need to know about the host.
+    fn me(&self) -> super::Me {
+        let v4 = self.status.ipv4.as_ref().filter(|_| self.v4_ready);
+        let v6 = self.status.ipv6.as_ref();
+        super::Me {
+            mac: self.cfg.mac,
+            vlan: self.cfg.vlan,
+            hostname: self.cfg.hostname.clone(),
+            ip4: v4.and_then(|a| match a.ip {
+                IpAddr::V4(x) => Some((x, a.prefix)),
+                IpAddr::V6(_) => None,
+            }),
+            gateway4: v4.and_then(|a| match a.gateway {
+                Some(IpAddr::V4(g)) => Some(g),
+                _ => None,
+            }),
+            ip6: self.v6.address,
+            gateway6: v6.and_then(|a| match a.gateway {
+                Some(IpAddr::V6(g)) => Some(g),
+                _ => None,
+            }),
+            ll: (self.uses_v6 && self.ip_started).then_some(self.ll),
+        }
     }
 
     /// True if `ip` is one of the host's addresses the engine answers for:
@@ -739,7 +899,13 @@ impl HostEngine {
                 let uses_v6 = cfg.ipv6.is_some()
                     || cfg.router.is_some()
                     || cfg.dhcpv6_server.is_some()
+                    || cfg.prefix_delegation.is_some()
                     || cfg.groups.iter().any(|g| g.is_ipv6());
+                let mac_name = {
+                    let m = cfg.mac.0;
+                    format!("ferotrx-{:02x}{:02x}{:02x}", m[3], m[4], m[5])
+                };
+                let default_name = cfg.hostname.clone().unwrap_or(mac_name);
                 let ll = hw::link_local(cfg.mac);
                 let srv4 = match (&cfg.dhcp_server, &cfg.ipv4) {
                     (
@@ -774,6 +940,12 @@ impl HostEngine {
                         counters: HostCounters::default(),
                         dhcp_server: None,
                         dhcpv6_server: None,
+                        delegated_prefix: None,
+                        lldp: None,
+                        mdns: None,
+                        dot1x: None,
+                        dot1x_authenticator: None,
+                        flow_export: None,
                     },
                     start_at: gap.saturating_mul(i as u32),
                     started: false,
@@ -793,13 +965,30 @@ impl HostEngine {
                     ra_last: None,
                     srv4,
                     srv6,
+                    pd_ready: cfg.prefix_delegation.is_none(),
+                    ip_started: false,
+                    lldp: cfg.lldp.clone().map(super::lldp::Lldp::new),
+                    mdns: cfg
+                        .mdns
+                        .clone()
+                        .map(|m| super::mdns::Mdns::new(m, &default_name)),
+                    dot1x: cfg
+                        .dot1x
+                        .clone()
+                        .map(|d| super::eapol::Supplicant::new(d, options.retry)),
+                    auth: cfg
+                        .dot1x_authenticator
+                        .clone()
+                        .map(|a| super::eapol::Authenticator::new(a, seed)),
+                    flow: cfg.flow_export.clone().map(super::flow::Exporter::new),
+                    resolver: super::Resolver::default(),
                     cfg,
                 }
             })
             .collect::<Vec<Emu>>();
         // A server role with other hosts on its port and VLAN.
         let loopback = emus.iter().any(|s| {
-            s.cfg.serves()
+            s.cfg.talks()
                 && emus.iter().any(|o| {
                     o.cfg.mac != s.cfg.mac && o.cfg.port == s.cfg.port && o.cfg.vlan == s.cfg.vlan
                 })
@@ -859,6 +1048,11 @@ impl HostEngine {
                 let mut s = h.status.clone();
                 s.dhcp_server = h.srv4.as_ref().map(|v| v.status(self.now));
                 s.dhcpv6_server = h.srv6.as_ref().map(|v| v.status(self.now));
+                s.lldp = h.lldp.as_ref().map(|v| v.status(self.now));
+                s.mdns = h.mdns.as_ref().map(|v| v.status());
+                s.dot1x = h.dot1x.as_ref().map(|v| v.status());
+                s.dot1x_authenticator = h.auth.as_ref().map(|v| v.status());
+                s.flow_export = h.flow.as_ref().map(|v| v.status());
                 s
             })
             .collect()
@@ -972,6 +1166,8 @@ impl HostEngine {
         let taken = match link.ethertype {
             wire::ETHERTYPE_ARP => self.on_arp(port, &link, payload),
             ETHERTYPE_IPV4 | ETHERTYPE_IPV6 => self.on_ip(port, &link, payload, now),
+            super::eapol::ETHERTYPE_EAPOL => self.on_eapol(port, &link, payload, now),
+            _ if super::lldp::is_ours(&link) => self.on_lldp(port, &link, payload, now),
             _ => false,
         };
         if taken {
@@ -995,13 +1191,25 @@ impl HostEngine {
     }
 
     fn on_arp(&mut self, port: usize, link: &wire::Link, payload: &[u8]) -> bool {
-        if !self.options.answer {
-            return false;
-        }
         let Some(arp) = wire::parse_arp(payload) else {
             return false;
         };
-        if arp.op != 1 {
+        if arp.op == 2 {
+            // An answer to a services' next-hop lookup.
+            let hosts: Vec<usize> = self.on_link(port, link).collect();
+            let mut taken = false;
+            for h in hosts {
+                let host = &mut self.hosts[h];
+                if link.dst == host.cfg.mac
+                    && host.resolver.learn(arp.sender_ip.into(), arp.sender_mac)
+                {
+                    taken = true;
+                    self.wake = Duration::ZERO;
+                }
+            }
+            return taken;
+        }
+        if !self.options.answer || arp.op != 1 {
             return false;
         }
         let targets: Vec<usize> = self
@@ -1084,6 +1292,195 @@ impl HostEngine {
         }
     }
 
+    // --- Link services: LLDP/CDP, 802.1X, mDNS ---------------------------
+
+    fn on_lldp(&mut self, port: usize, link: &wire::Link, payload: &[u8], now: Duration) -> bool {
+        let hosts: Vec<usize> = self.on_link(port, link).collect();
+        let mut taken = false;
+        for h in hosts {
+            if let Some(l) = self.hosts[h].lldp.as_mut() {
+                taken |= l.take(link.src, link.ethertype, payload, now);
+                self.wake = self.wake.min(l.next_wake());
+            }
+        }
+        taken
+    }
+
+    fn on_eapol(&mut self, port: usize, link: &wire::Link, payload: &[u8], now: Duration) -> bool {
+        let hosts: Vec<usize> = self.on_link(port, link).collect();
+        let mut taken = false;
+        for h in hosts {
+            let host = &mut self.hosts[h];
+            if link.dst != host.cfg.mac && link.dst != super::eapol::PAE_MAC {
+                continue;
+            }
+            let mut out = Vec::new();
+            let mut event = None;
+            if host.auth.is_some() {
+                let me = host.me();
+                if let Some(a) = host.auth.as_mut() {
+                    a.take(&me, link.src, payload, &mut out);
+                }
+                taken = true;
+            }
+            if host.dot1x.is_some() {
+                let me = host.me();
+                if let Some(d) = host.dot1x.as_mut() {
+                    event = d.take(&me, link.src, payload, now, &mut out);
+                }
+                taken = true;
+            }
+            for f in out {
+                self.out.push((port, f));
+            }
+            self.dot1x_event(h, event, now);
+        }
+        taken
+    }
+
+    /// Starts IP once 802.1X lets the host on; fails it when refused.
+    fn dot1x_event(&mut self, h: usize, event: Option<super::eapol::Event>, now: Duration) {
+        match event {
+            Some(super::eapol::Event::Authorized) => {
+                if !self.hosts[h].ip_started {
+                    self.start_ip(h, now);
+                }
+                self.check_ready(h, now);
+            }
+            Some(super::eapol::Event::Refused) => self.fail(
+                h,
+                "802.1X authentication failed: the authenticator answered EAP-Failure".into(),
+            ),
+            None => {}
+        }
+    }
+
+    fn on_mdns(
+        &mut self,
+        port: usize,
+        link: &wire::Link,
+        ip: &wire::Ip,
+        udp: &wire::Datagram,
+    ) -> bool {
+        let hosts: Vec<usize> = self.on_link(port, link).collect();
+        let mut taken = false;
+        for h in hosts {
+            let host = &mut self.hosts[h];
+            if host.mdns.is_none() || !host.ip_started {
+                continue;
+            }
+            let me = host.me();
+            let mine = match ip.dst {
+                IpAddr::V4(a) => a == super::mdns::MDNS_V4 || me.ip4.map(|x| x.0) == Some(a),
+                IpAddr::V6(a) => {
+                    a == super::mdns::MDNS_V6 || me.ll == Some(a) || me.ip6.map(|x| x.0) == Some(a)
+                }
+            };
+            if !mine {
+                continue;
+            }
+            taken = true;
+            let mut out = Vec::new();
+            if let Some(m) = host.mdns.as_mut() {
+                m.take(&me, ip.src, udp.sport, link.src, udp.data, &mut out);
+            }
+            for (to, m) in out {
+                if let Some(f) = super::mdns::frame(&me, &to, &m) {
+                    self.out.push((port, f));
+                }
+            }
+        }
+        taken
+    }
+
+    /// The services' timers: LLDP announcements, 802.1X starts, mDNS
+    /// announcements and queries, flow exports.
+    fn poll_services(&mut self, h: usize, now: Duration) {
+        let port = self.hosts[h].cfg.port;
+        let host = &mut self.hosts[h];
+        let me = host.me();
+        let mut out = Vec::new();
+        if let Some(l) = host.lldp.as_mut() {
+            l.poll(&me, now, &mut out);
+        }
+        let mut event = None;
+        if let Some(d) = host.dot1x.as_mut() {
+            event = d.poll(&me, now, &mut out);
+        }
+        if host.ip_started {
+            if let Some(m) = host.mdns.as_mut() {
+                let mut msgs = Vec::new();
+                m.poll(&me, now, &mut msgs);
+                out.extend(
+                    msgs.iter()
+                        .filter_map(|(to, m)| super::mdns::frame(&me, to, m)),
+                );
+            }
+            self.poll_flow(h, now, &mut out);
+        }
+        for f in out {
+            self.out.push((port, f));
+        }
+        self.dot1x_event(h, event, now);
+    }
+
+    /// Flow exports once the next hop to the collector is resolved.
+    fn poll_flow(&mut self, h: usize, now: Duration, out: &mut Vec<Vec<u8>>) {
+        let host = &mut self.hosts[h];
+        let Some(collector) = host.flow.as_ref().map(|f| f.collector()) else {
+            return;
+        };
+        let me = host.me();
+        let (Some(src), Some(hop)) = (me.source(collector.ip()), me.next_hop(collector.ip()))
+        else {
+            return;
+        };
+        let mac = match host.resolver.lookup(hop, now) {
+            Ok(mac) => mac,
+            Err(due) => {
+                if due {
+                    out.push(match (src, hop) {
+                        (IpAddr::V4(s), IpAddr::V4(t)) => wire::arp_frame(
+                            wire::BROADCAST,
+                            me.vlan,
+                            1,
+                            me.mac,
+                            s,
+                            MacAddr([0; 6]),
+                            t,
+                        ),
+                        (IpAddr::V6(s), IpAddr::V6(t)) => wire::ndp_solicit(me.mac, me.vlan, s, t),
+                        _ => return,
+                    });
+                }
+                if let Some(f) = host.flow.as_mut() {
+                    f.set_waiting(true);
+                }
+                return;
+            }
+        };
+        let Some(f) = host.flow.as_mut() else { return };
+        f.set_waiting(false);
+        let mut packets = Vec::new();
+        f.poll(now, &mut packets);
+        let path = Path {
+            src_mac: me.mac,
+            dst_mac: mac,
+            vlan: me.vlan,
+            src,
+            dst: collector.ip(),
+        };
+        for p in packets {
+            out.push(wire::udp_frame(
+                &path,
+                collector.port(),
+                collector.port(),
+                &p,
+                0,
+            ));
+        }
+    }
+
     // --- DHCPv4 -----------------------------------------------------------
 
     fn on_udp4(&mut self, port: usize, link: &wire::Link, ip: &wire::Ip, now: Duration) -> bool {
@@ -1094,6 +1491,9 @@ impl HostEngine {
         };
         if udp.dport == hw::DHCP_SERVER_PORT {
             return self.on_dhcp4_server(port, link, ip, udp.data, now);
+        }
+        if udp.dport == super::mdns::MDNS_PORT {
+            return self.on_mdns(port, link, ip, &udp);
         }
         if udp.sport != hw::DHCP_SERVER_PORT || udp.dport != hw::DHCP_CLIENT_PORT {
             return false;
@@ -1277,6 +1677,8 @@ impl HostEngine {
                     lease: (lease != NEVER).then_some(lease),
                     renewals: host.status.ipv4.as_ref().map_or(0, |a| a.renewals)
                         + u64::from(renewed),
+                    mtu: None,
+                    domains: m.domain.iter().cloned().collect(),
                 };
                 host.status.ipv4 = Some(addr);
                 if !host.v4_ready {
@@ -1372,6 +1774,9 @@ impl HostEngine {
     fn on_v4_ready(&mut self, h: usize, now: Duration) {
         let announcements = self.options.announcements;
         let host = &mut self.hosts[h];
+        if host.mdns.is_some() {
+            host.join(super::mdns::MDNS_V4.into(), true, now);
+        }
         if host.cfg.announce {
             host.announce4 = Announce {
                 left: announcements,
@@ -1466,6 +1871,16 @@ impl HostEngine {
             if self.hosts[h].cfg.mac == link.src {
                 continue;
             }
+            if nd.kind == NDP_ADVERT
+                && link.dst == self.hosts[h].cfg.mac
+                && self.hosts[h]
+                    .resolver
+                    .learn(nd.target, nd.lladdr.unwrap_or(link.src))
+            {
+                taken = true;
+                self.wake = Duration::ZERO;
+                continue;
+            }
             // Someone else has (an advert) or wants (a probe from ::) the
             // address being checked.
             let tentative = self.hosts[h].v6.tentative.map(|t| t.0);
@@ -1506,6 +1921,17 @@ impl HostEngine {
         let dad_wait = self.options.dad_wait;
         let host = &mut self.hosts[h];
         host.status.counters.ra_received += 1;
+        // MTU, DNS servers and search list (RFC 8106), for any IPv6 host.
+        if ra.mtu.is_some() {
+            host.v6.ra_mtu = ra.mtu;
+        }
+        if !ra.dns.is_empty() {
+            host.v6.ra_dns = ra.dns.clone();
+        }
+        if !ra.search.is_empty() {
+            host.v6.ra_search = ra.search.clone();
+        }
+        apply_ra(host);
         let Some(mode) = host.cfg.ipv6.clone() else {
             return;
         };
@@ -1576,6 +2002,9 @@ impl HostEngine {
         };
         if udp.dport == hw::DHCP6_SERVER_PORT {
             return self.on_dhcp6_server(port, link, ip, udp.data, now);
+        }
+        if udp.dport == super::mdns::MDNS_PORT {
+            return self.on_mdns(port, link, ip, &udp);
         }
         if udp.sport != hw::DHCP6_SERVER_PORT || udp.dport != hw::DHCP6_CLIENT_PORT {
             return false;
@@ -1655,7 +2084,9 @@ impl HostEngine {
                 && kind != hw::DHCP6_REBIND
                 && kind != hw::DHCP6_SOLICIT)
                 .then_some(d.server_id.as_slice()),
+            want_address: host.cfg.ipv6 == Some(Ipv6Mode::Dhcpv6),
             address: d.addr,
+            pd: host.cfg.prefix_delegation.map(|hint| (d.pd, hint)),
         };
         let f = hw::dhcp6_frame(host.cfg.mac, host.cfg.vlan, host.ll, &m);
         host.status.counters.dhcp_sent += 1;
@@ -1677,6 +2108,7 @@ impl HostEngine {
             tries: 0,
             server_id: Vec::new(),
             addr: None,
+            pd: None,
             bound_at: now,
             t1: NEVER,
             t2: NEVER,
@@ -1693,16 +2125,23 @@ impl HostEngine {
         };
         match (phase, m.kind) {
             (D6Phase::Soliciting, hw::DHCP6_ADVERTISE) => {
-                let (Some((addr, _, _)), None) = (m.address, m.status) else {
-                    return;
-                };
-                if m.server_id.is_empty() {
+                let cfg = &self.hosts[h].cfg;
+                let (want_na, want_pd) = (
+                    cfg.ipv6 == Some(Ipv6Mode::Dhcpv6),
+                    cfg.prefix_delegation.is_some(),
+                );
+                if m.status.is_some()
+                    || m.server_id.is_empty()
+                    || want_na && m.address.is_none()
+                    || want_pd && m.prefix.is_none()
+                {
                     return;
                 }
                 let d = self.hosts[h].v6.d6.as_mut().expect("dhcpv6");
                 d.phase = D6Phase::Requesting;
                 d.server_id = m.server_id.clone();
-                d.addr = Some(addr);
+                d.addr = m.address.filter(|_| want_na).map(|a| a.0);
+                d.pd = m.prefix.filter(|_| want_pd).map(|p| (p.0, p.1));
                 d.xid = d.xid.wrapping_add(1) & 0x00ff_ffff;
                 d.began = now;
                 d.interval = retry;
@@ -1724,14 +2163,54 @@ impl HostEngine {
                     }
                     return;
                 }
-                let Some((addr, preferred, valid)) = m.address else {
+                let cfg = &self.hosts[h].cfg;
+                let (want_na, want_pd) = (
+                    cfg.ipv6 == Some(Ipv6Mode::Dhcpv6),
+                    cfg.prefix_delegation.is_some(),
+                );
+                let address = m.address.filter(|_| want_na);
+                let prefix = m.prefix.filter(|_| want_pd);
+                if want_na && address.is_none() || want_pd && prefix.is_none() {
                     return;
-                };
+                }
+                // A zero valid lifetime: the server took it back.
+                if address.is_some_and(|a| a.2 == 0) || prefix.is_some_and(|p| p.3 == 0) {
+                    self.hosts[h].status.counters.dhcp_naks += 1;
+                    if phase == D6Phase::Requesting {
+                        self.dhcp6_restart(h, now);
+                    } else {
+                        self.lost_v6(h, now, "the DHCPv6 server ended the lease (zero lifetime)");
+                    }
+                    return;
+                }
+                let preferred = [address.map(|a| a.1), prefix.map(|p| p.2)]
+                    .into_iter()
+                    .flatten()
+                    .min()
+                    .unwrap_or(0);
+                let valid = [address.map(|a| a.2), prefix.map(|p| p.3)]
+                    .into_iter()
+                    .flatten()
+                    .min()
+                    .unwrap_or(0);
+                let t1 = [m.t1, m.pd_t1]
+                    .into_iter()
+                    .filter(|t| *t > 0)
+                    .min()
+                    .unwrap_or(0);
+                let t2 = [m.t2, m.pd_t2]
+                    .into_iter()
+                    .filter(|t| *t > 0)
+                    .min()
+                    .unwrap_or(0);
                 let fail_fast = self.options.fail_fast;
                 let host = &mut self.hosts[h];
                 let d = host.v6.d6.as_mut().expect("dhcpv6");
-                if phase != D6Phase::Requesting && d.addr != Some(addr) && fail_fast {
-                    let msg = format!("the DHCPv6 server moved the host to {addr} on renewal");
+                let moved = phase != D6Phase::Requesting
+                    && (address.is_some_and(|a| d.addr != Some(a.0))
+                        || prefix.is_some_and(|p| d.pd != Some((p.0, p.1))));
+                if moved && fail_fast {
+                    let msg = "the DHCPv6 server gave other addresses on renewal".to_string();
                     self.fail(h, msg);
                     return;
                 }
@@ -1745,18 +2224,19 @@ impl HostEngine {
                 let valid = secs(valid);
                 let preferred = secs(preferred);
                 d.phase = D6Phase::Bound;
-                d.addr = Some(addr);
+                d.addr = address.map(|a| a.0);
+                d.pd = prefix.map(|p| (p.0, p.1));
                 d.bound_at = now;
                 d.valid = valid;
-                d.t1 = if m.t1 > 0 {
-                    secs(m.t1)
+                d.t1 = if t1 > 0 {
+                    secs(t1)
                 } else if preferred == NEVER {
                     NEVER
                 } else {
                     preferred / 2
                 };
-                d.t2 = if m.t2 > 0 {
-                    secs(m.t2)
+                d.t2 = if t2 > 0 {
+                    secs(t2)
                 } else if preferred == NEVER {
                     NEVER
                 } else {
@@ -1765,6 +2245,35 @@ impl HostEngine {
                 d.t1 = d.t1.min(valid);
                 d.t2 = d.t2.min(valid).max(d.t1);
                 let renewed = phase != D6Phase::Requesting;
+                if let Some((p, len, _, _)) = prefix {
+                    let renewals = host
+                        .status
+                        .delegated_prefix
+                        .as_ref()
+                        .map_or(0, |a| a.renewals + u64::from(renewed));
+                    host.status.delegated_prefix = Some(HostAddress {
+                        ip: p.into(),
+                        prefix: len,
+                        gateway: None,
+                        source: AddressSource::Dhcpv6,
+                        server: Some(from),
+                        dns: m.dns.iter().map(|a| IpAddr::V6(*a)).collect(),
+                        lease: (valid != NEVER).then_some(valid),
+                        renewals,
+                        mtu: None,
+                        domains: Vec::new(),
+                    });
+                    if !host.pd_ready {
+                        host.pd_ready = true;
+                        if !want_na {
+                            self.check_ready(h, now);
+                        }
+                    }
+                }
+                let host = &mut self.hosts[h];
+                let Some((addr, _, _)) = address else {
+                    return;
+                };
                 if let Some(a) = host.status.ipv6.as_mut() {
                     a.lease = (valid != NEVER).then_some(valid);
                     a.renewals += u64::from(renewed);
@@ -1780,6 +2289,8 @@ impl HostEngine {
                         dns: m.dns.iter().map(|a| IpAddr::V6(*a)).collect(),
                         lease: (valid != NEVER).then_some(valid),
                         renewals: 0,
+                        mtu: None,
+                        domains: Vec::new(),
                     });
                 }
                 if host.v6.address.is_none() && host.v6.tentative.is_none() {
@@ -1796,6 +2307,19 @@ impl HostEngine {
             return;
         }
         let host = &mut self.hosts[h];
+        if host.cfg.prefix_delegation.is_some() {
+            host.pd_ready = false;
+            host.status.delegated_prefix = None;
+        }
+        if host.cfg.ipv6 != Some(Ipv6Mode::Dhcpv6) {
+            // Only the delegated prefix came by DHCPv6: ask again.
+            if host.status.state == HostState::Ready {
+                host.status.state = HostState::Starting;
+                host.start_at = now;
+            }
+            self.dhcp6_restart(h, now);
+            return;
+        }
         host.v6_ready = false;
         host.v6.address = None;
         host.v6.tentative = None;
@@ -1946,8 +2470,11 @@ impl HostEngine {
                 AddressSource::Slaac => host.v6.slaac_valid,
                 _ => old.as_ref().and_then(|o| o.lease),
             },
-            renewals: old.map_or(0, |o| o.renewals),
+            renewals: old.as_ref().map_or(0, |o| o.renewals),
+            mtu: None,
+            domains: old.map(|o| o.domains).unwrap_or_default(),
         });
+        apply_ra(host);
         if host.cfg.announce {
             host.announce6 = Announce {
                 left: announcements,
@@ -2090,11 +2617,27 @@ impl HostEngine {
     // --- Timers -----------------------------------------------------------
 
     fn start(&mut self, h: usize, now: Duration) {
-        let dad = self.options.dad;
-        let dad_wait = self.options.dad_wait;
         let host = &mut self.hosts[h];
         host.started = true;
         host.start_at = now;
+        // With 802.1X, IP waits until the authenticator lets the host on.
+        if let Some(d) = host.dot1x.as_mut() {
+            d.begin(now);
+            self.wake = now;
+            return;
+        }
+        self.start_ip(h, now);
+    }
+
+    /// The host starts using IP: addresses, groups, its servers.
+    fn start_ip(&mut self, h: usize, now: Duration) {
+        let dad = self.options.dad;
+        let dad_wait = self.options.dad_wait;
+        let host = &mut self.hosts[h];
+        host.ip_started = true;
+        if host.mdns.is_some() && host.uses_v6 {
+            host.join(super::mdns::MDNS_V6.into(), true, now);
+        }
         if host.uses_v6 {
             let ll = host.ll;
             host.join(wire::solicited_node(ll).into(), true, now);
@@ -2118,6 +2661,8 @@ impl HostEngine {
                     dns: Vec::new(),
                     lease: None,
                     renewals: 0,
+                    mtu: None,
+                    domains: Vec::new(),
                 });
                 host.v4_ready = true;
                 self.on_v4_ready(h, now);
@@ -2139,6 +2684,11 @@ impl HostEngine {
                 self.dhcp6_restart(h, now);
             }
             None => {}
+        }
+        // A requesting router that takes its own address otherwise.
+        let host = &mut self.hosts[h];
+        if host.cfg.prefix_delegation.is_some() && host.cfg.ipv6 != Some(Ipv6Mode::Dhcpv6) {
+            self.dhcp6_restart(h, now);
         }
         let host = &mut self.hosts[h];
         if host.cfg.router.is_some() {
@@ -2221,10 +2771,24 @@ impl HostEngine {
                 self.out.push((host.cfg.port, f));
             }
         }
+        self.poll_services(h, now);
     }
 
     fn setup_failure(&self, h: usize, timeout: Duration) -> String {
         let host = &self.hosts[h];
+        if let Some(d) = host.dot1x.as_ref().filter(|d| !d.authorized()) {
+            let s = d.status();
+            return match s.authenticator {
+                Some(a) => format!(
+                    "802.1X authentication with {a} did not finish within {timeout:?} ({} responses sent)",
+                    s.responses
+                ),
+                None => format!(
+                    "no 802.1X authenticator answered within {timeout:?} ({} EAPOL-Starts sent); check that the switch port runs 802.1X, or set required = false",
+                    s.starts
+                ),
+            };
+        }
         if let Some(d) = host.d4.as_ref().filter(|_| !host.v4_ready) {
             return match (d.phase, d.offer) {
                 (D4Phase::Requesting, Some((ip, server))) => format!(
@@ -2256,6 +2820,9 @@ impl HostEngine {
                     )
                 }
             }
+            _ if !host.pd_ready => format!(
+                "no DHCPv6 server delegated a prefix within {timeout:?}; check that a server with prefix delegation serves this link"
+            ),
             _ => format!("did not get its addresses within {timeout:?}"),
         }
     }
@@ -2309,6 +2876,23 @@ impl HostEngine {
             at(host.announce6.next);
         }
         at(host.ra_next);
+        if let Some(l) = &host.lldp {
+            at(l.next_wake());
+        }
+        if let Some(d) = &host.dot1x {
+            at(d.next_wake());
+        }
+        if host.ip_started {
+            if let Some(m) = &host.mdns {
+                at(m.next_wake());
+            }
+            if let Some(f) = &host.flow {
+                let me = host.me();
+                if me.source(f.collector().ip()).is_some() {
+                    at(f.next_wake().min(host.resolver.next_wake()));
+                }
+            }
+        }
         w
     }
 
@@ -2322,6 +2906,27 @@ impl HostEngine {
         for h in 0..self.hosts.len() {
             if !self.hosts[h].started {
                 continue;
+            }
+            let host = &mut self.hosts[h];
+            let me = host.me();
+            let mut out = Vec::new();
+            if let Some(l) = host.lldp.as_mut() {
+                l.shutdown(&me, &mut out);
+            }
+            if let Some(m) = host.mdns.as_mut() {
+                let mut msgs = Vec::new();
+                m.goodbye(&me, &mut msgs);
+                out.extend(
+                    msgs.iter()
+                        .filter_map(|(to, m)| super::mdns::frame(&me, to, m)),
+                );
+            }
+            if let Some(f) = host.dot1x.as_ref().and_then(|d| d.logoff(&me)) {
+                out.push(f);
+            }
+            let port = host.cfg.port;
+            for f in out {
+                self.out.push((port, f));
             }
             if release {
                 if self.hosts[h].v4_ready
@@ -2380,6 +2985,23 @@ impl HostEngine {
     }
 }
 
+/// Puts what router advertisements said (MTU, DNS servers, search list)
+/// in the host's IPv6 address; DNS from DHCPv6 goes first.
+fn apply_ra(host: &mut Emu) {
+    let v6 = &host.v6;
+    let Some(a) = host.status.ipv6.as_mut() else {
+        return;
+    };
+    a.mtu = v6.ra_mtu;
+    let from_dhcp = a.source == AddressSource::Dhcpv6;
+    if !v6.ra_dns.is_empty() && (!from_dhcp || a.dns.is_empty()) {
+        a.dns = v6.ra_dns.iter().map(|d| IpAddr::V6(*d)).collect();
+    }
+    if !v6.ra_search.is_empty() && (!from_dhcp || a.domains.is_empty()) {
+        a.domains = v6.ra_search.clone();
+    }
+}
+
 /// A router advertisement of `host`'s router settings, with `lifetime`.
 fn advert(host: &Emu, lifetime: Duration) -> Vec<u8> {
     let r = host.cfg.router.as_ref().expect("a router");
@@ -2394,6 +3016,14 @@ fn advert(host: &Emu, lifetime: Duration) -> Vec<u8> {
             prefixes: &r.prefixes,
             valid: 86400,
             preferred: 14400,
+            mtu: r.mtu,
+            dns: &r.dns,
+            search: &r.search,
+            dns_lifetime: if lifetime.is_zero() {
+                0
+            } else {
+                r.dns_lifetime()
+            },
         },
     )
 }

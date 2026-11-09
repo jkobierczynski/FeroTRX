@@ -6,7 +6,11 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use super::eapol::{AuthenticatorConfig, Dot1xConfig};
 use super::engine::{HostConfig, HostOptions, Ipv4Mode, Ipv6Mode, RouterConfig};
+use super::flow::FlowExportConfig;
+use super::lldp::LldpConfig;
+use super::mdns::{MdnsConfig, MdnsService};
 use super::server::{DhcpServerConfig, Dhcpv6ServerConfig};
 use crate::profile::OutputFile;
 use crate::tcp::profile::{parse_groups, parse_ip_prefix};
@@ -53,7 +57,26 @@ use crate::{check_format, parse_duration, Error, MacAddr, Result, SendSettings};
 /// [host.dhcpv6_server]
 /// pool = "fd00:20::100-fd00:20::1ff"
 /// dns = ["fd00:20::53"]
+/// pd_pool = "fd00:2000::/40"  # delegate prefixes to requesting routers
+/// pd_length = 56
+///
+/// [[host]]                    # a host with the link services
+/// ipv4 = "10.20.0.5/24"
+/// ipv6 = "slaac"
+/// prefix_delegation = 56      # ask for a /56 (0: the server's choice)
+/// lldp = true                 # or a [host.lldp] table
+/// [host.mdns]
+/// services = [{ instance = "Lab web", service = "_http._tcp", port = 80 }]
+/// queries = ["_ipp._tcp"]
+/// [host.dot1x]
+/// identity = "lab-{n}"
+/// password = "secret"
+/// [host.flow_export]
+/// collector = "10.20.0.9:4739"
+/// version = "ipfix"           # or "netflow9"
 /// ```
+///
+/// `docs/host-emulation.md` lists every setting.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HostProfile {
     pub hosts: Vec<HostSpec>,
@@ -100,8 +123,18 @@ impl HostSpec {
         if let Some(Ipv6Mode::Static { ip, .. }) = &mut h.ipv6 {
             *ip = Ipv6Addr::from(u128::from(*ip).wrapping_add(u128::from(n)));
         }
-        if let Some(name) = &mut h.hostname {
-            *name = name.replace("{n}", &(n + 1).to_string());
+        let num = (n + 1).to_string();
+        let names = [
+            h.hostname.as_mut(),
+            h.mdns.as_mut().and_then(|m| m.name.as_mut()),
+            h.lldp.as_mut().and_then(|l| l.system_name.as_mut()),
+            h.dot1x.as_mut().map(|d| &mut d.identity),
+        ];
+        for name in names.into_iter().flatten() {
+            *name = name.replace("{n}", &num);
+        }
+        for s in h.mdns.iter_mut().flat_map(|m| m.services.iter_mut()) {
+            s.instance = s.instance.replace("{n}", &num);
         }
         h
     }
@@ -155,6 +188,94 @@ pub(crate) struct RawHost {
     router: Option<RawRouter>,
     dhcp_server: Option<RawDhcpServer>,
     dhcpv6_server: Option<RawDhcpServer>,
+    prefix_delegation: Option<u8>,
+    lldp: Option<OnOr<RawLldp>>,
+    mdns: Option<OnOr<RawMdns>>,
+    dot1x: Option<RawDot1x>,
+    dot1x_authenticator: Option<RawAuthenticator>,
+    flow_export: Option<RawFlowExport>,
+}
+
+/// `true` (the defaults), `false` (off) or a table.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OnOr<T> {
+    On(bool),
+    Table(T),
+}
+
+impl<T: Default> OnOr<T> {
+    fn table(self) -> Option<T> {
+        match self {
+            OnOr::On(true) => Some(T::default()),
+            OnOr::On(false) => None,
+            OnOr::Table(t) => Some(t),
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLldp {
+    lldp: Option<bool>,
+    cdp: Option<bool>,
+    system_name: Option<String>,
+    description: Option<String>,
+    port_id: Option<String>,
+    port_description: Option<String>,
+    platform: Option<String>,
+    capabilities: Option<Vec<String>>,
+    interval: Option<String>,
+    hold: Option<u32>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMdns {
+    name: Option<String>,
+    services: Option<Vec<RawMdnsService>>,
+    queries: Option<Vec<String>>,
+    interval: Option<String>,
+    ttl: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMdnsService {
+    instance: String,
+    service: String,
+    port: u16,
+    txt: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDot1x {
+    identity: String,
+    password: String,
+    logoff: Option<bool>,
+    required: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthenticator {
+    /// Identity = password.
+    users: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFlowExport {
+    collector: String,
+    version: Option<String>,
+    interval: Option<String>,
+    records: Option<u32>,
+    template_interval: Option<String>,
+    domain: Option<u32>,
+    src: Option<String>,
+    dst: Option<String>,
+    seed: Option<u64>,
 }
 
 /// `[host.dhcp_server]` and `[host.dhcpv6_server]`.
@@ -169,6 +290,8 @@ struct RawDhcpServer {
     reservations: Option<std::collections::BTreeMap<String, String>>,
     prefix: Option<u8>,
     rapid_commit: Option<bool>,
+    pd_pool: Option<String>,
+    pd_length: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -179,6 +302,9 @@ struct RawRouter {
     lifetime: Option<String>,
     managed: Option<bool>,
     other: Option<bool>,
+    mtu: Option<u32>,
+    dns: Option<Vec<String>>,
+    search: Option<Vec<String>>,
 }
 
 /// Parses `dhcp` or `ADDRESS/PREFIX` for IPv4.
@@ -288,6 +414,11 @@ impl RawDhcpServer {
                 "rapid_commit is a DHCPv6 setting".into(),
             ));
         }
+        if self.pd_pool.is_some() || self.pd_length.is_some() {
+            return Err(Error::InvalidSpec(
+                "prefix delegation (pd_pool) is a DHCPv6 setting".into(),
+            ));
+        }
         let mut c = DhcpServerConfig::new(a, b);
         if let Some(l) = self.lease {
             c.lease = parse_duration(&l)?;
@@ -335,6 +466,14 @@ impl RawDhcpServer {
         }
         if let Some(r) = self.rapid_commit {
             c.rapid_commit = r;
+        }
+        c.pd_pool = self.pd_pool.map(|p| parse_prefix6(&p)).transpose()?;
+        match self.pd_length {
+            Some(_) if c.pd_pool.is_none() => {
+                return Err(Error::InvalidSpec("pd_length goes with pd_pool".into()))
+            }
+            Some(l) => c.pd_length = l,
+            None => {}
         }
         for (mac, ip) in self.reservations.unwrap_or_default() {
             c.reservations.push((mac.parse()?, v6(&ip, "reservation")?));
@@ -418,6 +557,15 @@ impl RawHost {
             }
             router.managed = r.managed.unwrap_or(false);
             router.other = r.other.unwrap_or(false);
+            router.mtu = r.mtu;
+            router.dns = r
+                .dns
+                .unwrap_or_default()
+                .iter()
+                .map(|d| v6(d, "dns server"))
+                .collect::<Result<_>>()
+                .map_err(ctx)?;
+            router.search = r.search.unwrap_or_default();
             host.router = Some(router);
         }
         host.dhcp_server = self
@@ -430,6 +578,32 @@ impl RawHost {
             .map(RawDhcpServer::v6)
             .transpose()
             .map_err(ctx)?;
+        host.prefix_delegation = self.prefix_delegation;
+        host.lldp = self
+            .lldp
+            .and_then(OnOr::table)
+            .map(RawLldp::config)
+            .transpose()
+            .map_err(ctx)?;
+        host.mdns = self
+            .mdns
+            .and_then(OnOr::table)
+            .map(RawMdns::config)
+            .transpose()
+            .map_err(ctx)?;
+        host.dot1x = self.dot1x.map(|d| Dot1xConfig {
+            logoff: d.logoff.unwrap_or(true),
+            required: d.required.unwrap_or(true),
+            ..Dot1xConfig::new(d.identity, d.password)
+        });
+        host.dot1x_authenticator = self.dot1x_authenticator.map(|a| AuthenticatorConfig {
+            users: a.users.into_iter().collect(),
+        });
+        host.flow_export = self
+            .flow_export
+            .map(RawFlowExport::config)
+            .transpose()
+            .map_err(ctx)?;
         if count > 1 && (host.dhcp_server.is_some() || host.dhcpv6_server.is_some()) {
             return Err(ctx(Error::InvalidSpec(
                 "a DHCP server is one host: leave out `count`".into(),
@@ -440,6 +614,96 @@ impl RawHost {
             count,
             host,
         })
+    }
+}
+
+impl RawLldp {
+    fn config(self) -> Result<LldpConfig> {
+        let d = LldpConfig::default();
+        Ok(LldpConfig {
+            lldp: self.lldp.unwrap_or(d.lldp),
+            cdp: self.cdp.unwrap_or(d.cdp),
+            system_name: self.system_name,
+            description: self.description,
+            port_id: self.port_id,
+            port_description: self.port_description,
+            platform: self.platform,
+            capabilities: self.capabilities.unwrap_or(d.capabilities),
+            interval: self
+                .interval
+                .map_or(Ok(d.interval), |i| parse_duration(&i))?,
+            hold: self.hold.unwrap_or(d.hold),
+        })
+    }
+}
+
+impl RawMdns {
+    fn config(self) -> Result<MdnsConfig> {
+        let d = MdnsConfig::default();
+        Ok(MdnsConfig {
+            name: self.name,
+            services: self
+                .services
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| MdnsService {
+                    instance: s.instance,
+                    service: s.service,
+                    port: s.port,
+                    txt: s.txt.unwrap_or_default(),
+                })
+                .collect(),
+            queries: self.queries.unwrap_or_default(),
+            interval: self
+                .interval
+                .map_or(Ok(d.interval), |i| parse_duration(&i))?,
+            ttl: self.ttl.unwrap_or(d.ttl),
+        })
+    }
+}
+
+impl RawFlowExport {
+    fn config(self) -> Result<FlowExportConfig> {
+        let collector = parse_collector(&self.collector)?;
+        let mut c = FlowExportConfig::new(collector);
+        if let Some(v) = self.version {
+            c.version = v.parse()?;
+        }
+        if let Some(i) = self.interval {
+            c.interval = parse_duration(&i)?;
+        }
+        if let Some(i) = self.template_interval {
+            c.template_interval = parse_duration(&i)?;
+        }
+        c.records = self.records.unwrap_or(c.records);
+        c.domain = self.domain.unwrap_or(c.domain);
+        c.seed = self.seed.unwrap_or(c.seed);
+        if let Some(p) = self.src {
+            c.src = parse_ip_prefix(&p)?;
+        }
+        if let Some(p) = self.dst {
+            c.dst = parse_ip_prefix(&p)?;
+        }
+        Ok(c)
+    }
+}
+
+/// Parses a flow collector, `10.0.0.9:4739` or `[fd00::9]:4739`; without
+/// a port, IPFIX's 4739.
+pub fn parse_collector(s: &str) -> Result<std::net::SocketAddr> {
+    let s = s.trim();
+    if let Ok(a) = s.parse() {
+        return Ok(a);
+    }
+    match s
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+    {
+        Ok(ip) => Ok(std::net::SocketAddr::new(ip, 4739)),
+        Err(_) => Err(Error::InvalidSpec(format!(
+            "flow collector '{s}' is not ADDRESS:PORT"
+        ))),
     }
 }
 
@@ -558,6 +822,100 @@ mod tests {
     use super::*;
     use crate::{EndpointHosts, TcpProfile, UdpProfile};
     use std::sync::Arc;
+
+    #[test]
+    fn link_services_from_toml() {
+        let p = HostProfile::from_toml(
+            r#"
+format = 1
+[[host]]
+iface = "eth0"
+mac = "02:dc:00:00:00:01"
+ipv4 = "10.20.0.1/24"
+[host.router]
+prefixes = ["fd00:20::/64"]
+mtu = 1400
+dns = ["fd00:20::53"]
+search = ["lab.test"]
+[host.dhcpv6_server]
+pool = "fd00:20::100-fd00:20::1ff"
+pd_pool = "fd00:2000::/40"
+pd_length = 48
+[host.dot1x_authenticator]
+users = { alice = "secret" }
+
+[[host]]
+iface = "eth0"
+count = 2
+ipv4 = "10.20.0.5/24"
+hostname = "lab-{n}"
+prefix_delegation = 0
+lldp = true
+[host.mdns]
+name = "web-{n}"
+services = [{ instance = "Lab web {n}", service = "_http._tcp", port = 80, txt = ["a=b"] }]
+queries = ["_ipp._tcp"]
+[host.dot1x]
+identity = "user-{n}"
+password = "secret"
+required = false
+[host.flow_export]
+collector = "10.20.0.9"
+version = "netflow9"
+records = 3
+"#,
+        )
+        .unwrap();
+        let c = p.configs(&["eth0".into()], None).unwrap();
+        let r = c[0].router.as_ref().unwrap();
+        assert_eq!(r.mtu, Some(1400));
+        assert_eq!(r.dns, vec!["fd00:20::53".parse::<Ipv6Addr>().unwrap()]);
+        assert_eq!(r.search, vec!["lab.test"]);
+        let s6 = c[0].dhcpv6_server.as_ref().unwrap();
+        assert_eq!(s6.pd_pool, Some(("fd00:2000::".parse().unwrap(), 40)));
+        assert_eq!(s6.pd_length, 48);
+        assert_eq!(
+            c[0].dot1x_authenticator.as_ref().unwrap().users,
+            vec![("alice".into(), "secret".into())]
+        );
+        assert_eq!(c[2].prefix_delegation, Some(0));
+        assert_eq!(c[2].lldp, Some(LldpConfig::default()));
+        let m = c[2].mdns.as_ref().unwrap();
+        assert_eq!(m.name.as_deref(), Some("web-2"));
+        assert_eq!(m.services[0].txt, vec!["a=b"]);
+        assert_eq!(m.services[0].instance, "Lab web 2");
+        let d = c[2].dot1x.as_ref().unwrap();
+        assert_eq!(d.identity, "user-2");
+        assert!(!d.required);
+        let f = c[1].flow_export.as_ref().unwrap();
+        assert_eq!(f.collector, "10.20.0.9:4739".parse().unwrap());
+        assert_eq!(f.version, crate::FlowVersion::V9);
+        assert_eq!(f.records, 3);
+        for (toml, want) in [
+            ("[[host]]\nlldp = 3", "lldp"),
+            ("[[host]]\n[host.dhcp_server]\npool = \"10.0.0.1-10.0.0.9\"\npd_pool = \"fd00::/48\"", "DHCPv6"),
+            ("[[host]]\n[host.flow_export]\ncollector = \"nowhere\"", "collector"),
+        ] {
+            let e = HostProfile::from_toml(toml).unwrap_err().to_string();
+            assert!(e.contains(want), "{toml}: {e}");
+        }
+    }
+
+    #[test]
+    fn parses_the_services_example() {
+        let p =
+            HostProfile::from_toml(include_str!("../../../../examples/lab-services.toml")).unwrap();
+        let c = p.configs(&["eth0".into()], Some("eth0")).unwrap();
+        assert_eq!(c.len(), 4);
+        assert!(c[1].lldp.as_ref().unwrap().cdp);
+        assert_eq!(
+            c[1].mdns.as_ref().unwrap().services[0].instance,
+            "Lab web 2"
+        );
+        assert!(!c[2].dot1x.as_ref().unwrap().required);
+        assert_eq!(c[3].flow_export.as_ref().unwrap().records, 20);
+        crate::HostEngine::new(c, HostOptions::default()).unwrap();
+    }
 
     #[test]
     fn parses_the_example() {

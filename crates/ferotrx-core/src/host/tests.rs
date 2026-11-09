@@ -325,6 +325,9 @@ struct Router {
     managed: bool,
     taken: Option<Ipv6Addr>,
     probes: Vec<Ipv6Addr>,
+    mtu: Option<u32>,
+    dns: Vec<Ipv6Addr>,
+    search: Vec<String>,
 }
 
 impl Router {
@@ -335,6 +338,9 @@ impl Router {
             managed: false,
             taken: None,
             probes: Vec::new(),
+            mtu: None,
+            dns: Vec::new(),
+            search: Vec::new(),
         }
     }
 
@@ -358,6 +364,10 @@ impl Router {
                     prefixes: &prefixes,
                     valid: 3600,
                     preferred: 1800,
+                    mtu: self.mtu,
+                    dns: &self.dns,
+                    search: &self.search,
+                    dns_lifetime: 600,
                 },
             ));
         }
@@ -958,6 +968,8 @@ fn templates_follow_a_dhcp_server() {
         dns: Vec::new(),
         lease: None,
         renewals: 0,
+        mtu: None,
+        domains: Vec::new(),
     });
     plan.apply(&mut config, &status);
     let s = &config.server.as_ref().unwrap().endpoint;
@@ -1361,7 +1373,9 @@ fn a_dhcpv6_server_answers_rapid_commit_confirm_and_information_requests() {
             iaid: 1,
             elapsed: 0,
             server_id: None,
+            want_address: true,
             address,
+            pd: None,
         });
         if rapid {
             b.extend_from_slice(&[0, 14, 0, 0]);
@@ -1414,4 +1428,411 @@ fn a_dhcpv6_server_answers_rapid_commit_confirm_and_information_requests() {
     let st = engine.statuses()[0].dhcpv6_server.clone().unwrap();
     assert_eq!(st.counters.exhausted, 1);
     assert_eq!(st.leases.len(), 1);
+}
+
+fn static4(n: u8) -> HostConfig {
+    HostConfig::new(0, mac(n)).with_ipv4(Ipv4Mode::Static {
+        ip: Ipv4Addr::new(10, 77, 0, n),
+        prefix: 24,
+        gateway: None,
+    })
+}
+
+#[test]
+fn a_dhcpv6_server_delegates_prefixes_to_requesting_routers() {
+    let mut s6 = Dhcpv6ServerConfig::new(
+        "fd00:77::100".parse().unwrap(),
+        "fd00:77::1ff".parse().unwrap(),
+    );
+    s6.lease = Duration::from_secs(20);
+    s6.pd_pool = Some(("fd00:aa00::".parse().unwrap(), 48));
+    s6.pd_length = 56;
+    let mut router = RouterConfig::new(vec![("fd00:77::".parse().unwrap(), 64)]);
+    router.managed = true;
+    let server = HostConfig::new(0, SERVER_MAC)
+        .with_router(router)
+        .with_dhcpv6_server(s6);
+    let mut server = HostEngine::new(vec![server], HostOptions::default()).unwrap();
+    // One with an address and a prefix, one with only a prefix.
+    let mut both = HostConfig::new(0, mac(1)).with_ipv6(Ipv6Mode::Dhcpv6);
+    both.prefix_delegation = Some(56);
+    let mut only = HostConfig::new(0, mac(2));
+    only.prefix_delegation = Some(0);
+    let mut clients = HostEngine::new(vec![both, only], HostOptions::default()).unwrap();
+    link_up(&mut server, &mut clients, ms(0), ms(3000), ms(10));
+    let s = clients.statuses();
+    assert!(clients.all_ready(), "{s:?}");
+    assert_eq!(
+        s[0].ipv6.as_ref().unwrap().ip,
+        IpAddr::V6("fd00:77::100".parse().unwrap())
+    );
+    let mut prefixes: Vec<IpAddr> = s
+        .iter()
+        .map(|h| {
+            let p = h.delegated_prefix.as_ref().unwrap();
+            assert_eq!(p.prefix, 56);
+            assert_eq!(p.lease, Some(Duration::from_secs(20)));
+            p.ip
+        })
+        .collect();
+    prefixes.sort();
+    assert_eq!(
+        prefixes,
+        vec![
+            IpAddr::V6("fd00:aa00::".parse().unwrap()),
+            IpAddr::V6("fd00:aa00:0:100::".parse().unwrap())
+        ]
+    );
+    assert!(s[1].ipv6.is_none());
+    let st = server.statuses()[0].dhcpv6_server.clone().unwrap();
+    assert_eq!(st.leases.len(), 1);
+    assert_eq!(st.delegations.len(), 2);
+    assert!(st.delegations.iter().all(|d| d.prefix == Some(56)));
+    // Renewed at T1 = 10 s, with the address.
+    link_up(&mut server, &mut clients, ms(3000), ms(13_000), ms(20));
+    let s = clients.statuses();
+    assert!(s.iter().all(|h| h.state == HostState::Ready), "{s:?}");
+    assert!(s
+        .iter()
+        .all(|h| h.delegated_prefix.as_ref().unwrap().renewals == 1));
+    // Released at the end.
+    clients.finish();
+    for (_, f) in clients.take_output() {
+        server.handle_frame(0, &f, ms(13_000));
+    }
+    let st = server.statuses()[0].dhcpv6_server.clone().unwrap();
+    assert!(st.leases.is_empty());
+    assert!(st.delegations.is_empty());
+}
+
+#[test]
+fn router_advertisements_bring_the_mtu_dns_servers_and_search_list() {
+    let host = HostConfig::new(0, mac(1)).with_ipv6(Ipv6Mode::Slaac);
+    let mut engine = HostEngine::new(vec![host], HostOptions::default()).unwrap();
+    let mut router = Router::new("fd00:77::");
+    router.mtu = Some(1400);
+    router.dns = vec!["fd00:77::53".parse().unwrap()];
+    router.search = vec!["lab.test".into(), "example.org".into()];
+    drive(&mut engine, ms(0), ms(2500), ms(10), |p, f, _| {
+        router.answer(f).map(|r| (p, r)).into_iter().collect()
+    });
+    let s = engine.statuses();
+    let a = s[0].ipv6.as_ref().unwrap();
+    assert_eq!(a.mtu, Some(1400));
+    assert_eq!(a.dns, vec![IpAddr::V6("fd00:77::53".parse().unwrap())]);
+    assert_eq!(a.domains, vec!["lab.test", "example.org"]);
+
+    // Our own router host advertises them too.
+    let mut cfg = RouterConfig::new(vec![("fd00:99::".parse().unwrap(), 64)]);
+    cfg.mtu = Some(1450);
+    cfg.dns = vec!["fd00:99::53".parse().unwrap()];
+    cfg.search = vec!["lab.test".into()];
+    let mut routers = HostEngine::new(
+        vec![HostConfig::new(0, mac(9)).with_router(cfg)],
+        HostOptions::default(),
+    )
+    .unwrap();
+    let mut hosts = HostEngine::new(
+        vec![HostConfig::new(0, mac(1)).with_ipv6(Ipv6Mode::Slaac)],
+        HostOptions::default(),
+    )
+    .unwrap();
+    link_up(&mut routers, &mut hosts, ms(0), ms(3000), ms(10));
+    let a = hosts.statuses()[0].ipv6.clone().unwrap();
+    assert_eq!(a.mtu, Some(1450));
+    assert_eq!(a.dns, vec![IpAddr::V6("fd00:99::53".parse().unwrap())]);
+    assert_eq!(a.domains, vec!["lab.test"]);
+}
+
+#[test]
+fn lldp_and_cdp_neighbors_hear_each_other() {
+    let mut a = static4(1);
+    a.hostname = Some("lab-a".into());
+    a.lldp = Some(LldpConfig {
+        cdp: true,
+        ..LldpConfig::default()
+    });
+    let mut b = static4(2);
+    b.lldp = Some(LldpConfig {
+        system_name: Some("lab-b".into()),
+        interval: Duration::from_secs(5),
+        ..LldpConfig::default()
+    });
+    let mut x = HostEngine::new(vec![a], HostOptions::default()).unwrap();
+    let mut y = HostEngine::new(vec![b], HostOptions::default()).unwrap();
+    // Fast transmission: a frame a second at the start (the hosts start at
+    // random within 100 ms, so the first may come before the other starts).
+    link_up(&mut x, &mut y, ms(0), ms(1500), ms(10));
+    let sx = x.statuses()[0].lldp.clone().unwrap();
+    let sy = y.statuses()[0].lldp.clone().unwrap();
+    assert_eq!(sx.lldp_sent, 2);
+    assert_eq!(sx.cdp_sent, 2);
+    assert_eq!(sy.cdp_sent, 0);
+    // b hears a twice, by LLDP and CDP.
+    let mut heard: Vec<(&str, Option<&str>)> = sy
+        .neighbors
+        .iter()
+        .map(|n| (n.protocol.as_str(), n.system_name.as_deref()))
+        .collect();
+    heard.sort();
+    assert_eq!(heard, vec![("cdp", Some("lab-a")), ("lldp", Some("lab-a"))]);
+    let n = &sx.neighbors[0];
+    assert_eq!(n.system_name.as_deref(), Some("lab-b"));
+    assert_eq!(n.mac, mac(2));
+    assert_eq!(n.addresses, vec![IpAddr::V4(Ipv4Addr::new(10, 77, 0, 2))]);
+    assert_eq!(n.ttl, Duration::from_secs(20));
+    // Then at b's interval.
+    link_up(&mut x, &mut y, ms(1500), ms(20_000), ms(10));
+    let sy = y.statuses()[0].lldp.clone().unwrap();
+    assert!((6..=8).contains(&sy.lldp_sent), "{sy:?}");
+    assert_eq!(
+        x.statuses()[0].lldp.clone().unwrap().neighbors[0].frames,
+        sy.lldp_sent
+    );
+    // Shut down: the neighbor goes at once.
+    y.finish();
+    for (_, f) in y.take_output() {
+        x.handle_frame(0, &f, ms(20_000));
+    }
+    assert!(x.statuses()[0].lldp.clone().unwrap().neighbors.is_empty());
+}
+
+#[test]
+fn mdns_hosts_announce_and_find_each_other() {
+    let mut a = static4(1);
+    a.hostname = Some("lab-a".into());
+    a.mdns = Some(MdnsConfig {
+        services: vec![MdnsService {
+            instance: "Lab web".into(),
+            service: "_http._tcp".into(),
+            port: 8080,
+            txt: vec!["path=/".into()],
+        }],
+        ..MdnsConfig::default()
+    });
+    let mut b = static4(2);
+    b.mdns = Some(MdnsConfig {
+        queries: vec!["_http._tcp".into(), "lab-a.local".into()],
+        ..MdnsConfig::default()
+    });
+    // In one engine: its hosts hear each other.
+    let mut engine = HostEngine::new(vec![a.clone(), b.clone()], HostOptions::default()).unwrap();
+    drive(&mut engine, ms(0), ms(3000), ms(10), |_, _, _| Vec::new());
+    let s = engine.statuses();
+    let sa = s[0].mdns.clone().unwrap();
+    let sb = s[1].mdns.clone().unwrap();
+    assert_eq!(sa.name, "lab-a.local");
+    assert!(sa.announcements >= 1);
+    assert!(sa.answers_sent >= 1, "{sa:?}");
+    assert!(sb.queries_sent >= 1);
+    let find = |kind: &str| {
+        sb.found
+            .iter()
+            .find(|f| f.kind == kind)
+            .map(|f| f.data.clone())
+    };
+    assert_eq!(find("PTR").as_deref(), Some("Lab web._http._tcp.local"));
+    assert_eq!(find("SRV").as_deref(), Some("0 0 8080 lab-a.local"));
+    assert_eq!(find("A").as_deref(), Some("10.77.0.1"));
+    assert!(sb
+        .found
+        .iter()
+        .all(|f| f.from == IpAddr::V4(Ipv4Addr::new(10, 77, 0, 1))));
+    // A goodbye takes the records away.
+    engine.finish();
+    let out = engine.take_output();
+    let mut x = HostEngine::new(vec![b], HostOptions::default()).unwrap();
+    let mut y = HostEngine::new(vec![a], HostOptions::default()).unwrap();
+    link_up(&mut x, &mut y, ms(0), ms(3000), ms(10));
+    assert!(!x.statuses()[0].mdns.clone().unwrap().found.is_empty());
+    y.finish();
+    for (_, f) in y.take_output() {
+        x.handle_frame(0, &f, ms(3000));
+    }
+    assert!(x.statuses()[0].mdns.clone().unwrap().found.is_empty());
+    assert!(!out.is_empty());
+}
+
+#[test]
+fn mdns_answers_a_legacy_unicast_query() {
+    let mut a = static4(1);
+    a.hostname = Some("lab-a".into());
+    a.mdns = Some(MdnsConfig::default());
+    let mut engine = HostEngine::new(vec![a], HostOptions::default()).unwrap();
+    drive(&mut engine, ms(0), ms(500), ms(10), |_, _, _| Vec::new());
+    // `dig -p 5353 @224.0.0.251 lab-a.local`: from a random port.
+    let mut q = vec![0x42, 0x42, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    crate::udp::dns::put_name(&mut q, "lab-a.local");
+    q.extend_from_slice(&[0, 1, 0, 1]);
+    let peer = Ipv4Addr::new(10, 77, 0, 9);
+    let path = Path {
+        src_mac: mac(9),
+        dst_mac: MacAddr([0x01, 0x00, 0x5e, 0, 0, 0xfb]),
+        vlan: None,
+        src: IpAddr::V4(peer),
+        dst: IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251)),
+    };
+    let f = wire::udp_frame(&path, 40000, 5353, &q, 1);
+    assert!(engine.handle_frame(0, &f, ms(500)));
+    let out = engine.take_output();
+    let (_, f) = out
+        .iter()
+        .find(|(_, f)| wire::parse_link(f).unwrap().dst == mac(9))
+        .unwrap();
+    let link = wire::parse_link(f).unwrap();
+    let ip = wire::parse_ip(&f[link.payload..], true).unwrap();
+    assert_eq!(ip.dst, IpAddr::V4(peer));
+    let udp = wire::parse_udp(&ip, true).unwrap();
+    assert_eq!(udp.dport, 40000);
+    let m = crate::udp::dns::Message::parse(udp.data).unwrap();
+    assert_eq!(m.id, 0x4242);
+    assert_eq!(
+        m.question,
+        Some(("lab-a.local".into(), crate::udp::dns::DnsType::A))
+    );
+    assert_eq!(
+        m.answers[0].data,
+        crate::udp::dns::DnsData::A(Ipv4Addr::new(10, 77, 0, 1))
+    );
+}
+
+#[test]
+fn dot1x_supplicants_authenticate_before_they_take_addresses() {
+    let mut auth = HostConfig::new(0, SERVER_MAC);
+    auth.dot1x_authenticator = Some(AuthenticatorConfig {
+        users: vec![("alice".into(), "secret".into())],
+    });
+    let mut good = dhcp_server_host();
+    good.dot1x_authenticator = auth.dot1x_authenticator.clone();
+    let mut alice = dhcp_host(1);
+    alice.dot1x = Some(Dot1xConfig::new("alice", "secret"));
+    let mut mallory = dhcp_host(2);
+    mallory.dot1x = Some(Dot1xConfig::new("alice", "guess"));
+    let mut server = HostEngine::new(vec![good], HostOptions::default()).unwrap();
+    let mut clients = HostEngine::new(vec![alice, mallory], HostOptions::default()).unwrap();
+    // Before the authentication: no DHCP.
+    let mut first: Vec<u16> = Vec::new();
+    clients.poll(ms(0));
+    for (_, f) in clients.take_output() {
+        first.push(wire::parse_link(&f).unwrap().ethertype);
+    }
+    assert!(first.iter().all(|t| *t == 0x888e), "{first:x?}");
+    link_up(&mut server, &mut clients, ms(0), ms(3000), ms(10));
+    let s = clients.statuses();
+    let d = s[0].dot1x.clone().unwrap();
+    assert_eq!(d.state, Dot1xState::Authorized);
+    assert_eq!(d.authenticator, Some(SERVER_MAC));
+    assert_eq!(d.method.as_deref(), Some("MD5"));
+    assert_eq!(s[0].state, HostState::Ready);
+    assert!(s[0].ipv4.is_some());
+    let d = s[1].dot1x.clone().unwrap();
+    assert_eq!(d.state, Dot1xState::Refused);
+    assert_eq!(s[1].state, HostState::Failed);
+    assert!(s[1].ipv4.is_none());
+    assert!(
+        s[1].error.as_deref().unwrap().contains("802.1X"),
+        "{:?}",
+        s[1].error
+    );
+    let a = server.statuses()[0].dot1x_authenticator.clone().unwrap();
+    assert_eq!(a.successes, 1);
+    assert_eq!(a.failures, 1);
+    assert_eq!(a.sessions.len(), 2);
+    // Logoff at the end.
+    clients.finish();
+    for (_, f) in clients.take_output() {
+        server.handle_frame(0, &f, ms(3000));
+    }
+    assert_eq!(
+        server.statuses()[0]
+            .dot1x_authenticator
+            .clone()
+            .unwrap()
+            .logoffs,
+        1
+    );
+}
+
+#[test]
+fn dot1x_without_an_authenticator() {
+    let mut strict = dhcp_host(1);
+    strict.dot1x = Some(Dot1xConfig::new("alice", "secret"));
+    let mut lax = static4(2);
+    lax.dot1x = Some(Dot1xConfig {
+        required: false,
+        ..Dot1xConfig::new("bob", "secret")
+    });
+    let options = HostOptions {
+        setup_timeout: Duration::from_secs(15),
+        ..HostOptions::default()
+    };
+    let mut engine = HostEngine::new(vec![strict, lax], options).unwrap();
+    drive(&mut engine, ms(0), ms(20_000), ms(50), |_, _, _| Vec::new());
+    let s = engine.statuses();
+    // Required: it keeps asking until the setup times out.
+    assert_eq!(s[0].dot1x.clone().unwrap().state, Dot1xState::Connecting);
+    assert_eq!(s[0].state, HostState::Failed);
+    assert!(
+        s[0].error.as_deref().unwrap().contains("802.1X"),
+        "{:?}",
+        s[0].error
+    );
+    // Not required: after three EAPOL-Starts it goes on without.
+    let d = s[1].dot1x.clone().unwrap();
+    assert_eq!(d.state, Dot1xState::NoAuthenticator);
+    assert_eq!(d.starts, 3);
+    assert_eq!(s[1].state, HostState::Ready);
+}
+
+#[test]
+fn flow_records_go_to_the_collector_once_it_answers_arp() {
+    let mut host = static4(1);
+    let mut cfg = FlowExportConfig::new("10.77.0.9:4739".parse().unwrap());
+    cfg.records = 5;
+    host.flow_export = Some(cfg);
+    let mut engine = HostEngine::new(vec![host], HostOptions::default()).unwrap();
+    let collector = mac(9);
+    let mut arps = 0;
+    let mut got = Vec::new();
+    let mut answer = false;
+    drive(&mut engine, ms(0), ms(3500), ms(10), |p, f, _| {
+        let link = wire::parse_link(f).unwrap();
+        if link.ethertype == 0x0806 {
+            arps += 1;
+            if answer {
+                let arp = wire::parse_arp(&f[link.payload..]).unwrap();
+                return vec![(
+                    p,
+                    wire::arp_frame(
+                        link.src,
+                        None,
+                        2,
+                        collector,
+                        arp.target_ip,
+                        link.src,
+                        arp.sender_ip,
+                    ),
+                )];
+            }
+            answer = true;
+            return Vec::new();
+        }
+        if let Some(ip) = wire::parse_ip(&f[link.payload..], true) {
+            if let Some(u) = wire::parse_udp(&ip, true) {
+                if u.dport == 4739 {
+                    assert_eq!(link.dst, collector);
+                    got.push(u.data.to_vec());
+                }
+            }
+        }
+        Vec::new()
+    });
+    // The first request goes unanswered, the second a second later is.
+    assert_eq!(arps, 2);
+    assert!(!got.is_empty());
+    assert!(got.iter().all(|p| p[0..2] == [0, 10]));
+    let st = engine.statuses()[0].flow_export.clone().unwrap();
+    assert_eq!(st.packets as usize, got.len());
+    assert_eq!(st.records, 5 * st.packets);
+    assert!(!st.waiting);
 }
