@@ -1,0 +1,29 @@
+# NTP, TCP over FeroTRX's own impaired port, and a short Y.1564 test,
+# through the lab router.
+#
+#   sudo ferotrx scenario run examples/lab-scenario-services.toml --lab
+format = 1
+name = "lab-services"
+description = "NTP, TCP over an impaired port with CUBIC and ECN, and a Y.1564 test through the lab router"
+iface = "ftrx-lab"
+attempts = 2
+
+[lab]
+
+[[check]]
+name = "NTP answers"
+udp = "lab-ntp.toml"
+require = ["response_avg < 50ms"]
+
+# Every connection completes in spite of the loss, by retransmitting.
+[[check]]
+name = "TCP over a poor last mile"
+tcp = "lab-tcp-impair.toml"
+require = ["retransmits > 0", "timed_out == 0"]
+
+# The router does not police: every step passes.
+[[check]]
+name = "Y.1564 service activation"
+y1564 = "lab-y1564.toml"
+rx = "ftrx-lab"
+expect = "pass"

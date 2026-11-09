@@ -1,0 +1,46 @@
+# IPv6 prefix delegation, both ends emulated on one port: a DHCPv6 server
+# that hands out /56 prefixes from a /40 (and addresses), a router that
+# advertises the link, and three home routers (CPEs) that ask for an address
+# and a prefix each. Point the CPEs at a real DHCPv6 server or BNG instead by
+# leaving out the first two hosts.
+#
+#   sudo ferotrx host examples/lab-prefix-delegation.toml -i ftrx-lab
+#
+# On the lab router (`sudo ferotrx lab up`) they all sit on VLAN 10. The
+# server prints each delegation at the end, the CPEs the prefix they got.
+# See docs/host-emulation.md#dhcp-servers.
+format = 1
+duration = "20s"
+
+[options]
+setup_timeout = "15s"
+
+# The DHCPv6 server, also the router of the link (M flag: use DHCPv6).
+[[host]]
+mac = "02:dc:00:00:0d:61"
+ipv6 = "fd00:10::61/64"
+vlan = 10
+[host.router]
+prefixes = ["fd00:10::/64"]
+managed = true
+interval = "5s"
+mtu = 1500
+dns = ["fd00:10::53"]
+search = ["lab.test"]
+[host.dhcpv6_server]
+pool = "fd00:10::100-fd00:10::1ff"
+lease = "10m"
+dns = ["fd00:10::53"]
+domain = "lab.test"
+prefix = 64
+pd_pool = "fd00:6100::/40"
+pd_length = 56
+
+# Three home routers: an address by DHCPv6 and a delegated /56.
+[[host]]
+count = 3
+mac = "02:dc:00:00:0e:61"
+ipv6 = "dhcpv6"
+vlan = 10
+hostname = "cpe-{n}"
+prefix_delegation = 56

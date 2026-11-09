@@ -1,0 +1,35 @@
+# Stateful TCP as fast as the machine allows, on the lab router built with
+# four queues (`sudo ferotrx lab up --queues 4`): AF_XDP, one worker (thread
+# and queue) per core, pinned to CPUs, the connections split between the
+# workers by client port.
+#
+#   sudo ferotrx tcp -p examples/lab-tcp-fast.toml -i ftrx-lab
+#   ... -B pcap --workers 1      the slow way, to compare
+#
+# On a real NIC give as many workers as it has receive queues (ethtool -l),
+# and pin them to the CPUs of the NIC's NUMA node (`ferotrx info` or the
+# run's report says which). See docs/fast-ports.md and docs/multi-core.md.
+format = 1
+pcap = "http.pcap"
+cps = 2000
+connections = 20000
+concurrency = 2000           # a limit keeps an overloaded run from collapsing
+
+[output]
+backend = "af_xdp"           # pcap (default), af_xdp or dpdk
+workers = 4
+cpus = "0-3"                 # one per worker; leave out to let the OS choose
+
+[client]
+ip = "192.168.10.100/24"
+ips = 50
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.50/24"
+gateway = "192.168.20.1"
+vlan = 20
+
+[tcp]
+rto = "250ms"

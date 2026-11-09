@@ -1,0 +1,21 @@
+# Settings for a shared lab control server: traffic limits that remote
+# operators cannot go beyond, whoever they log in as (the command line on
+# the box itself is not limited). Options on the command line win.
+#
+#   sudo ferotrx serve -l 0.0.0.0:4510 --config examples/server/serve.toml \
+#       --tokens examples/server/tokens.toml --tls-cert lab-pki/server.pem \
+#       --tls-key lab-pki/server-key.pem --lab --require-acquire
+#
+# Here they fit the lab router (`--lab`, `ferotrx lab up`): runs may only
+# send on its trunk, to its two VLANs. See docs/remote-control.md#traffic-limits.
+format = 1
+
+[limits]
+interfaces = ["ftrx-lab"]
+destinations = ["192.168.10.0/24", "192.168.20.0/24", "fd00:10::/64", "fd00:20::/64", "172.16.0.0/16"]
+max_pps = "50kpps"          # all runs together
+max_bps = "200mbps"
+max_duration = "10m"
+max_runs = 4
+max_flows = 2000            # a TCP or UDP run's open connections, and new ones per second
+allow_unlimited = false     # true: benchmarks and Y.1564 tests despite the rate limits

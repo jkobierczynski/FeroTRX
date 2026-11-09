@@ -169,6 +169,9 @@ client = "local=10.9.1.2,remote=10.9.2.2,gateway=10.9.1.1,teid=1000,qfi=9"
 server = "local=10.9.2.2,remote=10.9.1.2,gateway=10.9.2.1,teid=1000,qfi=9"
 ```
 
+[`examples/lab-gtpu.toml`](../examples/lab-gtpu.toml) runs this through the lab
+router.
+
 On the command line: `--client-gtpu SPEC` and `--server-gtpu SPEC`
 (`none` turns a profile's off). Each spec is
 `local=IP,remote=IP[,gateway=IP][,teid=N][,qfi=N][,vlan=ID][,mac=MAC][,mtu=N]`:

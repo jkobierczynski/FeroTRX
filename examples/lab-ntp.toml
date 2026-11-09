@@ -1,0 +1,32 @@
+# NTP through the lab router (`sudo ferotrx lab up`): 50 emulated clients on
+# VLAN 10 ask an emulated stratum 2 server on VLAN 20 for the time. Requests
+# are matched by their transmit timestamp; the run counts answers, kiss-o'-
+# death codes and response times.
+#
+#   sudo ferotrx udp -p examples/lab-ntp.toml -i ftrx-lab
+#
+# Only the client, against a real NTP server (chrony, ntpd, a router):
+#   sudo ferotrx udp -p examples/lab-ntp.toml -i ftrx-lab --connect 192.168.20.123:123
+# (and leave out [server]). See docs/app-protocols.md#ntp.
+format = 1
+app = "ntp"
+rate = 100                  # requests per second, on average
+model = "poisson"           # as many independent clients would ask
+transactions = 1000
+concurrency = 200
+
+[client]
+ip = "192.168.10.150/24"
+ips = 50                    # 192.168.10.150 - .199
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.123/24"
+gateway = "192.168.20.1"
+vlan = 20
+
+[udp]
+timeout = "500ms"
+retries = 2
+think_time = "1ms"          # the server's time to answer

@@ -1,0 +1,36 @@
+# Logins for a shared lab control server (`ferotrx serve --tokens FILE`),
+# one per person, so that port reservations and runs belong to someone:
+#
+#   ferotrx ctl -c lab1 --token alice-... acquire ftrx-lab --note "soak test until 17:00"
+#   ferotrx ctl -c lab1 --token bob-... ports          # who has what
+#
+# Roles: read (look only), operator (start and stop their own runs, reserve
+# ports), admin (an operator who may also take ports from others with
+# --force and stop anyone's runs). Write `sha256` (of the token) instead of
+# `secret` so the file holds no secrets; `ferotrx serve` reads it again on
+# SIGHUP or `ferotrx ctl reload`. These secrets are examples: make your own
+# (openssl rand -hex 24). See docs/remote-control.md#several-users.
+#
+# Tokens need TLS beyond loopback: give serve --tls-cert and --tls-key
+# (`ferotrx certs lab-pki` makes them).
+
+[[token]]
+name = "alice"
+role = "operator"
+secret = "alice-example-token-change-me"
+
+[[token]]
+name = "bob"
+role = "operator"
+secret = "bob-example-token-change-me"
+
+[[token]]
+name = "lab-admin"
+role = "admin"
+secret = "admin-example-token-change-me"
+
+# A dashboard that only watches: the token is the SHA-256 of "test".
+[[token]]
+name = "dashboard"
+role = "read"
+sha256 = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"

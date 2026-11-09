@@ -352,6 +352,8 @@ plain string.
   a TCP run as a pass/fail check, with per-template counters.
 * [`python/examples/async_watch.py`](../python/examples/async_watch.py):
   follow several servers at once with the asyncio client.
+* [`python/examples/reserve_ports.py`](../python/examples/reserve_ports.py):
+  reserve a port on a shared server, run a TCP profile on it, give it back.
 
 ## Tests
 

@@ -1,0 +1,37 @@
+# The port's own addresses (L3 mode, as TRex's L3 ports): the streams carry
+# no MACs. FeroTRX asks the lab router (`sudo ferotrx lab up`) for its MAC by
+# ARP before it sends, writes it into every frame, and answers ARP and ping
+# for the port's address while the run goes on.
+#
+#   sudo ferotrx run examples/lab-l3-port.toml -i ftrx-lab --rx ftrx-lab -d 10s
+#   ping from the router: sudo ip netns exec ferotrx-lab ping -c 3 192.168.10.9
+#
+# The streams go to the router's stream receiver, 192.168.20.2, which sends
+# them back on VLAN 20, so --rx counts them. Without the lab, change the
+# addresses to your own; the run fails with a clear error when the gateway
+# does not answer within 3 s.
+format = 1
+
+[output]
+ip = "192.168.10.9/24"       # the port's address (one per IP version)
+gateway = "192.168.10.1"     # the router; its MAC becomes every frame's mac_dst
+vlan = 10                    # ARP and answers in VLAN 10
+# The port also answers for the sources the second stream varies, so the
+# router can reach them too.
+answer = ["192.168.10.20-192.168.10.29"]
+# mac = "02:00:00:00:10:09"  # default: the interface's own MAC
+
+[[stream]]
+name = "from the port"
+packet = "eth/vlan(id=10)/ipv4(src=192.168.10.9,dst=192.168.20.2)/udp(sport=4000,dport=9000)/raw(len=100)"
+rate = "200pps"
+loops = 0
+latency = true
+
+[[stream]]
+name = "ten clients"
+packet = "eth/vlan(id=10)/ipv4(src=192.168.10.20,dst=192.168.20.2)/udp(sport=4001,dport=9000)/raw(len=100)"
+rate = "200pps"
+loops = 0
+vary = ["ip_src=192.168.10.20..192.168.10.29"]
+latency = true

@@ -1,0 +1,51 @@
+# Stream sequencing on the lab router (`sudo ferotrx lab up`): bursts, streams
+# that start each other, and rates that are a share of the line. The streams
+# go through the router to its stream receiver, 192.168.20.2, which sends
+# them back out on VLAN 20, so --rx counts what got through:
+#
+#   sudo ferotrx run examples/lab-sequence.toml -i ftrx-lab --rx ftrx-lab
+#   ferotrx check examples/lab-sequence.toml
+#
+# What it sends, in order:
+#   1. "probe": 10 bursts of 32 small frames, 20 ms apart, then "bulk";
+#   2. "bulk": web.pcap at 2% of the line (20 Mbit/s of a 1 Gbit/s line,
+#      preamble, gap and FCS counted), 4000 frames, then "probe" again: four
+#      rounds of the two in all (the first and `next_count = 3` more).
+#   3. "beacon" runs beside them from the start, 1 Mbit/s on the wire (about
+#      500 frames a second), as long as the run lasts (Ctrl-C or --duration).
+# See docs/replay.md#bursts-and-streams-that-start-each-other.
+format = 1
+
+[output]
+# The line's speed, for "2%" below; on real NICs FeroTRX reads it from the
+# interface (ethtool), but veth links have none.
+line_rate = "1gbps"
+
+[[stream]]
+name = "probe"
+packet = "eth(src=02:00:00:00:10:02,dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.2,dst=192.168.20.2)/udp(sport=4000,dport=9000)/raw(len=64)"
+rate = "5kpps"               # inside a burst
+loops = 0                    # the bursts end it, not the one packet
+burst_size = 32
+burst_gap = "20ms"
+bursts = 10
+latency = true               # signatures, for --rx loss and latency
+next = "bulk"
+
+[[stream]]
+name = "bulk"
+pcap = "web.pcap"
+rate = "2%"                  # of line_rate, counted on the wire (L1)
+limit = 4000                 # about 0.2 s
+loops = 0
+rewrite = ["vlan_push=10", "mac_src=02:00:00:00:10:03", "mac_dst=02:00:00:00:00:01", "ip_src=192.168.10.3", "ip_dst=192.168.20.2"]
+latency = true
+next = "probe"               # an earlier stream: a loop,
+next_count = 3               # three times round
+
+[[stream]]
+name = "beacon"
+packet = "eth(src=02:00:00:00:10:04,dst=02:00:00:00:00:01)/vlan(id=10)/ipv4(src=192.168.10.4,dst=192.168.20.2,dscp=46)/udp(sport=5004,dport=5004)/raw(len=160)"
+rate = "1mbps-l1"            # a bit rate counted on the wire too
+loops = 0
+latency = true
