@@ -27,6 +27,10 @@ pub struct UserGroup {
     /// Users that arrive per second at the start, until all are online;
     /// `None`: all at once.
     pub arrival: Option<f64>,
+    /// Where this worker's arrivals fall between arrivals, 0 to 1: with
+    /// `--workers N`, worker k takes k/N, so the workers' users come in
+    /// turn instead of together.
+    pub(crate) phase: f64,
 }
 
 impl UserGroup {
@@ -37,6 +41,7 @@ impl UserGroup {
             think: Dist::zero(),
             lifetime: None,
             arrival: None,
+            phase: 0.0,
         }
     }
 
@@ -291,11 +296,15 @@ impl Users {
         }
         self.started = true;
         for g in 0..self.groups.len() {
-            let (n, rate) = (self.groups[g].users, self.groups[g].arrival);
+            let (n, rate, phase) = (
+                self.groups[g].users,
+                self.groups[g].arrival,
+                self.groups[g].phase,
+            );
             for k in 0..n {
                 let at = match rate {
                     Some(r) => now.saturating_add(
-                        Duration::try_from_secs_f64(f64::from(k) / r)
+                        Duration::try_from_secs_f64((f64::from(k) + phase) / r)
                             .unwrap_or(crate::dist::MAX_TIME)
                             .min(crate::dist::MAX_TIME),
                     ),
@@ -419,5 +428,18 @@ mod tests {
         assert_eq!(u.due(Duration::ZERO).len(), 1);
         assert_eq!(u.due(Duration::from_millis(999)).len(), 5);
         assert_eq!(u.next_due(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn a_worker_phase_delays_its_first_arrival() {
+        // Worker 1 of 2 with 2 users/s overall: 1/s here, half a gap late.
+        let mut g = UserGroup::new("iot", 2);
+        g.arrival = Some(1.0);
+        g.phase = 0.5;
+        let mut u = Users::new(vec![g], 1);
+        u.start(Duration::ZERO);
+        assert!(u.due(Duration::from_millis(499)).is_empty());
+        assert_eq!(u.due(Duration::from_millis(500)).len(), 1);
+        assert_eq!(u.due(Duration::from_millis(1500)).len(), 2);
     }
 }

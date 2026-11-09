@@ -246,6 +246,9 @@ fn users_for(
             n,
         )? as u32;
         g.arrival = g.arrival.map(|r| r / n as f64);
+        // The workers' arrivals in turn: worker k comes k/N of its own
+        // gap later, so together they keep the profile's rate.
+        g.phase = k as f64 / n as f64;
         out.push(g);
     }
     Ok((out, u64::from(ip_count) * k as u64 / n as u64))
