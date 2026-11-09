@@ -397,6 +397,7 @@ pub fn cmd_host(args: HostArgs) -> Result<()> {
             duration: profile.duration,
             stop: Some(stop),
             start_at: None,
+            pinning: None,
         },
     )?;
     let mut shown: Vec<HostState> = Vec::new();

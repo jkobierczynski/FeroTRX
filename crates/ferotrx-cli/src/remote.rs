@@ -637,7 +637,7 @@ enum CtlCommand {
     /// Forget a loaded profile.
     Unload { name: String },
     /// Start a run of a loaded profile.
-    Start(StartArgs),
+    Start(Box<StartArgs>),
     /// Stop a run and show its final counters.
     Stop { id: u64 },
     /// Hold a run (or some of its streams) where it is; `resume` goes on
@@ -1050,6 +1050,7 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
         }
         CtlCommand::Unload { name } => c.unload_profile(&name)?,
         CtlCommand::Start(s) => {
+            let s = *s;
             s.link.check_no_l1()?;
             let params = StartParams {
                 profile: s.profile,
@@ -1065,6 +1066,7 @@ pub fn cmd_ctl(args: CtlArgs) -> Result<()> {
                         batch: send.batch,
                         dpdk_args: send.dpdk_args,
                         workers: send.workers,
+                        cpus: send.cpus.as_ref().map(|c| c.to_string()),
                         line_rate: s.link.line_rate.clone(),
                         ip: s.link.addr.ip.iter().map(|p| p.to_string()).collect(),
                         gateway: s.link.addr.gateway.iter().map(|g| g.to_string()).collect(),

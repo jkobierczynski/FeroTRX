@@ -353,6 +353,8 @@ pub struct TcpRunConfig {
     /// A [`PortJob`] waits for this wall-clock time before the engine
     /// starts, so that runs on several machines start together.
     pub start_at: Option<std::time::SystemTime>,
+    /// Pin the engine threads to CPUs (worker `k` on the `k`-th listed).
+    pub pinning: Option<crate::CpuPinning>,
 }
 
 /// Frames read from one port before the others get a turn.
@@ -500,6 +502,7 @@ pub struct PortJob<S> {
     stop: Arc<AtomicBool>,
     shared: Arc<JobShared<S>>,
     workers: usize,
+    pinned: Option<crate::CpuList>,
     thread: Option<JoinHandle<Result<S>>>,
 }
 
@@ -529,6 +532,7 @@ impl<S: Clone + Default + Send + 'static> PortJob<S> {
     where
         E: PortEngine<Stats = S> + 'static,
     {
+        let pinned = config.pinning.as_ref().map(|p| p.cpus.used_by(1));
         let stop = config
             .stop
             .get_or_insert_with(|| Arc::new(AtomicBool::new(false)))
@@ -551,13 +555,15 @@ impl<S: Clone + Default + Send + 'static> PortJob<S> {
                 .spawn(move || {
                     let started = crate::wait_until(config.start_at, &stop_flag);
                     lock(&shared.live).started_at = Some(started);
-                    let result = run_engine(
-                        &mut engine,
-                        &mut ports,
-                        &config,
-                        crate::JOB_STATS_INTERVAL,
-                        |s| lock(&shared.live).stats = s.clone(),
-                    );
+                    let result = crate::cpus::pin(&config.pinning, 0).and_then(|_| {
+                        run_engine(
+                            &mut engine,
+                            &mut ports,
+                            &config,
+                            crate::JOB_STATS_INTERVAL,
+                            |s| lock(&shared.live).stats = s.clone(),
+                        )
+                    });
                     let mut live = lock(&shared.live);
                     live.running = false;
                     match &result {
@@ -576,6 +582,7 @@ impl<S: Clone + Default + Send + 'static> PortJob<S> {
             stop,
             shared,
             workers: 1,
+            pinned,
             thread: Some(thread),
         })
     }
@@ -654,6 +661,7 @@ impl<S: Clone + Default + Send + MergeStats + 'static> PortJob<S> {
                 router.workers()
             )));
         }
+        let pinned = config.pinning.as_ref().map(|p| p.cpus.used_by(n));
         let stop = config
             .stop
             .get_or_insert_with(|| Arc::new(AtomicBool::new(false)))
@@ -693,6 +701,7 @@ impl<S: Clone + Default + Send + MergeStats + 'static> PortJob<S> {
             stop,
             shared,
             workers: n,
+            pinned,
             thread: Some(thread),
         })
     }
@@ -742,16 +751,18 @@ where
                 std::thread::Builder::new()
                     .name(format!("ferotrx-worker-{k}"))
                     .spawn_scoped(scope, move || {
-                        let r = worker_loop(
-                            k,
-                            &mut engine,
-                            &mut ports,
-                            router,
-                            config,
-                            mesh,
-                            start,
-                            shared,
-                        );
+                        let r = crate::cpus::pin(&config.pinning, k).and_then(|_| {
+                            worker_loop(
+                                k,
+                                &mut engine,
+                                &mut ports,
+                                router,
+                                config,
+                                mesh,
+                                start,
+                                shared,
+                            )
+                        });
                         if r.is_err() {
                             mesh.finish.store(true, Ordering::Relaxed);
                         }
@@ -919,6 +930,11 @@ impl<S> PortJob<S> {
     /// The number of engine threads the run uses.
     pub fn workers(&self) -> usize {
         self.workers
+    }
+
+    /// The CPUs the engine threads are pinned to, in worker order (`--cpus`).
+    pub fn pinned_cpus(&self) -> Option<&crate::CpuList> {
+        self.pinned.as_ref()
     }
 
     pub fn is_running(&self) -> bool {

@@ -144,12 +144,20 @@ pub fn start_run_with_rx(
     start_run_guarded(profile, output, rate, config, rx, &None)
 }
 
+/// Pins workers to `cpus` with the platform's [`ferotrx_io::pin_thread`].
+pub fn pinning(cpus: Option<&ferotrx_core::CpuList>) -> Option<ferotrx_core::CpuPinning> {
+    cpus.map(|c| ferotrx_core::CpuPinning {
+        cpus: c.clone(),
+        pin: ferotrx_io::pin_thread,
+    })
+}
+
 /// [`start_run_with_rx`] with the sinks held to a server's limits.
 pub(crate) fn start_run_guarded(
     profile: &Profile,
     output: &Output,
     rate: Option<Rate>,
-    config: RunConfig,
+    mut config: RunConfig,
     rx: Option<RxSettings>,
     guard: &Option<Arc<Guard>>,
 ) -> Result<Started, StartError> {
@@ -169,10 +177,13 @@ pub(crate) fn start_run_guarded(
     let service = start_link(&output, &profile.link)?;
     // Interface outputs carry the profile's [output] settings now; files and
     // the null output take the worker count from the profile.
-    let workers = match &output {
-        Output::Interface { send, .. } => send.workers(),
-        _ => profile.output.workers(),
+    let (workers, cpus) = match &output {
+        Output::Interface { send, .. } => (send.workers(), send.cpus.as_ref()),
+        _ => (profile.output.workers(), profile.output.cpus.as_ref()),
     };
+    if config.pinning.is_none() {
+        config.pinning = pinning(cpus);
+    }
     if let Some(rate) = rate {
         rate.validate()?;
     }
@@ -1331,14 +1342,20 @@ impl Controller {
                 .resolve_line_rate(line)
                 .map_err(|e| RpcError::invalid_params(e.to_string()))?;
         }
-        // Files and the null output take only a worker count.
+        // Files and the null output take only a worker count and CPUs.
         let workers_only = send
             == SendSettings {
                 workers: send.workers,
+                cpus: send.cpus.clone(),
                 ..Default::default()
             };
-        if workers_only && p.output.iface.is_none() && send.workers.is_some() {
-            profile.output.workers = send.workers;
+        if workers_only && p.output.iface.is_none() {
+            if send.workers.is_some() {
+                profile.output.workers = send.workers;
+            }
+            if send.cpus.is_some() {
+                profile.output.cpus = send.cpus.clone();
+            }
         }
         let output = match (p.output.iface, p.output.file, p.output.null) {
             (Some(name), None, false) => Output::Interface { name, send },
@@ -1384,6 +1401,7 @@ impl Controller {
             stop: None,
             start_at,
             control: None,
+            pinning: None,
         };
         if p.latency {
             profile.enable_latency();
@@ -1878,6 +1896,7 @@ impl Controller {
             queue: p.queue,
             xdp_mode: p.xdp_mode,
             workers: p.workers,
+            cpus: p.cpus,
             ..Default::default()
         }
         .send_settings()?
@@ -2014,6 +2033,7 @@ impl Controller {
             queue: p.queue,
             xdp_mode: p.xdp_mode,
             workers: p.workers,
+            cpus: p.cpus,
             ..Default::default()
         }
         .send_settings()?
@@ -2130,6 +2150,7 @@ impl Controller {
             duration: self.limits.duration_or_max(duration.or(profile.duration)),
             stop: None,
             start_at,
+            pinning: None,
         };
         let output = OutputSpec {
             backend: p.backend,
@@ -2138,6 +2159,7 @@ impl Controller {
             batch: p.batch,
             dpdk_args: p.dpdk_args,
             workers: p.workers,
+            cpus: p.cpus,
             ..Default::default()
         }
         .send_settings()?;
@@ -2240,6 +2262,7 @@ impl Controller {
             duration: self.limits.duration_or_max(duration.or(profile.duration)),
             stop: None,
             start_at,
+            pinning: None,
         };
         let output = OutputSpec {
             backend: p.backend,
@@ -2248,6 +2271,7 @@ impl Controller {
             batch: p.batch,
             dpdk_args: p.dpdk_args,
             workers: p.workers,
+            cpus: p.cpus,
             ..Default::default()
         }
         .send_settings()?;
@@ -2551,6 +2575,12 @@ impl OutputSpec {
             batch: self.batch,
             dpdk_args: self.dpdk_args.clone(),
             workers: self.workers,
+            cpus: self
+                .cpus
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(bad)?,
         };
         s.validate().map_err(bad)?;
         Ok(s)

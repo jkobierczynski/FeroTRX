@@ -16,6 +16,10 @@
 //!   down, until `frame_loss_clean` steps in a row lose nothing.
 //! * **Back-to-back**: the longest burst at `max_load` that passes without
 //!   loss, by a binary search on its length up to `burst_max` frames.
+//! * **Sweep** (not in RFC 2544): a warm-up, then `repetitions` trials at
+//!   `max_load`, reported as the median, minimum, maximum and spread of the
+//!   rates sent and received, loss and latency ([`SweepResult`]): evidence
+//!   of what the sender and the path carry, comparable between runs.
 //!
 //! The trials themselves are run by a [`TrialRunner`]: [`JobTrialRunner`]
 //! sends with a [`Job`](crate::Job) on any [`PacketSink`](crate::PacketSink)
@@ -32,6 +36,7 @@ mod info;
 pub(crate) mod profile;
 mod report;
 mod runner;
+mod sweep;
 
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +47,7 @@ pub use info::{utc_timestamp, InterfaceDetails, RunInfo};
 #[cfg(feature = "profile")]
 pub use profile::BenchProfile;
 pub use runner::JobTrialRunner;
+pub use sweep::{Spread, SweepResult};
 
 use crate::{Error, LatencyStats, Result, SizeMix, FCS_LEN, L1_OVERHEAD};
 
@@ -54,14 +60,17 @@ pub enum BenchTest {
     Latency,
     FrameLoss,
     BackToBack,
+    /// Several trials at one load, with their spread (see [`SweepResult`]).
+    Sweep,
 }
 
 impl BenchTest {
-    pub const ALL: [BenchTest; 4] = [
+    pub const ALL: [BenchTest; 5] = [
         BenchTest::Throughput,
         BenchTest::Latency,
         BenchTest::FrameLoss,
         BenchTest::BackToBack,
+        BenchTest::Sweep,
     ];
 
     pub fn name(self) -> &'static str {
@@ -70,6 +79,7 @@ impl BenchTest {
             BenchTest::Latency => "latency",
             BenchTest::FrameLoss => "frame_loss",
             BenchTest::BackToBack => "back_to_back",
+            BenchTest::Sweep => "sweep",
         }
     }
 }
@@ -82,8 +92,9 @@ impl FromStr for BenchTest {
             "latency" => Ok(BenchTest::Latency),
             "frame_loss" | "loss" => Ok(BenchTest::FrameLoss),
             "back_to_back" | "b2b" | "burst" => Ok(BenchTest::BackToBack),
+            "sweep" => Ok(BenchTest::Sweep),
             _ => Err(Error::InvalidSpec(format!(
-                "unknown test '{s}' (throughput, latency, frame_loss, back_to_back)"
+                "unknown test '{s}' (throughput, latency, frame_loss, back_to_back, sweep)"
             ))),
         }
     }
@@ -493,6 +504,11 @@ pub struct SizeReport {
     pub frame_loss: Vec<LossPoint>,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub back_to_back: Option<BurstResult>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub sweep: Option<SweepResult>,
     /// Every trial, in the order run.
     pub trials: Vec<TrialRecord>,
 }
@@ -623,6 +639,7 @@ pub fn run_benchmark(
             latency: None,
             frame_loss: Vec::new(),
             back_to_back: None,
+            sweep: None,
             trials: Vec::new(),
         };
         let result = bench.size(size, &mut sr);
@@ -699,6 +716,7 @@ impl Bench<'_> {
                 BenchTest::Latency => self.latency(size, sr)?,
                 BenchTest::FrameLoss => self.frame_loss(size, sr)?,
                 BenchTest::BackToBack => self.back_to_back(size, sr)?,
+                BenchTest::Sweep => self.sweep(size, sr)?,
             }
         }
         Ok(())

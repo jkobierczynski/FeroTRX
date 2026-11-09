@@ -145,6 +145,7 @@ fn run_tcp_split(config: TcpConfig, workers: usize, through_relay: bool) -> TcpS
             duration: Some(Duration::from_secs(60)),
             stop: None,
             start_at: None,
+            pinning: None,
         },
     )
     .unwrap();
@@ -255,6 +256,7 @@ fn udp_dns_over_three_workers() {
             duration: Some(Duration::from_secs(60)),
             stop: None,
             start_at: None,
+            pinning: None,
         },
     )
     .unwrap();
@@ -307,4 +309,87 @@ fn streams_split_over_workers_send_one_stream() {
     let flow = flow.flow(9).unwrap();
     assert_eq!(flow.duplicates, 0);
     assert_eq!(flow.unique(), 1000);
+}
+
+static PINNED: std::sync::Mutex<Vec<(String, usize)>> = std::sync::Mutex::new(Vec::new());
+
+fn record_pin(cpu: usize) -> std::result::Result<(), String> {
+    let name = std::thread::current().name().unwrap_or("").to_string();
+    PINNED.lock().unwrap().push((name, cpu));
+    Ok(())
+}
+
+fn refuse_pin(cpu: usize) -> std::result::Result<(), String> {
+    Err(format!("no CPU {cpu} here"))
+}
+
+fn null_workers(n: usize) -> Vec<(Vec<Stream<'static>>, Box<dyn PacketSink + Send>)> {
+    let cap = Arc::new(
+        Capture::from_specs(
+            &["eth/ipv4(src=10.0.0.1,dst=10.0.0.2)/udp(sport=1,dport=2)/raw(len=18)"],
+            Duration::ZERO,
+        )
+        .unwrap(),
+    );
+    (0..n)
+        .map(|k| {
+            let s = Stream::new("pinned", CaptureSource::new(cap.clone()).loops(0))
+                .with_limit(Some(100))
+                .shard(k, n);
+            (vec![s], Box::new(NullSink) as Box<dyn PacketSink + Send>)
+        })
+        .collect()
+}
+
+#[test]
+fn workers_are_pinned_in_order_and_wrap() {
+    let config = RunConfig {
+        pinning: Some(CpuPinning {
+            cpus: "6,2".parse().unwrap(),
+            pin: record_pin,
+        }),
+        ..Default::default()
+    };
+    let job = Job::spawn_workers(null_workers(3), config, None).unwrap();
+    assert_eq!(
+        job.pinned_cpus().map(ToString::to_string).as_deref(),
+        Some("6,2")
+    );
+    let stats = job.join().unwrap();
+    assert_eq!(stats.total.packets, 100);
+    let mut pinned: Vec<(String, usize)> = PINNED
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(n, _)| n.starts_with("ferotrx-worker-"))
+        .cloned()
+        .collect();
+    pinned.sort();
+    assert_eq!(
+        pinned,
+        vec![
+            ("ferotrx-worker-0".to_string(), 6),
+            ("ferotrx-worker-1".to_string(), 2),
+            ("ferotrx-worker-2".to_string(), 6),
+        ]
+    );
+}
+
+#[test]
+fn a_worker_that_cannot_be_pinned_fails_the_run() {
+    let config = RunConfig {
+        pinning: Some(CpuPinning {
+            cpus: "1".parse().unwrap(),
+            pin: refuse_pin,
+        }),
+        ..Default::default()
+    };
+    for n in [1, 2] {
+        let job = Job::spawn_workers(null_workers(n), config.clone(), None).unwrap();
+        let err = job.join().unwrap_err().to_string();
+        assert!(
+            err.contains("cannot pin worker 0 to CPU 1: no CPU 1 here"),
+            "{err}"
+        );
+    }
 }

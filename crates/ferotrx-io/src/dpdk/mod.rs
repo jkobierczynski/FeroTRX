@@ -8,12 +8,18 @@
 //! the first DPDK output opened. Packets are copied into mbufs and handed to
 //! the NIC in bursts of `batch`.
 //!
+//! A run on several workers gives each worker a TX queue of its own, from
+//! `queue` up ([`DpdkSink::open_queues`]); the NIC needs that many.
+//!
 //! [`DpdkPort`] also receives, for stateful TCP and UDP: the port is put in
-//! promiscuous mode and frames are taken from its RX queue 0.
+//! promiscuous mode and frames are taken from its RX queues. With
+//! `queues` above one the port has that many RX queues too, spread by RSS
+//! where the NIC can, and [`PacketPort::split`] gives each worker its own
+//! TX queue and its share of the RX queues.
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, CStr, CString};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::ThreadId;
 
 use ferotrx_core::{PacketPort, PacketSink, SinkError};
@@ -28,14 +34,19 @@ extern "C" {
     fn ftrx_dpdk_strerror(err: c_int) -> *const c_char;
     fn ftrx_dpdk_register_thread();
     fn ftrx_dpdk_find_port(name: *const c_char, devargs: *const c_char, port: *mut u16) -> c_int;
+    #[allow(clippy::too_many_arguments)]
     fn ftrx_dpdk_setup(
         port: u16,
-        queue: u16,
+        first: u16,
+        count: u16,
         nb_desc: u16,
+        rx_queues: *mut u16,
+        rss: *mut c_int,
         pool: *mut *mut RteMempool,
         info: *mut c_char,
         info_len: usize,
     ) -> c_int;
+    fn ftrx_dpdk_tx_done(port: u16, queue: u16);
     fn ftrx_dpdk_send(
         port: u16,
         queue: u16,
@@ -45,10 +56,17 @@ extern "C" {
         n: u16,
         spin_limit: u64,
     ) -> c_int;
-    fn ftrx_dpdk_stop(port: u16, queue: u16);
+    fn ftrx_dpdk_stop(port: u16);
     fn ftrx_dpdk_stats(port: u16, out: *mut u64) -> c_int;
     fn ftrx_dpdk_promisc(port: u16) -> c_int;
-    fn ftrx_dpdk_recv(port: u16, out: *mut u8, slot: usize, lens: *mut u16, max: u16) -> c_int;
+    fn ftrx_dpdk_recv(
+        port: u16,
+        queue: u16,
+        out: *mut u8,
+        slot: usize,
+        lens: *mut u16,
+        max: u16,
+    ) -> c_int;
 }
 
 /// Largest packet: the data room of one mbuf (see shim.c).
@@ -111,12 +129,110 @@ unsafe impl Send for PortState {}
 
 static PORTS: Mutex<Option<HashMap<u16, PortState>>> = Mutex::new(None);
 
-/// How to open a [`DpdkSink`].
+/// How to open a [`DpdkSink`] or [`DpdkPort`].
 #[derive(Clone, Debug)]
 pub struct DpdkConfig {
+    /// The first TX queue.
     pub queue: u16,
     pub batch: u32,
     pub eal_args: Vec<String>,
+    /// TX queues from `queue` up, one per worker; for a [`DpdkPort`] also
+    /// the RX queues (0 counts as 1).
+    pub queues: u16,
+}
+
+/// A started port; stopped when the last sink on it goes.
+struct PortHandle {
+    port: u16,
+}
+
+impl Drop for PortHandle {
+    fn drop(&mut self) {
+        unsafe { ftrx_dpdk_stop(self.port) };
+        let mut ports = PORTS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = ports.as_mut().and_then(|p| p.get_mut(&self.port)) {
+            state.in_use = false;
+        }
+    }
+}
+
+/// A port set up by [`setup`].
+struct Setup {
+    handle: Arc<PortHandle>,
+    pool: *mut RteMempool,
+    name: String,
+    /// Driver and link, as the shim describes them.
+    info: String,
+    link_up: bool,
+    rx_queues: u16,
+    rss: bool,
+}
+
+/// Finds and starts `device` with `config.queues` TX queues from
+/// `config.queue`, and up to `rx_queues` RX queues.
+fn setup(device: &str, config: &DpdkConfig, rx_queues: u16) -> Result<Setup, SinkError> {
+    init_eal(&config.eal_args)?;
+    let name = device.split(',').next().unwrap_or(device);
+    let cname = CString::new(name).map_err(|_| format!("bad DPDK device '{device}'"))?;
+    let cdev = CString::new(device).map_err(|_| format!("bad DPDK device '{device}'"))?;
+    let mut port = 0u16;
+    let r = unsafe { ftrx_dpdk_find_port(cname.as_ptr(), cdev.as_ptr(), &mut port) };
+    if r < 0 {
+        return Err(dpdk_err(&format!("device {device}"), r));
+    }
+
+    let mut ports = PORTS.lock().unwrap_or_else(|e| e.into_inner());
+    let state = ports
+        .get_or_insert_with(HashMap::new)
+        .entry(port)
+        .or_insert(PortState {
+            pool: std::ptr::null_mut(),
+            in_use: false,
+        });
+    if state.in_use {
+        return Err(format!("DPDK port {port} ({device}) is already sending").into());
+    }
+    let count = config.queues.max(1);
+    let mut info = [0 as c_char; 256];
+    let mut rx = rx_queues.max(1);
+    let mut rss: c_int = 0;
+    let r = unsafe {
+        ftrx_dpdk_setup(
+            port,
+            config.queue,
+            count,
+            TX_DESC,
+            &mut rx,
+            &mut rss,
+            &mut state.pool,
+            info.as_mut_ptr(),
+            info.len(),
+        )
+    };
+    if r == -libc::EINVAL && count > 1 {
+        return Err(format!(
+            "DPDK port {port} ({device}) has too few TX queues for {count} workers from queue {} \
+             (a virtual device may take more, such as net_af_packet0,iface=eth0,qpairs={count})",
+            config.queue
+        )
+        .into());
+    }
+    if r < 0 {
+        return Err(dpdk_err(&format!("setting up port {port} ({device})"), r));
+    }
+    state.in_use = true;
+    let info = unsafe { CStr::from_ptr(info.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    Ok(Setup {
+        handle: Arc::new(PortHandle { port }),
+        pool: state.pool,
+        name: name.to_string(),
+        info,
+        link_up: r > 0,
+        rx_queues: rx,
+        rss: rss != 0,
+    })
 }
 
 /// Sends packets on a DPDK port.
@@ -132,6 +248,8 @@ pub struct DpdkSink {
     describe: String,
     /// The port's counters when the sink opened.
     start: ferotrx_core::DropCounters,
+    /// Keeps the port started while the sink lives.
+    _started: Arc<PortHandle>,
 }
 
 // The pool is DPDK's and safe to use from any thread; the sink is used by one at a time.
@@ -140,61 +258,56 @@ unsafe impl Send for DpdkSink {}
 impl DpdkSink {
     /// Opens `device`: a PCI address bound to a DPDK driver (`0000:03:00.0`),
     /// a virtual device with its arguments (`net_af_packet0,iface=eth0`) or a
-    /// port number.
+    /// port number. Sends on `config.queue`, whatever `config.queues` says.
     pub fn open(device: &str, config: &DpdkConfig) -> Result<Self, SinkError> {
-        init_eal(&config.eal_args)?;
-        let name = device.split(',').next().unwrap_or(device);
-        let cname = CString::new(name).map_err(|_| format!("bad DPDK device '{device}'"))?;
-        let cdev = CString::new(device).map_err(|_| format!("bad DPDK device '{device}'"))?;
-        let mut port = 0u16;
-        let r = unsafe { ftrx_dpdk_find_port(cname.as_ptr(), cdev.as_ptr(), &mut port) };
-        if r < 0 {
-            return Err(dpdk_err(&format!("device {device}"), r));
-        }
-
-        let mut ports = PORTS.lock().unwrap_or_else(|e| e.into_inner());
-        let state = ports
-            .get_or_insert_with(HashMap::new)
-            .entry(port)
-            .or_insert(PortState {
-                pool: std::ptr::null_mut(),
-                in_use: false,
-            });
-        if state.in_use {
-            return Err(format!("DPDK port {port} ({device}) is already sending").into());
-        }
-        let mut info = [0 as c_char; 256];
-        let r = unsafe {
-            ftrx_dpdk_setup(
-                port,
-                config.queue,
-                TX_DESC,
-                &mut state.pool,
-                info.as_mut_ptr(),
-                info.len(),
-            )
+        let config = DpdkConfig {
+            queues: 1,
+            ..config.clone()
         };
-        if r < 0 {
-            return Err(dpdk_err(&format!("setting up port {port} ({device})"), r));
-        }
-        state.in_use = true;
-        let info = unsafe { CStr::from_ptr(info.as_ptr()) }.to_string_lossy();
+        let mut sinks = Self::open_queues(device, &config)?;
+        Ok(sinks.remove(0))
+    }
+
+    /// Opens `device` as [`open`](Self::open) does, with one sink per TX
+    /// queue from `config.queue` (`config.queues` of them): one per worker,
+    /// each sending on its own queue without a lock.
+    pub fn open_queues(device: &str, config: &DpdkConfig) -> Result<Vec<Self>, SinkError> {
+        let s = setup(device, config, 1)?;
+        Ok(Self::sinks(&s, config))
+    }
+
+    fn sinks(s: &Setup, config: &DpdkConfig) -> Vec<Self> {
+        let count = config.queues.max(1);
         let batch = config.batch.clamp(1, 4096) as usize;
-        Ok(Self {
-            port,
-            queue: config.queue,
-            pool: state.pool,
-            batch,
-            bytes: Vec::with_capacity(batch * 1518),
-            ends: Vec::with_capacity(batch),
-            thread: None,
-            describe: format!(
-                "dpdk port {port} ({name}) queue {}, {info}{}",
-                config.queue,
-                if r == 0 { " (link is down)" } else { "" }
-            ),
-            start: port_drops(port),
-        })
+        let port = s.handle.port;
+        let start = port_drops(port);
+        (0..count)
+            .map(|k| {
+                let queue = config.queue + k;
+                Self {
+                    port,
+                    queue,
+                    pool: s.pool,
+                    batch,
+                    bytes: Vec::with_capacity(batch * 1518),
+                    ends: Vec::with_capacity(batch),
+                    thread: None,
+                    describe: format!(
+                        "dpdk port {port} ({}) queue {queue}{}, {}{}",
+                        s.name,
+                        if count > 1 {
+                            format!(" ({} of {count})", k + 1)
+                        } else {
+                            String::new()
+                        },
+                        s.info,
+                        if s.link_up { "" } else { " (link is down)" }
+                    ),
+                    start,
+                    _started: s.handle.clone(),
+                }
+            })
+            .collect()
     }
 
     /// One line on the port, e.g. `dpdk port 0 (net_null0) queue 0, net_null, Link up at ...`.
@@ -302,11 +415,8 @@ fn port_drops(port: u16) -> ferotrx_core::DropCounters {
 impl Drop for DpdkSink {
     fn drop(&mut self) {
         let _ = self.submit();
-        unsafe { ftrx_dpdk_stop(self.port, self.queue) };
-        let mut ports = PORTS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(state) = ports.as_mut().and_then(|p| p.get_mut(&self.port)) {
-            state.in_use = false;
-        }
+        unsafe { ftrx_dpdk_tx_done(self.port, self.queue) };
+        // The port stops when the last sink's handle goes.
     }
 }
 
@@ -317,7 +427,17 @@ const RX_BURST: usize = 64;
 
 /// Sends and receives on a DPDK port, for stateful TCP and UDP.
 pub struct DpdkPort {
-    tx: DpdkSink,
+    port: u16,
+    /// The port's counters when it opened.
+    start: ferotrx_core::DropCounters,
+    /// The sink this port sends on first, then those of the other TX
+    /// queues, for [`PacketPort::split`]; empty after a split.
+    sinks: Vec<DpdkSink>,
+    /// The RX queues this port (or lane) reads, in turn.
+    rx_queues: Vec<u16>,
+    next_rx: usize,
+    /// How the port spreads frames over its RX queues, for `describe`.
+    spread: Option<String>,
     /// Frames received but not handed out yet, one every MAX_RX_FRAME bytes.
     rx: Vec<u8>,
     lens: [u16; RX_BURST],
@@ -327,41 +447,82 @@ pub struct DpdkPort {
 
 impl DpdkPort {
     /// Opens `device` as for [`DpdkSink::open`], and receives every frame on
-    /// it (promiscuous mode).
+    /// it (promiscuous mode). With `config.queues` above one it has that
+    /// many TX and RX queues, for [`PacketPort::split`].
     pub fn open(device: &str, config: &DpdkConfig) -> Result<Self, SinkError> {
-        let tx = DpdkSink::open(device, config)?;
-        let r = unsafe { ftrx_dpdk_promisc(tx.port) };
+        let count = config.queues.max(1);
+        let s = setup(device, config, count)?;
+        let r = unsafe { ftrx_dpdk_promisc(s.handle.port) };
         if r < 0 {
             return Err(dpdk_err(
-                &format!("promiscuous mode on port {}", tx.port),
+                &format!("promiscuous mode on port {}", s.handle.port),
                 r,
             ));
         }
-        Ok(Self {
-            tx,
+        let spread = (s.rx_queues > 1).then(|| {
+            format!(
+                "{} RX queues, {}",
+                s.rx_queues,
+                if s.rss {
+                    "spread by RSS"
+                } else {
+                    "spread by the driver"
+                }
+            )
+        });
+        let sinks = DpdkSink::sinks(
+            &s,
+            &DpdkConfig {
+                queues: count,
+                ..config.clone()
+            },
+        );
+        Ok(Self::lane(sinks, (0..s.rx_queues).collect(), spread))
+    }
+
+    fn lane(sinks: Vec<DpdkSink>, rx_queues: Vec<u16>, spread: Option<String>) -> Self {
+        Self {
+            port: sinks[0].port,
+            start: sinks[0].start,
+            sinks,
+            rx_queues,
+            next_rx: 0,
+            spread,
             rx: vec![0; MAX_RX_FRAME * RX_BURST],
             lens: [0; RX_BURST],
             count: 0,
             next: 0,
-        })
+        }
     }
 
     pub fn describe(&self) -> String {
-        self.tx.describe()
+        let tx = self
+            .sinks
+            .first()
+            .map_or_else(|| format!("dpdk port {}", self.port), DpdkSink::describe);
+        match &self.spread {
+            Some(s) => format!("{tx}; {s}"),
+            None => tx,
+        }
     }
-}
 
-impl PacketPort for DpdkPort {
-    fn send(&mut self, frame: &[u8]) -> Result<(), SinkError> {
-        PacketSink::send(&mut self.tx, frame)
+    fn tx(&mut self) -> Result<&mut DpdkSink, SinkError> {
+        self.sinks
+            .first_mut()
+            .ok_or_else(|| "this DPDK port was split among workers".into())
     }
 
-    fn recv(&mut self, buf: &mut Vec<u8>) -> Result<bool, SinkError> {
-        if self.next == self.count {
-            self.tx.register();
+    /// Takes the next burst from the RX queues, starting after the one that
+    /// gave the last, so none starves.
+    fn fill(&mut self) -> Result<(), SinkError> {
+        let n = self.rx_queues.len();
+        for i in 0..n {
+            let at = (self.next_rx + i) % n;
+            let queue = self.rx_queues[at];
             let r = unsafe {
                 ftrx_dpdk_recv(
-                    self.tx.port,
+                    self.port,
+                    queue,
                     self.rx.as_mut_ptr(),
                     MAX_RX_FRAME,
                     self.lens.as_mut_ptr(),
@@ -369,10 +530,33 @@ impl PacketPort for DpdkPort {
                 )
             };
             if r < 0 {
-                return Err(dpdk_err(&format!("receive on port {}", self.tx.port), r));
+                return Err(dpdk_err(
+                    &format!("receive on port {} queue {queue}", self.port),
+                    r,
+                ));
             }
-            self.count = r as usize;
-            self.next = 0;
+            if r > 0 {
+                self.count = r as usize;
+                self.next = 0;
+                self.next_rx = (at + 1) % n;
+                return Ok(());
+            }
+        }
+        self.count = 0;
+        self.next = 0;
+        Ok(())
+    }
+}
+
+impl PacketPort for DpdkPort {
+    fn send(&mut self, frame: &[u8]) -> Result<(), SinkError> {
+        PacketSink::send(self.tx()?, frame)
+    }
+
+    fn recv(&mut self, buf: &mut Vec<u8>) -> Result<bool, SinkError> {
+        if self.next == self.count {
+            self.tx()?.register();
+            self.fill()?;
             if self.count == 0 {
                 return Ok(false);
             }
@@ -386,7 +570,7 @@ impl PacketPort for DpdkPort {
     }
 
     fn flush(&mut self) -> Result<(), SinkError> {
-        self.tx.submit()
+        self.tx()?.submit()
     }
 
     fn describe(&self) -> Option<String> {
@@ -394,6 +578,43 @@ impl PacketPort for DpdkPort {
     }
 
     fn drops(&mut self) -> ferotrx_core::DropCounters {
-        port_drops(self.tx.port).since(&self.tx.start)
+        port_drops(self.port).since(&self.start)
+    }
+
+    /// One lane per worker when the port was opened with that many queues:
+    /// lane `k` sends on TX queue `queue + k` and reads every `n`-th RX
+    /// queue from `k`. Frames of a flow that arrive on another worker's
+    /// queue are passed on to it by the run.
+    fn split(&mut self, n: usize) -> Option<Vec<Box<dyn PacketPort>>> {
+        if n < 2 || self.sinks.len() != n {
+            return None;
+        }
+        let rx = std::mem::take(&mut self.rx_queues);
+        let sinks = std::mem::take(&mut self.sinks);
+        Some(
+            sinks
+                .into_iter()
+                .enumerate()
+                .map(|(k, tx)| {
+                    let queues: Vec<u16> = rx
+                        .iter()
+                        .copied()
+                        .filter(|q| usize::from(*q) % n == k)
+                        .collect();
+                    let spread = Some(match queues.as_slice() {
+                        [] => "receives through the other workers".to_string(),
+                        [q] => format!("RX queue {q}"),
+                        many => format!(
+                            "RX queues {}",
+                            many.iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ),
+                    });
+                    Box::new(DpdkPort::lane(vec![tx], queues, spread)) as Box<dyn PacketPort>
+                })
+                .collect(),
+        )
     }
 }

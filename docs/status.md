@@ -1,6 +1,6 @@
 # Feature status
 
-What works how well, as of 0.45.0. The milestones and their notes are in
+What works how well, as of 0.46.0. The milestones and their notes are in
 [DEVELOPMENT.md](../DEVELOPMENT.md); which real implementations each
 protocol is tested against is in [interop.md](interop.md).
 
@@ -22,8 +22,8 @@ protocol is tested against is in [interop.md](interop.md).
 | Packet building and inspection | Done | [packets.md](packets.md) |
 | libpcap/Npcap sending (Linux, macOS, Windows) | Done | Windows batches through Npcap's send queue |
 | AF_XDP sending and stateful ports (Linux) | Done | copy and zero-copy, driver and generic mode; [fast-ports.md](fast-ports.md) |
-| DPDK sending and stateful ports | Experimental | built and unit-tested in CI (`dpdk` job), no NIC there to send on; several queues are not split over workers |
-| Several cores (`--workers`) | Partial | hosts with DHCP/SLAAC addresses, SIP media and DPDK multi-queue are not split |
+| DPDK sending and stateful ports | Experimental | built and run in CI (`dpdk` job) through DPDK's af_packet driver, one queue pair per worker; no physical NIC there to send on |
+| Several cores (`--workers`, `--cpus`) | Partial | hosts with DHCP/SLAAC addresses and SIP media are not split; pinning on Linux and Windows only |
 | Loss and latency (signatures, `--rx`, `ferotrx rx`) | Partial | receiving through libpcap only, not AF_XDP; one-way latency needs synced clocks |
 | Loss split by where (generator, network, receiver), drop counters | Partial | NIC counters on Linux and Windows (not macOS); AF_XDP ring and capture buffer; DPDK port-wide |
 | Run records (`--report` on replay, run, build, tcp, udp, bench, y1564) | Done | M51 |
@@ -53,6 +53,7 @@ protocol is tested against is in [interop.md](interop.md).
 | Feature | Status | Notes |
 |---|---|---|
 | RFC 2544 benchmarks | Done | [benchmarking.md](benchmarking.md) |
+| Performance sweep (`bench --sweep`), repeatability | Partial | [performance.md](performance.md); no numbers from a physical NIC yet |
 | Y.1564 service activation | Partial | delay across two machines needs synced clocks; no far-end reflector |
 | Scenarios (pass/fail, history, compare, JUnit) | Done | [scenarios.md](scenarios.md) |
 | Fleet of agents | Partial | no discovery; no benchmarks, Y.1564, scenarios or hosts in plans; calls not in parallel |
@@ -71,8 +72,6 @@ protocol is tested against is in [interop.md](interop.md).
 ## Planned
 
 From the comparison with TRex and Ostinato:
-[#105](https://github.com/jkobierczynski/FeroTRX/issues/105) performance
-evidence (M52),
 [#106](https://github.com/jkobierczynski/FeroTRX/issues/106) to
 [#109](https://github.com/jkobierczynski/FeroTRX/issues/109) realism,
 tunnels, accurate latency and fleet robustness (M53 to M56).

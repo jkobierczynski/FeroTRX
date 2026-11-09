@@ -57,46 +57,74 @@ int ftrx_dpdk_find_port(const char *name, const char *devargs, uint16_t *port) {
     return rte_eth_dev_get_port_by_name(name, port) == 0 ? 0 : -ENODEV;
 }
 
-/* Configures `port` with `queue + 1` TX queues and one RX queue (some drivers
- * insist on one) and starts it. `*pool` is created on first use and kept, so
+/* Configures `port` with `first + count` TX queues (the run sends on
+ * `first` to `first + count - 1`) and up to `*rx_queues` RX queues, at
+ * least one (some drivers insist on one), and starts it. With several RX
+ * queues the NIC spreads frames over them by a hash of addresses and ports
+ * (RSS), where it can; `*rx_queues` is set to how many there are, and
+ * `*rss` to 1 when RSS is on. `*pool` is created on first use and kept, so
  * a port can be set up again later. */
-int ftrx_dpdk_setup(uint16_t port, uint16_t queue, uint16_t nb_desc, struct rte_mempool **pool,
-                    char *info, size_t info_len) {
+int ftrx_dpdk_setup(uint16_t port, uint16_t first, uint16_t count, uint16_t nb_desc,
+                    uint16_t *rx_queues, int *rss, struct rte_mempool **pool, char *info,
+                    size_t info_len) {
     struct rte_eth_dev_info dev_info;
     int r = rte_eth_dev_info_get(port, &dev_info);
     if (r < 0)
         return r;
-    if (queue >= dev_info.max_tx_queues)
+    if (count == 0)
+        count = 1;
+    if ((uint32_t)first + count > dev_info.max_tx_queues)
         return -EINVAL;
+    uint16_t nb_rx = *rx_queues;
+    if (nb_rx == 0)
+        nb_rx = 1;
+    if (nb_rx > dev_info.max_rx_queues)
+        nb_rx = dev_info.max_rx_queues > 0 ? dev_info.max_rx_queues : 1;
     int socket = rte_eth_dev_socket_id(port);
     if (socket < 0)
         socket = (int)rte_socket_id();
     if (*pool == NULL) {
         char pool_name[RTE_MEMPOOL_NAMESIZE];
         snprintf(pool_name, sizeof pool_name, "ftrx_tx_%u", port);
-        /* 4 KiB of data per mbuf, so packets up to 4096 bytes fit in one. */
-        *pool = rte_pktmbuf_pool_create(pool_name, 8191, 256, 0,
+        /* 4 KiB of data per mbuf, so packets up to 4096 bytes fit in one;
+         * room for every queue's ring and then some. */
+        unsigned n = 8191;
+        while (n < (unsigned)(first + count + nb_rx) * 2048u && n < 262143u)
+            n = n * 2 + 1;
+        *pool = rte_pktmbuf_pool_create(pool_name, n, 256, 0,
                                         RTE_PKTMBUF_HEADROOM + 4096, socket);
         if (*pool == NULL)
             return -rte_errno;
     }
     struct rte_eth_conf conf;
     memset(&conf, 0, sizeof conf);
-    r = rte_eth_dev_configure(port, 1, queue + 1, &conf);
+    *rss = 0;
+    uint64_t hf = (RTE_ETH_RSS_IP | RTE_ETH_RSS_TCP | RTE_ETH_RSS_UDP) &
+                  dev_info.flow_type_rss_offloads;
+    if (nb_rx > 1 && hf != 0) {
+        conf.rxmode.mq_mode = RTE_ETH_MQ_RX_RSS;
+        conf.rx_adv_conf.rss_conf.rss_key = NULL;
+        conf.rx_adv_conf.rss_conf.rss_hf = hf;
+        *rss = 1;
+    }
+    r = rte_eth_dev_configure(port, nb_rx, first + count, &conf);
     if (r < 0)
         return r;
-    uint16_t nb_rx = 1024, nb_tx = nb_desc;
-    r = rte_eth_dev_adjust_nb_rx_tx_desc(port, &nb_rx, &nb_tx);
+    uint16_t rx_desc = 1024, nb_tx = nb_desc;
+    r = rte_eth_dev_adjust_nb_rx_tx_desc(port, &rx_desc, &nb_tx);
     if (r < 0)
         return r;
-    r = rte_eth_rx_queue_setup(port, 0, nb_rx, socket, NULL, *pool);
-    if (r < 0)
-        return r;
-    for (uint16_t q = 0; q <= queue; q++) {
+    for (uint16_t q = 0; q < nb_rx; q++) {
+        r = rte_eth_rx_queue_setup(port, q, rx_desc, socket, NULL, *pool);
+        if (r < 0)
+            return r;
+    }
+    for (uint16_t q = 0; q < first + count; q++) {
         r = rte_eth_tx_queue_setup(port, q, nb_tx, socket, NULL);
         if (r < 0)
             return r;
     }
+    *rx_queues = nb_rx;
     r = rte_eth_dev_start(port);
     if (r < 0)
         return r;
@@ -113,6 +141,11 @@ int ftrx_dpdk_setup(uint16_t port, uint16_t queue, uint16_t nb_desc, struct rte_
     rte_eth_link_to_str(link_text, sizeof link_text, &link);
     snprintf(info, info_len, "%s, %s", dev_info.driver_name, link_text);
     return link.link_status == RTE_ETH_LINK_UP ? 1 : 0;
+}
+
+/* Lets the NIC finish what is queued on `queue`, for a sink that is done. */
+void ftrx_dpdk_tx_done(uint16_t port, uint16_t queue) {
+    (void)rte_eth_tx_done_cleanup(port, queue, 0);
 }
 
 /* Copies `n` packets into mbufs and sends them on `port`/`queue`. Waits while
@@ -154,10 +187,9 @@ int ftrx_dpdk_send(uint16_t port, uint16_t queue, struct rte_mempool *pool,
     return sent;
 }
 
-void ftrx_dpdk_stop(uint16_t port, uint16_t queue) {
+void ftrx_dpdk_stop(uint16_t port) {
     /* Let the NIC finish what is queued before the port goes down. */
     rte_delay_ms(10);
-    (void)rte_eth_tx_done_cleanup(port, queue, 0);
     (void)rte_eth_dev_stop(port);
 }
 
@@ -195,15 +227,16 @@ int ftrx_dpdk_promisc(uint16_t port) {
     return 0;
 }
 
-/* Receives up to `max` (at most FTRX_BURST) frames from RX queue 0 of
- * `port` and copies them into `out`, one every `slot` bytes, their lengths
+/* Receives up to `max` (at most FTRX_BURST) frames from RX queue `queue`
+ * of `port` and copies them into `out`, one every `slot` bytes, their lengths
  * into `lens`. Frames longer than `slot` are dropped. Returns how many were
  * copied. */
-int ftrx_dpdk_recv(uint16_t port, uint8_t *out, size_t slot, uint16_t *lens, uint16_t max) {
+int ftrx_dpdk_recv(uint16_t port, uint16_t queue, uint8_t *out, size_t slot, uint16_t *lens,
+                   uint16_t max) {
     struct rte_mbuf *bufs[FTRX_BURST];
     if (max > FTRX_BURST)
         max = FTRX_BURST;
-    uint16_t got = rte_eth_rx_burst(port, 0, bufs, max);
+    uint16_t got = rte_eth_rx_burst(port, queue, bufs, max);
     uint16_t n = 0;
     for (uint16_t i = 0; i < got; i++) {
         struct rte_mbuf *m = bufs[i];

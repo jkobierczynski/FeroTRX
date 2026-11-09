@@ -20,6 +20,15 @@ profiles), and `workers` in `run.start` (in `output`), `tcp.start` and
 `udp.start` on the control server, whose run info then says `workers`. The
 default is 1, which runs exactly as before. At most 64.
 
+`--cpus LIST` (`cpus = "2-5"` in `[output]`, `cpus` on the control server)
+pins worker `k` to the `k`-th CPU of the list, wrapping around when there are
+more workers than CPUs, on Linux (`sched_setaffinity`) and Windows (CPUs 0 to
+63). A list is `0-3,8` in Linux's form; order counts. A CPU that cannot be
+used fails the run with `cannot pin worker K to CPU C`. Run records say which
+CPUs the workers were pinned to (`pinned_cpus`) and, on Linux, the NIC's NUMA
+node and the CPUs close to it (`numa_node`, `local_cpus` of the interface):
+pin the workers to those. macOS cannot pin threads.
+
 What comes out is the same as one thread would send: the same packets, rates
 and limits, the same counters (added up over the workers). What changes is how
 much can go out.
@@ -44,8 +53,11 @@ sequence numbers a single thread would give it.
   A model's `seed` is offset per worker.
 * Sinks: libpcap/Npcap gets one handle per worker. AF_XDP gets one socket per
   worker, on consecutive queues from `--queue` (the interface needs that many
-  queues: `ethtool -l IFACE`, `ethtool -L IFACE combined N`). DPDK ports,
-  pcap files and the null output are opened once and shared behind a lock.
+  queues: `ethtool -l IFACE`, `ethtool -L IFACE combined N`). DPDK gets one
+  TX queue per worker, likewise from `--queue` (a virtual device takes more
+  with `qpairs=N`, e.g. `net_af_packet0,iface=eth0,qpairs=4`). The null
+  output is one per worker; pcap files are opened once and shared behind a
+  lock.
 * Loss and latency: one receiver counts every worker's packets as one flow.
   Packets from different workers can arrive slightly out of order (they leave
   from different queues), which shows as reordering, not loss.
@@ -86,7 +98,13 @@ How frames reach the workers:
   worker passes frames that belong to another worker on to it. Broadcasts and
   multicasts come in on worker 0. Run as many workers as the interface has
   queues, or a divisor of it.
-* **libpcap/Npcap, DPDK, or AF_XDP with fewer queues than workers:** the port
+* **DPDK:** the port is opened with one TX and one RX queue per worker
+  (`--queue` up for TX), with RSS on addresses and ports where the NIC can
+  do it (the run's port line says `spread by RSS` or `spread by the
+  driver`). Worker `k` sends on its own TX queue and reads every `N`-th RX
+  queue from `k`, passing frames that belong to another worker on, as with
+  AF_XDP. A NIC with fewer queues fails to open, and says how many it has.
+* **libpcap/Npcap, or AF_XDP with fewer queues than workers:** the port
   is shared. Worker 0 reads it and passes frames on; every worker sends its
   own frames, a batch at a time behind a lock. One reader keeps the frames of
   each flow in order. This spreads the engine work, which is what limits a

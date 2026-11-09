@@ -317,6 +317,9 @@ pub struct RunConfig {
     /// [`Job`](crate::Job) makes one when this is `None` (see
     /// [`Job::control`](crate::Job::control)).
     pub control: Option<Arc<RunControl>>,
+    /// Pin a [`Job`](crate::Job)'s workers to CPUs (worker `k` on the
+    /// `k`-th listed).
+    pub pinning: Option<crate::CpuPinning>,
 }
 
 /// Counters of a run: the total, and one entry per stream in the order given.

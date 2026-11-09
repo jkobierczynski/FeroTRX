@@ -54,6 +54,8 @@ xdp_mode = "copy"            # auto (default), copy or zerocopy
 queue = 0
 batch = 64
 dpdk_args = ["--no-huge", "-m", "512"]
+workers = 2                  # engine threads (multi-core.md)
+cpus = "2-3"                 # pin worker k to the k-th CPU of the list
 ```
 
 On a VirtualBox VM such as the lab's Debian host, the virtual NIC has no

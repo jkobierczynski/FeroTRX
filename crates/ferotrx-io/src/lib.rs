@@ -56,7 +56,7 @@ pub use capture::{check_filter, open_capture};
 pub use capture::{FrameFilter, LiveCapture};
 #[cfg(feature = "dpdk")]
 pub use dpdk::{DpdkConfig, DpdkPort, DpdkSink};
-pub use host::{describe_host, describe_interface, hostname, process_alive};
+pub use host::{describe_host, describe_interface, hostname, pin_thread, process_alive};
 pub use lab::{
     lab_unavailable, remove_lab, Lab, LabConfig, LAB_INTERFACE, LAB_NAMESPACE, LAB_RECEIVER_IP,
     LAB_RECEIVER_IP6, LAB_RECEIVER_MAC, LAB_ROUTER_MAC,
@@ -158,16 +158,36 @@ impl Output {
     }
 
     /// Opens the output once per worker of a run on several cores: one
-    /// libpcap/Npcap handle per worker, or one AF_XDP socket per worker on
-    /// consecutive queues from `queue` (the interface needs that many). DPDK
-    /// ports, files and the null output are opened once and shared by the
-    /// workers, taking turns behind a lock ([`ferotrx_core::share_sink`]).
+    /// libpcap/Npcap handle per worker, or one AF_XDP socket or DPDK TX
+    /// queue per worker on consecutive queues from `queue` (the interface
+    /// needs that many). Files are opened once and shared by the workers,
+    /// taking turns behind a lock ([`ferotrx_core::share_sink`]).
     pub fn open_workers(&self, linktype: u32, workers: usize) -> Result<Vec<Opened>, SinkError> {
         let workers = workers.max(1);
         if workers == 1 {
             return Ok(vec![self.open_detailed(linktype)?]);
         }
         match self {
+            #[cfg(feature = "dpdk")]
+            Output::Interface { name, send } if send.backend() == Backend::Dpdk => {
+                send.validate()?;
+                let config = DpdkConfig {
+                    queue: send.queue(),
+                    batch: send.batch(),
+                    eal_args: send.dpdk_args().to_vec(),
+                    queues: u16::try_from(workers).map_err(|_| "too many workers")?,
+                };
+                let sinks = DpdkSink::open_queues(name, &config)
+                    .map_err(|e| format!("cannot open {name} with dpdk: {e}"))?;
+                Ok(sinks
+                    .into_iter()
+                    .enumerate()
+                    .map(|(k, sink)| Opened {
+                        detail: format!("worker {k}: {}", sink.describe()),
+                        sink: Box::new(sink),
+                    })
+                    .collect())
+            }
             Output::Interface { name, send } if send.backend() != Backend::Dpdk => {
                 let mut out = Vec::with_capacity(workers);
                 for k in 0..workers {
@@ -278,6 +298,7 @@ fn open_interface(name: &str, send: &SendSettings) -> Result<Opened, SinkError> 
                     queue: send.queue(),
                     batch: send.batch(),
                     eal_args: send.dpdk_args().to_vec(),
+                    queues: 1,
                 },
             )
             .map_err(fail)?;

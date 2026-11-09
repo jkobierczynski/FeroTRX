@@ -147,6 +147,9 @@ pub struct SendSettings {
     /// are split packet by packet, stateful runs by flow; with AF_XDP each
     /// worker sends on its own queue, from `queue` up. See `docs/multi-core.md`.
     pub workers: Option<u16>,
+    /// CPUs the workers are pinned to, in order (worker `k` on the `k`-th);
+    /// not pinned when `None`.
+    pub cpus: Option<crate::CpuList>,
 }
 
 impl SendSettings {
@@ -160,6 +163,9 @@ impl SendSettings {
             self.dpdk_args.clone_from(&fallback.dpdk_args);
         }
         self.workers = self.workers.or(fallback.workers);
+        if self.cpus.is_none() {
+            self.cpus.clone_from(&fallback.cpus);
+        }
         self
     }
 
@@ -207,6 +213,9 @@ impl SendSettings {
                     "workers must be between 1 and {MAX_WORKERS}, got {w}"
                 )));
             }
+        }
+        if self.cpus.as_ref().is_some_and(|c| c.is_empty()) {
+            return Err(Error::InvalidSpec("cpus lists no CPU".into()));
         }
         Ok(())
     }

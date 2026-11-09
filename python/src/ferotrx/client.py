@@ -391,6 +391,7 @@ class Client:
         batch: int | None = None,
         dpdk_args: str | Sequence[str] | None = None,
         workers: int | None = None,
+        cpus: str | None = None,
         rate: str | None = None,
         limit: int | None = None,
         duration: str | None = None,
@@ -416,7 +417,8 @@ class Client:
         ``limit`` packets in total and ``duration`` (e.g. ``"30s"``) stop it.
         ``rx`` receives on that interface for loss and latency (``latency``
         puts a signature in every stream), ``rx_wait`` after the last packet.
-        ``workers`` spreads the run over that many threads on the server.
+        ``workers`` spreads the run over that many threads on the server,
+        ``cpus`` (e.g. ``"2-5"``) pins worker k to the k-th CPU listed.
         ``impair`` (e.g. ``"delay=20ms jitter=5ms loss=1%"``) impairs every
         stream's packets instead of the profile's impairments (``"none"``: none).
         ``line_rate`` (e.g. ``"10gbps"``) is what ``"50%"`` rates are a share
@@ -435,6 +437,7 @@ class Client:
             batch=batch,
             dpdk_args=dpdk_args,
             workers=workers,
+            cpus=cpus,
             line_rate=line_rate,
             ip=ip,
             gateway=gateway,
@@ -516,6 +519,7 @@ class Client:
         batch: int | None = None,
         dpdk_args: str | Sequence[str] | None = None,
         workers: int | None = None,
+        cpus: str | None = None,
         impair: str | None = None,
         impair_rx: str | None = None,
         congestion: str | None = None,
@@ -546,6 +550,7 @@ class Client:
                 batch=batch,
                 dpdk_args=dpdk_args,
                 workers=workers,
+                cpus=cpus,
                 impair=impair,
                 impair_rx=impair_rx,
                 congestion=congestion,
@@ -589,6 +594,7 @@ class Client:
         batch: int | None = None,
         dpdk_args: str | Sequence[str] | None = None,
         workers: int | None = None,
+        cpus: str | None = None,
         impair: str | None = None,
         impair_rx: str | None = None,
         start_at: float | None = None,
@@ -612,6 +618,7 @@ class Client:
                 batch=batch,
                 dpdk_args=dpdk_args,
                 workers=workers,
+                cpus=cpus,
                 impair=impair,
                 impair_rx=impair_rx,
                 start_at=start_at,
@@ -652,6 +659,7 @@ class Client:
         queue: int | None = None,
         xdp_mode: str | None = None,
         workers: int | None = None,
+        cpus: str | None = None,
     ) -> Y1564RunInfo:
         """Starts a Y.1564 service activation test of a profile (``path`` on
         the server, this machine's file with ``upload=True``, or ``toml``
@@ -674,6 +682,7 @@ class Client:
                 queue=queue,
                 xdp_mode=xdp_mode,
                 workers=workers,
+                cpus=cpus,
             )
         )
 

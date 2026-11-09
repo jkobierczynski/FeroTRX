@@ -62,8 +62,10 @@ Needs Linux 5.9 or newer and root, or `CAP_NET_ADMIN`, `CAP_NET_RAW` and
 With `-B dpdk` the interface is a DPDK device, as for stateless runs: a PCI
 address bound to a DPDK driver, a virtual device such as
 `net_af_packet0,iface=eth0`, or a port number. The port is put in
-promiscuous and all-multicast mode, and frames are taken from its first
-receive queue, up to 9216 bytes each. DPDK takes the whole NIC, so the
+promiscuous and all-multicast mode, and frames are taken from its receive
+queue, up to 9216 bytes each. With `--workers N` the port gets `N` TX and
+`N` RX queues, one pair per worker, spread by RSS where the NIC can (see
+[multi-core.md](multi-core.md)); a virtual device needs `qpairs=N`. DPDK takes the whole NIC, so the
 machine's own traffic does not pass on a NIC bound to DPDK.
 
 ```sh

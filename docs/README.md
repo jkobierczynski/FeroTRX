@@ -38,7 +38,9 @@ The [README](../README.md) has the overview and a quickstart.
   IGMP/MLD, router advertisements.
 * [TCP and UDP over AF_XDP and DPDK](fast-ports.md).
 * [One run on several cores](multi-core.md): `--workers`, for streams and
-  for stateful TCP and UDP.
+  for stateful TCP and UDP; `--cpus` pins them.
+* [Performance](performance.md): the sweep method, repeatability, and the
+  numbers measured so far (and where).
 
 ## Measuring and testing
 

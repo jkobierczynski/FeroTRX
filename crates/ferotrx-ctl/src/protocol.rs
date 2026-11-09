@@ -499,6 +499,9 @@ pub struct OutputSpec {
     /// Engine threads (cores) to spread the run over (default 1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<u16>,
+    /// CPUs to pin the workers to, e.g. `2-5` (worker k on the k-th).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<String>,
     /// A pcap file on the server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<PathBuf>,
@@ -1135,6 +1138,9 @@ pub struct TcpStartParams {
     /// Engine threads (cores) to spread the run over (default 1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<u16>,
+    /// CPUs to pin the workers to, e.g. `2-5` (worker k on the k-th).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<String>,
     /// Impairments of the frames the run sends, as a bad link would do them:
     /// `delay=20ms jitter=5ms loss=1%` and so on (see
     /// `ferotrx_core::ImpairSpec`); `none` turns the profile's off.
@@ -1570,6 +1576,9 @@ pub struct UdpStartParams {
     /// Engine threads (cores) to spread the run over (default 1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<u16>,
+    /// CPUs to pin the workers to, e.g. `2-5` (worker k on the k-th).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<String>,
     /// Impairments of the frames the run sends, as a bad link would do them:
     /// `delay=20ms jitter=5ms loss=1%` and so on (see
     /// `ferotrx_core::ImpairSpec`); `none` turns the profile's off.
@@ -2096,6 +2105,9 @@ pub struct BenchStartParams {
     pub xdp_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<u16>,
+    /// CPUs to pin the workers to, e.g. `2-5` (worker k on the k-th).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<String>,
     /// Tests instead of the profile's: `throughput`, `latency`, `frame_loss`,
     /// `back_to_back`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2177,6 +2189,9 @@ pub struct Y1564StartParams {
     pub xdp_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers: Option<u16>,
+    /// CPUs to pin the workers to, e.g. `2-5` (worker k on the k-th).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<String>,
     /// Tests instead of the profile's: `configuration`, `performance`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tests: Vec<String>,

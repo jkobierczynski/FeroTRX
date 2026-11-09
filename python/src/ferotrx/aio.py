@@ -400,6 +400,7 @@ class AsyncClient:
         batch: int | None = None,
         dpdk_args: str | Sequence[str] | None = None,
         workers: int | None = None,
+        cpus: str | None = None,
         rate: str | None = None,
         limit: int | None = None,
         duration: str | None = None,
@@ -426,6 +427,7 @@ class AsyncClient:
             batch=batch,
             dpdk_args=dpdk_args,
             workers=workers,
+            cpus=cpus,
             line_rate=line_rate,
             ip=ip,
             gateway=gateway,
@@ -504,6 +506,7 @@ class AsyncClient:
         batch: int | None = None,
         dpdk_args: str | Sequence[str] | None = None,
         workers: int | None = None,
+        cpus: str | None = None,
         impair: str | None = None,
         impair_rx: str | None = None,
         congestion: str | None = None,
@@ -527,6 +530,7 @@ class AsyncClient:
                 batch=batch,
                 dpdk_args=dpdk_args,
                 workers=workers,
+                cpus=cpus,
                 impair=impair,
                 impair_rx=impair_rx,
                 congestion=congestion,
@@ -572,6 +576,7 @@ class AsyncClient:
         batch: int | None = None,
         dpdk_args: str | Sequence[str] | None = None,
         workers: int | None = None,
+        cpus: str | None = None,
         impair: str | None = None,
         impair_rx: str | None = None,
         start_at: float | None = None,
@@ -593,6 +598,7 @@ class AsyncClient:
                 batch=batch,
                 dpdk_args=dpdk_args,
                 workers=workers,
+                cpus=cpus,
                 impair=impair,
                 impair_rx=impair_rx,
                 start_at=start_at,
@@ -635,6 +641,7 @@ class AsyncClient:
         queue: int | None = None,
         xdp_mode: str | None = None,
         workers: int | None = None,
+        cpus: str | None = None,
     ) -> Y1564RunInfo:
         """Starts a Y.1564 service activation test of a profile (``path`` on
         the server, this machine's file with ``upload=True``, or ``toml``
@@ -657,6 +664,7 @@ class AsyncClient:
                 queue=queue,
                 xdp_mode=xdp_mode,
                 workers=workers,
+                cpus=cpus,
             )
         )
 

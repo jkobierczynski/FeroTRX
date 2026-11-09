@@ -49,6 +49,9 @@ pub struct RunInfo {
     /// The CPUs the process may run on, e.g. `0-3,8` (Linux).
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub cpu_affinity: Option<String>,
+    /// The CPUs the workers were pinned to, in worker order (`--cpus`).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub pinned_cpus: Option<String>,
 }
 
 /// A network interface as the report describes it.
@@ -67,6 +70,13 @@ pub struct InterfaceDetails {
     pub mtu: Option<u32>,
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub mac: Option<String>,
+    /// The NUMA node the NIC hangs off (Linux; none on one-node machines
+    /// and virtual interfaces).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub numa_node: Option<u32>,
+    /// The CPUs close to the NIC, e.g. `0-7` (Linux): pin workers to these.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub local_cpus: Option<String>,
 }
 
 impl RunInfo {
@@ -133,7 +143,13 @@ impl RunInfo {
             "affinity",
             self.cpu_affinity.as_ref().map(|c| format!("CPUs {c}")),
         );
-        add("workers", self.workers.map(|w| w.to_string()));
+        add(
+            "workers",
+            self.workers.map(|w| match &self.pinned_cpus {
+                Some(c) => format!("{w}, pinned to CPUs {c}"),
+                None => w.to_string(),
+            }),
+        );
         add("sender", self.backend.clone());
         add(
             "tx iface",
@@ -173,6 +189,11 @@ impl InterfaceDetails {
         }
         if let Some(m) = &self.mac {
             parts.push(m.clone());
+        }
+        match (self.numa_node, &self.local_cpus) {
+            (Some(n), Some(c)) => parts.push(format!("NUMA node {n} (CPUs {c})")),
+            (Some(n), None) => parts.push(format!("NUMA node {n}")),
+            (None, _) => {}
         }
         if parts.is_empty() {
             self.name.clone()
@@ -234,6 +255,7 @@ mod tests {
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
         info.set_profile("lab.toml", Some("abc".into()));
         info.workers = Some(4);
+        info.pinned_cpus = Some("2-5".into());
         assert_eq!(
             info.profile_sha256.as_deref(),
             Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
@@ -243,6 +265,6 @@ mod tests {
             text.contains("lab.toml (sha256 ba7816bf8f01cfea)"),
             "{text}"
         );
-        assert!(text.contains("workers:    4"), "{text}");
+        assert!(text.contains("workers:    4, pinned to CPUs 2-5"), "{text}");
     }
 }
