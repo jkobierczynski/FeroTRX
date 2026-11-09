@@ -67,6 +67,7 @@ protocol is tested against is in [interop.md](interop.md).
 |---|---|---|
 | Control API (JSON-RPC over TCP, TLS, mTLS, roles, audit) | Done | [remote-control.md](remote-control.md) |
 | Revocation (CRL, deny list), traffic guardrails | Partial | pcap readers and run outputs reopen files by path; no limits per user |
+| Port reservations and sessions per user (`ports.*`, `session.*`, admin role) | Done | [remote-control.md](remote-control.md#several-users); reservations do not expire on their own |
 | Python client | Done | [python-client.md](python-client.md) |
 | Desktop GUI | Partial | no MOS charts |
 | Windows app (MSI, service, Npcap) | Done | [windows.md](windows.md) |

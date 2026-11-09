@@ -419,6 +419,16 @@ their sum over time. The group is saved in the workspace.
 
 ## Ports and their settings
 
+On a server several people share, the port list says who holds each port:
+**reserved** (by you), **held by NAME** (another user reserved it; the
+note they gave is in the tooltip) or **in use** (another user's run sends
+on it). Right-click a port to **Reserve for me** or **Release this port**;
+an admin login also gets **Take over**, which stops the other user's runs on
+it. Under the server's version, "you: NAME" says who the server takes you
+for and how many other users are there. On a server without logins, the
+**User** field of the server's settings (Edit…) names you. See [several
+users](remote-control.md#several-users).
+
 A port's streams are sent together, as one profile named `gui-<port>`
 (`profile.load`, then `run.start` with the port's output). **Port settings**
 holds what `ferotrx run` takes on its command line: backend (`pcap`,

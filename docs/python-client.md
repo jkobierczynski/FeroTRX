@@ -90,6 +90,31 @@ its tokens, certificates and revocation lists again ([locking someone
 out](remote-control.md#locking-someone-out)); `client.info().certificate_expires`
 says when its TLS certificate runs out.
 
+### Sharing a server: ports and sessions
+
+Several users share a server by reserving its ports ([several
+users](remote-control.md#several-users), servers from 0.49.0):
+
+```python
+with ferotrx.Client("lab", token=os.environ["MY_TOKEN"]) as c:
+    c.acquire(["enp0s8", "enp0s9"], note="soak test")   # all or none
+    try:
+        run = c.start("lab", iface="enp0s8")
+    except ferotrx.Forbidden as e:
+        print(e.reason, e.port, e.owner)    # e.g. reserved enp0s8 alice
+    print(c.session())                      # you: ports and running runs
+    print(c.ports(), c.sessions())          # everybody
+    c.release()                             # all of yours
+```
+
+A start on a port another user reserved, or that another user's run sends
+on, raises `Forbidden` with `.reason` `"reserved"` or `"in_use"`
+(`"not_acquired"` on a `--require-acquire` server); stopping someone else's
+run raises it with `"not_owner"`. An admin login may `acquire(port,
+force=True)`, which stops the other user's runs on it, and
+`release(port, force=True)`. On a server without logins, `Client(...,
+user="alice")` (or `FEROTRX_USER` with `Client.from_env`) names your session.
+
 ## Stateless runs
 
 ```python

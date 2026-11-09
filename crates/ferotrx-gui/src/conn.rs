@@ -16,7 +16,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ferotrx_ctl::protocol::{
-    InterfaceEntry, RunInfo, RxRunInfo, ScenarioRunInfo, ServerInfo, TcpRunInfo, UdpRunInfo,
+    InterfaceEntry, PortInfo, RunInfo, RxRunInfo, ScenarioRunInfo, ServerInfo, SessionInfo,
+    TcpRunInfo, UdpRunInfo,
 };
 use ferotrx_ctl::{Client, ClientError, ClientTls};
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,10 @@ pub struct ConnSettings {
     pub server_name: String,
     #[serde(skip)]
     pub token: String,
+    /// On a server without logins: the user name this GUI's port
+    /// reservations and runs go under (`session.name`); servers with logins
+    /// name users by their token or certificate.
+    pub user: String,
     /// A server the GUI starts on this computer ([`crate::local`]); `addr`
     /// is then its name, "This computer".
     pub local: bool,
@@ -60,6 +65,7 @@ impl Default for ConnSettings {
             key: String::new(),
             server_name: String::new(),
             token: String::new(),
+            user: String::new(),
             local: false,
             folders: String::new(),
             launch: None,
@@ -128,6 +134,7 @@ impl ConnSettings {
             token: var("FEROTRX_TOKEN")
                 .or_else(|| var("FEROTRX_READ_TOKEN"))
                 .unwrap_or_default(),
+            user: var("FEROTRX_USER").unwrap_or_default(),
             ..Default::default()
         })
     }
@@ -139,7 +146,17 @@ impl ConnSettings {
         if !self.token.is_empty() {
             c.auth(&self.token).map_err(|e| format!("login: {e}"))?;
         }
+        self.name_session(&mut c);
         Ok(c)
+    }
+
+    /// Names the connection's session with `user` on a server without
+    /// logins; servers with logins (and older ones) refuse, which is fine.
+    fn name_session(&self, c: &mut Client) {
+        let user = self.user.trim();
+        if !user.is_empty() {
+            let _ = c.name_session(user);
+        }
     }
 
     fn connect(&self) -> Result<Client, String> {
@@ -210,6 +227,12 @@ pub struct Snapshot {
     pub scenarios: Vec<ScenarioRunInfo>,
     pub bench: Vec<ferotrx_ctl::protocol::BenchRunInfo>,
     pub y1564: Vec<ferotrx_ctl::protocol::Y1564RunInfo>,
+    /// Ports that are reserved or that runs send on (servers from 0.49.0).
+    pub ports: Vec<PortInfo>,
+    /// This connection's user and what it holds.
+    pub me: Option<SessionInfo>,
+    /// Every user on the server.
+    pub sessions: Vec<SessionInfo>,
 }
 
 /// What a worker tells the GUI.
@@ -295,6 +318,7 @@ fn worker(
             c.call_value("auth", serde_json::json!({ "token": settings.token }))
                 .map_err(|e| format!("login: {e}"))?;
         }
+        settings.name_session(&mut c);
         let now = || ferotrx_core::unix_seconds(std::time::SystemTime::now());
         let t0 = now();
         let info = c.info().map_err(|e| e.to_string())?;
@@ -443,6 +467,9 @@ fn snapshot(c: &mut Client) -> Result<Snapshot, ClientError> {
         scenarios: list(c.scenario_runs())?,
         bench: list(c.bench_runs())?,
         y1564: list(c.y1564_runs())?,
+        ports: list(c.ports())?,
+        me: list(c.session().map(|s| vec![s]))?.pop(),
+        sessions: list(c.sessions())?,
     })
 }
 

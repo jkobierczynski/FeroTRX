@@ -29,6 +29,11 @@
 //! | `server.info` | | [`ServerInfo`](protocol::ServerInfo) |
 //! | `auth` | `token` | `true` (the connection now has the token's role) |
 //! | `interfaces.list` | | [`InterfaceEntry`](protocol::InterfaceEntry)`[]` |
+//! | `ports.list` | | [`PortInfo`](protocol::PortInfo)`[]` |
+//! | `ports.acquire` | [`AcquireParams`](protocol::AcquireParams): `ports`, `force`, `note` | `PortInfo[]` |
+//! | `ports.release` | [`ReleaseParams`](protocol::ReleaseParams): `ports` (empty: all of yours), `force` | names released |
+//! | `session.info` / `session.list` | | [`SessionInfo`](protocol::SessionInfo) / `SessionInfo[]` |
+//! | `session.name` | `user` (servers without logins) | `SessionInfo` |
 //! | `profile.load` | `path` or `toml` (+ `base_dir`), `name` | [`ProfileInfo`](protocol::ProfileInfo) |
 //! | `profile.get` / `profile.unload` | `name` | `ProfileInfo` / `true` |
 //! | `profile.list` | | `ProfileInfo[]` |
@@ -107,8 +112,14 @@
 //!   unless `insecure` is set.
 //! * **Roles** ([`Role`]): `read` may call `server.info`,
 //!   `interfaces.list`, the `*.get`, `*.list` and `*.stats` methods and
-//!   `stats.subscribe`; `operator` may also load profiles and start, stop and
-//!   remove runs. Anything else answers `FORBIDDEN` (-32004).
+//!   `stats.subscribe`, `ports.list` and `session.*`; `operator` may also
+//!   load profiles, reserve ports and start, stop and remove its own runs;
+//!   `admin` may also take ports and runs from other users. Anything else
+//!   answers `FORBIDDEN` (-32004).
+//! * **Sessions and ports** ([`ports`]): each user (token name, certificate
+//!   name, or `session.name` without logins) reserves ports with
+//!   `ports.acquire`; runs may not send on ports other users reserved or
+//!   send on now, and only their owner or an admin stops them.
 //! * **Files** ([`FilePolicy`], set on the [`Controller`]): none by default;
 //!   with [`FilePolicy::dirs`], profiles, the pcaps they name and pcap
 //!   outputs only inside the data directories; uploaded profiles
@@ -142,6 +153,7 @@ pub mod fleet;
 #[doc(hidden)]
 pub mod fuzzing;
 mod limits;
+pub mod ports;
 pub mod protocol;
 mod safe_open;
 mod scenario;
@@ -161,6 +173,7 @@ pub use controller::{
 };
 pub use files::{sha256_hex, FilePolicy, DEFAULT_MAX_FILE, DEFAULT_MAX_UPLOAD};
 pub use limits::{parse_bps, parse_limit_duration, parse_pps, refused_limit, Demand, Limits, Net};
+pub use ports::{refused_port, run_name, utc_text, ANONYMOUS};
 pub use protocol::{Role, RpcError};
 pub use scenario::{check_info, scenario_info, LabRunner, SinkOpener};
 pub use server::{Credentials, ReloadHandle, Reloader, Server, ServerConfig, MAX_LINE};

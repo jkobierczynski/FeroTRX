@@ -644,9 +644,20 @@ impl LabPki {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || "-_.@".contains(c))
             && !name.starts_with('.');
-        if !ok || ["ca", "read-ca", "server", "crl", "read-crl"].contains(&name) {
+        if !ok
+            || [
+                "ca",
+                "read-ca",
+                "admin-ca",
+                "server",
+                "crl",
+                "read-crl",
+                "admin-crl",
+            ]
+            .contains(&name)
+        {
             return Err(TlsError(format!(
-                "'{name}' cannot be a client name (letters, digits, - _ . @; not ca, read-ca, server, crl or read-crl)"
+                "'{name}' cannot be a client name (letters, digits, - _ . @; not ca, read-ca, admin-ca, server, crl, read-crl or admin-crl)"
             )));
         }
         let mut out = Issued::default();
@@ -721,7 +732,7 @@ impl LabPki {
         let f = cert_fields(&der)
             .ok_or_else(|| TlsError(format!("{}: cannot read the certificate", path.display())))?;
         let mut role = None;
-        for r in [Role::Operator, Role::Read] {
+        for r in [Role::Operator, Role::Read, Role::Admin] {
             let ca = self.path(&format!("{}.pem", ca_stem(r)));
             if let Ok(pem) = read(&ca) {
                 let ca = certs(&pem, "CA")?.remove(0);
@@ -827,6 +838,7 @@ pub fn crl_file(role: Role) -> &'static str {
     match role {
         Role::Operator => "crl.pem",
         Role::Read => "read-crl.pem",
+        Role::Admin => "admin-crl.pem",
     }
 }
 
@@ -840,6 +852,7 @@ fn ca_stem(role: Role) -> &'static str {
     match role {
         Role::Operator => "ca",
         Role::Read => "read-ca",
+        Role::Admin => "admin-ca",
     }
 }
 
@@ -851,6 +864,7 @@ fn ca_params(role: Role) -> Result<rcgen::CertificateParams, TlsError> {
         match role {
             Role::Operator => "FeroTRX lab CA",
             Role::Read => "FeroTRX lab read-only CA",
+            Role::Admin => "FeroTRX lab admin CA",
         },
     );
     p.key_usages = vec![

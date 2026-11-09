@@ -244,6 +244,32 @@ impl FeroApp {
                                 .on_hover_text(l.limits.describe().join("\n"));
                             }
                         }
+                        if let Some(me) = &s.snap.me {
+                            // Who this GUI is on the server, and who else is there.
+                            let others: Vec<String> = s
+                                .snap
+                                .sessions
+                                .iter()
+                                .filter(|o| o.user != me.user)
+                                .map(|o| {
+                                    let mut t = o.user.clone();
+                                    if !o.ports.is_empty() {
+                                        t.push_str(&format!(" ({})", o.ports.join(", ")));
+                                    }
+                                    t
+                                })
+                                .collect();
+                            let mut text = format!("you: {}", me.user);
+                            if !others.is_empty() {
+                                text.push_str(&format!(" · {} other user(s)", others.len()));
+                            }
+                            let tip = if others.is_empty() {
+                                "Nobody else is on this server. Right-click a port to reserve it for you.".to_string()
+                            } else {
+                                format!("Also here: {}\nRight-click a port to reserve it for you.", others.join(", "))
+                            };
+                            ui.label(RichText::new(text).small().weak()).on_hover_text(tip);
+                        }
                         if let Some(hint) = s.local.as_ref().and_then(|l| l.hint.as_ref()) {
                             ui.label(RichText::new(hint).small().color(ui.visuals().warn_fg_color));
                         }
@@ -278,6 +304,11 @@ impl FeroApp {
                                 }
                                 if r.clicked() {
                                     action = Some(PanelAction::SelectPort(i, port.clone()));
+                                }
+                                if let PortKind::Interface(name) = &port {
+                                    if let Some(a) = reservation(ui, s, i, name, r) {
+                                        action = Some(a);
+                                    }
                                 }
                             });
                         }
@@ -355,6 +386,21 @@ impl FeroApp {
                     serde_json::Value::Null,
                     crate::app::Pending::Lab(String::new()),
                 );
+            }
+            PanelAction::Reserve(i, port, op) => {
+                let (method, params, what) = match op {
+                    ReserveOp::Acquire { force } => (
+                        "ports.acquire",
+                        serde_json::json!({ "ports": [port], "force": force }),
+                        format!("reserved {port}"),
+                    ),
+                    ReserveOp::Release { force } => (
+                        "ports.release",
+                        serde_json::json!({ "ports": [port], "force": force }),
+                        format!("released {port}"),
+                    ),
+                };
+                self.call(i, method, params, crate::app::Pending::Done(what));
             }
             PanelAction::Connect(i) => self.connect(i),
             PanelAction::Disconnect(i) => self.disconnect(i),
@@ -491,6 +537,13 @@ impl FeroApp {
                         )
                         .on_hover_text("Not saved: give it again after a restart, or set FEROTRX_TOKEN");
                         ui.end_row();
+                        ui.label("User");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut s.user)
+                                .hint_text("your name, on a server without logins"),
+                        )
+                        .on_hover_text("The name your port reservations and runs go under on a server without tokens or certificates; servers with logins name you by your login");
+                        ui.end_row();
                         ui.label("TLS");
                         ui.checkbox(&mut s.tls, "Verify the server with a CA certificate");
                         ui.end_row();
@@ -570,10 +623,129 @@ impl FeroApp {
 
 enum PanelAction {
     Lab(usize),
+    Reserve(usize, String, ReserveOp),
     SelectServer(usize),
     SelectPort(usize, PortKind),
     Connect(usize),
     Disconnect(usize),
     Edit(usize),
     Remove(usize),
+}
+
+#[derive(Clone, Copy)]
+enum ReserveOp {
+    Acquire { force: bool },
+    Release { force: bool },
+}
+
+/// Who holds port `name` of server `i`, next to its label, and the menu that
+/// reserves or releases it (servers from 0.49.0 say who holds what).
+fn reservation(
+    ui: &mut egui::Ui,
+    s: &ServerState,
+    i: usize,
+    name: &str,
+    label: egui::Response,
+) -> Option<PanelAction> {
+    let me = s.snap.me.as_ref()?;
+    let held = s.snap.ports.iter().find(|p| p.name == name);
+    let owner = held.and_then(|p| p.owner.as_deref());
+    let mine = owner == Some(me.user.as_str());
+    let others_runs: Vec<String> = held
+        .map(|p| {
+            p.runs
+                .iter()
+                .filter(|r| r.owner != me.user)
+                .map(|r| format!("{}'s {}", r.owner, ferotrx_ctl::run_name(&r.kind, r.id)))
+                .collect()
+        })
+        .unwrap_or_default();
+    match owner {
+        Some(_) if mine => {
+            ui.label(
+                RichText::new("reserved")
+                    .small()
+                    .color(crate::theme::good(ui)),
+            )
+            .on_hover_text("You reserved this port: other users' runs cannot send on it");
+        }
+        Some(o) => {
+            let mut tip = format!("Reserved by {o}: your runs cannot send on it");
+            if let Some(n) = held.and_then(|p| p.note.as_deref()) {
+                tip.push_str(&format!(" ({n})"));
+            }
+            ui.label(
+                RichText::new(format!("held by {o}"))
+                    .small()
+                    .color(ui.visuals().warn_fg_color),
+            )
+            .on_hover_text(tip);
+        }
+        None if !others_runs.is_empty() => {
+            ui.label(
+                RichText::new("in use")
+                    .small()
+                    .color(ui.visuals().warn_fg_color),
+            )
+            .on_hover_text(format!(
+                "{} send(s) on it now: your runs cannot until it ends",
+                others_runs.join(", ")
+            ));
+        }
+        None => {}
+    }
+    if !s.can_operate() {
+        return None;
+    }
+    let admin = s
+        .info
+        .as_ref()
+        .is_some_and(|i| i.role == Some(ferotrx_ctl::Role::Admin) || !i.auth_required);
+    let mut action = None;
+    label.context_menu(|ui| {
+        let port = name.to_string();
+        if mine {
+            if ui.button("Release this port").clicked() {
+                action = Some(PanelAction::Reserve(
+                    i,
+                    port,
+                    ReserveOp::Release { force: false },
+                ));
+                ui.close();
+            }
+        } else if owner.is_none() && others_runs.is_empty() {
+            if ui
+                .button("Reserve for me")
+                .on_hover_text("Other users' runs cannot send on it until you release it")
+                .clicked()
+            {
+                action = Some(PanelAction::Reserve(
+                    i,
+                    port,
+                    ReserveOp::Acquire { force: false },
+                ));
+                ui.close();
+            }
+        } else if admin {
+            if ui.button("Take over (stops their runs on it)").clicked() {
+                action = Some(PanelAction::Reserve(
+                    i,
+                    port.clone(),
+                    ReserveOp::Acquire { force: true },
+                ));
+                ui.close();
+            }
+            if owner.is_some() && ui.button("Release their reservation").clicked() {
+                action = Some(PanelAction::Reserve(
+                    i,
+                    port,
+                    ReserveOp::Release { force: true },
+                ));
+                ui.close();
+            }
+        } else {
+            ui.label("Another user has this port");
+        }
+    });
+    action
 }

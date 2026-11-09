@@ -173,6 +173,7 @@ fn service_args(
     for (opt, name, role) in [
         ("--token", "operator", "operator"),
         ("--read-token", "read", "read"),
+        ("--admin-token", "admin", "admin"),
     ] {
         if let Some(t) = take_option(&mut args, opt) {
             if t.is_empty() {

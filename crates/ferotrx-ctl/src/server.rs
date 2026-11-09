@@ -11,6 +11,7 @@ use serde_json::{json, Map, Value};
 use crate::audit::AuditLog;
 use crate::auth::Token;
 use crate::controller::{parse, to_value};
+use crate::ports::{Who, ANONYMOUS};
 use crate::protocol::*;
 use crate::tls::{common_name, fingerprint, ServerTls, TlsSetup};
 use crate::Controller;
@@ -731,6 +732,8 @@ struct Connection {
     last_request: Instant,
     subs: HashMap<u64, Arc<AtomicBool>>,
     next_sub: u64,
+    /// The user whose session counts this connection.
+    session_user: Option<String>,
 }
 
 /// What to do after a request.
@@ -789,6 +792,7 @@ impl Connection {
             last_request: now,
             subs: HashMap::new(),
             next_sub: 1,
+            session_user: None,
         })
     }
 
@@ -804,6 +808,61 @@ impl Connection {
             m.insert("role".into(), r.as_str().into());
         }
         m
+    }
+
+    /// Who the connection works for, for reservations and run owners.
+    fn caller(&self) -> Who {
+        Who {
+            user: self.user.clone().unwrap_or_else(|| ANONYMOUS.into()),
+            role: self.role,
+            may_override: self.role == Some(Role::Admin) || !self.shared.login_required,
+        }
+    }
+
+    /// Counts the connection in its user's session, moving it when its
+    /// login changed.
+    fn sync_session(&mut self) {
+        let now = self
+            .role
+            .map(|_| self.user.clone().unwrap_or_else(|| ANONYMOUS.into()));
+        let ports = self.controller.ports();
+        if now != self.session_user {
+            if let Some(old) = self.session_user.take() {
+                ports.disconnected(&old);
+            }
+            if let Some(new) = &now {
+                ports.connected(new, self.role);
+            }
+            self.session_user = now;
+        } else if let Some(user) = &now {
+            ports.seen(user);
+        }
+    }
+
+    /// `session.name`: on a server without logins, the name this
+    /// connection's reservations and runs go under.
+    fn name_session(&mut self, params: Value) -> Result<Value, RpcError> {
+        let p: SessionNameParams = parse(params)?;
+        if self.shared.login_required {
+            return Err(RpcError::forbidden(
+                "this server names you by your login (token or certificate)",
+            ));
+        }
+        let name = p.user.trim();
+        let ok = !name.is_empty()
+            && name.len() <= 64
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.@".contains(c));
+        if !ok {
+            return Err(RpcError::invalid_params(
+                "a user name is 1 to 64 letters, digits, - _ . or @",
+            ));
+        }
+        self.user = Some(name.to_string());
+        self.sync_session();
+        self.audit("session_name", json!({}));
+        to_value(self.controller.ports().session(name))
     }
 
     fn audit(&self, event: &str, extra: Value) {
@@ -835,6 +894,9 @@ impl Connection {
         }
         if self.pending_login {
             self.shared.unauthenticated.fetch_sub(1, Ordering::SeqCst);
+        }
+        if let Some(user) = self.session_user.take() {
+            self.controller.ports().disconnected(&user);
         }
         self.writer.close();
         self.audit("disconnect", json!({"reason": reason}));
@@ -928,6 +990,7 @@ impl Connection {
         self.role = Some(role);
         self.user = Some(name);
         self.logged_in();
+        self.sync_session();
         self.audit("login", json!({"by": "certificate", "cert_sha256": fp}));
         Ok(None)
     }
@@ -1109,7 +1172,7 @@ impl Connection {
                         return Ok(Next::Continue);
                     }
                     let logged = audit_params(&req.params);
-                    let r = self.controller.call(method, req.params);
+                    let r = self.controller.call_as(&self.caller(), method, req.params);
                     // Reading frames is polled many times a second: the
                     // capture's start, stop and files are what the log keeps.
                     if self.shared.audit.is_some() && method != "capture.read" {
@@ -1134,9 +1197,11 @@ impl Connection {
                     }
                     r
                 }
-                method => self.controller.call(method, req.params),
+                "session.name" => self.name_session(req.params),
+                method => self.controller.call_as(&self.caller(), method, req.params),
             },
         };
+        self.sync_session();
         if let Some(id) = req.id {
             send(&self.writer, &Response::new(id, outcome))?;
         }

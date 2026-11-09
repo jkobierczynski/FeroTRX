@@ -13,6 +13,18 @@ fn main() {
         println!("cargo:rustc-link-arg=/DELAYLOAD:wpcap.dll");
         println!("cargo:rustc-link-lib=delayimp");
     }
+    // Windows gives the main thread 1 MB of stack (Linux 8 MB). Parsing
+    // the command line of a debug build already takes close to 1 MB (clap's
+    // derived parsers have large frames without optimization), and a
+    // debug `ferotrx serve` overflowed it: give the main thread 8 MB as on
+    // Linux.
+    if windows {
+        if msvc {
+            println!("cargo:rustc-link-arg-bins=/STACK:8388608");
+        } else {
+            println!("cargo:rustc-link-arg-bins=-Wl,--stack,8388608");
+        }
+    }
     #[cfg(windows)]
     if windows {
         let mut res = winresource::WindowsResource::new();

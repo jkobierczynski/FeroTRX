@@ -132,6 +132,26 @@ class Forbidden(RpcError):
 
     CODE = -32004
 
+    @property
+    def port(self) -> str | None:
+        """The port a refused start or reservation named (servers from 0.49.0)."""
+        port = self.data.get("port") if isinstance(self.data, dict) else None
+        return port if isinstance(port, str) else None
+
+    @property
+    def owner(self) -> str | None:
+        """The user who holds that port or run."""
+        owner = self.data.get("owner") if isinstance(self.data, dict) else None
+        return owner if isinstance(owner, str) else None
+
+    @property
+    def reason(self) -> str | None:
+        """Why: ``reserved`` (another user acquired the port), ``in_use``
+        (another user's run sends on it), ``not_acquired`` (the server wants
+        ports acquired first) or ``not_owner`` (another user's run or port)."""
+        reason = self.data.get("reason") if isinstance(self.data, dict) else None
+        return reason if isinstance(reason, str) else None
+
 
 class LimitExceeded(RpcError):
     """A server limit was reached: too many ``stats`` subscriptions on this

@@ -225,6 +225,44 @@ impl Client {
         .map(drop)
     }
 
+    /// On a server without logins: the user name this connection's port
+    /// reservations and runs go under (`session.name`).
+    pub fn name_session(&mut self, user: &str) -> Result<SessionInfo, ClientError> {
+        self.call("session.name", &SessionNameParams { user: user.into() })
+    }
+
+    /// This connection's user: logins, reserved ports and running runs.
+    pub fn session(&mut self) -> Result<SessionInfo, ClientError> {
+        self.call("session.info", &Value::Null)
+    }
+
+    /// Every user's session.
+    pub fn sessions(&mut self) -> Result<Vec<SessionInfo>, ClientError> {
+        self.call("session.list", &Value::Null)
+    }
+
+    /// Ports that are reserved or that runs send on now.
+    pub fn ports(&mut self) -> Result<Vec<PortInfo>, ClientError> {
+        self.call("ports.list", &Value::Null)
+    }
+
+    /// Reserves ports for this user, all or none (`ports.acquire`).
+    pub fn acquire(&mut self, params: &AcquireParams) -> Result<Vec<PortInfo>, ClientError> {
+        self.call("ports.acquire", params)
+    }
+
+    /// Gives ports back (all of this user's when `ports` is empty); returns
+    /// those released.
+    pub fn release(&mut self, ports: &[String], force: bool) -> Result<Vec<String>, ClientError> {
+        self.call(
+            "ports.release",
+            &ReleaseParams {
+                ports: ports.to_vec(),
+                force,
+            },
+        )
+    }
+
     pub fn interfaces(&mut self) -> Result<Vec<InterfaceEntry>, ClientError> {
         self.call("interfaces.list", &Value::Null)
     }

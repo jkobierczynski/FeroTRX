@@ -27,7 +27,16 @@ fn a_local_server_starts_and_stops() {
     }
     let folder = std::env::temp_dir();
     let mut server = LocalServer::start_with(&exe, &[folder]).unwrap();
-    let addr = wait_for_address(&server.port_file, Duration::from_secs(30)).unwrap();
+    let addr = match wait_for_address(&server.port_file, Duration::from_secs(30)) {
+        Ok(a) => a,
+        Err(e) => {
+            // Say why: a server that ended (a crash, a refused argument)
+            // leaves its status and its standard error behind.
+            let ended = server.ended().unwrap_or_else(|| "still running".into());
+            let log = std::fs::read_to_string(&server.log).unwrap_or_default();
+            panic!("{e}: {ended}\nserver.log:\n{log}");
+        }
+    };
     assert!(addr.starts_with("127.0.0.1:"), "{addr}");
 
     // Without the token: nothing but login.

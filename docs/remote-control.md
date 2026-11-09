@@ -51,6 +51,7 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 | `server.info` | | name, version, protocol, interfaces, backends, auth_required, tls, this connection's role and user, the server's clock `time` (Unix seconds), `max_file` and `certificate_expires` |
 | `auth` | `token` | `true`; the connection now has the token's role |
 | `interfaces.list` | | `[{name, description}]` |
+| `ports.list`, `ports.acquire`, `ports.release`, `session.info`, `session.list`, `session.name` | see [Several users](#several-users) | |
 | `profile.load` | `path` (on the server) or `toml` (+ `base_dir`), optional `name` | the profile's streams |
 | `profile.get`, `profile.unload` | `name` | profile / `true` |
 | `profile.list` | | loaded profiles |
@@ -209,17 +210,21 @@ certificate or remove their token and reload ([Locking someone
 out](#locking-someone-out)).
 
 **Logins and roles.** `read` may call `server.info`, `interfaces.list`, the
-`*.get`, `*.list` and `*.stats` methods and `stats.subscribe`; `operator` may
-also load and unload profiles and start, stop and remove runs. Log in with a
+`*.get`, `*.list` and `*.stats` methods, `stats.subscribe`, `ports.list` and
+`session.*`; `operator` may also load and unload profiles, reserve ports and
+start, stop and remove its own runs; `admin` may also take ports and runs
+from other users (see [Several users](#several-users)). Log in with a
 token (`auth`) or a client certificate:
 
 | `ferotrx serve` option | Logs in as |
 | --- | --- |
 | `--token T` (or `FEROTRX_TOKEN`) | operator |
 | `--read-token T` (or `FEROTRX_READ_TOKEN`) | read |
-| `--tokens FILE`: `[[token]]` tables with `name`, `role` and `secret` (or `sha256` of it) | the token's role, under its name in the audit log |
+| `--admin-token T` (or `FEROTRX_ADMIN_TOKEN`) | admin |
+| `--tokens FILE`: `[[token]]` tables with `name`, `role` (`read`, `operator` or `admin`) and `secret` (or `sha256` of it) | the token's role, under its name: the user in the audit log and in sessions |
 | `--client-ca FILE` (needs TLS) | operator, for certificates from that CA |
 | `--read-client-ca FILE` (needs TLS) | read, for certificates from that CA |
+| `--admin-client-ca FILE` (needs TLS) | admin, for certificates from that CA (`ferotrx certs --admin-client NAME` makes `admin-ca.pem`) |
 
 With client CAs and no tokens, a client without a certificate cannot connect;
 with both, it can and logs in with a token. With none of these, every
@@ -254,6 +259,78 @@ profiles may be at most `--max-upload` (1M); a request at most
 `file.put` writes files of at most `--max-file` bytes (256M; 0 refuses
 files) under the first data directory; [fleets](fleet.md) send profiles and
 pcaps to the agents with it.
+
+### Several users
+
+Several people can share one server. Each user has a **session**: the
+connections logged in as that user, the ports the user reserved and the
+user's runs. The user is the token's name (from a tokens file; `--token`
+is "operator", `--read-token` "read", `--admin-token` "admin") or the client
+certificate's common name. On a server without logins, a client may name
+itself with `session.name` (`ferotrx ctl --user NAME`, `FEROTRX_USER`,
+`Client(..., user=...)` in Python, the User field in the GUI); otherwise it is
+`anonymous`. Give each person a token of their own for this to mean
+something: people who share a token are one user.
+
+**Ports.** A port is an interface of the server as runs name it (`iface`;
+on Windows "Ethernet 2" and its `\Device\NPF_{GUID}` are the same port).
+A run may send on a port only when no other user reserved it and no other
+user's run sends on it now:
+
+```sh
+ferotrx ctl acquire enp0s8,enp0s9 --note "soak test until 17:00"
+ferotrx ctl ports            # what is reserved, by whom, and which runs send where
+ferotrx ctl session          # you: connections, ports, runs
+ferotrx ctl sessions         # everybody
+ferotrx ctl release          # all of yours (or name them)
+```
+
+A start that would send on someone else's port answers `FORBIDDEN`
+(-32004) with `data` `{"port": "enp0s8", "owner": "alice", "reason":
+"reserved"}`; `reason` is `reserved`, `in_use` (another user's run sends on
+it), `not_acquired` (see below) or `not_owner`. Python raises
+`ferotrx.Forbidden` with `.port`, `.owner` and `.reason`. `ports.acquire` takes
+all the ports named or none. Reservations stay across reconnects and server
+calls until `ports.release`; they end when the server stops.
+
+Runs of every kind count: `run.start`, `tcp.start`, `udp.start` (the ports
+of both ends), `scenario.start` (every port its checks send on), `bench.start`
+and `y1564.start` (the sending port). Receiving needs no reservation:
+`rx.start`, `capture.start` and the receive port of a run may listen on any
+port, since listening disturbs nobody. Files and the null output are not ports.
+
+`ferotrx serve --require-acquire` makes reserving a must: a run may then only
+send on ports its user acquired first (`server.info` says
+`require_acquire`). Without it, a free port needs no reservation, so single
+users and scripts work as before.
+
+**Runs belong to who started them.** Only the user who started a run (or an
+admin) may stop, pause, resume, update or remove it; others get
+`FORBIDDEN` with `reason` `not_owner`. Everyone with the read role still
+sees every run.
+
+**Admins** (`--admin-token`, `role = "admin"`, `--admin-client-ca`) are
+operators who may also override: `ferotrx ctl acquire PORT --force` takes a
+port from another user and stops that user's runs that send on it (the
+server waits up to 10 s for them to end), `ferotrx ctl release PORT --force`
+gives back another user's reservation, and they may stop anyone's runs. On a
+server without logins, nobody can be told apart for sure, so everyone may
+use `--force` and stop the runs of others; reservations there guard against
+mistakes, not against people.
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `ports.list` | | [`PortInfo`](../crates/ferotrx-ctl/src/protocol.rs)`[]`: `name`, `owner`, `since`, `note`, `runs` (kind, id, owner, ports) |
+| `ports.acquire` | `ports`, `force` (false), `note` | `PortInfo[]` of the ports taken |
+| `ports.release` | `ports` (empty: all of yours), `force` (false) | names released |
+| `session.info` | | `SessionInfo`: `user`, `role`, `connections`, `ports`, `runs`, `since`, `last_seen` |
+| `session.list` | | `SessionInfo[]`: users with a connection, a port or a run |
+| `session.name` | `user` | `SessionInfo`; servers with logins answer `FORBIDDEN` |
+
+Every `ports.acquire` and `ports.release` is in the audit log with the user
+and its parameters. Not done: reservations that end on their own when their
+user has been away for a while (an admin releases them), and rate shares
+per user (the [traffic limits](#traffic-limits) hold for all users together).
 
 ### Locking someone out
 

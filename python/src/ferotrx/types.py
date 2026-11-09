@@ -24,6 +24,9 @@ __all__ = [
     "Role",
     "RunState",
     "ServerInfo",
+    "PortRun",
+    "PortInfo",
+    "SessionInfo",
     "InterfaceEntry",
     "StreamInfo",
     "ProfileInfo",
@@ -54,10 +57,13 @@ R = TypeVar("R", bound="Record")
 
 class Role(str, enum.Enum):
     """What a login may do: ``read`` sees everything and changes nothing,
-    ``operator`` may also load profiles and start, stop and remove runs."""
+    ``operator`` may also load profiles, reserve ports and start, stop and
+    remove its own runs, ``admin`` may also take ports and runs from other
+    users (servers from 0.49.0)."""
 
     READ = "read"
     OPERATOR = "operator"
+    ADMIN = "admin"
 
     def __str__(self) -> str:
         return self.value
@@ -213,6 +219,54 @@ class ServerInfo(Record):
     #: When the server's TLS certificate expires, ``YYYY-MM-DDTHH:MM:SS.mmmZ``
     #: (servers from 0.43.0).
     certificate_expires: str | None = None
+    #: True when runs may only send on ports their user acquired first
+    #: (``ferotrx serve --require-acquire``, servers from 0.49.0).
+    require_acquire: bool = False
+
+
+# ----- ports.*, session.* (servers from 0.49.0) -----
+
+
+@dataclass(kw_only=True)
+class PortRun(Record):
+    """A run that sends on a port now."""
+
+    #: ``run``, ``tcp``, ``udp``, ``scenario``, ``bench`` or ``y1564``.
+    kind: str = ""
+    id: int = 0
+    #: Who started it.
+    owner: str = ""
+    #: The ports it sends on.
+    ports: list[str] = field(default_factory=list)
+
+
+@dataclass(kw_only=True)
+class PortInfo(Record):
+    """A port that is reserved or that runs send on (``ports.list``)."""
+
+    name: str = ""
+    #: Who reserved it with ``acquire``, if anyone did.
+    owner: str | None = None
+    #: When, in seconds since 1970.
+    since: float | None = None
+    note: str | None = None
+    #: Runs that send on it now.
+    runs: list[PortRun] = field(default_factory=list)
+
+
+@dataclass(kw_only=True)
+class SessionInfo(Record):
+    """One user's session: connections, reserved ports and running runs."""
+
+    #: The login's name, the name given with ``name_session``, or ``anonymous``.
+    user: str = ""
+    role: Role | None = None
+    #: Connections logged in as this user now.
+    connections: int = 0
+    ports: list[str] = field(default_factory=list)
+    runs: list[PortRun] = field(default_factory=list)
+    since: float | None = None
+    last_seen: float | None = None
 
 
 @dataclass(kw_only=True)
