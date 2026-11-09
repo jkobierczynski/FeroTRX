@@ -25,6 +25,7 @@ from .errors import (
 from .types import (
     AppCounters,
     AuditHealth,
+    CountCounters,
     Counters,
     DhcpLeaseInfo,
     DhcpServerInfo,
@@ -37,7 +38,6 @@ from .types import (
     HostInfo,
     ImpairCounters,
     InterfaceEntry,
-    CountCounters,
     LatencyCounters,
     Limits,
     LossReport,
