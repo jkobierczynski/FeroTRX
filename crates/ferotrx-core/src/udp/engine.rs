@@ -1396,7 +1396,13 @@ impl UdpEngine {
         let Some(c) = &self.client else {
             return false;
         };
-        let all = c.transactions > 0 && self.stats.client.sent >= c.transactions;
+        // With users, `transactions` does not end the run: users keep
+        // coming until it is stopped.
+        let users = self
+            .templates
+            .iter()
+            .any(|t| t.group.is_some() && t.weight > 0);
+        let all = !users && c.transactions > 0 && self.stats.client.sent >= c.transactions;
         // Or every template has started all of its own, or its traffic
         // model's ramp has ended.
         let each = (0..self.templates.len()).all(|i| {
@@ -1856,7 +1862,12 @@ impl UdpEngine {
                 .client
                 .as_ref()
                 .map_or(1, |c| u64::from(c.endpoint.ip_count.max(1)));
+            let concurrency = self.client.as_ref().map_or(0, |c| c.concurrency);
             for (user, group, address) in self.users.due(now).into_iter().take(256) {
+                if concurrency > 0 && self.stats.client.active as usize >= concurrency {
+                    self.users.retry(user, now + USER_RETRY);
+                    continue;
+                }
                 let ready: Vec<usize> = (0..self.templates.len())
                     .filter(|&i| self.templates[i].group == Some(group) && self.ready(i))
                     .collect();

@@ -911,16 +911,21 @@ impl TcpProfile {
                         .transpose()
                         .map_err(ctx)?,
                     ecn: t.ecn,
-                    session: session_from(
-                        t.session_requests
-                            .as_ref()
-                            .or(raw.session_requests.as_ref()),
-                        t.session_duration
-                            .as_ref()
-                            .or(raw.session_duration.as_ref()),
-                        t.session_bytes.as_ref().or(raw.session_bytes.as_ref()),
-                    )
-                    .map_err(ctx)?,
+                    // A template's own session length replaces the
+                    // profile's, of whatever kind.
+                    session: if t.session_requests.is_some()
+                        || t.session_duration.is_some()
+                        || t.session_bytes.is_some()
+                    {
+                        session_from(
+                            t.session_requests.as_ref(),
+                            t.session_duration.as_ref(),
+                            t.session_bytes.as_ref(),
+                        )
+                        .map_err(ctx)?
+                    } else {
+                        top_session
+                    },
                     think: t
                         .think_time
                         .as_ref()
@@ -1244,6 +1249,36 @@ mod tests {
             (client.endpoint.port, cfg.server.unwrap().endpoint.port),
             (0, 1)
         );
+    }
+
+    #[test]
+    fn a_template_session_length_replaces_the_profiles() {
+        let p = TcpProfile::from_toml(
+            r#"
+            session_requests = 5
+            [[template]]
+            name = "short"
+            app = "http"
+            [[template]]
+            name = "timed"
+            app = "http"
+            session_duration = "30s"
+            [client]
+            ip = "192.168.10.100/24"
+            [server]
+            ip = "192.168.20.50"
+            "#,
+            Path::new("/lab"),
+        )
+        .unwrap();
+        assert!(matches!(
+            p.templates[0].session,
+            Some(SessionLength::Requests(_))
+        ));
+        assert!(matches!(
+            p.templates[1].session,
+            Some(SessionLength::Duration(_))
+        ));
     }
 
     #[test]

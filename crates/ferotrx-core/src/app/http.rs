@@ -1206,12 +1206,18 @@ impl ClientSession {
                 ));
             }
             cx.close();
-        } else if !pipeline && self.outstanding.is_empty() {
-            if self.think.is_zero() {
-                self.send_next(cx);
-            } else {
+        } else if self.outstanding.is_empty() {
+            if !self.think.is_zero() {
                 let t = self.think.sample_time(&mut self.rng);
-                cx.wake_at(cx.now() + t);
+                cx.wake_at(cx.now().saturating_add(t));
+            } else if pipeline {
+                // A session longer than one batch (by time or bytes):
+                // the next batch.
+                for _ in 0..self.cfg.client.per_connection.max(1) {
+                    self.send_next(cx);
+                }
+            } else {
+                self.send_next(cx);
             }
         }
     }
@@ -1272,7 +1278,18 @@ impl AppSession for ClientSession {
     }
 
     fn timer(&mut self, cx: &mut AppCx) {
-        self.send_next(cx);
+        if self.outstanding.is_empty() && !self.more(self.sent, cx.now()) {
+            // The session's time ran out during a think time.
+            cx.close();
+            return;
+        }
+        if self.cfg.client.pipeline && self.outstanding.is_empty() {
+            for _ in 0..self.cfg.client.per_connection.max(1) {
+                self.send_next(cx);
+            }
+        } else {
+            self.send_next(cx);
+        }
     }
 }
 

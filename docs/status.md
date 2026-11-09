@@ -1,6 +1,6 @@
 # Feature status
 
-What works how well, as of 0.46.0. The milestones and their notes are in
+What works how well, as of 0.50.0. The milestones and their notes are in
 [DEVELOPMENT.md](../DEVELOPMENT.md); which real implementations each
 protocol is tested against is in [interop.md](interop.md).
 
@@ -16,7 +16,7 @@ protocol is tested against is in [interop.md](interop.md).
 | Feature | Status | Notes |
 |---|---|---|
 | pcap replay, rewriting, loops, rates | Done | [replay.md](replay.md) |
-| Profiles of streams (TOML), field engine, traffic models | Done | [traffic-models.md](traffic-models.md); session length distributions not done |
+| Profiles of streams (TOML), field engine, traffic models | Done | [traffic-models.md](traffic-models.md) |
 | Multi-burst and `next` streams, `50%` and L1 rates, live pause/resume/rate | Done | M50 |
 | The port's own addresses (ARP, neighbor discovery, answers) | Partial | scenario traffic checks do not resolve addresses or shares of the line |
 | Packet building and inspection | Done | [packets.md](packets.md); MPLS, GRE, VXLAN, Geneve, GTP-U, IP in IP, LLC/SNAP, IGMP and MLD since 0.47.0 |

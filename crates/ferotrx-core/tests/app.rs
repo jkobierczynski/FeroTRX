@@ -1440,3 +1440,46 @@ fn udp_users_and_h3_sessions_of_drawn_length() {
     assert!(c.app.transactions >= 2 * c.answered, "{:?} {c:?}", c.app);
     assert!(c.app.transactions <= 4 * c.sent, "{:?} {c:?}", c.app);
 }
+
+/// A session whose time runs out during a think time ends then (it is not
+/// left open until the idle timeout), and a pipelined session longer than
+/// one batch sends the next batch.
+#[test]
+fn timed_sessions_end_after_a_think_time_and_pipelines_refill() {
+    for (app, think, http) in [
+        ("http", "think_time = \"150ms\"", ""),
+        ("h2c", "think_time = \"150ms\"", ""),
+        ("http", "", "pipeline = true\nper_connection = 2"),
+    ] {
+        let table = if app == "http" { "http" } else { "http2" };
+        let text = format!(
+            r#"
+            app = "{app}"
+            session_duration = "400ms"
+            {think}
+            [users]
+            count = 2
+            think = "50ms"
+            [{table}]
+            requests = ["GET /", "GET /a"]
+            {http}
+            [client]
+            ip = "10.0.0.1/24"
+            ips = 10
+            [server]
+            ip = "10.0.0.80/24"
+            [tcp]
+            idle_timeout = "2s"
+            "#
+        );
+        let what = format!("{app} {think}{http}");
+        let p = TcpProfile::from_toml(&text, Path::new(".")).unwrap_or_else(|e| panic!("{e}"));
+        let (client, _) = run_profile(&p, 5);
+        let c = &client.stats().client;
+        assert_eq!((c.failed(), c.mismatched), (0, 0), "{what}: {c:?}");
+        // Each session ends soon after 400 ms: several per user in 5 s.
+        assert!(c.completed >= 12, "{what}: {c:?}");
+        let n = c.session_requests.max().unwrap();
+        assert!(n >= 3, "{what}: at most {n} requests a session");
+    }
+}

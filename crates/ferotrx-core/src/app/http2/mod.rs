@@ -1060,7 +1060,8 @@ impl AppSession for ClientSession {
         if self.done {
             cx.close(); // the server did not close after our GOAWAY
         } else {
-            self.fill(cx);
+            // Fills, or ends the session if its time ran out meanwhile.
+            self.after(cx);
         }
     }
 }

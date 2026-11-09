@@ -25,6 +25,10 @@ use std::time::Duration;
 use crate::field_engine::{fresh_seed, next_random};
 use crate::{parse_duration, Error, Result};
 
+/// The longest time a draw gives: 100 years, far beyond any run, and far
+/// enough from [`Duration::MAX`] that adding draws to a clock cannot overflow.
+pub const MAX_TIME: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
+
 /// What a distribution's numbers are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Quantity {
@@ -323,8 +327,13 @@ impl Dist {
     }
 
     /// One draw as a time.
+    ///
+    /// Draws are capped at [`MAX_TIME`] (100 years), so a heavy-tailed draw
+    /// added to an engine's clock cannot overflow.
     pub fn sample_time(&self, rng: &mut DistRng) -> Duration {
-        Duration::try_from_secs_f64(self.sample(rng)).unwrap_or(Duration::MAX)
+        Duration::try_from_secs_f64(self.sample(rng))
+            .unwrap_or(MAX_TIME)
+            .min(MAX_TIME)
     }
 
     /// One draw as a whole number (rounded), at least `at_least`.
@@ -615,6 +624,15 @@ mod tests {
 
     fn mean(v: &[f64]) -> f64 {
         v.iter().sum::<f64>() / v.len() as f64
+    }
+
+    #[test]
+    fn heavy_tailed_times_are_capped() {
+        let d = Dist::parse(Quantity::Time, "pareto(min=1s, shape=0.01)").unwrap();
+        let mut rng = DistRng::new(3);
+        let most = (0..1000).map(|_| d.sample_time(&mut rng)).max().unwrap();
+        assert_eq!(most, MAX_TIME);
+        let _ = Duration::from_secs(3600).saturating_add(most) + most;
     }
 
     #[test]
