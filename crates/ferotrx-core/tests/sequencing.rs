@@ -196,7 +196,13 @@ fn a_paused_run_holds_and_goes_on_where_it_was() {
     assert!(sink.times().len() <= held + 1, "sent while paused");
     let resumed = Instant::now();
     job.control().resume();
-    std::thread::sleep(Duration::from_millis(100));
+    // Wait for the run to go on rather than for a fixed time: a busy CI
+    // runner (macOS) can give the sending thread far less than 100 ms of
+    // the next 100 ms.
+    let deadline = resumed + Duration::from_secs(3);
+    while sink.times().len() <= held + 100 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     job.stop();
     job.join().unwrap();
     let times = sink.times();
