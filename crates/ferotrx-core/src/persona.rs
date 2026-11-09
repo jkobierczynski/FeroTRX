@@ -336,7 +336,8 @@ port_offset = 1000
         assert_eq!(t[1]["name"].as_str(), Some("office/web"));
         assert_eq!(t[1]["port"].as_integer(), Some(1080));
         assert_eq!(t[1]["_group"].as_integer(), Some(1));
-        assert!(t[2]["pcap"].as_str().unwrap().ends_with("p/web.pcap"));
+        let pcap = Path::new(t[2]["pcap"].as_str().unwrap());
+        assert!(pcap.is_absolute() && pcap.ends_with(Path::new("p").join("web.pcap")));
         assert!(!doc.contains_key("persona"));
         // No UDP sessions in this persona.
         let mut doc: toml::Table =
