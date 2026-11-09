@@ -1,6 +1,6 @@
 //! Link layer: Ethernet II, 802.3/LLC, VLAN tags, Linux cooked capture, ARP.
 
-use crate::{hex16, l3, mac, Decoder};
+use crate::{hex16, l3, mac, tunnel, Decoder};
 
 pub(crate) fn ethertype_name(t: u16) -> &'static str {
     match t {
@@ -78,6 +78,7 @@ pub(crate) fn ethertype(d: &mut Decoder, t: u16, at: usize) {
         0x0800 => l3::ipv4(d, at),
         0x86dd => l3::ipv6(d, at),
         0x0806 => arp(d, at),
+        0x8847 | 0x8848 => tunnel::mpls(d, at),
         _ => {
             let name = ethertype_name(t);
             d.summary(
@@ -151,7 +152,64 @@ fn llc(d: &mut Decoder, at: usize) {
         },
         what.to_string(),
     );
+    if what == "SNAP" && ctrl == 0x03 && d.need(at + 3, 5, "SNAP header") {
+        let oui = d.u32(at + 2).unwrap_or(0) & 0x00ff_ffff;
+        let pid = d.u16(at + 6).unwrap_or(0);
+        d.layer(
+            "SNAP",
+            format!(
+                "SubNetwork Access Protocol, OUI 0x{oui:06x}{}, PID {}",
+                oui_name(oui),
+                hex16(pid)
+            ),
+            at + 3..at + 8,
+        );
+        d.field(
+            "Organization code",
+            format!("0x{oui:06x}{}", oui_name(oui)),
+            at + 3..at + 6,
+        );
+        if oui == 0 {
+            d.field(
+                "Type",
+                format!("{} ({})", hex16(pid), ethertype_name(pid)),
+                at + 6..at + 8,
+            );
+            ethertype(d, pid, at + 8);
+            return;
+        }
+        let name = match (oui, pid) {
+            (0x00000c, 0x2000) => "CDP",
+            (0x00000c, 0x2003) => "VTP",
+            (0x00000c, 0x2004) => "DTP",
+            (0x00000c, 0x010b) => "PVST+",
+            _ => "",
+        };
+        d.field(
+            "PID",
+            if name.is_empty() {
+                hex16(pid)
+            } else {
+                format!("{} ({name})", hex16(pid))
+            },
+            at + 6..at + 8,
+        );
+        if !name.is_empty() {
+            d.summary("SNAP", name.to_string());
+        }
+        d.data(at + 8);
+        return;
+    }
     d.data(at + 3);
+}
+
+fn oui_name(oui: u32) -> &'static str {
+    match oui {
+        0 => " (encapsulated Ethernet)",
+        0x00000c => " (Cisco)",
+        0x0080c2 => " (IEEE 802.1)",
+        _ => "",
+    }
 }
 
 /// Linux cooked capture v1 (16 byte header).

@@ -28,15 +28,17 @@ pub use builtin::builtin_editors;
 pub enum Category {
     Link,
     Network,
+    Tunnel,
     Transport,
     Application,
     Payload,
 }
 
 impl Category {
-    pub const ALL: [Category; 5] = [
+    pub const ALL: [Category; 6] = [
         Category::Link,
         Category::Network,
+        Category::Tunnel,
         Category::Transport,
         Category::Application,
         Category::Payload,
@@ -46,6 +48,7 @@ impl Category {
         match self {
             Category::Link => "Link",
             Category::Network => "Network",
+            Category::Tunnel => "Tunnel",
             Category::Transport => "Transport",
             Category::Application => "Application",
             Category::Payload => "Payload",
@@ -595,7 +598,8 @@ mod tests {
         let r = Registry::builtin();
         for name in [
             "eth", "ether", "vlan", "dot1q", "qinq", "arp", "ipv4", "ip", "ipv6", "hbh", "dstopt",
-            "frag", "tcp", "udp", "icmp", "icmpv6", "dns", "raw", "payload",
+            "frag", "tcp", "udp", "icmp", "icmpv6", "dns", "raw", "payload", "mpls", "llc", "snap",
+            "gre", "vxlan", "geneve", "gtpu", "gtp", "igmp", "mld",
         ] {
             assert!(r.get(name).is_some(), "no editor for {name}");
         }
