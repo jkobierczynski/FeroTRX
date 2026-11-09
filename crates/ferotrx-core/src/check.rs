@@ -434,6 +434,39 @@ fn hosts(p: &crate::HostProfile, out: &mut FileCheck) -> Result<()> {
                 "dhcpv6 server {}-{} ({:?} leases)",
                 d.pool.0, d.pool.1, d.lease
             ));
+            if let Some((a, l)) = d.pd_pool {
+                parts.push(format!("delegates /{} from {a}/{l}", d.pd_length));
+            }
+        }
+        if let Some(l) = h.prefix_delegation {
+            parts.push(match l {
+                0 => "asks for a prefix".to_string(),
+                l => format!("asks for a /{l}"),
+            });
+        }
+        if let Some(l) = &h.lldp {
+            let p: Vec<&str> = [(l.lldp, "lldp"), (l.cdp, "cdp")]
+                .iter()
+                .filter(|(on, _)| *on)
+                .map(|(_, n)| *n)
+                .collect();
+            parts.push(format!("{} every {:?}", p.join("+"), l.interval));
+        }
+        if let Some(m) = &h.mdns {
+            parts.push(format!(
+                "mdns ({} services, {} queries)",
+                m.services.len(),
+                m.queries.len()
+            ));
+        }
+        if let Some(d) = &h.dot1x {
+            parts.push(format!("802.1X as {}", d.identity));
+        }
+        if let Some(a) = &h.dot1x_authenticator {
+            parts.push(format!("802.1X authenticator ({} users)", a.users.len()));
+        }
+        if let Some(f) = &h.flow_export {
+            parts.push(format!("{} to {}", f.version, f.collector));
         }
         out.summary.push(format!(
             "  host {}: {} from {}{}: {}",

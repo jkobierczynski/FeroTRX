@@ -133,6 +133,9 @@ impl HostSpec {
         for name in names.into_iter().flatten() {
             *name = name.replace("{n}", &num);
         }
+        for s in h.mdns.iter_mut().flat_map(|m| m.services.iter_mut()) {
+            s.instance = s.instance.replace("{n}", &num);
+        }
         h
     }
 }
@@ -850,7 +853,7 @@ prefix_delegation = 0
 lldp = true
 [host.mdns]
 name = "web-{n}"
-services = [{ instance = "Lab web", service = "_http._tcp", port = 80, txt = ["a=b"] }]
+services = [{ instance = "Lab web {n}", service = "_http._tcp", port = 80, txt = ["a=b"] }]
 queries = ["_ipp._tcp"]
 [host.dot1x]
 identity = "user-{n}"
@@ -880,6 +883,7 @@ records = 3
         let m = c[2].mdns.as_ref().unwrap();
         assert_eq!(m.name.as_deref(), Some("web-2"));
         assert_eq!(m.services[0].txt, vec!["a=b"]);
+        assert_eq!(m.services[0].instance, "Lab web 2");
         let d = c[2].dot1x.as_ref().unwrap();
         assert_eq!(d.identity, "user-2");
         assert!(!d.required);
@@ -895,6 +899,22 @@ records = 3
             let e = HostProfile::from_toml(toml).unwrap_err().to_string();
             assert!(e.contains(want), "{toml}: {e}");
         }
+    }
+
+    #[test]
+    fn parses_the_services_example() {
+        let p =
+            HostProfile::from_toml(include_str!("../../../../examples/lab-services.toml")).unwrap();
+        let c = p.configs(&["eth0".into()], Some("eth0")).unwrap();
+        assert_eq!(c.len(), 4);
+        assert!(c[1].lldp.as_ref().unwrap().cdp);
+        assert_eq!(
+            c[1].mdns.as_ref().unwrap().services[0].instance,
+            "Lab web 2"
+        );
+        assert!(!c[2].dot1x.as_ref().unwrap().required);
+        assert_eq!(c[3].flow_export.as_ref().unwrap().records, 20);
+        crate::HostEngine::new(c, HostOptions::default()).unwrap();
     }
 
     #[test]

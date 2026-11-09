@@ -1,0 +1,39 @@
+# Link services of emulated hosts (M57): LLDP/CDP, mDNS/DNS-SD, 802.1X,
+# NetFlow v9/IPFIX export, and DHCPv6 prefix delegation.
+#
+#   sudo ferotrx host examples/lab-services.toml -i enp0s3
+#
+# Change the addresses to your lab's; docs/host-emulation.md#link-services
+# has every setting.
+format = 1
+duration = "2m"
+
+# Two hosts that switches see by LLDP and CDP, with a web service in mDNS.
+[[host]]
+count = 2
+mac = "02:dc:00:00:57:01"
+ipv4 = "10.77.0.50/24"
+hostname = "lab-svc-{n}"
+lldp = { cdp = true, interval = "10s", capabilities = ["station"] }
+[host.mdns]
+services = [{ instance = "Lab web {n}", service = "_http._tcp", port = 80, txt = ["path=/"] }]
+queries = ["_ipp._tcp", "_http._tcp"]
+
+# A host that authenticates by 802.1X (EAP-MD5) before it asks for DHCP;
+# `required = false` goes on when the port does not ask for 802.1X.
+[[host]]
+mac = "02:dc:00:00:57:10"
+ipv4 = "dhcp"
+[host.dot1x]
+identity = "lab-user"
+password = "secret"
+required = false
+
+# A probe that exports made-up flows to a collector (nfcapd, Wireshark, ...).
+[[host]]
+mac = "02:dc:00:00:57:20"
+ipv4 = "10.77.0.60/24"
+[host.flow_export]
+collector = "10.77.0.1:4739"
+version = "ipfix"
+records = 20

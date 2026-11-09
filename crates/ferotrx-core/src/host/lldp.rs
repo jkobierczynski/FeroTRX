@@ -230,9 +230,14 @@ impl Lldp {
         }
     }
 
-    /// Announcements with a time to live of zero, when the host stops.
+    /// An LLDP shutdown frame (time to live zero) when the host stops. CDP
+    /// has none: lldpd and others reject a CDP frame with TTL 0, so its
+    /// neighbors keep the host until the hold time runs out.
     pub fn shutdown(&mut self, me: &Me, out: &mut Vec<Vec<u8>>) {
-        self.announce(me, 0, out);
+        if self.cfg.lldp {
+            self.status.lldp_sent += 1;
+            out.push(lldp_frame(&self.cfg, me, 0));
+        }
     }
 
     /// Takes an LLDP frame (`ethertype` 0x88cc) or a CDP frame (802.3 with
