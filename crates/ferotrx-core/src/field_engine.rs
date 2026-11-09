@@ -680,7 +680,7 @@ impl fmt::Display for FieldVar {
 }
 
 /// Parses a decimal or `0x` hex number.
-fn parse_num(s: &str) -> Option<u128> {
+pub(crate) fn parse_num(s: &str) -> Option<u128> {
     let s = s.trim();
     match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         Some(h) => u128::from_str_radix(h, 16).ok(),

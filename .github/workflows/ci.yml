@@ -61,7 +61,10 @@ jobs:
 
       - name: Install libpcap (Linux)
         if: env.CI_SKIP != 'true' && runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+        # tshark checks what the packet builder makes (crates/ferotrx-packet/tests/wireshark.rs).
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libpcap-dev tshark
 
       # macOS ships libpcap. Windows links against the Npcap SDK; running the
       # binary needs Npcap installed, so on Windows only the core and packet tests run.
@@ -88,6 +91,8 @@ jobs:
       - name: Test
         if: env.CI_SKIP != 'true' && runner.os != 'Windows'
         run: cargo test --workspace
+        env:
+          FEROTRX_REQUIRE_TSHARK: ${{ runner.os == 'Linux' && '1' || '' }}
       - name: Test core (Windows)
         if: env.CI_SKIP != 'true' && runner.os == 'Windows'
         run: cargo test -p ferotrx-core -p ferotrx-packet -p ferotrx-gui
@@ -524,6 +529,17 @@ jobs:
           sudo scripts/latency-netns.sh ./target/debug/ferotrx
           sudo LOSS=0.03 scripts/latency-netns.sh ./target/debug/ferotrx
           sudo IPV6=1 scripts/latency-netns.sh ./target/debug/ferotrx
+
+      # Tunnels with the kernel as the far end: IP in IP, GRE (with key),
+      # Ethernet over GRE, VXLAN (also through an encap= rewrite), Geneve,
+      # MPLS and 6in4, each stream counted after the kernel unwrapped it;
+      # then TCP and DNS inside GTP-U through a router, a TEID per client.
+      - name: Tunnels to kernel endpoints and GTP-U (Linux)
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
+        run: |
+          cargo build -p ferotrx-cli
+          sudo apt-get install -y ethtool
+          sudo scripts/tunnel-netns.sh ./target/debug/ferotrx
 
       # The port's own addresses (ARP/neighbor discovery for the router,
       # answers to its pings), multi-burst and next streams, a rate that is a

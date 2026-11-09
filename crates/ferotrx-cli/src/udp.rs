@@ -83,6 +83,9 @@ pub struct UdpArgs {
     #[command(flatten)]
     impair: crate::PortImpairArgs,
 
+    #[command(flatten)]
+    gtpu: crate::GtpuArgs,
+
     /// Where the client sends, IP:PORT ([IPv6]:PORT), or IP for each
     /// template's port. Default: the server. Needed when this machine runs
     /// only the client.
@@ -315,6 +318,7 @@ pub fn cmd_udp(args: UdpArgs) -> Result<()> {
     }
     profile.output = args.send.settings()?.or(&profile.output);
     args.impair.apply(&mut profile.impair);
+    args.gtpu.apply(&mut profile.gtpu);
 
     if args.show {
         let apps = profile.apps()?;

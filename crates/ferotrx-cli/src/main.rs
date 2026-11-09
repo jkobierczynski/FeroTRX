@@ -440,6 +440,48 @@ impl PortImpairArgs {
     }
 }
 
+/// GTP-U tunnels around a TCP or UDP run's client and server, over the
+/// profile's `[gtpu]`.
+#[derive(Args, Clone, Default)]
+pub struct GtpuArgs {
+    /// Put the client in a GTP-U tunnel, as a base station does:
+    /// local=IP,remote=IP[,gateway=IP][,teid=N][,qfi=N][,vlan=ID][,mac=MAC].
+    /// local and remote are the tunnel's outer addresses; each client address
+    /// gets its own TEID from teid (default 1) up. `none` turns the profile's off.
+    #[arg(long, value_name = "SPEC", value_parser = parse_gtpu)]
+    pub client_gtpu: Option<GtpuArg>,
+
+    /// Put the server in a GTP-U tunnel, as a user plane function does
+    /// (same form; TEIDs follow the client addresses).
+    #[arg(long, value_name = "SPEC", value_parser = parse_gtpu)]
+    pub server_gtpu: Option<GtpuArg>,
+}
+
+/// A tunnel end from the command line, or `none`.
+#[derive(Clone, Debug)]
+pub struct GtpuArg(Option<ferotrx_core::GtpuSpec>);
+
+fn parse_gtpu(s: &str) -> Result<GtpuArg, String> {
+    if s.trim() == "none" {
+        return Ok(GtpuArg(None));
+    }
+    s.parse()
+        .map(|g| GtpuArg(Some(g)))
+        .map_err(|e: ferotrx_core::Error| e.to_string())
+}
+
+impl GtpuArgs {
+    /// The profile's tunnels with the command line's over them.
+    pub fn apply(&self, profile: &mut ferotrx_core::GtpuTunnels) {
+        if let Some(s) = &self.client_gtpu {
+            profile.client = s.0.clone();
+        }
+        if let Some(s) = &self.server_gtpu {
+            profile.server = s.0.clone();
+        }
+    }
+}
+
 /// What an impairment did, from the control API's counters, on one line
 /// as [`ImpairStats`](ferotrx_core::ImpairStats) prints it.
 pub fn impair_counters_line(c: &ferotrx_ctl::protocol::ImpairCounters) -> String {

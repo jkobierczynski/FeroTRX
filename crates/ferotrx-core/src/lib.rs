@@ -119,6 +119,7 @@ mod flows;
 ))]
 #[doc(hidden)]
 pub mod fuzzing;
+mod gtpu;
 mod host;
 mod impair;
 mod job;
@@ -164,6 +165,9 @@ pub use drops::{DropCounters, LossReport};
 pub use error::{Error, Result};
 pub use field_engine::{FieldEngine, FieldVar, Side, VarField, VarOp};
 pub use flows::{FlowRouter, Route};
+pub use gtpu::{
+    gtpu_port, GtpuEnd, GtpuPort, GtpuSpec, GtpuStats, GtpuTunnels, TUNNEL_GATEWAY_MAC,
+};
 #[cfg(feature = "profile")]
 pub use host::{
     parse_ipv4_mode, parse_ipv6_mode, parse_pool, parse_prefix6, HostProfile, HostSpec,
@@ -220,8 +224,8 @@ pub use tcp::{
 };
 pub use traffic::{parse_shape_point, Arrivals, Schedule, ShapePoint, TrafficModel};
 pub use transform::{
-    Field, FixChecksums, IpRewrite, MacRewrite, PortRewrite, Rewrite, Transform, VlanPop, VlanPush,
-    VlanSet,
+    Decap, Encap, Field, FixChecksums, IpRewrite, MacRewrite, MplsPop, MplsPush, PortRewrite,
+    Rewrite, Transform, VlanPop, VlanPush, VlanSet,
 };
 pub use udp::{
     DnsData, DnsQuery, DnsRecord, DnsType, DnsWorkload, Rcode, UdpApp, UdpClientConfig, UdpConfig,
