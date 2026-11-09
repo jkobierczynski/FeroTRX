@@ -248,7 +248,14 @@ pub(crate) fn ipv4(d: &mut Decoder, at: usize) {
 fn padding(d: &mut Decoder, end: Option<usize>) {
     if let Some(end) = end {
         let n = d.data.len().saturating_sub(end);
-        if n > 0 {
+        // A tunnel's inner datagram ends where the outer one does; its
+        // padding is already there.
+        let shown = d
+            .out
+            .layers
+            .iter()
+            .any(|l| l.protocol == "Padding" && l.range.start <= end);
+        if n > 0 && !shown {
             d.layer("Padding", format!("Padding ({n} bytes)"), end..d.data.len());
         }
     }

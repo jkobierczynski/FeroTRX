@@ -341,6 +341,35 @@ fn qtype(v: &str) -> Option<u16> {
     })
 }
 
+/// A group record of an IGMPv3 or MLDv2 report: `TYPE@GROUP[+SOURCE...]`,
+/// where TYPE is `join` (change to exclude, no sources), `leave` (change to
+/// include, no sources), `include`, `exclude`, `to_in`, `to_ex`, `allow`,
+/// `block` or the number.
+fn group_record(v: &str, v6: bool) -> Option<GroupRecord> {
+    let (t, rest) = v.split_once('@')?;
+    let record_type = match t {
+        "include" | "is_in" => 1,
+        "exclude" | "is_ex" => 2,
+        "to_in" | "leave" => 3,
+        "to_ex" | "join" => 4,
+        "allow" => 5,
+        "block" => 6,
+        _ => num(t)?,
+    };
+    let mut parts = rest.split('+');
+    let addr = |s: &str| -> Option<IpAddr> {
+        let a: IpAddr = s.trim().parse().ok()?;
+        (a.is_ipv6() == v6).then_some(a)
+    };
+    let group = addr(parts.next()?)?;
+    let sources = parts.map(addr).collect::<Option<Vec<_>>>()?;
+    Some(GroupRecord {
+        record_type,
+        group,
+        sources,
+    })
+}
+
 fn unknown<T>(layer: &str, key: &str, fields: &str) -> Result<T, BuildError> {
     err(format!("{layer}: unknown field '{key}' (fields: {fields})"))
 }
@@ -576,6 +605,178 @@ fn layer(name: &str, args: &[(String, String)]) -> Result<LayerSpec, BuildError>
             }
             l.into()
         }
+        "mpls" => {
+            let mut l = Mpls::default();
+            for (k, v) in args {
+                match k.as_str() {
+                    "label" => l.label = val(n, k, v, num)?,
+                    "tc" | "exp" => l.tc = val(n, k, v, num)?,
+                    "ttl" => l.ttl = val(n, k, v, num)?,
+                    "s" | "bos" => l.bos = Some(val(n, k, v, boolean)?),
+                    _ => return unknown(n, k, "label, tc, ttl, s"),
+                }
+            }
+            l.into()
+        }
+        "gre" => {
+            let mut l = Gre::default();
+            for (k, v) in args {
+                match k.as_str() {
+                    "key" => l.key = Some(val(n, k, v, num)?),
+                    "seq" => l.seq = Some(val(n, k, v, num)?),
+                    "csum" => l.checksum = val(n, k, v, boolean)?,
+                    "proto" | "type" => l.proto = Some(val(n, k, v, num)?),
+                    _ => return unknown(n, k, "key, seq, csum, proto"),
+                }
+            }
+            l.into()
+        }
+        "vxlan" => {
+            let mut l = Vxlan::default();
+            for (k, v) in args {
+                match k.as_str() {
+                    "vni" => l.vni = val(n, k, v, num)?,
+                    "flags" => l.flags = val(n, k, v, num)?,
+                    _ => return unknown(n, k, "vni, flags"),
+                }
+            }
+            l.into()
+        }
+        "geneve" => {
+            let mut l = Geneve::default();
+            for (k, v) in args {
+                match k.as_str() {
+                    "vni" => l.vni = val(n, k, v, num)?,
+                    "proto" | "type" => l.proto = Some(val(n, k, v, num)?),
+                    "oam" => l.oam = val(n, k, v, boolean)?,
+                    "crit" | "critical" => l.critical = val(n, k, v, boolean)?,
+                    "opt" | "options" => l.options = val(n, k, v, hex_bytes)?,
+                    _ => return unknown(n, k, "vni, proto, oam, crit, opt"),
+                }
+            }
+            l.into()
+        }
+        "gtpu" | "gtp" => {
+            let mut l = Gtpu::default();
+            for (k, v) in args {
+                match k.as_str() {
+                    "teid" => l.teid = val(n, k, v, num)?,
+                    "type" => {
+                        l.msg_type = val(n, k, v, |v| match v {
+                            "gpdu" | "tpdu" => Some(255),
+                            "echo" | "echo_req" => Some(1),
+                            "echo_resp" | "echo_reply" => Some(2),
+                            "error" => Some(26),
+                            "end" | "end_marker" => Some(254),
+                            _ => num(v),
+                        })?
+                    }
+                    "seq" => l.seq = Some(val(n, k, v, num)?),
+                    "qfi" => l.qfi = Some(val(n, k, v, num)?),
+                    "pdu" => {
+                        l.uplink = val(n, k, v, |v| match v {
+                            "ul" | "uplink" | "1" => Some(true),
+                            "dl" | "downlink" | "0" => Some(false),
+                            _ => None,
+                        })?
+                    }
+                    "len" => l.len = Some(val(n, k, v, num)?),
+                    _ => return unknown(n, k, "teid, type, seq, qfi, pdu, len"),
+                }
+            }
+            l.into()
+        }
+        "llc" => {
+            let mut l = Llc::default();
+            for (k, v) in args {
+                match k.as_str() {
+                    "dsap" => l.dsap = val(n, k, v, num)?,
+                    "ssap" => l.ssap = val(n, k, v, num)?,
+                    "ctrl" | "control" => l.control = val(n, k, v, num)?,
+                    _ => return unknown(n, k, "dsap, ssap, ctrl"),
+                }
+            }
+            l.into()
+        }
+        "snap" => {
+            let mut l = Snap::default();
+            for (k, v) in args {
+                match k.as_str() {
+                    "oui" => l.oui = val(n, k, v, num)?,
+                    "pid" | "type" => l.pid = Some(val(n, k, v, num)?),
+                    _ => return unknown(n, k, "oui, pid"),
+                }
+            }
+            l.into()
+        }
+        "igmp" => {
+            let mut l = Igmp::default();
+            for (k, v) in args {
+                match k.as_str() {
+                    "type" => {
+                        (l.kind, l.version) = val(n, k, v, |v| match v {
+                            "query" => Some((McastType::Query, l.version)),
+                            "report" => Some((McastType::Report, l.version)),
+                            "leave" => Some((McastType::Leave, l.version)),
+                            "v3report" => Some((McastType::Report, 3)),
+                            "v3query" => Some((McastType::Query, 3)),
+                            _ => None,
+                        })?
+                    }
+                    "ver" | "version" => l.version = val(n, k, v, num)?,
+                    "mrt" | "max_resp" => l.max_resp = val(n, k, v, num)?,
+                    "group" => l.group = val(n, k, v, |v| v.parse().ok())?,
+                    "src" | "source" => l.sources.push(val(n, k, v, |v| v.parse().ok())?),
+                    "rec" | "record" => l.records.push(val(n, k, v, |v| group_record(v, false))?),
+                    "s" => l.suppress = val(n, k, v, boolean)?,
+                    "qrv" => l.qrv = val(n, k, v, num)?,
+                    "qqic" => l.qqic = val(n, k, v, num)?,
+                    "chksum" | "checksum" => l.checksum = Some(val(n, k, v, num)?),
+                    _ => {
+                        return unknown(
+                            n,
+                            k,
+                            "type, ver, mrt, group, src, rec, s, qrv, qqic, chksum",
+                        )
+                    }
+                }
+            }
+            l.into()
+        }
+        "mld" => {
+            let mut l = Mld::default();
+            for (k, v) in args {
+                match k.as_str() {
+                    "type" => {
+                        (l.kind, l.version) = val(n, k, v, |v| match v {
+                            "query" => Some((McastType::Query, l.version)),
+                            "report" => Some((McastType::Report, l.version)),
+                            "done" | "leave" => Some((McastType::Leave, 1)),
+                            "v2report" => Some((McastType::Report, 2)),
+                            "v2query" => Some((McastType::Query, 2)),
+                            _ => None,
+                        })?
+                    }
+                    "ver" | "version" => l.version = val(n, k, v, num)?,
+                    "delay" | "mrd" => l.max_delay = val(n, k, v, num)?,
+                    "group" => l.group = val(n, k, v, |v| v.parse().ok())?,
+                    "src" | "source" => l.sources.push(val(n, k, v, |v| v.parse().ok())?),
+                    "rec" | "record" => l.records.push(val(n, k, v, |v| group_record(v, true))?),
+                    "s" => l.suppress = val(n, k, v, boolean)?,
+                    "qrv" => l.qrv = val(n, k, v, num)?,
+                    "qqic" => l.qqic = val(n, k, v, num)?,
+                    "chksum" | "checksum" => l.checksum = Some(val(n, k, v, num)?),
+                    _ => {
+                        return unknown(
+                            n,
+                            k,
+                            "type, ver, delay, group, src, rec, s, qrv, qqic, chksum",
+                        )
+                    }
+                }
+            }
+            l.into()
+        }
         "raw" | "data" | "payload" => {
             let mut bytes: Option<Vec<u8>> = None;
             let mut len: Option<usize> = None;
@@ -600,7 +801,7 @@ fn layer(name: &str, args: &[(String, String)]) -> Result<LayerSpec, BuildError>
         }
         _ => {
             return err(format!(
-                "unknown layer '{name}' (layers: eth, vlan, qinq, arp, ipv4, ipv6, hbh, dstopt, frag, tcp, udp, icmp, dns, raw)"
+                "unknown layer '{name}' (layers: eth, vlan, qinq, mpls, llc, snap, arp, ipv4, ipv6, hbh, dstopt, frag, tcp, udp, icmp, igmp, mld, gre, vxlan, geneve, gtpu, dns, raw)"
             ))
         }
     })

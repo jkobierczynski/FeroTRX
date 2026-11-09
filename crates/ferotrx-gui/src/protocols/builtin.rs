@@ -44,7 +44,7 @@ impl ProtocolEditor for TableEditor {
     }
 }
 
-const L3: &[&str] = &["ipv4", "ipv6", "arp", "vlan", "raw"];
+const L3: &[&str] = &["ipv4", "ipv6", "arp", "vlan", "mpls", "llc", "raw"];
 
 const ETH: TableEditor = TableEditor {
     name: "eth",
@@ -111,7 +111,7 @@ const ARP: TableEditor = TableEditor {
     next: &[],
 };
 
-const IP_NEXT: &[&str] = &["tcp", "udp", "icmp", "raw"];
+const IP_NEXT: &[&str] = &["tcp", "udp", "icmp", "gre", "ipv4", "ipv6", "raw"];
 
 const IPV4: TableEditor = TableEditor {
     name: "ipv4",
@@ -137,7 +137,7 @@ const IPV4: TableEditor = TableEditor {
             .default(AUTO_SUM)
             .help("Set a value to send a wrong checksum on purpose"),
     ],
-    next: IP_NEXT,
+    next: &["tcp", "udp", "icmp", "igmp", "gre", "ipv4", "ipv6", "raw"],
 };
 
 const IPV6: TableEditor = TableEditor {
@@ -154,7 +154,9 @@ const IPV6: TableEditor = TableEditor {
         F::new("nh", "Next header", U8).default(AUTO),
         F::new("plen", "Payload length", U16).default(AUTO),
     ],
-    next: &["tcp", "udp", "icmp", "hbh", "dstopt", "frag", "raw"],
+    next: &[
+        "tcp", "udp", "icmp", "mld", "hbh", "dstopt", "frag", "gre", "ipv4", "ipv6", "raw",
+    ],
 };
 
 const HBH: TableEditor = TableEditor {
@@ -167,7 +169,7 @@ const HBH: TableEditor = TableEditor {
         F::new("ra", "Router alert", U16).help("0 for MLD"),
         F::new("nh", "Next header", U8).default(AUTO),
     ],
-    next: IP_NEXT,
+    next: &["mld", "tcp", "udp", "icmp", "raw"],
 };
 
 const DSTOPT: TableEditor = TableEditor {
@@ -232,14 +234,16 @@ const UDP: TableEditor = TableEditor {
     title: "UDP",
     category: Category::Transport,
     fields: &[
-        F::new("sport", "Source port", U16).default("auto (53 for DNS, else 49152)"),
-        F::new("dport", "Destination port", U16).default("auto (53 for DNS, else 9)"),
+        F::new("sport", "Source port", U16)
+            .default("auto (53 for DNS, 2152 for GTP-U, else 49152)"),
+        F::new("dport", "Destination port", U16)
+            .default("auto (53 DNS, 4789 VXLAN, 6081 Geneve, 2152 GTP-U, else 9)"),
         F::new("len", "Length", U16).default(AUTO),
         F::new("chksum", "Checksum", U16)
             .default(AUTO_SUM)
             .help("0 sends no checksum over IPv4"),
     ],
-    next: &["dns", "raw"],
+    next: &["dns", "vxlan", "geneve", "gtpu", "raw"],
 };
 
 const ICMP: TableEditor = TableEditor {
@@ -268,6 +272,187 @@ const ICMP: TableEditor = TableEditor {
         F::new("chksum", "Checksum", U16).default(AUTO_SUM),
     ],
     next: &["raw"],
+};
+
+const RECORD_HELP: &str = "TYPE@GROUP[+SOURCE...]: join@239.1.1.1, leave@..., \
+    include, exclude, allow, block (with sources)";
+
+const MPLS: TableEditor = TableEditor {
+    name: "mpls",
+    aliases: &[],
+    title: "MPLS label",
+    category: Category::Link,
+    fields: &[
+        F::new("label", "Label", K::Uint(0xfffff)).default("16"),
+        F::new("tc", "Traffic class", K::Uint(7)).default("0"),
+        F::new("ttl", "TTL", U8).default("64"),
+        F::new("s", "Bottom of stack", K::Bool).default("auto (on the last label)"),
+    ],
+    next: &["mpls", "ipv4", "ipv6", "eth"],
+};
+
+const LLC: TableEditor = TableEditor {
+    name: "llc",
+    aliases: &[],
+    title: "802.2 LLC",
+    category: Category::Link,
+    fields: &[
+        F::new("dsap", "DSAP", U8)
+            .default("0xaa")
+            .help("0x42 for spanning tree"),
+        F::new("ssap", "SSAP", U8).default("0xaa"),
+        F::new("ctrl", "Control", U8).default("3"),
+    ],
+    next: &["snap", "raw"],
+};
+
+const SNAP: TableEditor = TableEditor {
+    name: "snap",
+    aliases: &[],
+    title: "SNAP",
+    category: Category::Link,
+    fields: &[
+        F::new("oui", "OUI", K::Uint(0xffffff))
+            .default("0")
+            .help("0: the PID is an EtherType; 0x00000c for Cisco"),
+        F::new("pid", "Protocol ID", U16).default(AUTO),
+    ],
+    next: &["ipv4", "ipv6", "arp", "vlan", "raw"],
+};
+
+const TUNNEL_NEXT: &[&str] = &["eth", "ipv4", "ipv6", "mpls", "raw"];
+
+const GRE: TableEditor = TableEditor {
+    name: "gre",
+    aliases: &[],
+    title: "GRE",
+    category: Category::Tunnel,
+    fields: &[
+        F::new("key", "Key", U32),
+        F::new("seq", "Sequence number", U32),
+        F::new("csum", "Checksum", K::Bool).default("off"),
+        F::new("proto", "Protocol type", U16).default("auto (0x6558 before Ethernet)"),
+    ],
+    next: TUNNEL_NEXT,
+};
+
+const VXLAN: TableEditor = TableEditor {
+    name: "vxlan",
+    aliases: &[],
+    title: "VXLAN",
+    category: Category::Tunnel,
+    fields: &[
+        F::new("vni", "VNI", K::Uint(0xffffff)).default("1"),
+        F::new("flags", "Flags", U8).default("0x08"),
+    ],
+    next: &["eth"],
+};
+
+const GENEVE: TableEditor = TableEditor {
+    name: "geneve",
+    aliases: &[],
+    title: "Geneve",
+    category: Category::Tunnel,
+    fields: &[
+        F::new("vni", "VNI", K::Uint(0xffffff)).default("0"),
+        F::new("proto", "Protocol type", U16).default("auto (0x6558 before Ethernet)"),
+        F::new("oam", "OAM", K::Bool).default("off"),
+        F::new("crit", "Critical options", K::Bool).default("off"),
+        F::new("opt", "Options", K::Hex).help("Option TLVs, a multiple of 4 bytes"),
+    ],
+    next: TUNNEL_NEXT,
+};
+
+const GTPU: TableEditor = TableEditor {
+    name: "gtpu",
+    aliases: &["gtp"],
+    title: "GTP-U",
+    category: Category::Tunnel,
+    fields: &[
+        F::new("teid", "TEID", U32).default("1"),
+        F::new(
+            "type",
+            "Message type",
+            K::Choice {
+                options: &["gpdu", "echo", "echo_resp", "error", "end"],
+                numeric: true,
+            },
+        )
+        .default("gpdu"),
+        F::new("seq", "Sequence number", U16),
+        F::new("qfi", "QoS flow (QFI)", K::Uint(63)).help("Adds a 5G PDU session container"),
+        F::new(
+            "pdu",
+            "PDU session direction",
+            K::Choice {
+                options: &["dl", "ul"],
+                numeric: false,
+            },
+        )
+        .default("dl"),
+        F::new("len", "Length", U16).default(AUTO),
+    ],
+    next: &["ipv4", "ipv6", "raw"],
+};
+
+const IGMP: TableEditor = TableEditor {
+    name: "igmp",
+    aliases: &[],
+    title: "IGMP",
+    category: Category::Transport,
+    fields: &[
+        F::new(
+            "type",
+            "Message",
+            K::Choice {
+                options: &["report", "query", "leave", "v3report", "v3query"],
+                numeric: false,
+            },
+        )
+        .default("report"),
+        F::new("ver", "Version", K::Uint(3)).default("2"),
+        F::new("group", "Group", K::Ipv4).default("239.1.1.1"),
+        F::new("mrt", "Max response (1/10 s)", U8).default("100"),
+        F::new("rec", "Group record (v3 report)", K::Text)
+            .repeat()
+            .help(RECORD_HELP),
+        F::new("src", "Source (v3 query)", K::Ipv4).repeat(),
+        F::new("s", "Suppress router processing", K::Bool).default("off"),
+        F::new("qrv", "Robustness (QRV)", K::Uint(7)).default("2"),
+        F::new("qqic", "Query interval code", U8).default("125"),
+        F::new("chksum", "Checksum", U16).default(AUTO_SUM),
+    ],
+    next: &[],
+};
+
+const MLD: TableEditor = TableEditor {
+    name: "mld",
+    aliases: &[],
+    title: "MLD",
+    category: Category::Transport,
+    fields: &[
+        F::new(
+            "type",
+            "Message",
+            K::Choice {
+                options: &["report", "query", "done", "v2report", "v2query"],
+                numeric: false,
+            },
+        )
+        .default("report"),
+        F::new("ver", "Version", K::Uint(2)).default("1"),
+        F::new("group", "Group", K::Ipv6).default("ff0e::1"),
+        F::new("delay", "Max response delay (ms)", U16).default("10000"),
+        F::new("rec", "Group record (v2 report)", K::Text)
+            .repeat()
+            .help(RECORD_HELP),
+        F::new("src", "Source (v2 query)", K::Ipv6).repeat(),
+        F::new("s", "Suppress router processing", K::Bool).default("off"),
+        F::new("qrv", "Robustness (QRV)", K::Uint(7)).default("2"),
+        F::new("qqic", "Query interval code", U8).default("125"),
+        F::new("chksum", "Checksum", U16).default(AUTO_SUM),
+    ],
+    next: &[],
 };
 
 const DNS: TableEditor = TableEditor {
@@ -492,7 +677,8 @@ fn parse_hex(v: &str) -> Vec<u8> {
 /// Every built-in editor, in the order the "add layer" menu lists them.
 pub fn builtin_editors() -> Vec<Box<dyn ProtocolEditor>> {
     let mut v: Vec<Box<dyn ProtocolEditor>> = [
-        ETH, VLAN, QINQ, ARP, IPV4, IPV6, HBH, DSTOPT, FRAG, TCP, UDP, ICMP, DNS,
+        ETH, VLAN, QINQ, MPLS, LLC, SNAP, ARP, IPV4, IPV6, HBH, DSTOPT, FRAG, GRE, TCP, UDP, VXLAN,
+        GENEVE, GTPU, ICMP, IGMP, MLD, DNS,
     ]
     .into_iter()
     .map(|t| Box::new(t) as Box<dyn ProtocolEditor>)

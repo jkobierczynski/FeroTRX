@@ -5,16 +5,20 @@
 //! one-line summary (source, destination, protocol, info) like a capture viewer
 //! shows. Checksums are verified where the capture holds enough of the packet.
 //!
-//! Decoded protocols: Ethernet II, 802.3/LLC, 802.1Q/802.1ad VLAN tags, Linux
-//! cooked capture (SLL), ARP, IPv4, IPv6 with extension headers, TCP, UDP,
-//! ICMP, ICMPv6 and DNS (also mDNS and LLMNR). Anything else is shown as data.
+//! Decoded protocols: Ethernet II, 802.3/LLC with SNAP, 802.1Q/802.1ad VLAN
+//! tags, MPLS label stacks, Linux cooked capture (SLL), ARP, IPv4, IPv6 with
+//! extension headers, IP in IP (4in4, 6in4, 4in6, 6in6), GRE, TCP, UDP, VXLAN,
+//! Geneve, GTP-U, ICMP, ICMPv6 with MLD, IGMP and DNS (also mDNS and LLMNR).
+//! Tunnels are followed: the layers of the packet a tunnel carries come after
+//! the tunnel's. Anything else is shown as data.
 //!
 //! The decoder never panics on malformed or truncated input; it stops at the
 //! first layer it cannot read and records a problem instead.
 //!
 //! [`PacketSpec`] goes the other way: describe a packet layer by layer
-//! (Ethernet, VLAN, ARP, IPv4, IPv6 and its extension headers, TCP, UDP, ICMP,
-//! ICMPv6 with neighbor discovery, DNS, raw bytes) in code or
+//! (Ethernet, VLAN, MPLS, LLC/SNAP, ARP, IPv4, IPv6 and its extension headers,
+//! GRE, TCP, UDP, VXLAN, Geneve, GTP-U, ICMP, ICMPv6 with neighbor discovery,
+//! IGMP, MLD, DNS, raw bytes) in code or
 //! as text like `eth/vlan(id=10)/ipv4(dst=10.0.0.2)/udp/dns(q=example.com)`,
 //! and build its bytes with lengths and checksums filled in.
 //!
@@ -40,14 +44,20 @@ mod import;
 mod l2;
 mod l3;
 mod l4;
+mod mcast;
 mod spec;
+mod tunnel;
 
 pub use import::{import, Imported};
 pub use spec::{format_layers, parse_layers, quote, RawLayer};
+pub use tunnel::{
+    ETHERTYPE_MPLS, ETHERTYPE_MPLS_MC, ETHERTYPE_TEB, GENEVE_PORT, GTPU_PORT, VXLAN_PORT,
+};
 
 pub use build::{
-    Arp, BuildError, Dns, Ethernet, Icmp, Ipv4, Ipv6, Ipv6Ext, Ipv6ExtKind, LayerSpec, PacketSpec,
-    Tcp, Udp, Vlan, ETHERTYPE_EXPERIMENTAL, ETH_MIN_FRAME, IPPROTO_EXPERIMENTAL,
+    Arp, BuildError, Dns, Ethernet, Geneve, Gre, GroupRecord, Gtpu, Icmp, Igmp, Ipv4, Ipv6,
+    Ipv6Ext, Ipv6ExtKind, LayerSpec, Llc, McastType, Mld, Mpls, PacketSpec, Snap, Tcp, Udp, Vlan,
+    Vxlan, ETHERTYPE_EXPERIMENTAL, ETH_MIN_FRAME, IPPROTO_EXPERIMENTAL,
 };
 
 /// Ethernet (DLT_EN10MB).

@@ -158,6 +158,9 @@ pub struct TcpProfile {
     /// Impairments of the frames the ports send (`impair`) and receive
     /// (`impair_rx`), as a bad link would do them.
     pub impair: crate::PortImpair,
+    /// GTP-U tunnels around the client and the server (the `[gtpu]` table):
+    /// each client address gets a TEID of its own.
+    pub gtpu: crate::GtpuTunnels,
     /// Settings of the emulated hosts (the `[hosts]` table), for a client
     /// or server that gets its address by DHCP, SLAAC or DHCPv6, announces
     /// it or joins groups.
@@ -440,6 +443,7 @@ impl Default for TcpProfile {
             options: TcpOptions::default(),
             output: SendSettings::default(),
             impair: crate::PortImpair::default(),
+            gtpu: crate::GtpuTunnels::default(),
             host_options: crate::HostOptions::for_endpoints(),
         }
     }
@@ -474,6 +478,7 @@ struct RawProfile {
     hosts: Option<crate::host::RawHostOptions>,
     impair: Option<crate::profile::ImpairFile>,
     impair_rx: Option<crate::profile::ImpairFile>,
+    gtpu: Option<crate::gtpu::RawGtpu>,
 }
 
 #[derive(Deserialize)]
@@ -884,6 +889,7 @@ impl TcpProfile {
         p.output = raw
             .output
             .map_or(Ok(SendSettings::default()), OutputFile::settings)?;
+        p.gtpu = crate::gtpu::RawGtpu::tunnels(raw.gtpu)?;
         p.impair = crate::PortImpair {
             tx: crate::profile::ImpairFile::into_option(raw.impair, "impair")?,
             rx: crate::profile::ImpairFile::into_option(raw.impair_rx, "impair_rx")?,
@@ -959,6 +965,20 @@ impl TcpProfile {
             }
         }
         Ok(out)
+    }
+
+    /// The GTP-U tunnel ends on each port, numbered as in `interfaces`.
+    pub fn gtpu_ends(
+        &self,
+        interfaces: &[String],
+        default: Option<&str>,
+    ) -> Result<Vec<Vec<crate::GtpuEnd>>> {
+        self.gtpu.ends(
+            interfaces,
+            default,
+            self.client.as_ref(),
+            self.server.as_ref(),
+        )
     }
 
     /// The emulated hosts `config`'s client and server need (DHCP, SLAAC,

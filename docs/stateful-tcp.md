@@ -144,6 +144,55 @@ over TCP. Over the
 control API, `tcp.start` takes the same profile (`ferotrx ctl tcp-start
 lab-tcp.toml --upload -i enp0s3`), and `tcp.stats` reports the counters.
 
+## Inside GTP-U tunnels
+
+In a mobile network the user plane runs inside GTP-U between the base
+stations and the user plane function (UPF). TRex runs its stateful traffic
+that way, and so can FeroTRX: `[gtpu]` puts the client, the server or both
+into tunnels, with a TEID of its own for each client address. It works the
+same for `ferotrx tcp`, `ferotrx udp` and every application protocol.
+
+```toml
+[client]
+ip = "172.16.0.100/24"       # the phones' (inner) addresses
+ips = 10
+gateway = "172.16.0.1"
+
+[server]
+ip = "172.16.1.50/24"
+gateway = "172.16.1.1"
+
+[gtpu]
+# The base station's end: outer addresses, the first client's TEID, a QoS flow
+client = "local=10.9.1.2,remote=10.9.2.2,gateway=10.9.1.1,teid=1000,qfi=9"
+# The UPF's end (leave it out to send to a real UPF)
+server = "local=10.9.2.2,remote=10.9.1.2,gateway=10.9.2.1,teid=1000,qfi=9"
+```
+
+On the command line: `--client-gtpu SPEC` and `--server-gtpu SPEC`
+(`none` turns a profile's off). Each spec is
+`local=IP,remote=IP[,gateway=IP][,teid=N][,qfi=N][,vlan=ID][,mac=MAC][,mtu=N]`:
+
+| Key | Meaning |
+| --- | --- |
+| `local`, `remote` | The tunnel's outer addresses, IPv4 or IPv6 (inner and outer versions can differ) |
+| `gateway` | The outer next hop, found by ARP or neighbor discovery; default `remote` |
+| `teid` | The first client's TEID (default 1); client N (counting from 0) uses `teid + N` both ways |
+| `qfi` | Adds a PDU session container with this QoS flow ID (uplink from the client's end, downlink from the server's) |
+| `vlan`, `mac` | Tag and source MAC of the outer frames; the MAC defaults to 02:00 and the last four bytes of `local` |
+| `mtu` | The outer link's MTU (default 1500): SYNs through the tunnel get their MSS lowered so segments fit |
+
+The emulated hosts keep their inner addresses and MACs; the port answers
+their ARP and neighbor solicitations itself, since a tunnel has no link
+layer, and impairments (`--impair`) act on the outer frames, as a bad
+link would. Large UDP datagrams are not fragmented: keep them under the
+MTU less the tunnel's 36 to 76 bytes. `sudo scripts/tunnel-netns.sh` runs
+TCP and DNS inside GTP-U through a router that only knows the outer
+addresses, and checks with tshark that each client had its own TEID.
+
+To put the packets of a capture or a stream into GTP-U, VXLAN, GRE and other
+tunnels instead, see [tunnel rewrites](replay.md#tunnels).
+
 ## Lab script
 
 To try it without a lab, `sudo scripts/tcp-nat-netns.sh` builds a router in

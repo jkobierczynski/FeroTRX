@@ -1,7 +1,7 @@
 //! Transport layer: TCP, UDP, ICMP, ICMPv6.
 
 use crate::l3::IpCtx;
-use crate::{dns, hex16, ones_sum, Decoder};
+use crate::{dns, hex16, l3, mcast, ones_sum, tunnel, Decoder};
 
 pub(crate) fn transport(d: &mut Decoder, proto: u8, at: usize, ip: &IpCtx) {
     let end = ip.end.unwrap_or(d.data.len());
@@ -10,6 +10,10 @@ pub(crate) fn transport(d: &mut Decoder, proto: u8, at: usize, ip: &IpCtx) {
         17 => udp(d, at, end, ip),
         1 => icmp(d, at, end, ip),
         58 => icmpv6(d, at, end, ip),
+        2 => mcast::igmp(d, at, end, ip),
+        4 => l3::ipv4(d, at),
+        41 => l3::ipv6(d, at),
+        47 => tunnel::gre(d, at, end),
         _ => d.data_to(at, end),
     }
 }
@@ -192,6 +196,17 @@ fn udp(d: &mut Decoder, at: usize, end: usize, ip: &IpCtx) {
 /// Application protocols, by port.
 fn app(d: &mut Decoder, sp: u16, dp: u16, at: usize, end: usize, tcp: bool) {
     let either = |p: u16| sp == p || dp == p;
+    if !tcp {
+        let tunnel = match () {
+            _ if dp == tunnel::VXLAN_PORT => tunnel::vxlan(d, at, end),
+            _ if dp == tunnel::GENEVE_PORT => tunnel::geneve(d, at, end),
+            _ if either(tunnel::GTPU_PORT) => tunnel::gtpu(d, at, end),
+            _ => false,
+        };
+        if tunnel {
+            return;
+        }
+    }
     if either(53) || either(5353) || either(5355) {
         // DNS over TCP has a two byte length prefix.
         let start = if tcp { at + 2 } else { at };
@@ -295,6 +310,7 @@ fn icmpv6_name(t: u8) -> &'static str {
         135 => "Neighbor solicitation",
         136 => "Neighbor advertisement",
         137 => "Redirect",
+        132 => "Multicast listener done",
         143 => "Multicast listener report v2",
         _ => "unknown",
     }
@@ -326,6 +342,10 @@ fn icmpv6(d: &mut Decoder, at: usize, end: usize, ip: &IpCtx) {
         name.to_string()
     };
     match t {
+        130..=132 | 143 => {
+            mcast::mld(d, t, at, end);
+            return;
+        }
         128 | 129 if d.need(at, 8, "ICMPv6 echo") => {
             let id = d.u16(at + 4).unwrap_or(0);
             let seq = d.u16(at + 6).unwrap_or(0);

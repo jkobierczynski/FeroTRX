@@ -157,7 +157,7 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "ferotrx-core"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "ferotrx-packet",
  "pcap-file",
@@ -171,11 +171,12 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-ctl"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "base64",
  "ferotrx-core",
  "ferotrx-io",
+ "libc",
  "rcgen",
  "ring",
  "rustls",
@@ -197,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-io"
-version = "0.46.0"
+version = "0.47.0"
 dependencies = [
  "ferotrx-core",
  "libc",
@@ -206,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "ferotrx-packet"
-version = "0.46.0"
+version = "0.47.0"
 
 [[package]]
 name = "find-msvc-tools"

@@ -273,4 +273,32 @@ mod tests {
         }
         assert_eq!(reserve(&mut vec![0u8; 4], 1), None);
     }
+
+    #[cfg(feature = "build")]
+    #[test]
+    fn signatures_sit_inside_tunnels() {
+        for spec in [
+            "eth/ipv4/udp/vxlan(vni=5)/eth/ipv4/udp/raw(len=40)",
+            "eth/ipv4/udp/gtpu(teid=9,qfi=1)/ipv6/udp/raw(len=40)",
+            "eth/ipv4/gre(csum=1)/ipv4/tcp/raw(len=4)",
+            "eth/mpls(label=3)/ipv6/ipv4/udp/raw(len=4)",
+        ] {
+            let mut f: Vec<u8> = spec
+                .parse::<ferotrx_packet::PacketSpec>()
+                .unwrap()
+                .build()
+                .unwrap();
+            let before = f.len();
+            let at = reserve(&mut f, 7).unwrap();
+            assert_eq!(f.len(), before + SIGNATURE_LEN, "{spec}");
+            stamp(&mut f, at, 7, 42, Duration::from_millis(5));
+            let d = ferotrx_packet::decode(1, &f);
+            assert!(d.problems.is_empty(), "{spec}: {:?}", d.problems);
+            let sig = Signature::find(&f).unwrap();
+            assert_eq!((sig.flow, sig.seq), (7, 42), "{spec}");
+            let mut g = f.clone();
+            assert!(reserve_inside(&mut g, 8).is_some());
+            assert_eq!(g.len(), f.len(), "{spec}");
+        }
+    }
 }

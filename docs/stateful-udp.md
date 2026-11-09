@@ -101,6 +101,12 @@ timing). `udp.start` takes the same profile over the control API (`ferotrx
 ctl udp-start lab-dns.toml --upload -i enp0s3`), and `udp.stats` reports the
 counters with response times.
 
+## Inside GTP-U tunnels
+
+UDP runs take the same `[gtpu]` table and `--client-gtpu`/`--server-gtpu`
+options as TCP runs, to run DNS, NTP, SIP or HTTP/3 clients inside GTP-U
+with a TEID per client: see [stateful TCP](stateful-tcp.md#inside-gtp-u-tunnels).
+
 ## Lab script
 
 `sudo scripts/udp-netns.sh` plays 600 lookups through the namespace router,

@@ -97,14 +97,22 @@ pub fn start_tcp_with(
             .collect::<Vec<_>>()
             .join("; "),
     };
+    let mut gtpu = profile.gtpu_ends(&interfaces, iface)?;
     let mut ports = Vec::with_capacity(interfaces.len());
     let mut port_details = Vec::new();
     for (i, name) in interfaces.iter().enumerate() {
         let settings = PortSettings {
             send: profile.output.clone(),
-            macs: engine.port_macs(i),
+            // A tunnel's frames come to its outer MAC.
+            macs: engine
+                .port_macs(i)
+                .into_iter()
+                .chain(gtpu[i].iter().map(|e| e.spec.mac()))
+                .collect(),
         };
+        // The impairments act on the wire, so on the tunnel's outer frames.
         let port = profile.impair.wrap(open(name, &settings)?, i);
+        let port = ferotrx_core::gtpu_port(port, std::mem::take(&mut gtpu[i]));
         port_details.extend(port.describe());
         ports.push(port);
     }

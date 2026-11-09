@@ -300,9 +300,10 @@ impl Default for Tcp {
 /// UDP header.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Udp {
-    /// `None`: 53 for a DNS response, else 49152.
+    /// `None`: 53 for a DNS response, 2152 for GTP-U, else 49152.
     pub sport: Option<u16>,
-    /// `None`: 53 for a DNS query, 49152 for a DNS response, else 9 (discard).
+    /// `None`: 53 for a DNS query, 49152 for a DNS response, 4789 for VXLAN,
+    /// 6081 for Geneve, 2152 for GTP-U, else 9 (discard).
     pub dport: Option<u16>,
     /// `None` computes it.
     pub len: Option<u16>,
@@ -372,6 +373,226 @@ impl Default for Dns {
     }
 }
 
+/// One MPLS label stack entry. The bottom-of-stack bit is set on the last
+/// label before what the stack carries, unless `bos` says otherwise.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mpls {
+    /// 20-bit label.
+    pub label: u32,
+    /// Traffic class (the former EXP bits), 0-7.
+    pub tc: u8,
+    pub ttl: u8,
+    /// `None`: set on the last label of the stack.
+    pub bos: Option<bool>,
+}
+
+impl Default for Mpls {
+    fn default() -> Self {
+        Self {
+            label: 16,
+            tc: 0,
+            ttl: 64,
+            bos: None,
+        }
+    }
+}
+
+/// GRE header (RFC 2784 and 2890), version 0.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Gre {
+    /// Carry a checksum over the GRE header and payload.
+    pub checksum: bool,
+    pub key: Option<u32>,
+    pub seq: Option<u32>,
+    /// Protocol type; `None` takes it from the next layer (0x6558 for Ethernet).
+    pub proto: Option<u16>,
+}
+
+/// VXLAN header (RFC 7348); an Ethernet frame follows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Vxlan {
+    /// 24-bit VXLAN network identifier.
+    pub vni: u32,
+    /// Flags byte; 0x08 says the VNI is valid.
+    pub flags: u8,
+}
+
+impl Default for Vxlan {
+    fn default() -> Self {
+        Self {
+            vni: 1,
+            flags: 0x08,
+        }
+    }
+}
+
+/// Geneve header (RFC 8926).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Geneve {
+    /// 24-bit virtual network identifier.
+    pub vni: u32,
+    /// Protocol type; `None` takes it from the next layer (0x6558 for Ethernet).
+    pub proto: Option<u16>,
+    pub oam: bool,
+    pub critical: bool,
+    /// Option TLVs as bytes, a multiple of 4 up to 252.
+    pub options: Vec<u8>,
+}
+
+/// GTP-U header (3GPP TS 29.281), version 1.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Gtpu {
+    pub teid: u32,
+    /// Message type: 255 (T-PDU, the default), 1 echo request, 2 echo
+    /// response, 26 error indication, 254 end marker.
+    pub msg_type: u8,
+    /// Sequence number; sets the S flag.
+    pub seq: Option<u16>,
+    /// QoS flow identifier of a 5G PDU session container extension header.
+    pub qfi: Option<u8>,
+    /// PDU session container: uplink (1) or downlink (0, the default).
+    pub uplink: bool,
+    /// Length after the first 8 bytes; `None` computes it.
+    pub len: Option<u16>,
+}
+
+impl Default for Gtpu {
+    fn default() -> Self {
+        Self {
+            teid: 1,
+            msg_type: 255,
+            seq: None,
+            qfi: None,
+            uplink: false,
+            len: None,
+        }
+    }
+}
+
+/// 802.2 LLC header, after an Ethernet header whose type field then holds
+/// the frame's length (802.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Llc {
+    pub dsap: u8,
+    pub ssap: u8,
+    pub control: u8,
+}
+
+impl Default for Llc {
+    fn default() -> Self {
+        Self {
+            dsap: 0xaa,
+            ssap: 0xaa,
+            control: 0x03,
+        }
+    }
+}
+
+/// SNAP header after LLC 0xaa/0xaa: an OUI and a protocol ID. With OUI 0 the
+/// protocol ID is an ethertype.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Snap {
+    /// 24-bit organization code.
+    pub oui: u32,
+    /// `None` takes it from the next layer.
+    pub pid: Option<u16>,
+}
+
+/// One group record of an IGMPv3 or MLDv2 report.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupRecord {
+    /// 1 MODE_IS_INCLUDE, 2 MODE_IS_EXCLUDE, 3 CHANGE_TO_INCLUDE (leave
+    /// without sources), 4 CHANGE_TO_EXCLUDE (join without sources), 5
+    /// ALLOW_NEW_SOURCES, 6 BLOCK_OLD_SOURCES.
+    pub record_type: u8,
+    pub group: IpAddr,
+    pub sources: Vec<IpAddr>,
+}
+
+/// Which IGMP or MLD message to build.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum McastType {
+    Query,
+    #[default]
+    Report,
+    /// IGMP leave group, MLD done.
+    Leave,
+}
+
+/// An IGMP message (v1, v2 or v3), after an IPv4 header.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Igmp {
+    pub kind: McastType,
+    /// 1, 2 (the default) or 3. Reports with records are always version 3.
+    pub version: u8,
+    /// Max response code, in tenths of a second (v3: the RFC 3376 code).
+    pub max_resp: u8,
+    pub group: Ipv4Addr,
+    /// v3 query: the sources asked about.
+    pub sources: Vec<Ipv4Addr>,
+    /// v3 report.
+    pub records: Vec<GroupRecord>,
+    /// v3 query: suppress router-side processing, robustness variable and
+    /// querier's query interval code.
+    pub suppress: bool,
+    pub qrv: u8,
+    pub qqic: u8,
+    /// `None` computes it.
+    pub checksum: Option<u16>,
+}
+
+impl Default for Igmp {
+    fn default() -> Self {
+        Self {
+            kind: McastType::Report,
+            version: 2,
+            max_resp: 100,
+            group: Ipv4Addr::new(239, 1, 1, 1),
+            sources: Vec::new(),
+            records: Vec::new(),
+            suppress: false,
+            qrv: 2,
+            qqic: 125,
+            checksum: None,
+        }
+    }
+}
+
+/// An MLD message (v1 or v2), after an IPv6 header (and usually a hop-by-hop
+/// header with a router alert: `hbh(ra=0)`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mld {
+    pub kind: McastType,
+    /// 1 (the default) or 2. Reports with records are always version 2.
+    pub version: u8,
+    /// Maximum response delay in milliseconds (v2: the RFC 3810 code).
+    pub max_delay: u16,
+    pub group: Ipv6Addr,
+    pub sources: Vec<Ipv6Addr>,
+    pub records: Vec<GroupRecord>,
+    pub suppress: bool,
+    pub qrv: u8,
+    pub qqic: u8,
+    pub checksum: Option<u16>,
+}
+
+impl Default for Mld {
+    fn default() -> Self {
+        Self {
+            kind: McastType::Report,
+            version: 1,
+            max_delay: 10000,
+            group: "ff0e::1".parse().expect("valid address"),
+            sources: Vec::new(),
+            records: Vec::new(),
+            suppress: false,
+            qrv: 2,
+            qqic: 125,
+            checksum: None,
+        }
+    }
+}
+
 /// One layer of a [`PacketSpec`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LayerSpec {
@@ -385,6 +606,15 @@ pub enum LayerSpec {
     Udp(Udp),
     Icmp(Icmp),
     Dns(Dns),
+    Mpls(Mpls),
+    Gre(Gre),
+    Vxlan(Vxlan),
+    Geneve(Geneve),
+    Gtpu(Gtpu),
+    Llc(Llc),
+    Snap(Snap),
+    Igmp(Igmp),
+    Mld(Mld),
     /// Bytes copied as they are.
     Raw(Vec<u8>),
 }
@@ -403,6 +633,15 @@ impl LayerSpec {
             LayerSpec::Udp(_) => "udp",
             LayerSpec::Icmp(_) => "icmp",
             LayerSpec::Dns(_) => "dns",
+            LayerSpec::Mpls(_) => "mpls",
+            LayerSpec::Gre(_) => "gre",
+            LayerSpec::Vxlan(_) => "vxlan",
+            LayerSpec::Geneve(_) => "geneve",
+            LayerSpec::Gtpu(_) => "gtpu",
+            LayerSpec::Llc(_) => "llc",
+            LayerSpec::Snap(_) => "snap",
+            LayerSpec::Igmp(_) => "igmp",
+            LayerSpec::Mld(_) => "mld",
             LayerSpec::Raw(_) => "raw",
         }
     }
@@ -413,7 +652,16 @@ impl LayerSpec {
             LayerSpec::Arp(_) => Some(0x0806),
             LayerSpec::Ipv4(_) => Some(0x0800),
             LayerSpec::Ipv6(_) => Some(0x86dd),
+            LayerSpec::Mpls(_) => Some(crate::ETHERTYPE_MPLS),
             _ => None,
+        }
+    }
+
+    /// The protocol type a tunnel header (GRE, Geneve) names for this layer.
+    fn tunnel_type(&self) -> Option<u16> {
+        match self {
+            LayerSpec::Ethernet(_) => Some(crate::ETHERTYPE_TEB),
+            other => other.ethertype(),
         }
     }
 
@@ -424,7 +672,9 @@ impl LayerSpec {
             LayerSpec::Ipv6Ext(e) => Some(e.proto()),
             LayerSpec::Tcp(_) => Some(6),
             LayerSpec::Udp(_) => Some(17),
-            LayerSpec::Icmp(_) => Some(if v6 { 58 } else { 1 }),
+            LayerSpec::Icmp(_) | LayerSpec::Mld(_) => Some(if v6 { 58 } else { 1 }),
+            LayerSpec::Gre(_) => Some(47),
+            LayerSpec::Igmp(_) => Some(2),
             _ => None,
         }
     }
@@ -439,7 +689,10 @@ macro_rules! from_layer {
         }
     )*};
 }
-from_layer!(Ethernet, Vlan, Arp, Ipv4, Ipv6, Ipv6Ext, Tcp, Udp, Icmp, Dns);
+from_layer!(
+    Ethernet, Vlan, Arp, Ipv4, Ipv6, Ipv6Ext, Tcp, Udp, Icmp, Dns, Mpls, Gre, Vxlan, Geneve, Gtpu,
+    Llc, Snap, Igmp, Mld
+);
 
 /// A packet described layer by layer, outermost first.
 ///
@@ -474,7 +727,33 @@ from_layer!(Ethernet, Vlan, Arp, Ipv4, Ipv6, Ipv6Ext, Tcp, Udp, Icmp, Dns);
 ///   (letters RSO). Neighbor discovery wants `ipv6(hlim=255)`.
 /// * `dns`: `id` [1], `q` (repeatable), `qtype` [A], `qr` / `response`, `a` (answer
 ///   address, repeatable), `ttl` [300], `rd` [1], `ra`, `aa`, `tc`, `opcode`, `rcode`
+/// * `mpls`: `label` [16], `tc` [0], `ttl` [64], `s` [1 on the last label]; after
+///   `eth` or `vlan` (ethertype 0x8847), before more labels, `ipv4`, `ipv6` or
+///   `eth` (an Ethernet pseudowire, written with a zero control word)
+/// * `llc`: `dsap` [0xaa], `ssap` [0xaa], `ctrl` [3]; after `eth`, whose type
+///   field then holds the length (802.3). `snap`: `oui` [0], `pid` [from next layer]
+/// * `gre`: `key`, `seq`, `csum` [0; 1 adds a checksum], `proto` [from next layer,
+///   0x6558 before `eth`]; after `ipv4` or `ipv6`
+/// * `vxlan`: `vni` [1], `flags` [0x08]; after `udp` (port 4789), before `eth`
+/// * `geneve`: `vni` [0], `proto` [from next layer], `oam`, `crit`, `opt` (option
+///   TLVs as hex); after `udp` (port 6081)
+/// * `gtpu`: `teid` [1], `type` [gpdu; or echo, echo_resp, error, end, a number],
+///   `seq`, `qfi` (adds a PDU session container), `pdu` [dl; or ul], `len`; after
+///   `udp` (port 2152), before `ipv4` or `ipv6`
+/// * `igmp`: `type` [report; or query, leave, v3report, v3query], `ver` [2], `mrt`
+///   [100, tenths of a second], `group` [239.1.1.1], `src` (v3 query sources,
+///   repeatable), `rec` (v3 report group records `TYPE@GROUP[+SOURCE...]` with
+///   TYPE `join`, `leave`, `include`, `exclude`, `allow` or `block`; repeatable),
+///   `s`, `qrv` [2], `qqic` [125], `chksum`
+/// * `mld`: like `igmp` after `ipv6` (add `hbh(ra=0)` and `hlim=1` for a real
+///   one): `type` [report; or query, done, v2report, v2query], `ver` [1], `delay`
+///   [10000 ms, queries], `group` [ff0e::1], `src`, `rec`, `s`, `qrv`, `qqic`, `chksum`
 /// * `raw`: `hex=0a0b0c`, `text="..."`, or `len=N` with `fill` [0]
+///
+/// Tunnels nest: `eth/ipv4/udp/vxlan(vni=5)/eth/ipv4/tcp`, `eth/ipv4/gre(key=1)/ipv6/udp`,
+/// `eth/ipv6/ipv4/icmp` (IP in IP), `eth/mpls(label=100)/mpls(label=200)/ipv4/udp`.
+/// The UDP ports of VXLAN, Geneve and GTP-U are filled in, and every length and
+/// checksum, outer and inner, is computed.
 ///
 /// Numbers can be decimal or `0x` hex; flags take 1/0, true/false, yes/no.
 /// A layer with no fields can be written without parentheses: `eth/ipv4/udp`.
@@ -516,15 +795,28 @@ impl PacketSpec {
             let ok = match (&w[0], &w[1]) {
                 (L::Raw(_) | L::Arp(_) | L::Dns(_), _) => false,
                 (_, L::Raw(_)) => true,
-                (L::Ethernet(_) | L::Vlan(_), L::Vlan(_) | L::Arp(_) | L::Ipv4(_) | L::Ipv6(_)) => {
-                    true
-                }
+                (
+                    L::Ethernet(_) | L::Vlan(_),
+                    L::Vlan(_) | L::Arp(_) | L::Ipv4(_) | L::Ipv6(_) | L::Mpls(_),
+                ) => true,
+                (L::Ethernet(_), L::Llc(_)) => true,
+                (L::Llc(_), L::Snap(_)) => true,
+                (L::Snap(_), L::Vlan(_) | L::Arp(_) | L::Ipv4(_) | L::Ipv6(_) | L::Mpls(_)) => true,
                 (
                     L::Ipv4(_) | L::Ipv6(_) | L::Ipv6Ext(_),
-                    L::Ipv4(_) | L::Ipv6(_) | L::Tcp(_) | L::Udp(_) | L::Icmp(_),
+                    L::Ipv4(_) | L::Ipv6(_) | L::Tcp(_) | L::Udp(_) | L::Icmp(_) | L::Gre(_),
                 ) => true,
-                (L::Ipv6(_) | L::Ipv6Ext(_), L::Ipv6Ext(_)) => true,
+                (L::Ipv4(_), L::Igmp(_)) => true,
+                (L::Ipv6(_) | L::Ipv6Ext(_), L::Ipv6Ext(_) | L::Mld(_)) => true,
                 (L::Tcp(_) | L::Udp(_), L::Dns(_)) => true,
+                (L::Udp(_), L::Vxlan(_) | L::Geneve(_) | L::Gtpu(_)) => true,
+                (L::Mpls(_), L::Mpls(_) | L::Ipv4(_) | L::Ipv6(_) | L::Ethernet(_)) => true,
+                (
+                    L::Gre(_) | L::Geneve(_),
+                    L::Ethernet(_) | L::Ipv4(_) | L::Ipv6(_) | L::Mpls(_),
+                ) => true,
+                (L::Vxlan(_), L::Ethernet(_)) => true,
+                (L::Gtpu(_), L::Ipv4(_) | L::Ipv6(_)) => true,
                 _ => false,
             };
             if !ok {
@@ -553,10 +845,19 @@ impl PacketSpec {
                 LayerSpec::Ethernet(e) => {
                     out.extend(e.dst);
                     out.extend(e.src);
-                    let t = e
-                        .ethertype
-                        .or_else(|| next.and_then(LayerSpec::ethertype))
-                        .unwrap_or(ETHERTYPE_EXPERIMENTAL);
+                    let t = match next {
+                        // 802.3: the type field holds the length.
+                        Some(LayerSpec::Llc(_)) if e.ethertype.is_none() => {
+                            if payload.len() > 1500 {
+                                return err("llc: an 802.3 frame carries at most 1500 bytes");
+                            }
+                            payload.len() as u16
+                        }
+                        _ => e
+                            .ethertype
+                            .or_else(|| next.and_then(LayerSpec::ethertype))
+                            .unwrap_or(ETHERTYPE_EXPERIMENTAL),
+                    };
                     out.extend(t.to_be_bytes());
                     out.extend(&payload);
                     if e.pad && i == 0 && out.len() < ETH_MIN_FRAME {
@@ -730,10 +1031,13 @@ impl PacketSpec {
                         Some(LayerSpec::Dns(d)) => Some(d.response),
                         _ => None,
                     };
-                    let (sp, dp) = match dns_response {
-                        Some(true) => (53, 49152),
-                        Some(false) => (49152, 53),
-                        None => (49152, 9),
+                    let (sp, dp) = match (dns_response, next) {
+                        (Some(true), _) => (53, 49152),
+                        (Some(false), _) => (49152, 53),
+                        (_, Some(LayerSpec::Vxlan(_))) => (49152, crate::VXLAN_PORT),
+                        (_, Some(LayerSpec::Geneve(_))) => (49152, crate::GENEVE_PORT),
+                        (_, Some(LayerSpec::Gtpu(_))) => (crate::GTPU_PORT, crate::GTPU_PORT),
+                        _ => (49152, 9),
                     };
                     let len = match u.len {
                         Some(l) => l,
@@ -781,6 +1085,133 @@ impl PacketSpec {
                     out[2..4].copy_from_slice(&c.to_be_bytes());
                 }
                 LayerSpec::Dns(d) => dns(d, &mut out)?,
+                LayerSpec::Mpls(m) => {
+                    if m.label > 0xfffff || m.tc > 7 {
+                        return err(format!(
+                            "mpls: label is 20 bits (up to 1048575) and tc 0-7 (got label {}, tc {})",
+                            m.label, m.tc
+                        ));
+                    }
+                    let bos = m.bos.unwrap_or(!matches!(next, Some(LayerSpec::Mpls(_))));
+                    let w = (m.label << 12)
+                        | (u32::from(m.tc) << 9)
+                        | (u32::from(bos) << 8)
+                        | u32::from(m.ttl);
+                    out.extend(w.to_be_bytes());
+                    if matches!(next, Some(LayerSpec::Ethernet(_))) {
+                        // Pseudowire control word (RFC 4448), so the frame
+                        // is not taken for IP by its first nibble.
+                        out.extend([0, 0, 0, 0]);
+                    }
+                    out.extend(&payload);
+                }
+                LayerSpec::Gre(g) => {
+                    let proto = g
+                        .proto
+                        .or_else(|| next.and_then(LayerSpec::tunnel_type))
+                        .unwrap_or(ETHERTYPE_EXPERIMENTAL);
+                    let flags = (u16::from(g.checksum) << 15)
+                        | (u16::from(g.key.is_some()) << 13)
+                        | (u16::from(g.seq.is_some()) << 12);
+                    out.extend(flags.to_be_bytes());
+                    out.extend(proto.to_be_bytes());
+                    if g.checksum {
+                        out.extend([0, 0, 0, 0]);
+                    }
+                    if let Some(k) = g.key {
+                        out.extend(k.to_be_bytes());
+                    }
+                    if let Some(q) = g.seq {
+                        out.extend(q.to_be_bytes());
+                    }
+                    out.extend(&payload);
+                    if g.checksum {
+                        let c = !ones_sum(&[&out]);
+                        out[4..6].copy_from_slice(&c.to_be_bytes());
+                    }
+                }
+                LayerSpec::Vxlan(v) => {
+                    if v.vni > 0xffffff {
+                        return err("vxlan: vni is 24 bits (up to 16777215)");
+                    }
+                    out.extend([v.flags, 0, 0, 0]);
+                    out.extend((v.vni << 8).to_be_bytes());
+                    out.extend(&payload);
+                }
+                LayerSpec::Geneve(g) => {
+                    if g.vni > 0xffffff {
+                        return err("geneve: vni is 24 bits (up to 16777215)");
+                    }
+                    if g.options.len() % 4 != 0 || g.options.len() > 252 {
+                        return err("geneve: options are a multiple of 4 bytes, up to 252");
+                    }
+                    let proto = g
+                        .proto
+                        .or_else(|| next.and_then(LayerSpec::tunnel_type))
+                        .unwrap_or(ETHERTYPE_EXPERIMENTAL);
+                    out.push((g.options.len() / 4) as u8);
+                    out.push((u8::from(g.oam) << 7) | (u8::from(g.critical) << 6));
+                    out.extend(proto.to_be_bytes());
+                    out.extend((g.vni << 8).to_be_bytes());
+                    out.extend(&g.options);
+                    out.extend(&payload);
+                }
+                LayerSpec::Gtpu(g) => {
+                    if g.qfi.is_some_and(|q| q > 63) {
+                        return err("gtpu: qfi is 6 bits (0-63)");
+                    }
+                    let ext = g.qfi.is_some();
+                    let opt = ext || g.seq.is_some();
+                    let flags = 0x30 | (u8::from(ext) << 2) | (u8::from(g.seq.is_some()) << 1);
+                    out.extend([flags, g.msg_type, 0, 0]);
+                    out.extend(g.teid.to_be_bytes());
+                    if opt {
+                        out.extend(g.seq.unwrap_or(0).to_be_bytes());
+                        out.push(0); // N-PDU number
+                        out.push(if ext { 0x85 } else { 0 });
+                    }
+                    if let Some(q) = g.qfi {
+                        // PDU session container: one 4-byte unit, no more extensions.
+                        out.extend([1, u8::from(g.uplink) << 4, q, 0]);
+                    }
+                    out.extend(&payload);
+                    let len = match g.len {
+                        Some(l) => l,
+                        None => len16(out.len() - 8, "gtpu length")?,
+                    };
+                    out[2..4].copy_from_slice(&len.to_be_bytes());
+                }
+                LayerSpec::Llc(l) => {
+                    out.extend([l.dsap, l.ssap, l.control]);
+                    out.extend(&payload);
+                }
+                LayerSpec::Snap(sn) => {
+                    if sn.oui > 0xffffff {
+                        return err("snap: oui is 24 bits");
+                    }
+                    let pid = sn
+                        .pid
+                        .or_else(|| next.and_then(LayerSpec::ethertype))
+                        .unwrap_or(ETHERTYPE_EXPERIMENTAL);
+                    out.extend(&sn.oui.to_be_bytes()[1..]);
+                    out.extend(pid.to_be_bytes());
+                    out.extend(&payload);
+                }
+                LayerSpec::Igmp(g) => {
+                    igmp(g, &mut out)?;
+                    out.extend(&payload);
+                    let c = g.checksum.unwrap_or_else(|| !ones_sum(&[&out]));
+                    out[2..4].copy_from_slice(&c.to_be_bytes());
+                }
+                LayerSpec::Mld(m) => {
+                    mld(m, &mut out)?;
+                    out.extend(&payload);
+                    let c = match m.checksum {
+                        Some(c) => c,
+                        None => transport_checksum(ip.as_ref(), 58, &out)?,
+                    };
+                    out[2..4].copy_from_slice(&c.to_be_bytes());
+                }
                 LayerSpec::Raw(b) => out.extend(b),
             }
             payload = out;
@@ -816,6 +1247,104 @@ fn transport_checksum(ip: Option<&Pseudo>, proto: u8, seg: &[u8]) -> Result<u16,
         None => return err("a transport layer needs an ipv4 or ipv6 layer before it"),
     }
     Ok(!ones_sum(&[&pseudo, seg]))
+}
+
+fn record(r: &GroupRecord, v6: bool, out: &mut Vec<u8>) -> Result<(), BuildError> {
+    let bytes = |a: &IpAddr| -> Result<Vec<u8>, BuildError> {
+        match (a, v6) {
+            (IpAddr::V4(a), false) => Ok(a.octets().to_vec()),
+            (IpAddr::V6(a), true) => Ok(a.octets().to_vec()),
+            _ => err(format!(
+                "{}: group record address {a} is not IPv{}",
+                if v6 { "mld" } else { "igmp" },
+                if v6 { 6 } else { 4 }
+            )),
+        }
+    };
+    out.extend([r.record_type, 0]);
+    out.extend(len16(r.sources.len(), "group record sources")?.to_be_bytes());
+    out.extend(bytes(&r.group)?);
+    for s in &r.sources {
+        out.extend(bytes(s)?);
+    }
+    Ok(())
+}
+
+fn igmp(g: &Igmp, out: &mut Vec<u8>) -> Result<(), BuildError> {
+    if !(1..=3).contains(&g.version) {
+        return err("igmp: ver is 1, 2 or 3");
+    }
+    let v3 = g.version == 3 || !g.records.is_empty();
+    match g.kind {
+        McastType::Report if v3 => {
+            out.extend([0x22, 0, 0, 0, 0, 0]);
+            out.extend(len16(g.records.len(), "igmp records")?.to_be_bytes());
+            for r in &g.records {
+                record(r, false, out)?;
+            }
+            return Ok(());
+        }
+        McastType::Report => {
+            let t = if g.version == 1 { 0x12 } else { 0x16 };
+            out.extend([t, 0, 0, 0]);
+        }
+        McastType::Leave => out.extend([0x17, 0, 0, 0]),
+        McastType::Query => {
+            let code = if g.version == 1 { 0 } else { g.max_resp };
+            out.extend([0x11, code, 0, 0]);
+        }
+    }
+    out.extend(g.group.octets());
+    if g.kind == McastType::Query && g.version == 3 {
+        out.push((u8::from(g.suppress) << 3) | (g.qrv & 7));
+        out.push(g.qqic);
+        out.extend(len16(g.sources.len(), "igmp sources")?.to_be_bytes());
+        for s in &g.sources {
+            out.extend(s.octets());
+        }
+    } else if !g.sources.is_empty() {
+        return err("igmp: src is for version 3 queries");
+    }
+    Ok(())
+}
+
+fn mld(m: &Mld, out: &mut Vec<u8>) -> Result<(), BuildError> {
+    if !(1..=2).contains(&m.version) {
+        return err("mld: ver is 1 or 2");
+    }
+    let v2 = m.version == 2 || !m.records.is_empty();
+    match m.kind {
+        McastType::Report if v2 => {
+            out.extend([143, 0, 0, 0, 0, 0]);
+            out.extend(len16(m.records.len(), "mld records")?.to_be_bytes());
+            for r in &m.records {
+                record(r, true, out)?;
+            }
+            return Ok(());
+        }
+        McastType::Report => out.extend([131, 0, 0, 0]),
+        McastType::Leave => out.extend([132, 0, 0, 0]),
+        McastType::Query => out.extend([130, 0, 0, 0]),
+    }
+    let delay = if m.kind == McastType::Query {
+        m.max_delay
+    } else {
+        0
+    };
+    out.extend(delay.to_be_bytes());
+    out.extend([0, 0]);
+    out.extend(m.group.octets());
+    if m.kind == McastType::Query && m.version == 2 {
+        out.push((u8::from(m.suppress) << 3) | (m.qrv & 7));
+        out.push(m.qqic);
+        out.extend(len16(m.sources.len(), "mld sources")?.to_be_bytes());
+        for s in &m.sources {
+            out.extend(s.octets());
+        }
+    } else if !m.sources.is_empty() {
+        return err("mld: src is for version 2 queries");
+    }
+    Ok(())
 }
 
 fn dns(d: &Dns, out: &mut Vec<u8>) -> Result<(), BuildError> {
@@ -1034,5 +1563,156 @@ mod tests {
             .unwrap()
             .build();
         assert!(e.unwrap_err().0.contains("neighbor"));
+    }
+    #[test]
+    fn tunnels_build_and_decode() {
+        let (b, d) = built(
+            "eth/ipv4(src=10.0.0.1,dst=10.0.0.2)/udp/vxlan(vni=5000)\
+             /eth(src=02:00:00:00:00:0a,dst=02:00:00:00:00:0b)/ipv4(src=192.168.1.1,dst=192.168.1.2)\
+             /udp(sport=1000,dport=2000)/raw(len=10)",
+        );
+        assert_eq!(d.protocol, "UDP");
+        assert_eq!(d.source, "192.168.1.1");
+        let vx = d.layer("VXLAN").unwrap();
+        assert!(vx.title.ends_with("VNI: 5000"), "{}", vx.title);
+        assert_eq!(&b[36..38], &4789u16.to_be_bytes());
+        // Inner frame is not padded; the outer one has the lengths of all of it.
+        assert_eq!(b.len(), 14 + 20 + 8 + 8 + 14 + 20 + 8 + 10);
+        assert_eq!(
+            d.layers.iter().filter(|l| l.protocol == "Ethernet").count(),
+            2
+        );
+
+        let (_, d) = built("eth/ipv6/udp/geneve(vni=7,opt=01020304)/eth/ipv6/icmp");
+        assert_eq!(d.protocol, "ICMPv6");
+        assert!(d.layer("Geneve").unwrap().title.contains("VNI: 7"));
+        let (_, d) = built("eth/ipv4/udp/geneve(vni=8)/ipv4/tcp(flags=S)");
+        assert_eq!(d.protocol, "TCP");
+
+        let (b, d) = built(
+            "eth/ipv4(src=10.1.0.1,dst=10.2.0.1)/udp/gtpu(teid=0x1234,qfi=9,pdu=ul,seq=7)\
+             /ipv4(src=172.16.0.5,dst=8.8.8.8)/udp/dns(q=example.com)",
+        );
+        assert_eq!(d.protocol, "DNS");
+        let gtp = d.layer("GTP").unwrap();
+        assert!(gtp.title.contains("TEID: 0x00001234"), "{}", gtp.title);
+        let pdu = gtp
+            .fields
+            .iter()
+            .find(|f| f.name == "PDU session container");
+        assert_eq!(pdu.unwrap().value, "uplink, QFI 9");
+        // GTP-U length counts everything after the first 8 bytes.
+        let at = 14 + 20 + 8;
+        assert_eq!(
+            usize::from(u16::from_be_bytes([b[at + 2], b[at + 3]])),
+            b.len() - at - 8
+        );
+        assert_eq!(&b[34..38], &[0x08, 0x68, 0x08, 0x68]); // 2152 both ways
+
+        let (b, d) = built("eth/ipv4/gre(key=42,seq=3,csum=1)/eth/ipv4/icmp");
+        assert_eq!(d.protocol, "ICMP");
+        let gre = d.layer("GRE").unwrap();
+        assert!(gre.title.contains("Transparent Ethernet"), "{}", gre.title);
+        assert_eq!(&b[34..36], &[0xb0, 0x00]);
+        let (_, d) = built("eth/ipv6/gre/ipv4/udp/raw(len=4)");
+        assert_eq!(d.protocol, "UDP");
+
+        // IP in IP, all four ways.
+        for spec in [
+            "eth/ipv4/ipv4/icmp",
+            "eth/ipv4/ipv6/icmp",
+            "eth/ipv6/ipv4/icmp",
+            "eth/ipv6/ipv6/icmp",
+        ] {
+            let (_, d) = built(spec);
+            assert_eq!(
+                d.layers
+                    .iter()
+                    .filter(|l| l.protocol.starts_with("IPv"))
+                    .count(),
+                2,
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn mpls_stacks() {
+        let (b, d) =
+            built("eth/vlan(id=5)/mpls(label=100,tc=5)/mpls(label=200,ttl=1)/ipv4/udp/raw(len=4)");
+        assert_eq!(d.protocol, "UDP");
+        // Ethertype 0x8847 after the tag; only the last label has S.
+        assert_eq!(&b[16..18], &[0x88, 0x47]);
+        assert_eq!(&b[18..22], &[0x00, 0x06, 0x4a, 64]);
+        assert_eq!(&b[22..26], &[0x00, 0x0c, 0x81, 1]);
+        let (b, d) = built("eth/mpls(label=17)/eth(src=02:00:00:00:00:01)/ipv4/icmp");
+        assert_eq!(d.protocol, "ICMP");
+        assert_eq!(&b[18..22], &[0, 0, 0, 0], "control word");
+        assert!(d.layer("PW").is_some());
+        let e = "eth/mpls(label=2000000)"
+            .parse::<PacketSpec>()
+            .unwrap()
+            .build();
+        assert!(e.unwrap_err().0.contains("20 bits"));
+    }
+
+    #[test]
+    fn llc_snap() {
+        let (b, d) = built("eth(dst=01:80:c2:00:00:00)/llc(dsap=0x42,ssap=0x42)/raw(len=35)");
+        // 802.3 length, then STP's LLC header.
+        assert_eq!(&b[12..15], &[0, 38, 0x42]);
+        assert_eq!(d.protocol, "STP");
+        let (b, d) = built("eth/llc/snap/ipv4/udp/raw(len=4)");
+        assert_eq!(d.protocol, "UDP");
+        assert_eq!(&b[14..22], &[0xaa, 0xaa, 0x03, 0, 0, 0, 0x08, 0x00]);
+        let (_, d) =
+            built("eth(dst=01:00:0c:cc:cc:cc)/llc/snap(oui=0x00000c,pid=0x2000)/raw(len=20)");
+        assert_eq!(d.protocol, "SNAP");
+        assert_eq!(d.info, "CDP");
+    }
+
+    #[test]
+    fn igmp_and_mld_messages() {
+        let (b, d) = built(
+            "eth/ipv4(dst=224.0.0.22,ttl=1)/igmp(rec=join@239.1.2.3,rec=allow@232.1.1.1+10.0.0.9)",
+        );
+        assert_eq!(d.protocol, "IGMP");
+        assert_eq!(b[34], 0x22);
+        assert!(d.info.contains("Join group 239.1.2.3"), "{}", d.info);
+        let (_, d) = built("eth/ipv4/igmp(type=query,mrt=100,group=0.0.0.0)");
+        assert_eq!(d.info, "v2 Membership Query, general");
+        let (b, d) = built("eth/ipv4/igmp(type=v3query,group=239.1.1.1,src=10.0.0.1,src=10.0.0.2)");
+        assert_eq!(u16::from_be_bytes([b[16], b[17]]), 20 + 12 + 8);
+        assert!(
+            d.info.starts_with("v3 Membership Query for 239.1.1.1"),
+            "{}",
+            d.info
+        );
+        let (_, d) = built("eth/ipv4/igmp(type=leave,group=239.9.9.9)");
+        assert_eq!(d.info, "v2 Leave Group 239.9.9.9");
+        let (_, d) = built("eth/ipv4/igmp(ver=1,group=239.9.9.9)");
+        assert_eq!(d.info, "v1 Membership Report 239.9.9.9");
+
+        let (_, d) = built("eth/ipv6(hlim=1,dst=ff02::16)/hbh(ra=0)/mld(rec=join@ff3e::1234,rec=block@ff3e::1+2001:db8::1)");
+        assert_eq!(d.protocol, "ICMPv6");
+        assert!(
+            d.info.starts_with("MLDv2 Report / Join group ff3e::1234"),
+            "{}",
+            d.info
+        );
+        let (_, d) = built("eth/ipv6/hbh(ra=0)/mld(type=query,group=::)");
+        assert_eq!(d.info, "MLDv1 Query, general");
+        let (_, d) = built("eth/ipv6/mld(type=v2query,group=ff3e::1,src=2001:db8::5)");
+        assert!(d.info.starts_with("MLDv2 Query ff3e::1"), "{}", d.info);
+        let (_, d) = built("eth/ipv6/mld(type=done,group=ff3e::1)");
+        assert_eq!(d.info, "MLDv1 Done ff3e::1");
+        let e = |s: &str| {
+            s.parse::<PacketSpec>()
+                .and_then(|p| p.build())
+                .unwrap_err()
+                .0
+        };
+        assert!(e("eth/ipv4/igmp(rec=join@ff02::1)").contains("invalid rec"));
+        assert!(e("eth/ipv6/igmp").contains("igmp cannot follow ipv6"));
     }
 }

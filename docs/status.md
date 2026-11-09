@@ -19,7 +19,8 @@ protocol is tested against is in [interop.md](interop.md).
 | Profiles of streams (TOML), field engine, traffic models | Done | [traffic-models.md](traffic-models.md); session length distributions not done |
 | Multi-burst and `next` streams, `50%` and L1 rates, live pause/resume/rate | Done | M50 |
 | The port's own addresses (ARP, neighbor discovery, answers) | Partial | scenario traffic checks do not resolve addresses or shares of the line |
-| Packet building and inspection | Done | [packets.md](packets.md) |
+| Packet building and inspection | Done | [packets.md](packets.md); MPLS, GRE, VXLAN, Geneve, GTP-U, IP in IP, LLC/SNAP, IGMP and MLD since 0.47.0 |
+| Tunnel rewrites (`encap=`, `decap`, MPLS push/pop), rewrites and `--vary` inside tunnels | Done | [replay.md](replay.md#tunnels); no NVGRE, L2TP or GTP-U extension headers other than the PDU session container |
 | libpcap/Npcap sending (Linux, macOS, Windows) | Done | Windows batches through Npcap's send queue |
 | AF_XDP sending and stateful ports (Linux) | Done | copy and zero-copy, driver and generic mode; [fast-ports.md](fast-ports.md) |
 | DPDK sending and stateful ports | Experimental | built and run in CI (`dpdk` job) through DPDK's af_packet driver, one queue pair per worker; no physical NIC there to send on |
@@ -36,6 +37,7 @@ protocol is tested against is in [interop.md](interop.md).
 |---|---|---|
 | TCP engine (SACK, window scaling, timestamps, RTO, NewReno, CUBIC, ECN) | Partial | no BBR, Accurate ECN or L4S; no cap on half-open connections in the server |
 | TCP templates, rates, concurrency, think time | Done | [stateful-tcp.md](stateful-tcp.md) |
+| TCP, UDP and applications inside GTP-U, a TEID per client | Partial | [stateful-tcp.md](stateful-tcp.md#inside-gtp-u-tunnels); no GTP-C, echo requests or fragmentation; ports are shared among `--workers` |
 | UDP engine, DNS, NTP | Done | [stateful-udp.md](stateful-udp.md) |
 | HTTP/1.1 with response checks | Done | |
 | TLS 1.2/1.3, handshake load, resumption | Partial | no hello-only emulation of TLS 1.0/1.1 |
@@ -72,6 +74,7 @@ protocol is tested against is in [interop.md](interop.md).
 ## Planned
 
 From the comparison with TRex and Ostinato:
-[#106](https://github.com/jkobierczynski/FeroTRX/issues/106) to
-[#109](https://github.com/jkobierczynski/FeroTRX/issues/109) realism,
-tunnels, accurate latency and fleet robustness (M53 to M56).
+[#106](https://github.com/jkobierczynski/FeroTRX/issues/106) realism (M53),
+[#108](https://github.com/jkobierczynski/FeroTRX/issues/108) accurate latency
+and [#109](https://github.com/jkobierczynski/FeroTRX/issues/109) fleet
+robustness (M55, M56).

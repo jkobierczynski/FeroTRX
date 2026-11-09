@@ -1,9 +1,11 @@
 //! From bytes back to the text form: turn a captured packet into layers that
 //! can be edited and built again.
 //!
-//! [`import`] reads the headers it knows (Ethernet, VLAN tags, ARP, IPv4,
-//! IPv6, TCP, UDP, ICMP and ICMPv6) into [`RawLayer`]s with their field
-//! values, and keeps the rest of the packet as a `raw(hex=...)` payload.
+//! [`import`] reads the headers it knows (Ethernet, VLAN tags, MPLS, LLC/SNAP,
+//! ARP, IPv4, IPv6, IP in IP, GRE, TCP, UDP, VXLAN, Geneve, GTP-U, ICMP,
+//! ICMPv6, IGMP and MLD) into [`RawLayer`]s with their field values, through
+//! tunnels to the packet inside, and keeps the rest of the packet as a
+//! `raw(hex=...)` payload.
 //! Lengths and checksums are left out, so the builder computes them again
 //! after an edit; a packet whose checksums were right builds back to the
 //! same bytes. Whatever cannot be carried over (IPv4 options, TCP options
@@ -30,6 +32,7 @@ pub fn import(linktype: u32, data: &[u8]) -> Option<Imported> {
         data,
         out: Imported::default(),
         end: data.len(),
+        inner: false,
     };
     match linktype {
         LINKTYPE_ETHERNET => im.ethernet(),
@@ -48,6 +51,8 @@ struct Importer<'a> {
     out: Imported,
     /// End of the bytes that belong to the packet (before Ethernet padding).
     end: usize,
+    /// Inside a tunnel: Ethernet padding belongs to the outer frame.
+    inner: bool,
 }
 
 fn hex(b: &[u8]) -> String {
@@ -137,11 +142,36 @@ impl Importer<'_> {
         });
     }
 
+    /// An Ethernet header at `at` inside a tunnel, and what follows it.
+    fn inner_ethernet(&mut self, at: usize) {
+        if !self.has(at, 14) {
+            return self.raw(at);
+        }
+        self.inner = true;
+        let eth = self.push(
+            "eth",
+            vec![
+                ("dst", mac(&self.data[at..at + 6])),
+                ("src", mac(&self.data[at + 6..at + 12])),
+            ],
+        );
+        self.after_ethertype(eth, at + 12);
+    }
+
     /// The EtherType at `at` of `layer`, and what follows it.
     fn after_ethertype(&mut self, layer: usize, at: usize) {
+        if !self.has(at, 2) {
+            return self.raw(at);
+        }
         let ty = self.u16(at);
         let next = at + 2;
+        if ty <= 1500 && !self.inner && layer == 0 && self.has(next, 3) {
+            // 802.3: a length, then LLC.
+            self.ethernet_padding(next, ty as usize);
+            return self.llc(layer, next);
+        }
         match ty {
+            0x8847 if self.has(next, 4) => self.mpls(next),
             0x8100 | 0x88a8 if self.has(next, 4) => {
                 let tci = self.u16(next);
                 let name = if ty == 0x88a8 { "qinq" } else { "vlan" };
@@ -180,9 +210,503 @@ impl Importer<'_> {
         }
     }
 
+    /// 802.2 LLC at `at`, and SNAP after it.
+    fn llc(&mut self, eth: usize, at: usize) {
+        let (dsap, ssap, ctrl) = (self.data[at], self.data[at + 1], self.data[at + 2]);
+        if self.end != at + self.u16(at - 2) as usize {
+            // The length field does not cover what the builder would write.
+            self.set(eth, "type", format!("0x{:04x}", self.u16(at - 2)));
+        }
+        let mut args = vec![];
+        if dsap != 0xaa {
+            args.push(("dsap", format!("0x{dsap:02x}")));
+        }
+        if ssap != 0xaa {
+            args.push(("ssap", format!("0x{ssap:02x}")));
+        }
+        if ctrl != 3 {
+            args.push(("ctrl", format!("0x{ctrl:02x}")));
+        }
+        self.push("llc", args);
+        if (dsap, ssap, ctrl) != (0xaa, 0xaa, 3) || !self.has(at + 3, 5) {
+            return self.raw(at + 3);
+        }
+        let oui = self.u32(at + 2) & 0x00ff_ffff;
+        let pid = self.u16(at + 6);
+        let mut args = vec![];
+        if oui != 0 {
+            args.push(("oui", format!("0x{oui:06x}")));
+        }
+        let sn = self.push("snap", args);
+        if oui == 0 {
+            // The PID is an EtherType; `after_ethertype` reads it again and
+            // adds it to the SNAP layer when it cannot be inferred.
+            self.inner = true;
+            self.after_ethertype(sn, at + 6);
+            self.fix_type_key(sn, "pid");
+        } else {
+            self.set(sn, "pid", format!("0x{pid:04x}"));
+            self.raw(at + 8);
+        }
+    }
+
+    /// `after_ethertype` names an EtherType it cannot infer `type`; layers
+    /// that call it something else (SNAP's `pid`) rename it.
+    fn fix_type_key(&mut self, layer: usize, key: &str) {
+        for (k, _) in &mut self.out.layers[layer].args {
+            if k == "type" {
+                *k = key.to_string();
+            }
+        }
+    }
+
+    /// An MPLS label stack at `at` and what it carries.
+    fn mpls(&mut self, mut at: usize) {
+        loop {
+            if !self.has(at, 4) {
+                return self.raw(at);
+            }
+            let w = self.u32(at);
+            let (label, tc, bos, ttl) = (w >> 12, (w >> 9) & 7, (w >> 8) & 1 == 1, w & 0xff);
+            let mut args = vec![("label", label.to_string())];
+            if tc != 0 {
+                args.push(("tc", tc.to_string()));
+            }
+            if ttl != 64 {
+                args.push(("ttl", ttl.to_string()));
+            }
+            let l = self.push("mpls", args);
+            at += 4;
+            if bos {
+                // The builder sets S on the last label: right unless the
+                // payload is kept as bytes that happen to follow.
+                match self.data.get(at).map(|b| b >> 4) {
+                    Some(4 | 6) => {}
+                    Some(0) if self.has(at, 18) && self.u32(at) == 0 => {}
+                    _ => self.set(l, "s", "1".into()),
+                }
+                break;
+            }
+            if self.data.get(at).is_none() {
+                self.set(l, "s", "0".into());
+                return;
+            }
+            if !self.has(at, 4) {
+                self.set(l, "s", "0".into());
+                return self.raw(at);
+            }
+        }
+        self.inner = true;
+        match self.data.get(at).map(|b| b >> 4) {
+            Some(4) => self.ipv4(at),
+            Some(6) => self.ipv6(at),
+            Some(0) if self.has(at, 18) && self.u32(at) == 0 => self.inner_ethernet(at + 4),
+            _ => self.raw(at),
+        }
+    }
+
+    /// GRE at `at`.
+    fn gre(&mut self, at: usize) -> bool {
+        if !self.has(at, 4) {
+            return false;
+        }
+        let flags = self.u16(at);
+        // Only what the builder writes: version 0 with checksum, key and
+        // sequence number.
+        if flags & !0xb000 != 0 {
+            return false;
+        }
+        let (c, k, s) = (
+            flags & 0x8000 != 0,
+            flags & 0x2000 != 0,
+            flags & 0x1000 != 0,
+        );
+        let len = 4 + 4 * (usize::from(c) + usize::from(k) + usize::from(s));
+        if !self.has(at, len) {
+            return false;
+        }
+        let proto = self.u16(at + 2);
+        let mut args = vec![];
+        let mut o = at + 4;
+        if c {
+            args.push(("csum", "1".to_string()));
+            o += 4;
+        }
+        if k {
+            args.push(("key", self.u32(o).to_string()));
+            o += 4;
+        }
+        if s {
+            args.push(("seq", self.u32(o).to_string()));
+            o += 4;
+        }
+        let g = self.push("gre", args);
+        self.tunnel_payload(g, proto, o);
+        true
+    }
+
+    /// What a GRE or Geneve header with protocol type `proto` carries.
+    fn tunnel_payload(&mut self, layer: usize, proto: u16, at: usize) {
+        self.inner = true;
+        match proto {
+            0x6558 => self.inner_ethernet(at),
+            0x0800 if self.data.get(at).is_some_and(|b| b >> 4 == 4) => self.ipv4(at),
+            0x86dd if self.data.get(at).is_some_and(|b| b >> 4 == 6) => self.ipv6(at),
+            0x8847 if self.has(at, 4) => self.mpls(at),
+            _ => {
+                self.set(layer, "proto", format!("0x{proto:04x}"));
+                self.raw(at)
+            }
+        }
+    }
+
+    /// A UDP tunnel (VXLAN, Geneve, GTP-U) at `at`, by port. False when the
+    /// payload is not one the builder can write.
+    fn udp_tunnel(&mut self, sport: u16, dport: u16, at: usize) -> bool {
+        if dport == 4789 && self.has(at, 8 + 14) {
+            let flags = self.data[at];
+            if self.data[at + 1..at + 4] != [0, 0, 0] || self.data[at + 7] != 0 {
+                return false;
+            }
+            let mut args = vec![("vni", (self.u32(at + 4) >> 8).to_string())];
+            if flags != 0x08 {
+                args.push(("flags", format!("0x{flags:02x}")));
+            }
+            self.push("vxlan", args);
+            self.inner_ethernet(at + 8);
+            return true;
+        }
+        if dport == 6081 && self.has(at, 8) {
+            let first = self.data[at];
+            let opt = usize::from(first & 0x3f) * 4;
+            let flags = self.data[at + 1];
+            if first >> 6 != 0
+                || flags & 0x3f != 0
+                || self.data[at + 7] != 0
+                || !self.has(at, 8 + opt)
+            {
+                return false;
+            }
+            let mut args = vec![("vni", (self.u32(at + 4) >> 8).to_string())];
+            if flags & 0x80 != 0 {
+                args.push(("oam", "1".into()));
+            }
+            if flags & 0x40 != 0 {
+                args.push(("crit", "1".into()));
+            }
+            if opt > 0 {
+                args.push(("opt", hex(&self.data[at + 8..at + 8 + opt])));
+            }
+            let g = self.push("geneve", args);
+            let proto = self.u16(at + 2);
+            self.tunnel_payload(g, proto, at + 8 + opt);
+            return true;
+        }
+        if (sport == 2152 || dport == 2152) && self.has(at, 8) {
+            let flags = self.data[at];
+            let msg = self.data[at + 1];
+            let len = self.u16(at + 2) as usize;
+            // Version 1, PT 1, no PN; with E only a PDU session container.
+            if flags & 0xf1 != 0x30 || at + 8 + len != self.end {
+                return false;
+            }
+            let (e, s) = (flags & 4 != 0, flags & 2 != 0);
+            let mut o = at + 8;
+            let mut args = vec![("teid", self.u32(at + 4).to_string())];
+            if msg != 255 {
+                args.push(("type", msg.to_string()));
+            }
+            if e || s {
+                if !self.has(at, 12) || self.data[at + 10] != 0 {
+                    return false;
+                }
+                let next = self.data[at + 11];
+                if s {
+                    args.push(("seq", self.u16(at + 8).to_string()));
+                } else if self.u16(at + 8) != 0 {
+                    return false;
+                }
+                o += 4;
+                match (e, next) {
+                    (true, 0x85) => {
+                        if !self.has(o, 4) || self.data[o] != 1 || self.data[o + 3] != 0 {
+                            return false;
+                        }
+                        let pdu = self.data[o + 1];
+                        let qfi = self.data[o + 2];
+                        if pdu & !0x10 != 0 || qfi > 63 {
+                            return false;
+                        }
+                        args.push(("qfi", qfi.to_string()));
+                        if pdu != 0 {
+                            args.push(("pdu", "ul".into()));
+                        }
+                        o += 4;
+                    }
+                    (false, 0) => {}
+                    _ => return false,
+                }
+            }
+            self.push("gtpu", args);
+            self.inner = true;
+            match self.data.get(o).map(|b| b >> 4) {
+                Some(4) if msg == 255 => self.ipv4(o),
+                Some(6) if msg == 255 => self.ipv6(o),
+                _ => self.raw(o),
+            }
+            return true;
+        }
+        false
+    }
+
+    /// A hop-by-hop or destination options header the builder writes the
+    /// same way (padding, and a router alert in hop-by-hop), then what follows.
+    fn ipv6_options(&mut self, proto: u8, at: usize) -> bool {
+        if !self.has(at, 8) {
+            return false;
+        }
+        let len = (usize::from(self.data[at + 1]) + 1) * 8;
+        if !self.has(at, len) {
+            return false;
+        }
+        let nh = self.data[at];
+        let mut o = at + 2;
+        let mut args: Vec<(&str, String)> = vec![];
+        if proto == 0 && self.data[o] == 5 && self.data[o + 1] == 2 {
+            args.push(("ra", self.u16(o + 2).to_string()));
+            o += 4;
+        }
+        // The rest must be the padding the builder writes: Pad1 or one PadN.
+        let rest = &self.data[o..at + len];
+        let padded = match rest {
+            [] | [0] => true,
+            [1, n, zeros @ ..] => usize::from(*n) == zeros.len() && zeros.iter().all(|&b| b == 0),
+            _ => false,
+        };
+        if !padded {
+            return false;
+        }
+        if len != 8 {
+            args.push(("len", len.to_string()));
+        }
+        let l = self.push(if proto == 0 { "hbh" } else { "dstopt" }, args);
+        self.transport(l, nh, at + len, true);
+        true
+    }
+
+    /// IGMP at `at`, when it is a message the builder writes the same way.
+    fn igmp(&mut self, at: usize) -> bool {
+        let len = self.end.saturating_sub(at);
+        if len < 8 {
+            return false;
+        }
+        let (t, code) = (self.data[at], self.data[at + 1]);
+        let group = Ipv4Addr::new(
+            self.data[at + 4],
+            self.data[at + 5],
+            self.data[at + 6],
+            self.data[at + 7],
+        );
+        let mut args: Vec<(&str, String)> = vec![];
+        match (t, len) {
+            (0x22, _) => {
+                if code != 0 || self.u16(at + 4) != 0 {
+                    return false;
+                }
+                let Some(recs) = self.records(at + 8, self.u16(at + 6) as usize, 4) else {
+                    return false;
+                };
+                if recs.is_empty() {
+                    args.push(("ver", "3".into()));
+                }
+                for r in recs {
+                    args.push(("rec", r));
+                }
+            }
+            (0x11, 8) => {
+                args.push(("type", "query".into()));
+                if code == 0 {
+                    args.push(("ver", "1".into()));
+                } else if code != 100 {
+                    args.push(("mrt", code.to_string()));
+                }
+                args.push(("group", group.to_string()));
+            }
+            (0x11, _) if len >= 12 => {
+                let n = self.u16(at + 10) as usize;
+                if len != 12 + 4 * n || self.data[at + 8] & 0xf0 != 0 {
+                    return false;
+                }
+                args.push(("type", "v3query".into()));
+                if code != 100 {
+                    args.push(("mrt", code.to_string()));
+                }
+                args.push(("group", group.to_string()));
+                let f = self.data[at + 8];
+                if f & 8 != 0 {
+                    args.push(("s", "1".into()));
+                }
+                if f & 7 != 2 {
+                    args.push(("qrv", (f & 7).to_string()));
+                }
+                if self.data[at + 9] != 125 {
+                    args.push(("qqic", self.data[at + 9].to_string()));
+                }
+                for i in 0..n {
+                    let o = at + 12 + 4 * i;
+                    let a = Ipv4Addr::new(
+                        self.data[o],
+                        self.data[o + 1],
+                        self.data[o + 2],
+                        self.data[o + 3],
+                    );
+                    args.push(("src", a.to_string()));
+                }
+            }
+            (0x12 | 0x16 | 0x17, 8) if code == 0 => {
+                match t {
+                    0x12 => args.push(("ver", "1".into())),
+                    0x17 => args.push(("type", "leave".into())),
+                    _ => {}
+                }
+                args.push(("group", group.to_string()));
+            }
+            _ => return false,
+        }
+        self.push("igmp", args);
+        true
+    }
+
+    /// Group records of an IGMPv3 or MLDv2 report as `rec` values, when they
+    /// fill the message exactly and carry no auxiliary data.
+    fn records(&self, mut at: usize, n: usize, alen: usize) -> Option<Vec<String>> {
+        let addr = |o: usize| -> String {
+            if alen == 4 {
+                Ipv4Addr::new(
+                    self.data[o],
+                    self.data[o + 1],
+                    self.data[o + 2],
+                    self.data[o + 3],
+                )
+                .to_string()
+            } else {
+                let mut a = [0u8; 16];
+                a.copy_from_slice(&self.data[o..o + 16]);
+                Ipv6Addr::from(a).to_string()
+            }
+        };
+        let mut out = Vec::new();
+        for _ in 0..n {
+            if !self.has(at, 4 + alen) || self.data[at + 1] != 0 {
+                return None;
+            }
+            let t = self.data[at];
+            let ns = self.u16(at + 2) as usize;
+            if !self.has(at, 4 + alen + ns * alen) {
+                return None;
+            }
+            let name = match t {
+                1 => "include",
+                2 => "exclude",
+                3 => "to_in",
+                4 => "to_ex",
+                5 => "allow",
+                6 => "block",
+                _ => return None,
+            };
+            let mut r = format!("{name}@{}", addr(at + 4));
+            for i in 0..ns {
+                r.push('+');
+                r.push_str(&addr(at + 4 + alen + i * alen));
+            }
+            out.push(r);
+            at += 4 + alen + ns * alen;
+        }
+        (at == self.end).then_some(out)
+    }
+
+    /// MLD at `at` (ICMPv6 types 130 to 132 and 143).
+    fn mld(&mut self, at: usize) -> bool {
+        let len = self.end.saturating_sub(at);
+        if len < 8 || self.data[at + 1] != 0 {
+            return false;
+        }
+        let t = self.data[at];
+        let mut args: Vec<(&str, String)> = vec![];
+        if t == 143 {
+            if self.u16(at + 4) != 0 {
+                return false;
+            }
+            let Some(recs) = self.records(at + 8, self.u16(at + 6) as usize, 16) else {
+                return false;
+            };
+            if recs.is_empty() {
+                args.push(("ver", "2".into()));
+            }
+            for r in recs {
+                args.push(("rec", r));
+            }
+            self.push("mld", args);
+            return true;
+        }
+        if len < 24 || self.u16(at + 6) != 0 {
+            return false;
+        }
+        let mut g = [0u8; 16];
+        g.copy_from_slice(&self.data[at + 8..at + 24]);
+        let group = Ipv6Addr::from(g).to_string();
+        let delay = self.u16(at + 4);
+        match (t, len) {
+            (130, 24) => {
+                args.push(("type", "query".into()));
+                if delay != 10000 {
+                    args.push(("delay", delay.to_string()));
+                }
+            }
+            (130, _) => {
+                let n = self.u16(at + 26) as usize;
+                if len != 28 + 16 * n || self.data[at + 24] & 0xf0 != 0 {
+                    return false;
+                }
+                args.push(("type", "v2query".into()));
+                if delay != 10000 {
+                    args.push(("delay", delay.to_string()));
+                }
+                let f = self.data[at + 24];
+                if f & 8 != 0 {
+                    args.push(("s", "1".into()));
+                }
+                if f & 7 != 2 {
+                    args.push(("qrv", (f & 7).to_string()));
+                }
+                if self.data[at + 25] != 125 {
+                    args.push(("qqic", self.data[at + 25].to_string()));
+                }
+                for i in 0..n {
+                    let o = at + 28 + 16 * i;
+                    let mut a = [0u8; 16];
+                    a.copy_from_slice(&self.data[o..o + 16]);
+                    args.push(("src", Ipv6Addr::from(a).to_string()));
+                }
+            }
+            (131 | 132, 24) if delay == 0 => {
+                if t == 132 {
+                    args.push(("type", "done".into()));
+                }
+            }
+            _ => return false,
+        }
+        args.push(("group", group));
+        self.push("mld", args);
+        true
+    }
+
     /// The builder pads Ethernet frames with zeros to 60 bytes; turn that off
     /// when the frame was not padded like that.
     fn ethernet_padding(&mut self, l3: usize, len: usize) {
+        if self.inner {
+            return;
+        }
         let packet_end = (l3 + len).min(self.data.len());
         let trailer = &self.data[packet_end..];
         if trailer.is_empty() {
@@ -202,7 +726,7 @@ impl Importer<'_> {
     }
 
     fn no_pad(&mut self) {
-        if self.data.len() < 60 {
+        if self.data.len() < 60 && !self.inner {
             if let Some(eth) = self.out.layers.iter_mut().find(|l| l.name == "eth") {
                 if !eth.args.iter().any(|(k, _)| k == "pad") {
                     eth.args.push(("pad".into(), "0".into()));
@@ -355,6 +879,18 @@ impl Importer<'_> {
         }
         match proto {
             6 => self.tcp(ip, at),
+            4 if self.data.get(at).is_some_and(|b| b >> 4 == 4) => {
+                self.inner = true;
+                self.ipv4(at)
+            }
+            41 if self.data.get(at).is_some_and(|b| b >> 4 == 6) => {
+                self.inner = true;
+                self.ipv6(at)
+            }
+            47 if self.gre(at) => {}
+            0 | 60 if self.out.layers[ip].name == "ipv6" && self.ipv6_options(proto, at) => {}
+            2 if self.out.layers[ip].name == "ipv4" && self.igmp(at) => {}
+            58 if self.has(at, 4) && matches!(self.data[at], 130..=132 | 143) && self.mld(at) => {}
             17 if self.has(at, 8) => {
                 let sport = self.u16(at);
                 let dport = self.u16(at + 2);
@@ -379,7 +915,9 @@ impl Importer<'_> {
                         vec![("sport", sport.to_string()), ("dport", dport.to_string())],
                     );
                 }
-                self.raw(at + 8);
+                if !self.udp_tunnel(sport, dport, at + 8) {
+                    self.raw(at + 8);
+                }
             }
             // ICMPv6 other than echo (neighbor discovery and the rest) is
             // kept as captured bytes.
@@ -542,6 +1080,33 @@ mod tests {
             "eth(type=0x88b5)/raw(len=46)",
             "eth/ipv4(mf=1,id=7)/udp/raw(len=100)",
             "eth/ipv4(frag=1480,id=7)/raw(len=40)",
+            "eth/ipv4(src=10.0.0.1,dst=10.0.0.2)/udp(sport=4000,dport=4789)/vxlan(vni=5000)/eth(dst=02:00:00:00:00:0b,src=02:00:00:00:00:0a)/ipv4(src=192.168.1.1,dst=192.168.1.2)/udp(sport=1000,dport=2000)/raw(len=10)",
+            "eth/vlan(id=7)/ipv4/udp(sport=2152,dport=2152)/gtpu(teid=4660,qfi=9,pdu=ul,seq=7)/ipv4(src=172.16.0.5,dst=8.8.8.8)/udp(sport=1,dport=53)/raw(len=20)",
+            "eth/ipv6/udp(sport=2152,dport=2152)/gtpu(teid=1)/ipv6/tcp(sport=1,dport=2,flags=S)",
+            "eth/ipv4/gre(csum=1,key=42,seq=3)/eth(dst=02:00:00:00:00:01,src=02:00:00:00:00:02)/ipv4/icmp(id=1,seq=1)",
+            "eth/ipv6/gre/ipv4/udp(sport=1,dport=2)/raw(len=4)",
+            "eth/ipv6/udp(sport=5,dport=6081)/geneve(vni=7,opt=01020300,oam=1)/eth(dst=02:00:00:00:00:01,src=02:00:00:00:00:02)/ipv6/icmp(id=1,seq=2)",
+            "eth/ipv4/udp(sport=5,dport=6081)/geneve(vni=8)/ipv4/tcp(sport=1,dport=2,flags=S)",
+            "eth/vlan(id=5)/mpls(label=100,tc=5)/mpls(label=200,ttl=1)/ipv4/udp(sport=1,dport=2)/raw(len=4)",
+            "eth/mpls(label=17)/eth(dst=02:00:00:00:00:01,src=02:00:00:00:00:02)/ipv4/icmp(id=1,seq=1)",
+            "eth/ipv4/ipv4/icmp(id=1,seq=1)",
+            "eth/ipv4/ipv6/udp(sport=1,dport=2)/raw(len=8)",
+            "eth/ipv6/ipv4/tcp(sport=1,dport=2,flags=S)",
+            "eth/ipv6/ipv6/icmp(id=1,seq=1)",
+            "eth(dst=01:80:c2:00:00:00)/llc(dsap=0x42,ssap=0x42)/raw(len=35)",
+            "eth/llc/snap/ipv4/udp(sport=1,dport=2)/raw(len=4)",
+            "eth(dst=01:00:0c:cc:cc:cc)/llc/snap(oui=0x00000c,pid=0x2000)/raw(len=20)",
+            "eth/ipv4(dst=224.0.0.22,ttl=1)/igmp(rec=join@239.1.2.3,rec=allow@232.1.1.1+10.0.0.9)",
+            "eth/ipv4/igmp(type=query,mrt=50,group=0.0.0.0)",
+            "eth/ipv4/igmp(type=v3query,group=239.1.1.1,src=10.0.0.1,src=10.0.0.2,qrv=3)",
+            "eth/ipv4/igmp(type=leave,group=239.9.9.9)",
+            "eth/ipv4/igmp(ver=1,group=239.9.9.9)",
+            "eth/ipv4/igmp(group=239.9.9.9)",
+            "eth/ipv6(hlim=1,dst=ff02::16)/hbh(ra=0)/mld(rec=join@ff3e::1234,rec=block@ff3e::1+2001:db8::1)",
+            "eth/ipv6/hbh(ra=0)/mld(type=query,group=::)",
+            "eth/ipv6/mld(type=v2query,group=ff3e::1,src=2001:db8::5,s=1)",
+            "eth/ipv6/hbh(ra=0)/mld(type=done,group=ff3e::1)",
+            "eth/ipv6/dstopt(len=16)/udp(sport=1,dport=2)/raw(len=4)",
         ] {
             let im = round_trip(spec);
             assert!(im.notes.is_empty(), "{spec}: {:?}", im.notes);
