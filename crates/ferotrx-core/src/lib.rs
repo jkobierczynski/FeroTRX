@@ -129,6 +129,7 @@ mod link;
 pub mod live;
 mod net;
 mod pacer;
+#[cfg(feature = "profile")]
 pub mod persona;
 #[cfg(feature = "profile")]
 mod profile;
@@ -206,6 +207,7 @@ pub use live::{
 };
 pub use net::{MacAddr, TPID_QINQ, TPID_VLAN};
 pub use pacer::{parse_duration, Pacer, Rate, RateSpec, WIRE_OVERHEAD};
+#[cfg(feature = "profile")]
 pub use persona::Persona;
 #[cfg(feature = "profile")]
 pub use profile::{

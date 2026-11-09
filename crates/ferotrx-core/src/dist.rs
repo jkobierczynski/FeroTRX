@@ -575,6 +575,7 @@ impl CountStats {
 
 /// A distribution as a profile writes it: text (`"exp(5s)"`) or a plain
 /// number (`session_requests = 5`).
+#[cfg(feature = "profile")]
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(untagged)]
 pub(crate) enum DistText {
@@ -583,6 +584,7 @@ pub(crate) enum DistText {
     Float(f64),
 }
 
+#[cfg(feature = "profile")]
 impl DistText {
     pub(crate) fn text(&self) -> String {
         match self {
@@ -598,6 +600,7 @@ impl DistText {
 }
 
 /// `SessionLength::from_keys` for profile values.
+#[cfg(feature = "profile")]
 pub(crate) fn session_from(
     requests: Option<&DistText>,
     duration: Option<&DistText>,

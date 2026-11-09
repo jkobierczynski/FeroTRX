@@ -77,6 +77,7 @@ impl std::fmt::Display for UserGroup {
 
 /// A profile's `[users]` table (and a persona's `[user]` table, without
 /// `count`).
+#[cfg(feature = "profile")]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawUsers {
@@ -86,6 +87,7 @@ pub(crate) struct RawUsers {
     pub arrival: Option<f64>,
 }
 
+#[cfg(feature = "profile")]
 impl RawUsers {
     /// The group, named `name`; `count` comes from here or from `users`.
     pub(crate) fn group(&self, name: &str, users: Option<u32>) -> crate::Result<UserGroup> {

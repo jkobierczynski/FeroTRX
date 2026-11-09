@@ -1225,6 +1225,12 @@ impl ClientSession {
 
 impl AppSession for ClientSession {
     fn start(&mut self, cx: &mut AppCx) {
+        if !self.more(0, cx.now()) {
+            // The session's time ran out during the handshake: nothing to
+            // ask, so close rather than wait for the idle timeout.
+            cx.close();
+            return;
+        }
         if self.cfg.client.pipeline {
             // The whole session at once, up to a bounded batch (a drawn
             // length can be huge); `take` and `timer` send the next batch
