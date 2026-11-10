@@ -59,6 +59,16 @@ pub fn tcp_metrics(s: &TcpStats) -> Metrics {
     latency_metrics(&mut m, "response", &a.response_time);
     latency_metrics(&mut m, "connect", &c.connect_time);
     latency_metrics(&mut m, "first_byte", &c.first_byte);
+    let n = &c.session_requests;
+    if n.count() > 0 {
+        let v = |x: Option<u64>| x.unwrap_or(0) as f64;
+        put(&mut m, "session_requests_avg", n.mean().unwrap_or(0.0));
+        put(&mut m, "session_requests_p50", v(n.percentile(0.5)));
+        put(&mut m, "session_requests_p99", v(n.percentile(0.99)));
+        put(&mut m, "session_requests_max", v(n.max()));
+    }
+    latency_metrics(&mut m, "session_time", &c.session_time);
+    user_metrics(&mut m, &s.users);
     if a.handshakes > 0 {
         put(&mut m, "tls_handshakes", a.handshakes as f64);
         put(&mut m, "tls_failed", a.handshake_failures as f64);
@@ -100,6 +110,21 @@ pub fn tcp_summary(s: &TcpStats) -> String {
     line
 }
 
+/// The users of a run, all groups together.
+fn user_metrics(m: &mut Metrics, users: &[crate::UserStats]) {
+    let Some(all) = users.last() else { return };
+    put(m, "users_online", all.online as f64);
+    put(m, "users_arrived", all.arrived as f64);
+    put(m, "users_departed", all.departed as f64);
+    put(m, "user_sessions", all.sessions as f64);
+    if let Some(v) = all.think.mean() {
+        put(m, "user_think_avg", ms(v));
+    }
+    if let Some(v) = all.lifetime.mean() {
+        put(m, "user_lifetime_avg", ms(v));
+    }
+}
+
 fn latency_metrics(m: &mut Metrics, prefix: &str, l: &LatencyStats) {
     if l.count() == 0 {
         return;
@@ -138,6 +163,7 @@ pub fn udp_metrics(s: &UdpStats) -> Metrics {
     );
     latency_metrics(&mut m, "response", &c.response_time);
     put(&mut m, "tps", s.tps());
+    user_metrics(&mut m, &s.users);
     put(&mut m, "server_answered", s.server.answered as f64);
     let a = &c.app;
     if !a.is_empty() {

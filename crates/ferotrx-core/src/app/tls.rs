@@ -32,7 +32,9 @@ use rustls::{
 };
 
 use super::Transport;
-use super::{App, AppCx, AppHandshake, AppProtocol, AppRole, AppSession, Receive, SessionInit};
+use super::{
+    App, AppCx, AppHandshake, AppProtocol, AppRole, AppSession, Receive, SessionInit, SessionPlan,
+};
 use crate::{Error, Result};
 
 fn err(m: impl fmt::Display) -> Error {
@@ -423,7 +425,15 @@ impl AppProtocol for Tls {
     }
 
     fn session(&self, init: &SessionInit) -> Box<dyn AppSession> {
-        let inner = self.inner.session(init);
+        self.session_with(init, &SessionPlan::default())
+    }
+
+    fn plans(&self) -> bool {
+        self.inner.plans()
+    }
+
+    fn session_with(&self, init: &SessionInit, plan: &SessionPlan) -> Box<dyn AppSession> {
+        let inner = self.inner.session_with(init, plan);
         let conn = match init.role {
             AppRole::Client => None,
             AppRole::Server => Some(

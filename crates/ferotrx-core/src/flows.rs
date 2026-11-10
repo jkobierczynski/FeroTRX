@@ -226,6 +226,34 @@ fn limit_share(kind: &str, what: &str, total: u64, k: usize, n: usize) -> Result
     Ok(share(total, k, n))
 }
 
+/// Worker `k`'s share of the users: of each group, and of its arrival
+/// rate; its users start from their own part of the client's addresses.
+fn users_for(
+    kind: &str,
+    groups: &[crate::UserGroup],
+    ip_count: u32,
+    k: usize,
+    n: usize,
+) -> Result<(Vec<crate::UserGroup>, u64)> {
+    let mut out = Vec::with_capacity(groups.len());
+    for g in groups {
+        let mut g = g.clone();
+        g.users = limit_share(
+            kind,
+            &format!("users '{}'", g.name),
+            u64::from(g.users),
+            k,
+            n,
+        )? as u32;
+        g.arrival = g.arrival.map(|r| r / n as f64);
+        // The workers' arrivals in turn: worker k comes k/N of its own
+        // gap later, so together they keep the profile's rate.
+        g.phase = k as f64 / n as f64;
+        out.push(g);
+    }
+    Ok((out, u64::from(ip_count) * k as u64 / n as u64))
+}
+
 fn model_for(model: &TrafficModel, k: usize) -> TrafficModel {
     let mut m = model.clone();
     m.seed = m.seed.map(|s| worker_seed(s, k));
@@ -304,6 +332,7 @@ impl TcpConfig {
                 c.concurrency =
                     limit_share("tcp", "concurrency", c.concurrency as u64, k, n)? as usize;
                 c.source_ports = slice(c.source_ports.clone(), k, n);
+                (c.users, c.user_address) = users_for("tcp", &c.users, c.endpoint.ip_count, k, n)?;
             }
             for t in &mut cfg.templates {
                 let what = |w: &str| format!("template '{}': {w}", t.name);
@@ -360,6 +389,7 @@ impl UdpConfig {
                 c.concurrency =
                     limit_share("udp", "concurrency", c.concurrency as u64, k, n)? as usize;
                 c.source_ports = slice(c.source_ports.clone(), k, n);
+                (c.users, c.user_address) = users_for("udp", &c.users, c.endpoint.ip_count, k, n)?;
             }
             for t in &mut cfg.templates {
                 let what = |w: &str| format!("template '{}': {w}", t.name);
@@ -393,6 +423,8 @@ impl MergeStats for TcpSideStats {
         self.max_in_flight = self.max_in_flight.max(o.max_in_flight);
         self.connect_time.merge(&o.connect_time);
         self.first_byte.merge(&o.first_byte);
+        self.session_requests.merge(&o.session_requests);
+        self.session_time.merge(&o.session_time);
         self.app.merge(&o.app);
     }
 }
@@ -420,9 +452,21 @@ impl MergeStats for TcpStats {
         self.impair.merge(&o.impair);
         self.elapsed = self.elapsed.max(o.elapsed);
         self.stopped |= o.stopped;
+        merge_users(&mut self.users, &o.users);
         if self.hosts.is_empty() {
             self.hosts.clone_from(&o.hosts);
         }
+    }
+}
+
+/// Adds each group's users (by position: every worker has the same groups).
+fn merge_users(a: &mut Vec<crate::UserStats>, b: &[crate::UserStats]) {
+    if a.is_empty() {
+        a.extend_from_slice(b);
+        return;
+    }
+    for (x, y) in a.iter_mut().zip(b) {
+        x.merge(y);
     }
 }
 
@@ -467,6 +511,7 @@ impl MergeStats for UdpStats {
         self.impair.merge(&o.impair);
         self.elapsed = self.elapsed.max(o.elapsed);
         self.stopped |= o.stopped;
+        merge_users(&mut self.users, &o.users);
         if self.hosts.is_empty() {
             self.hosts.clone_from(&o.hosts);
         }

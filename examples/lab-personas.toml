@@ -1,0 +1,36 @@
+# Personas on the lab router (`sudo ferotrx lab up`): office workers, IoT
+# sensors and machines, each kind from its own file in personas/, mixed in
+# one TCP run. A persona says what its users do and how they pause; this
+# file says how many are online. The [server] answers all their templates.
+# See docs/traffic-models.md#personas.
+#
+#   sudo ferotrx tcp -p examples/lab-personas.toml -i ftrx-lab -d 2m
+#   sudo ferotrx udp -p examples/lab-personas-udp.toml -i ftrx-lab -d 2m   (their UDP side)
+format = 1
+
+[[persona]]
+file = "personas/office.toml"
+users = 30
+
+[[persona]]
+file = "personas/iot.toml"
+users = 100
+think = "exp(5s)"           # livelier than the persona's 30 s, for a short run
+
+[[persona]]
+file = "personas/server.toml"
+users = 4
+
+[client]
+ip = "192.168.10.50/24"
+ips = 200
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20
+
+[tcp]
+idle_timeout = "2m"

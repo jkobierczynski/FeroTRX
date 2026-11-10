@@ -3,6 +3,8 @@
 FeroTRX 0.10.0 (M17) adds two things: traffic models, which decide how
 packets, connections and transactions spread over time around a rate, and
 `ferotrx check`, which checks profile and scenario files without sending.
+FeroTRX 0.50.0 (M53) adds [sessions and users](#sessions-and-users) (session
+lengths, think times, users kept online) and [personas](#personas).
 
 ## Traffic models
 
@@ -103,6 +105,187 @@ exactly, so a ramp from 0 to 100 pps in 10 s sends its 500 packets at the
 times `sqrt(2·n/10)`, not in steps. With no model, the times are the same as
 before 0.10.0.
 
+## Sessions and users
+
+A model spreads connections over time, but every connection is still alike:
+one pass of a capture or of an application's request list. Real users come
+and go, make sessions of different lengths, and pause between requests and
+between sessions. FeroTRX 0.50.0 (M53) adds this to TCP and UDP profiles.
+
+### Distributions
+
+Session lengths, think times and user lifetimes are drawn from a
+distribution, written the same everywhere:
+
+| Written | Distribution |
+|---|---|
+| `5s`, `12`, `64K` | Fixed: always that value. |
+| `exp(5s)` | Exponential with that mean (Poisson-like pauses). |
+| `lognormal(median=2s, sigma=1)` | Log-normal: half below the median, a long tail; `mean=` instead of `median=` gives it by its mean. |
+| `pareto(min=1K, shape=1.5)` | Pareto: at least `min`, a heavy tail (the smaller `shape`, the heavier). |
+| `uniform(1s, 5s)` | Uniform between the two. |
+| `normal(mean=200ms, sd=50ms)` | Normal, cut at 0. |
+
+Any of them takes `min=` and `max=` to cut the draws to a range, such as
+`lognormal(median=8, sigma=1, max=100)`. Times take `us`, `ms`, `s`, `m` and
+`h`; byte sizes `K`, `M` and `G` (powers of 1024); counts are plain numbers.
+Draws come from the run's seed (`[tcp] seed`, `[udp] seed`), so a seeded
+run draws the same values again.
+
+### Session lengths
+
+A TCP template (or the top of a TCP profile, as the default for all
+templates) takes one of:
+
+| Key | A session ends after |
+|---|---|
+| `session_requests` | That many requests (HTTP), streams (HTTP/2, HTTP/3) or rounds of a capture. |
+| `session_duration` | That much time: no new request or round starts after it. |
+| `session_bytes` | That many bytes, sent and received together. |
+
+and `think_time`, the pause between the requests or rounds of a session, as
+a distribution (`--think-time` on the command line takes one too). A
+session is one connection. Session lengths work with `app = "http"`,
+`"https"`, `"h2"`/`"h2c"` and, in UDP profiles, `"h3"`, whose requests are
+played in turn from the request list; and with a capture (`pcap`) whose
+client speaks first, which is played again in rounds on the same
+connection. Other protocols play their own sessions (`per_connection` and
+the like) and refuse session lengths.
+
+```toml
+[[template]]
+name = "web"
+app = "http"
+session_requests = "lognormal(median=5, sigma=0.8, max=50)"
+think_time = "exp(1s)"
+
+[[template]]
+name = "app"
+pcap = "http.pcap"
+port = 8080
+session_duration = "uniform(10s, 30s)"
+think_time = "2s"
+```
+
+With a capture, `think_time` pauses both ends before they speak (as it did
+before 0.50.0), so a round takes about twice the think time plus the round
+trips.
+
+### Users
+
+A `[users]` table keeps a number of users online instead of opening
+connections at a rate:
+
+```toml
+[users]
+count = 50                  # online at once
+think = "exp(5s)"           # between a user's sessions
+lifetime = "exp(5m)"        # how long a user stays, then a new one comes
+arrival = 10                # users per second at the start, until all are on
+```
+
+Each user has a client address of its own when `[client] ips` has enough
+for them (else users share addresses in turn), makes one session at a time on a template picked by weight,
+waits `think` after it ends and makes the next. With `lifetime`, a user
+leaves when the session it is in ends after its time is up, and a new user
+comes in its place, so `count` stays online. Without `arrival`, all users
+start at once. With users, `cps`, `rate` and `connections` don't apply:
+the run goes on until `-d` or Ctrl-C.
+
+The summary has a `users:` line per group: users online, how many came and
+left, sessions, the think times drawn and how long the users that left
+stayed. The run's counters have `session_requests` (requests per session:
+min, mean, median, p99, max) and `session_time`. The same are in the JSON
+report (`tcp.users`, `udp.users`, `tcp.client.session_requests`), the control
+API (`UserCounters`, `CountCounters`), Python, and as scenario metrics
+(`users_online`, `users_arrived`, `users_departed`, `user_sessions`,
+`user_think_avg`, `user_lifetime_avg`, `session_requests_avg`/`p50`/`p99`/`max`,
+`session_time_min`/`avg`/`p99`/`max`).
+
+Set `[tcp] idle_timeout` above the longest think time between requests, or
+connections that wait are reset; `ferotrx check` warns when the median
+think time is more than half of it.
+
+Over UDP, a user's session is a transaction (a DNS lookup, an NTP request)
+or a dialog (a SIP call, an HTTP/3 connection); `think` paces them. Session
+lengths over UDP need a protocol that plays a whole session (`h3`).
+
+[`examples/lab-sessions.toml`](../examples/lab-sessions.toml) keeps 50
+users browsing in visits of a log-normal number of pages.
+
+## Personas
+
+A persona is a file that says what one kind of user does: how it pauses
+and how long it stays (`[user]`, as `[users]` without `count`), and the
+sessions it makes, as `[[tcp]]` and `[[udp]]` tables written like a
+profile's `[[template]]`:
+
+```toml
+format = 1
+name = "iot"
+description = "MQTT telemetry in short connections, NTP"
+
+[user]
+think = "exp(30s)"
+arrival = 20
+
+[[tcp]]
+name = "telemetry"
+app = "mqtt"
+port = 1883
+[tcp.mqtt]
+publish = ["lab/sensors/temp 1 32"]
+
+[[udp]]
+name = "ntp"
+app = "ntp"
+port = 123
+```
+
+A TCP profile takes the persona's `[[tcp]]` tables, a UDP profile its
+`[[udp]]` tables, with a `[[persona]]` table each that says how many of its
+users are online:
+
+```toml
+[[persona]]
+file = "personas/office.toml"
+users = 30
+
+[[persona]]
+file = "personas/iot.toml"
+users = 100
+think = "exp(5s)"           # optional: overrides the persona's [user]
+lifetime = "exp(10m)"       # optional, as are arrival and name
+port_offset = 1000          # optional: added to the persona's ports
+```
+
+The persona's templates join the profile's as `PERSONA/TEMPLATE`
+(`office/intranet`), each group of users makes sessions only on its own
+persona's templates, and the profile's `[server]` answers them all. A
+profile can have both `[[persona]]` tables and its own `[users]` and
+templates. A capture a persona names is looked for next to the persona
+file. On a control server (`serve`, fleet agents), persona files must be in
+a data directory like any other file; deploy them beside the profile.
+
+Scenarios and fleet plans run profiles with personas like any other, and
+`ferotrx check` checks a persona file on its own (kind `persona`): both its
+TCP and UDP sides, with their apps.
+
+[`examples/personas/`](../examples/personas) has four: `office` (intranet
+over HTTPS, API posts, DNS), `iot` (MQTT telemetry, NTP), `voice` (SIP
+calls with RTP, HTTP provisioning) and `server` (HTTP/2 API sessions with a
+heavy tail). [`examples/lab-personas.toml`](../examples/lab-personas.toml)
+and [`lab-personas-udp.toml`](../examples/lab-personas-udp.toml) mix them on
+the lab router.
+
+### Checking the numbers
+
+`scripts/realism-netns.sh` (in CI) runs users through a NAT router in
+network namespaces and checks that what was measured matches what was
+asked: the median and mean of log-normal session lengths, exponential think
+times, users online and their stay, capture rounds for a session duration,
+UDP lookups at users ÷ think time, and every persona group making sessions.
+
 ## `ferotrx check`
 
 ```sh
@@ -124,7 +307,8 @@ use. It exits with 1 if any file has an error, and with `--strict` also if
 any has a warning.
 
 The kind comes from the top-level keys: `[[check]]` is a scenario,
-`[benchmark]` a benchmark profile, `[[stream]]` a traffic profile; `rate`,
+`[benchmark]` a benchmark profile, `[[stream]]` a traffic profile, `[user]`
+or `[[tcp]]`/`[[udp]]` tables a persona; `rate`,
 `app`, `queries`, `records`, `transactions` or `[udp]` (at the top or in a
 template) make a UDP profile, and anything else is taken as TCP. `--kind`
 overrides the guess.

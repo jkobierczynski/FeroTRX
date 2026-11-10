@@ -1,0 +1,33 @@
+# Persona: a desk phone. Calls now and then (SIP with RTP), and fetches its
+# provisioning file over HTTP once in a while. See
+# examples/lab-personas-udp.toml.
+format = 1
+name = "voice"
+description = "SIP calls with RTP, HTTP provisioning"
+
+[user]
+think = "exp(2m)"           # between calls
+
+[[udp]]
+name = "calls"
+app = "sip"
+port = 5060
+
+[udp.sip]
+register = false
+call = "echo"
+duration = "30s"
+codecs = ["PCMU", "PCMA"]
+
+[[tcp]]
+name = "provisioning"
+app = "http"
+port = 8081
+session_requests = 1
+
+[tcp.http]
+requests = ["GET /phone.cfg"]
+
+[[tcp.http.route]]
+path = "/phone.cfg"
+body_size = "4K"

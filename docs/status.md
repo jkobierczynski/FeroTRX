@@ -1,6 +1,6 @@
 # Feature status
 
-What works how well, as of 0.46.0. The milestones and their notes are in
+What works how well, as of 0.50.0. The milestones and their notes are in
 [DEVELOPMENT.md](../DEVELOPMENT.md); which real implementations each
 protocol is tested against is in [interop.md](interop.md).
 
@@ -16,7 +16,7 @@ protocol is tested against is in [interop.md](interop.md).
 | Feature | Status | Notes |
 |---|---|---|
 | pcap replay, rewriting, loops, rates | Done | [replay.md](replay.md) |
-| Profiles of streams (TOML), field engine, traffic models | Done | [traffic-models.md](traffic-models.md); session length distributions not done |
+| Profiles of streams (TOML), field engine, traffic models | Done | [traffic-models.md](traffic-models.md) |
 | Multi-burst and `next` streams, `50%` and L1 rates, live pause/resume/rate | Done | M50 |
 | The port's own addresses (ARP, neighbor discovery, answers) | Partial | scenario traffic checks do not resolve addresses or shares of the line |
 | Packet building and inspection | Done | [packets.md](packets.md); MPLS, GRE, VXLAN, Geneve, GTP-U, IP in IP, LLC/SNAP, IGMP and MLD since 0.47.0 |
@@ -37,6 +37,7 @@ protocol is tested against is in [interop.md](interop.md).
 |---|---|---|
 | TCP engine (SACK, window scaling, timestamps, RTO, NewReno, CUBIC, ECN) | Partial | no BBR, Accurate ECN or L4S; no cap on half-open connections in the server |
 | TCP templates, rates, concurrency, think time | Done | [stateful-tcp.md](stateful-tcp.md) |
+| Session lengths, think times, users, personas | Partial | [traffic-models.md](traffic-models.md#sessions-and-users); session lengths only for HTTP, HTTPS, HTTP/2, HTTP/3 and captures; personas not in the GUI's editors |
 | TCP, UDP and applications inside GTP-U, a TEID per client | Partial | [stateful-tcp.md](stateful-tcp.md#inside-gtp-u-tunnels); no GTP-C, echo requests or fragmentation; ports are shared among `--workers` |
 | UDP engine, DNS, NTP | Done | [stateful-udp.md](stateful-udp.md) |
 | HTTP/1.1 with response checks | Done | |
@@ -76,7 +77,6 @@ protocol is tested against is in [interop.md](interop.md).
 ## Planned
 
 From the comparison with TRex and Ostinato:
-[#106](https://github.com/jkobierczynski/FeroTRX/issues/106) realism (M53),
 [#108](https://github.com/jkobierczynski/FeroTRX/issues/108) accurate latency
 and [#109](https://github.com/jkobierczynski/FeroTRX/issues/109) fleet
 robustness (M55, M56).

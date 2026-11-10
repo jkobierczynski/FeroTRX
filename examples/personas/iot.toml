@@ -1,0 +1,27 @@
+# Persona: an IoT sensor. Wakes up, connects to the MQTT broker, publishes
+# a few readings and sleeps; checks the time over NTP. Many of them, each
+# with little to say. See examples/lab-personas.toml.
+format = 1
+name = "iot"
+description = "MQTT telemetry in short connections, NTP"
+
+[user]
+think = "exp(30s)"          # sleeps between wake-ups, Poisson-like
+arrival = 20                # power-on storm: 20 sensors a second
+
+[[tcp]]
+name = "telemetry"
+app = "mqtt"
+port = 1883
+
+[tcp.mqtt]
+client_id = "sensor-{n}"
+keep_alive = "60s"
+publish = ["lab/sensors/temp 1 32", "lab/sensors/battery 0 8"]
+per_connection = 3          # readings each wake-up
+interval = "10ms"
+
+[[udp]]
+name = "ntp"
+app = "ntp"
+port = 123

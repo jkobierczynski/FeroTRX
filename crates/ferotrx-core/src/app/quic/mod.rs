@@ -199,7 +199,15 @@ impl AppProtocol for Http3 {
     }
 
     fn session(&self, init: &SessionInit) -> Box<dyn AppSession> {
-        Box::new(QuicSession::new(self, init))
+        Box::new(QuicSession::new(self, init, &super::SessionPlan::default()))
+    }
+
+    fn plans(&self) -> bool {
+        true
+    }
+
+    fn session_with(&self, init: &SessionInit, plan: &super::SessionPlan) -> Box<dyn AppSession> {
+        Box::new(QuicSession::new(self, init, plan))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -208,7 +216,7 @@ impl AppProtocol for Http3 {
 }
 
 impl QuicSession {
-    fn new(h3: &Http3, init: &SessionInit) -> Self {
+    fn new(h3: &Http3, init: &SessionInit, plan: &super::SessionPlan) -> Self {
         let cfg = Arc::new(h3.clone());
         let role = match init.role {
             AppRole::Client => {
@@ -219,7 +227,7 @@ impl QuicSession {
                         (a, _) => a.to_string(),
                     }
                 });
-                Role::Client(H3Client::new(cfg.clone(), host, init.index))
+                Role::Client(H3Client::new(cfg.clone(), host, init, plan))
             }
             AppRole::Server => Role::Server(H3Server::new(cfg.clone())),
         };
@@ -671,10 +679,12 @@ pub(crate) fn fuzz_established(h3: &Http3, server_side: bool, payloads: &[&[u8]]
     let mut c = QuicSession::new(
         h3,
         &init(AppRole::Client, 7, "10.0.0.1:40000", "10.0.0.2:443"),
+        &super::SessionPlan::default(),
     );
     let mut s = QuicSession::new(
         h3,
         &init(AppRole::Server, 9, "10.0.0.2:443", "10.0.0.1:40000"),
+        &super::SessionPlan::default(),
     );
     let mut now = Duration::from_millis(1);
     let mut cx = AppCx::new(now, now);

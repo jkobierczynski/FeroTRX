@@ -31,9 +31,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::http::{Http, HttpRoute};
+use super::http::{ClientPlan, Http, HttpRoute};
 use super::{
-    AppCx, AppProtocol, AppRole, AppSession, AppTransaction, Receive, SessionInit, Transport,
+    AppCx, AppProtocol, AppRole, AppSession, AppTransaction, Receive, SessionInit, SessionPlan,
+    Transport,
 };
 use crate::{Error, Result};
 use hpack::{Decoder, Encoder};
@@ -201,6 +202,14 @@ impl AppProtocol for Http2 {
     }
 
     fn session(&self, init: &SessionInit) -> Box<dyn AppSession> {
+        self.session_with(init, &SessionPlan::default())
+    }
+
+    fn plans(&self) -> bool {
+        true
+    }
+
+    fn session_with(&self, init: &SessionInit, plan: &SessionPlan) -> Box<dyn AppSession> {
         let cfg = Arc::new(self.clone());
         match init.role {
             AppRole::Client => {
@@ -218,6 +227,7 @@ impl AppProtocol for Http2 {
                     cfg,
                     host,
                     first: init.index * per,
+                    plan: ClientPlan::new(&self.http.client, plan, init.seed),
                     next_id: 1,
                     sent: 0,
                     answered: 0,
@@ -822,6 +832,8 @@ struct ClientSession {
     host: String,
     /// Number of the connection's first request, across connections.
     first: u64,
+    /// How many requests, and the pauses between them.
+    plan: ClientPlan,
     next_id: u32,
     sent: u32,
     answered: u32,
@@ -847,13 +859,14 @@ impl ClientSession {
             }
             self.gate = None;
         }
+        let _ = c;
         let limit = self.cfg.settings.concurrent.min(self.conn.peer_streams) as usize;
         while !self.stop
-            && (self.sent < c.per_connection || !self.retry.is_empty())
+            && (self.plan.more(self.sent, cx.now()) || !self.retry.is_empty())
             && self.inflight.len() < limit.max(1)
         {
             self.send_request(cx);
-            if !c.think_time.is_zero() {
+            if !self.plan.think.is_zero() {
                 break; // one at a time, as a user would
             }
         }
@@ -869,6 +882,7 @@ impl ClientSession {
             }
         };
         let req = &c.requests[i];
+        self.plan.bytes += req.body.len() as u64;
         let id = self.next_id;
         self.next_id += 2;
         let mut fields: Vec<(String, String)> = vec![
@@ -922,9 +936,8 @@ impl ClientSession {
         }
         cx.transaction(t);
         self.answered += 1;
-        let think = self.cfg.http.client.think_time;
-        if !think.is_zero() {
-            self.gate = Some(cx.now() + think);
+        if let Some(t) = self.plan.pause() {
+            self.gate = Some(cx.now() + t);
         }
     }
 
@@ -988,13 +1001,12 @@ impl ClientSession {
     }
 
     fn after(&mut self, cx: &mut AppCx) {
-        let per = self.cfg.http.client.per_connection;
-        if self.answered >= per || (self.stop && self.inflight.is_empty()) {
-            if self.answered < per {
-                cx.protocol_error(format!(
-                    "the server stopped after {} of {per} requests",
-                    self.answered
-                ));
+        let finished = self.inflight.is_empty()
+            && self.retry.is_empty()
+            && !self.plan.more(self.sent, cx.now());
+        if finished || (self.stop && self.inflight.is_empty()) {
+            if let Some(why) = self.plan.short_of(self.answered) {
+                cx.protocol_error(format!("the server stopped {why}"));
             }
             // GOAWAY, then let the server close first: a server that
             // closes on GOAWAY (nghttpd) would otherwise reset the
@@ -1024,6 +1036,7 @@ impl AppSession for ClientSession {
         if self.done {
             return Receive::Taken;
         }
+        self.plan.bytes += data.len() as u64;
         match self.conn.feed(data, cx) {
             Ok(events) => self.take(events, cx),
             Err((code, what)) => self.fail(cx, code, what),
@@ -1034,10 +1047,11 @@ impl AppSession for ClientSession {
     fn peer_closed(&mut self, cx: &mut AppCx) {
         if !self.done {
             self.done = true;
-            cx.protocol_error(format!(
-                "the server closed after {} of {} requests",
-                self.answered, self.cfg.http.client.per_connection
-            ));
+            let why = self
+                .plan
+                .short_of(self.answered)
+                .unwrap_or_else(|| format!("after {} requests", self.answered));
+            cx.protocol_error(format!("the server closed {why}"));
         }
         cx.close();
     }
@@ -1046,7 +1060,8 @@ impl AppSession for ClientSession {
         if self.done {
             cx.close(); // the server did not close after our GOAWAY
         } else {
-            self.fill(cx);
+            // Fills, or ends the session if its time ran out meanwhile.
+            self.after(cx);
         }
     }
 }
@@ -1536,7 +1551,7 @@ mod tests {
     #[test]
     fn think_time_and_delays() {
         let mut h2 = sample();
-        h2.http.client.think_time = Duration::from_millis(50);
+        h2.http.client.think_time = crate::Dist::time(Duration::from_millis(50));
         h2.http.server.routes[0].delay = Duration::from_millis(20);
         let (c, _) = run(&h2, 0, 1 << 20);
         assert!(c.all_ok());

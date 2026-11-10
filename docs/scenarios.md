@@ -231,7 +231,13 @@ whole answer); over TLS `tls_handshakes`, `tls_failed`, `tls_unexpected`
 (new sessions), `tls_rate` (successful handshakes per second) and
 `handshake_min`, `handshake_avg`, `handshake_p99`, `handshake_max` (ms), also
 for new and resumed sessions apart (`handshake_full_*`,
-`handshake_resumed_*`).
+`handshake_resumed_*`). With [session lengths and users](traffic-models.md#sessions-and-users):
+`session_requests_avg`, `session_requests_p50`, `session_requests_p99`,
+`session_requests_max` (requests or rounds per completed connection),
+`session_time_min`, `session_time_avg`, `session_time_p99`,
+`session_time_max` (ms), and for the users (all groups together)
+`users_online`, `users_arrived`, `users_departed`, `user_sessions`,
+`user_think_avg` and `user_lifetime_avg` (ms; these are for UDP too).
 
 **UDP**: `transactions`, `answered`, `answered_pct`, `timed_out`,
 `timed_out_pct`, `mismatched` (another answer than expected), `unmatched`

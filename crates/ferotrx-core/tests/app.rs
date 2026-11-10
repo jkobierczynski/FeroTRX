@@ -1232,3 +1232,254 @@ ip = "10.0.0.80/24"
     // The media ports are all given back.
     assert_eq!(client.open_transactions(), 0);
 }
+
+/// Runs a profile's client and server against each other on a clean link
+/// for `secs` simulated seconds.
+fn run_profile(p: &TcpProfile, secs: u64) -> (TcpEngine, TcpEngine) {
+    let programs: Vec<_> = p.programs().unwrap().into_iter().map(Arc::new).collect();
+    let config = p
+        .config(&programs, &["lo".to_string()], Some("lo"))
+        .unwrap();
+    let mut client_cfg = config.clone();
+    client_cfg.server = None;
+    let mut server_cfg = config;
+    server_cfg.client = None;
+    let mut client = TcpEngine::new(client_cfg).unwrap();
+    let mut server = TcpEngine::new(server_cfg).unwrap();
+    let mut link = Link::new(0, 0);
+    simulate(
+        &mut [&mut client, &mut server],
+        &mut link,
+        Duration::from_secs(secs),
+    );
+    (client, server)
+}
+
+#[test]
+fn http_users_with_drawn_session_lengths_and_think_times() {
+    for app in ["http", "h2c"] {
+        let table = if app == "http" { "http" } else { "http2" };
+        let text = format!(
+            r#"
+            app = "{app}"
+            session_requests = "uniform(2, 6)"
+            think_time = "exp(20ms)"
+            [users]
+            count = 8
+            think = "exp(50ms)"
+            lifetime = "exp(1s)"
+            [{table}]
+            requests = ["GET /", "GET /a"]
+            [client]
+            ip = "10.0.0.1/24"
+            ips = 100
+            [server]
+            ip = "10.0.0.80/24"
+            "#
+        );
+        let p = TcpProfile::from_toml(&text, Path::new(".")).unwrap();
+        assert_eq!(p.users.len(), 1);
+        assert_eq!(p.templates[0].group, Some(0));
+        let (client, _) = run_profile(&p, 6);
+        let st = client.stats();
+        let c = &st.client;
+        assert_eq!((c.failed(), c.mismatched), (0, 0), "{app}: {c:?}");
+        assert!(c.completed > 30, "{app}: {c:?}");
+        let n = &c.session_requests;
+        assert!(
+            n.min().unwrap() >= 2 && n.max().unwrap() <= 6,
+            "{app}: {n:?}"
+        );
+        let mean = n.mean().unwrap();
+        assert!((3.4..4.6).contains(&mean), "{app}: mean {mean}");
+        assert_eq!(c.app.failed, 0, "{app}");
+        let all = st.users.last().unwrap();
+        assert_eq!(all.online, 8, "{app}");
+        assert!(all.departed > 8, "{app}: {all:?}");
+        let think = all.think.mean().unwrap().as_secs_f64();
+        assert!((0.035..0.065).contains(&think), "{app}: think {think}");
+    }
+}
+
+#[test]
+fn personas_bring_their_users_and_templates() {
+    let dir = std::env::temp_dir().join(format!("ftrx-personas-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("reader.toml"),
+        r#"
+        format = 1
+        name = "reader"
+        [user]
+        think = "100ms"
+        [[tcp]]
+        name = "web"
+        app = "http"
+        port = 80
+        session_requests = 3
+        [tcp.http]
+        requests = ["GET /"]
+        "#,
+    )
+    .unwrap();
+    let text = r#"
+        [[persona]]
+        file = "reader.toml"
+        users = 3
+        [[persona]]
+        file = "reader.toml"
+        name = "heavy"
+        users = 2
+        think = "10ms"
+        port_offset = 8000
+        [client]
+        ip = "10.0.0.1/24"
+        ips = 20
+        [server]
+        ip = "10.0.0.80/24"
+    "#;
+    let p = TcpProfile::from_toml(text, &dir).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    let names: Vec<_> = p.templates.iter().map(|t| t.name(0)).collect();
+    assert_eq!(names, ["reader/web", "heavy/web"]);
+    assert_eq!(p.templates[1].port, Some(8080));
+    let (client, server) = run_profile(&p, 3);
+    let st = client.stats();
+    assert_eq!(st.client.failed(), 0, "{:?}", st.client);
+    assert_eq!(st.client.session_requests.mean(), Some(3.0));
+    let groups: Vec<_> = st
+        .users
+        .iter()
+        .map(|u| (u.name.as_str(), u.online))
+        .collect();
+    assert_eq!(groups, [("reader", 3), ("heavy", 2), ("all", 5)]);
+    // The heavy users think less, so they make more sessions each.
+    let (r, h) = (&st.users[0], &st.users[1]);
+    assert!(h.sessions * 3 > r.sessions * 2 * 2, "{r:?} {h:?}");
+    assert!(server.stats().templates[1].server.completed > 0);
+}
+
+fn run_udp_profile(p: &UdpProfile, secs: u64) -> (UdpEngine, UdpEngine) {
+    let apps = p.apps().unwrap();
+    let config = p.config(&apps, &["lo".to_string()], Some("lo")).unwrap();
+    let (mut cc, mut sc) = (config.clone(), config);
+    cc.server = None;
+    sc.client = None;
+    let (mut client, mut server) = (UdpEngine::new(cc).unwrap(), UdpEngine::new(sc).unwrap());
+    let mut link = Link::new(0, 0);
+    link.proto = 17;
+    simulate(
+        &mut [&mut client, &mut server],
+        &mut link,
+        Duration::from_secs(secs),
+    );
+    (client, server)
+}
+
+#[test]
+fn udp_users_and_h3_sessions_of_drawn_length() {
+    // DNS users: one lookup per session, then a think time.
+    let text = r#"
+        app = "dns"
+        [dns]
+        queries = ["www.lab.local A"]
+        records = ["www.lab.local A 10.0.0.80"]
+        [users]
+        count = 10
+        think = "exp(100ms)"
+        [udp]
+        think_time = "uniform(1ms, 3ms)"
+        [client]
+        ip = "10.0.0.1/24"
+        ips = 10
+        [server]
+        ip = "10.0.0.80/24"
+    "#;
+    let p = UdpProfile::from_toml(text, Path::new(".")).unwrap();
+    let (client, _) = run_udp_profile(&p, 5);
+    let st = client.stats();
+    assert_eq!(st.client.timed_out, 0, "{:?}", st.client);
+    // About 10 users / 0.1 s for 5 s.
+    let n = st.client.answered;
+    assert!((350..650).contains(&n), "{n}");
+    let all = st.users.last().unwrap();
+    assert_eq!(all.online, 10);
+    assert!(all.sessions >= n, "{all:?}");
+    // The server's pause, drawn per answer.
+    let r = &st.client.response_time;
+    assert!(r.min().unwrap() >= Duration::from_millis(1), "{r:?}");
+    assert!(r.max().unwrap() <= Duration::from_millis(8), "{r:?}");
+
+    // HTTP/3 users, each connection a session of 2 to 4 requests.
+    let text = r#"
+        app = "h3"
+        [[template]]
+        app = "h3"
+        session_requests = "uniform(2, 4)"
+        [template.h3]
+        requests = ["GET /"]
+        [users]
+        count = 4
+        think = "50ms"
+        [client]
+        ip = "10.0.0.1/24"
+        ips = 4
+        [server]
+        ip = "10.0.0.80/24"
+    "#;
+    let e = UdpProfile::from_toml(text, Path::new("."))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("not both"), "{e}");
+    let text = text.replacen("app = \"h3\"\n", "", 1);
+    let p = UdpProfile::from_toml(&text, Path::new(".")).unwrap();
+    let (client, _) = run_udp_profile(&p, 4);
+    let c = &client.stats().client;
+    assert!(c.answered > 10, "{c:?}");
+    assert_eq!(c.app.failed, 0, "{:?}", c.app);
+    assert!(c.app.transactions >= 2 * c.answered, "{:?} {c:?}", c.app);
+    assert!(c.app.transactions <= 4 * c.sent, "{:?} {c:?}", c.app);
+}
+
+/// A session whose time runs out during a think time ends then (it is not
+/// left open until the idle timeout), and a pipelined session longer than
+/// one batch sends the next batch.
+#[test]
+fn timed_sessions_end_after_a_think_time_and_pipelines_refill() {
+    for (app, think, http) in [
+        ("http", "think_time = \"150ms\"", ""),
+        ("h2c", "think_time = \"150ms\"", ""),
+        ("http", "", "pipeline = true\nper_connection = 2"),
+    ] {
+        let table = if app == "http" { "http" } else { "http2" };
+        let text = format!(
+            r#"
+            app = "{app}"
+            session_duration = "400ms"
+            {think}
+            [users]
+            count = 2
+            think = "50ms"
+            [{table}]
+            requests = ["GET /", "GET /a"]
+            {http}
+            [client]
+            ip = "10.0.0.1/24"
+            ips = 10
+            [server]
+            ip = "10.0.0.80/24"
+            [tcp]
+            idle_timeout = "2s"
+            "#
+        );
+        let what = format!("{app} {think}{http}");
+        let p = TcpProfile::from_toml(&text, Path::new(".")).unwrap_or_else(|e| panic!("{e}"));
+        let (client, _) = run_profile(&p, 5);
+        let c = &client.stats().client;
+        assert_eq!((c.failed(), c.mismatched), (0, 0), "{what}: {c:?}");
+        // Each session ends soon after 400 ms: several per user in 5 s.
+        assert!(c.completed >= 12, "{what}: {c:?}");
+        let n = c.session_requests.max().unwrap();
+        assert!(n >= 3, "{what}: at most {n} requests a session");
+    }
+}

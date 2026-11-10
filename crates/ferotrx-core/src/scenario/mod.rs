@@ -556,8 +556,18 @@ impl Scenario {
             ),
         };
         let mut workload = match kind {
-            CheckKind::Tcp => Workload::Tcp(TcpProfile::from_toml(&text, &dir)?),
-            CheckKind::Udp => Workload::Udp(UdpProfile::from_toml(&text, &dir)?),
+            CheckKind::Tcp => Workload::Tcp(TcpProfile::from_toml_allowing(
+                &text,
+                &dir,
+                &crate::app::AppRegistry::builtin(),
+                allow,
+            )?),
+            CheckKind::Udp => Workload::Udp(UdpProfile::from_toml_allowing(
+                &text,
+                &dir,
+                &crate::app::AppRegistry::builtin(),
+                allow,
+            )?),
             CheckKind::Traffic => Workload::Traffic(Profile::from_toml(&text, &dir)?),
             CheckKind::Y1564 => Workload::Y1564(Box::new(crate::Y1564Profile::from_toml(&text)?)),
         };

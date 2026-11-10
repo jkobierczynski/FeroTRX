@@ -1,0 +1,35 @@
+# The UDP side of the personas on the lab router: the office workers' DNS
+# lookups, the sensors' NTP and the desk phones' calls. See
+# examples/lab-personas.toml and docs/traffic-models.md#personas.
+#
+#   sudo ferotrx udp -p examples/lab-personas-udp.toml -i ftrx-lab -d 2m
+format = 1
+
+[[persona]]
+file = "personas/office.toml"
+users = 30
+think = "exp(2s)"
+
+[[persona]]
+file = "personas/iot.toml"
+users = 100
+think = "exp(5s)"
+
+[[persona]]
+file = "personas/voice.toml"
+users = 5
+think = "exp(10s)"
+
+[client]
+ip = "192.168.10.50/24"
+ips = 200
+gateway = "192.168.10.1"
+vlan = 10
+
+[server]
+ip = "192.168.20.80/24"
+gateway = "192.168.20.1"
+vlan = 20
+
+[udp]                       # (also what makes `ferotrx check` read this as a UDP profile)
+timeout = "1s"

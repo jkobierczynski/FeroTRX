@@ -25,6 +25,7 @@ from .errors import (
 from .types import (
     AppCounters,
     AuditHealth,
+    CountCounters,
     Counters,
     DhcpLeaseInfo,
     DhcpServerInfo,
@@ -64,10 +65,11 @@ from .types import (
     UdpCounters,
     UdpRunInfo,
     UdpTemplateCounters,
+    UserCounters,
     Y1564RunInfo,
 )
 
-__version__ = "0.49.0"
+__version__ = "0.50.0"
 
 __all__ = [
     "__version__",
@@ -102,6 +104,7 @@ __all__ = [
     "Counters",
     "StreamCounters",
     "ImpairCounters",
+    "CountCounters",
     "LatencyCounters",
     "Limits",
     "PortImpairCounters",
@@ -126,6 +129,7 @@ __all__ = [
     "TcpRunInfo",
     "UdpCounters",
     "UdpTemplateCounters",
+    "UserCounters",
     "Y1564RunInfo",
     "UdpRunInfo",
     "Notification",

@@ -453,6 +453,20 @@ jobs:
           sudo IPV6=1 scripts/tls-netns.sh ./target/debug/ferotrx
           sudo NO_VLAN=1 scripts/tls-netns.sh ./target/debug/ferotrx -B af_xdp --workers 2
 
+      # Traffic realism through a NAT router: users kept online with
+      # log-normal session lengths, think times and lifetimes, a capture in
+      # rounds for a session duration, DNS users, and the persona files over
+      # TCP and UDP; the measured medians, means and rates must match. With
+      # 2% loss, and over AF_XDP with two workers.
+      - name: Sessions, users and personas through a NAT router (Linux)
+        if: env.CI_SKIP != 'true' && runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y ethtool jq
+          cargo build -p ferotrx-cli
+          sudo scripts/realism-netns.sh ./target/debug/ferotrx
+          sudo LOSS=0.02 scripts/realism-netns.sh ./target/debug/ferotrx
+          sudo scripts/realism-netns.sh ./target/debug/ferotrx -B af_xdp --workers 2
+
       # Host emulation on a bridged LAN with IGMP/MLD snooping: DHCP clients
       # (dnsmasq) that join a group and answer the bridge's queries, a
       # gratuitous ARP, a TCP client with a DHCP address; over IPv6, SLAAC and

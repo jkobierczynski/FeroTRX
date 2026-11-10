@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::dist::{session_from, DistText};
 use crate::profile::OutputFile;
-use crate::SendSettings;
+use crate::{Dist, Quantity, SendSettings, SessionLength, UserGroup};
 
 use super::dns::DnsWorkload;
 use super::engine::{UdpApp, UdpClientConfig, UdpConfig, UdpOptions, UdpServerConfig, UdpTemplate};
@@ -97,6 +98,9 @@ pub struct UdpProfile {
     /// or server that gets its address by DHCP, SLAAC or DHCPv6, announces
     /// it or joins groups.
     pub host_options: crate::HostOptions,
+    /// Groups of concurrent users (`[users]`, `[[persona]]`); the templates
+    /// with a `group` make their sessions.
+    pub users: Vec<UserGroup>,
 }
 
 /// One template of a [`UdpProfile`].
@@ -112,7 +116,11 @@ pub struct UdpTemplateSpec {
     pub model: TrafficModel,
     pub transactions: Option<u64>,
     pub concurrency: Option<usize>,
-    pub think_time: Option<Duration>,
+    pub think_time: Option<Dist>,
+    /// How long a dialog lasts (h3: requests, time or bytes).
+    pub session: Option<SessionLength>,
+    /// The group of users whose sessions this template makes.
+    pub group: Option<usize>,
 }
 
 impl UdpTemplateSpec {
@@ -129,6 +137,8 @@ impl UdpTemplateSpec {
             transactions: None,
             concurrency: None,
             think_time: None,
+            session: None,
+            group: None,
         }
     }
 
@@ -246,6 +256,7 @@ impl Default for UdpProfile {
             impair: crate::PortImpair::default(),
             gtpu: crate::GtpuTunnels::default(),
             host_options: crate::HostOptions::for_endpoints(),
+            users: Vec::new(),
         }
     }
 }
@@ -319,7 +330,13 @@ struct RawTemplate {
     shape: Vec<String>,
     transactions: Option<u64>,
     concurrency: Option<usize>,
-    think_time: Option<String>,
+    think_time: Option<DistText>,
+    session_requests: Option<DistText>,
+    session_duration: Option<DistText>,
+    session_bytes: Option<DistText>,
+    /// Set by a persona: the group of users of the template.
+    #[serde(rename = "_group")]
+    group: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -330,7 +347,7 @@ struct RawOptions {
     session_timeout: Option<String>,
     arp_timeout: Option<String>,
     keep_timing: Option<bool>,
-    think_time: Option<String>,
+    think_time: Option<DistText>,
     verify: Option<bool>,
     seed: Option<u64>,
     media_ports: Option<String>,
@@ -477,12 +494,25 @@ impl UdpProfile {
         base_dir: &Path,
         registry: &crate::app::AppRegistry,
     ) -> Result<Self> {
+        Self::from_toml_allowing(text, base_dir, registry, &crate::persona::any_file)
+    }
+
+    /// [`from_toml_with`](Self::from_toml_with), asking `allow` before a
+    /// persona file is read.
+    pub fn from_toml_allowing(
+        text: &str,
+        base_dir: &Path,
+        registry: &crate::app::AppRegistry,
+        allow: crate::persona::FileAllow<'_>,
+    ) -> Result<Self> {
         let mut doc = crate::app::document(text)?;
         let own = |name: &str, table: bool| {
             name == "replay" || (!table && (name == "dns" || name == "ntp"))
         };
+        let (users, own_users) =
+            crate::persona::expand(&mut doc, base_dir, crate::persona::PersonaKind::Udp, allow)?;
         let apps = crate::app::take_apps(&mut doc, registry, base_dir, own)?;
-        let raw: RawProfile = apps.raw(text, doc)?;
+        let raw: RawProfile = apps.raw_edited(text, doc, !users.is_empty())?;
         check_format(raw.format)?;
         let model = parse_model(raw.model.as_deref(), &raw.shape)
             .map_err(|e| Error::Profile(e.to_string()))?;
@@ -541,18 +571,36 @@ impl UdpProfile {
                     concurrency: t.concurrency,
                     think_time: t
                         .think_time
-                        .map(|d| parse_duration(&d))
+                        .map(|d| d.parse(Quantity::Time))
                         .transpose()
                         .map_err(ctx)?,
+                    session: session_from(
+                        t.session_requests.as_ref(),
+                        t.session_duration.as_ref(),
+                        t.session_bytes.as_ref(),
+                    )
+                    .map_err(ctx)?,
+                    group: t.group,
                 });
             }
             out
         };
+        let mut templates = templates;
+        if own_users {
+            for t in templates.iter_mut().filter(|t| t.group.is_none()) {
+                t.group = Some(0);
+            }
+        }
         let mut p = UdpProfile {
             templates,
             model,
             ..Default::default()
         };
+        if !users.is_empty() {
+            // Users keep coming until the run's duration (or a limit given).
+            p.transactions = 0;
+        }
+        p.users = users;
         if let (Some(port), [t]) = (top_port, p.templates.as_mut_slice()) {
             t.port = Some(port);
         }
@@ -599,7 +647,9 @@ impl UdpProfile {
                 session_timeout: d(o.session_timeout, defaults.session_timeout)?,
                 arp_timeout: d(o.arp_timeout, defaults.arp_timeout)?,
                 keep_timing: o.keep_timing.unwrap_or(defaults.keep_timing),
-                think_time: d(o.think_time, defaults.think_time)?,
+                think_time: o
+                    .think_time
+                    .map_or(Ok(defaults.think_time), |t| t.parse(Quantity::Time))?,
                 verify: o.verify.unwrap_or(defaults.verify),
                 seed: o.seed.unwrap_or(defaults.seed),
                 clock: defaults.clock,
@@ -755,6 +805,8 @@ impl UdpProfile {
                 transactions: t.transactions.unwrap_or(0),
                 concurrency: t.concurrency.unwrap_or(0),
                 think_time: t.think_time,
+                session: t.session,
+                group: t.group,
             });
         }
         let server = match &self.server {
@@ -769,6 +821,7 @@ impl UdpProfile {
                 c.transactions = self.transactions;
                 c.concurrency = self.concurrency;
                 c.source_ports = self.source_ports.clone();
+                c.users = self.users.clone();
                 Some(c)
             }
             None => None,
@@ -892,7 +945,10 @@ mod tests {
         let ports: Vec<u16> = c.templates.iter().map(|t| t.listen_port).collect();
         assert_eq!(ports, [53, 123, 7, 5353]);
         assert_eq!(c.templates[1].rate, Some(5.0));
-        assert_eq!(c.templates[2].think_time, Some(Duration::from_millis(10)));
+        assert_eq!(
+            c.templates[2].think_time,
+            Some(Dist::time(Duration::from_millis(10)))
+        );
         let UdpApp::Replay(echo) = &c.templates[2].app else {
             panic!()
         };

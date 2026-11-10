@@ -100,6 +100,26 @@ pub struct SessionInit {
     pub remote: SocketAddr,
 }
 
+/// How long a client session goes on and how it pauses, as the template
+/// draws it for each session (`session_requests`, `session_duration`,
+/// `session_bytes`, `think_time`). Protocols that can play it say so with
+/// [`AppProtocol::plans`]; the rest play their own fixed sessions.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SessionPlan {
+    /// The session's length; open (the protocol's own) when nothing is set.
+    pub budget: crate::SessionBudget,
+    /// The pause before each request after the first, instead of the
+    /// protocol's own think time.
+    pub think: Option<crate::Dist>,
+}
+
+impl SessionPlan {
+    /// True when it changes nothing.
+    pub fn is_empty(&self) -> bool {
+        self.budget.is_open() && self.think.is_none()
+    }
+}
+
 /// A configured application protocol: makes the sessions of one template.
 ///
 /// Implement it (and [`AppSession`]) to add a protocol; wrap it in an
@@ -139,6 +159,16 @@ pub trait AppProtocol: Send + Sync + 'static {
     }
     /// A session for one connection or transaction.
     fn session(&self, init: &SessionInit) -> Box<dyn AppSession>;
+    /// Whether a client session can follow a [`SessionPlan`] (session
+    /// lengths and think times drawn per session).
+    fn plans(&self) -> bool {
+        false
+    }
+    /// A session that follows `plan` (only called when [`plans`](Self::plans)
+    /// says so; the default ignores it).
+    fn session_with(&self, init: &SessionInit, _plan: &SessionPlan) -> Box<dyn AppSession> {
+        self.session(init)
+    }
     /// For downcasting to the concrete protocol (`app.as_any().downcast_ref`).
     fn as_any(&self) -> &dyn Any;
 }
@@ -531,6 +561,20 @@ impl App {
 
     pub fn session(&self, init: &SessionInit) -> Box<dyn AppSession> {
         self.0.session(init)
+    }
+
+    /// A session that follows `plan` when the protocol can, else a plain one.
+    pub fn session_with(&self, init: &SessionInit, plan: &SessionPlan) -> Box<dyn AppSession> {
+        if plan.is_empty() || !self.0.plans() {
+            self.0.session(init)
+        } else {
+            self.0.session_with(init, plan)
+        }
+    }
+
+    /// Whether its client sessions follow session lengths and think times.
+    pub fn plans(&self) -> bool {
+        self.0.plans()
     }
 
     /// The concrete protocol, if it is a `T`.

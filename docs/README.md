@@ -23,7 +23,8 @@ The [README](../README.md) has the overview and a quickstart.
 * [Inspecting and building packets](packets.md): `ferotrx inspect`,
   `ferotrx build` and its packet syntax.
 * [Traffic models and file checks](traffic-models.md): Poisson arrivals,
-  bursts, ramps and rate shapes; `ferotrx check`; the `format` version.
+  bursts, ramps and rate shapes; session lengths, think times, users and
+  personas; `ferotrx check`; the `format` version.
 * [Fast send backends](backends.md): AF_XDP and DPDK.
 
 ## Stateful traffic
