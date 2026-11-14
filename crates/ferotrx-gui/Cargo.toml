@@ -25,7 +25,7 @@ egui_extras = "0.36"
 # Checks a font file before egui (which stops on a bad one) loads it.
 skrifa = "0.44"
 egui_plot = "0.37"
-egui-file-dialog = { version = "0.15", default-features = false }
+egui-file-dialog = { version = "0.16", default-features = false }
 ron = "0.12"
 # The user's folders: %APPDATA% and Documents on Windows (eframe uses it too).
 directories = "6"
