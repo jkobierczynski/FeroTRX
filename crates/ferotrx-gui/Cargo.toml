@@ -35,7 +35,7 @@ ring.workspace = true
 # Explorer's file dialogs, attaching to the console --help prints to, and
 # starting a local server as administrator (Npcap for administrators only).
 [target.'cfg(windows)'.dependencies]
-rfd = { version = "0.15", default-features = false }
+rfd = { version = "0.18", default-features = false }
 ferotrx-io.workspace = true
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
