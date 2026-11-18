@@ -136,6 +136,11 @@ jobs:
             # A crash (access violation, stack overflow, a DLL that failed to
             # load late) ends the process without a message: show its code.
             "ferotrx.exe run --null exited with {0} (0x{1:X8})" -f $code, $code
+            # Which DLL each wait/wake function is imported from, and which
+            # library the linker took it from.
+            $dumpbin = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio\2022\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($dumpbin) { & $dumpbin.FullName /imports target\debug\ferotrx.exe | Select-String -Pattern '\.dll$|WaitOnAddress|WakeByAddress' }
+            cargo rustc -p ferotrx-cli --bin ferotrx -- -C link-arg=/VERBOSE 2>&1 | Select-String -Pattern 'WaitOnAddress|WakeByAddress|vertdll' -Context 3,1 | Select-Object -First 30
             # The build tree's ferotrx.exe under the debugger: where it crashed.
             $cdb = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64\cdb.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($cdb) {
