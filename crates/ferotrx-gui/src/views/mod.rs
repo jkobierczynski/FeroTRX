@@ -155,7 +155,7 @@ impl FeroApp {
                     }
                     Status::Failed(e) => (ui.visuals().error_fg_color, e.clone()),
                 };
-                let id = ui.id().with(("server", i));
+                let id = ui.scope_id().with(("server", i));
                 let header = egui::collapsing_header::CollapsingState::load_with_default_open(
                     ui.ctx(),
                     id,

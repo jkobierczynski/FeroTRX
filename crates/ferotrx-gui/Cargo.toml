@@ -20,12 +20,12 @@ serde_json.workspace = true
 toml = { workspace = true, features = ["preserve_order"] }
 ferotrx-core.workspace = true
 clap.workspace = true
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "accesskit", "persistence"] }
-egui_extras = "0.36"
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "accesskit", "persistence"] }
+egui_extras = "0.37"
 # Checks a font file before egui (which stops on a bad one) loads it.
 skrifa = "0.44"
-egui_plot = "0.37"
-egui-file-dialog = { version = "0.15", default-features = false }
+egui_plot = "0.38"
+egui-file-dialog = { version = "0.16", default-features = false }
 ron = "0.12"
 # The user's folders: %APPDATA% and Documents on Windows (eframe uses it too).
 directories = "6"
@@ -35,7 +35,7 @@ ring.workspace = true
 # Explorer's file dialogs, attaching to the console --help prints to, and
 # starting a local server as administrator (Npcap for administrators only).
 [target.'cfg(windows)'.dependencies]
-rfd = { version = "0.15", default-features = false }
+rfd = { version = "0.18", default-features = false }
 ferotrx-io.workspace = true
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

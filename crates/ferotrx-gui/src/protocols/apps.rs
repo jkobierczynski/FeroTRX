@@ -258,7 +258,7 @@ fn text_field(
 
 /// The widget of one setting. Returns true when the table changed.
 pub fn setting_widget(ui: &mut egui::Ui, s: &Setting, table: &mut toml::Table) -> bool {
-    let id = ui.id().with(("setting", s.key));
+    let id = ui.scope_id().with(("setting", s.key));
     match s.kind {
         SettingKind::Bool => {
             let cur = table.get(s.key).and_then(|v| v.as_bool());
@@ -474,7 +474,7 @@ pub fn app_form(
         if settings.iter().any(|s| s.end != end) {
             ui.label(RichText::new(end.label()).strong());
         }
-        egui::Grid::new(ui.id().with(("app-grid", end as u8)))
+        egui::Grid::new(ui.scope_id().with(("app-grid", end as u8)))
             .num_columns(2)
             .spacing([12.0, 4.0])
             .show(ui, |ui| {
@@ -557,7 +557,7 @@ fn list_form(ui: &mut egui::Ui, l: &TableList, table: &mut toml::Table) -> bool 
             .filter_map(|s| item.get(s.key).map(value_text))
             .collect::<Vec<_>>()
             .join(" ");
-        let id = ui.id().with(("item", l.key, n));
+        let id = ui.scope_id().with(("item", l.key, n));
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
             .show_header(ui, |ui| {
                 ui.label(format!(
@@ -616,7 +616,7 @@ pub fn other_keys(ui: &mut egui::Ui, known: &[&str], table: &mut toml::Table) ->
         .filter(|(k, _)| !known.contains(&k.as_str()))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let id = ui.id().with("other-keys");
+    let id = ui.scope_id().with("other-keys");
     let text = if others.is_empty() {
         String::new()
     } else {

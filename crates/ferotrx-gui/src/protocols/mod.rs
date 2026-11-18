@@ -399,7 +399,7 @@ impl LayerArgs for RawLayer {
 /// the definitions do not name, so nothing written by hand is lost.
 pub fn generic_form(ui: &mut egui::Ui, fields: &[FieldDef], layer: &mut RawLayer) -> bool {
     let mut changed = false;
-    let id = ui.id().with(&layer.name);
+    let id = ui.scope_id().with(&layer.name);
     egui::Grid::new(id.with("fields"))
         .num_columns(2)
         .spacing([12.0, 4.0])
