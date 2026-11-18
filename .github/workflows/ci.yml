@@ -136,9 +136,13 @@ jobs:
             # A crash (access violation, stack overflow, a DLL that failed to
             # load late) ends the process without a message: show its code.
             "ferotrx.exe run --null exited with {0} (0x{1:X8})" -f $code, $code
-            & target\debug\ferotrx.exe run examples\lab-built-packets.toml --null --duration 1s
-            "the build tree's ferotrx.exe exited with 0x{0:X8}" -f $LASTEXITCODE
-            Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2} -MaxEvents 5 -ErrorAction SilentlyContinue | Format-List TimeCreated, ProviderName, Message
+            # The build tree's ferotrx.exe under the debugger: where it crashed.
+            $cdb = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64\cdb.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($cdb) {
+              & $cdb.FullName -g -G -lines -y target\debug -c ".ecxr;kn 40;q" target\debug\ferotrx.exe run examples\lab-built-packets.toml --null --duration 1s
+            } else {
+              "no cdb.exe on this runner"
+            }
             throw "ferotrx.exe run --null failed"
           }
           # The Windows service: install it from the installed ferotrx.exe, log
