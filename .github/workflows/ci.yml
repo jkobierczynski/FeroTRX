@@ -134,6 +134,7 @@ jobs:
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $link = & $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\link.exe' | Select-Object -First 1
           $imports = & (Join-Path (Split-Path $link) dumpbin.exe) /imports "$dir\ferotrx.exe" | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin /imports failed: exit code $LASTEXITCODE" }
           if ($imports -match 'vertdll') { throw "ferotrx.exe imports from vertdll.dll" }
           & "$dir\ferotrx.exe" run examples\lab-built-packets.toml --null --duration 1s
           $code = $LASTEXITCODE

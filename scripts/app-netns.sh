@@ -89,6 +89,7 @@ NS=ferotrx-app
 examples=$(cd "$(dirname "$0")/../examples" && pwd)
 tmp=$(mktemp -d /tmp/ferotrx-app.XXXXXX)
 
+mq_conf=
 cleanup() {
     [ -z "${bg_pid:-}" ] || kill "$bg_pid" 2>/dev/null || true
     for l in t0 c0 s0; do ip link del $l 2>/dev/null || true; done
