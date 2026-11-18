@@ -1,7 +1,20 @@
-//! Compiles the DPDK shim when the `dpdk` feature is on. Nothing to do otherwise.
+//! Compiles the DPDK shim when the `dpdk` feature is on; on Windows (MSVC),
+//! links the system's synchronization library ahead of windows-sys 0.36's.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    // The pcap crate pulls in windows-sys 0.36, whose import library
+    // (windows.lib) also lists WaitOnAddress and WakeByAddressAll under
+    // vertdll.dll, the runtime of VBS enclaves. From Rust 1.100 std takes
+    // those two from the libraries on the link line, and the linker found
+    // them in windows.lib first: every std Condvar wait then crashed
+    // (0xC0000005 in vertdll). Naming synchronization.lib here puts it
+    // ahead of windows.lib, since a crate's libraries come before those of
+    // the crates it uses.
+    let target = |key: &str| std::env::var(key).unwrap_or_default();
+    if target("CARGO_CFG_TARGET_OS") == "windows" && target("CARGO_CFG_TARGET_ENV") == "msvc" {
+        println!("cargo:rustc-link-lib=synchronization");
+    }
     #[cfg(feature = "dpdk")]
     dpdk::build();
 }

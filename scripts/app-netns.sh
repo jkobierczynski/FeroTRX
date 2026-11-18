@@ -89,11 +89,13 @@ NS=ferotrx-app
 examples=$(cd "$(dirname "$0")/../examples" && pwd)
 tmp=$(mktemp -d /tmp/ferotrx-app.XXXXXX)
 
+mq_conf=
 cleanup() {
     [ -z "${bg_pid:-}" ] || kill "$bg_pid" 2>/dev/null || true
     for l in t0 c0 s0; do ip link del $l 2>/dev/null || true; done
     ip netns del $NS 2>/dev/null || true
     rm -rf "$tmp"
+    [ -z "${mq_conf:-}" ] || rm -f "$mq_conf"
 }
 trap cleanup EXIT
 for l in t0 c0 s0; do ip link del $l 2>/dev/null || true; done
@@ -515,8 +517,12 @@ fi
 if command -v mosquitto >/dev/null 2>&1 && [ $have_ethtool = yes ]; then
     echo "== the emulated MQTT clients against mosquitto"
     if [ "${IPV6:-}" = 1 ]; then bind=::; else bind=0.0.0.0; fi
-    printf 'listener 1883 %s\nallow_anonymous true\n' "$bind" >"$tmp/mosquitto.conf"
-    r mosquitto -c "$tmp/mosquitto.conf" >"$tmp/mosquitto.log" 2>&1 &
+    # mosquitto 2.0.22 on Ubuntu 26.04 cannot open a config outside
+    # /etc/mosquitto, even as root: put ours there while it runs.
+    mq_conf="$tmp/mosquitto.conf"
+    [ -d /etc/mosquitto ] && mq_conf=/etc/mosquitto/ferotrx-app-$$.conf
+    printf 'listener 1883 %s\nallow_anonymous true\n' "$bind" >"$mq_conf"
+    r mosquitto -c "$mq_conf" >"$tmp/mosquitto.log" 2>&1 &
     bg_pid=$!
     sleep 1
     for v in 3.1.1 5; do
@@ -535,8 +541,10 @@ EOT
             -n 10 --cps 10 -q >"$log" 2>&1 || status=$?
         cat "$log"
         line=$(grep -E "^  client: " "$log" || true)
-        echo "$line" | grep -Eq "^  client: 10 connections, 10 established, 10 completed;" ||
+        echo "$line" | grep -Eq "^  client: 10 connections, 10 established, 10 completed;" || {
+            sed 's/^/  mosquitto: /' "$tmp/mosquitto.log"
             fail "MQTT $v: the emulated clients did not complete their connections to mosquitto"
+        }
         echo "$line" | grep -Eq "transactions \(.*\), 0 failed" ||
             fail "MQTT $v: mosquitto's answers were not the expected ones"
         echo "$line" | grep -q "PUBCOMP x20" || fail "MQTT $v: not every QoS 2 publish completed"
