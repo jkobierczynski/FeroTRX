@@ -129,8 +129,18 @@ jobs:
           if ($open -notlike '*ferotrx-gui.exe*%1*') { throw "*.ferotrx opens with: $open" }
           & "$dir\ferotrx.exe" --version
           if ($LASTEXITCODE -ne 0) { throw "ferotrx.exe --version failed" }
+          $env:RUST_BACKTRACE = '1'
           & "$dir\ferotrx.exe" run examples\lab-built-packets.toml --null --duration 1s
-          if ($LASTEXITCODE -ne 0) { throw "ferotrx.exe run --null failed" }
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            # A crash (access violation, stack overflow, a DLL that failed to
+            # load late) ends the process without a message: show its code.
+            "ferotrx.exe run --null exited with {0} (0x{1:X8})" -f $code, $code
+            & target\debug\ferotrx.exe run examples\lab-built-packets.toml --null --duration 1s
+            "the build tree's ferotrx.exe exited with 0x{0:X8}" -f $LASTEXITCODE
+            Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2} -MaxEvents 5 -ErrorAction SilentlyContinue | Format-List TimeCreated, ProviderName, Message
+            throw "ferotrx.exe run --null failed"
+          }
           # The Windows service: install it from the installed ferotrx.exe, log
           # in through it, check the token is not on its command line, remove it.
           & "$dir\ferotrx.exe" service install -- --token ci-secret
