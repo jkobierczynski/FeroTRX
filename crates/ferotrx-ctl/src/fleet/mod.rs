@@ -116,10 +116,6 @@ pub struct Agent {
     pub caps: Option<Capabilities>,
     /// Its health when the controller connected (`None`: older agent).
     pub health: Option<Health>,
-    /// When that health was read, on the controller's monotonic clock.
-    pub health_at: Instant,
-    /// When its health request was sent, on the same clock.
-    pub health_sent_at: Instant,
 }
 
 impl Agent {
@@ -191,9 +187,7 @@ impl Agent {
         }
         // Agents before 0.51.0 know neither call: they answer "no such method".
         let caps = optional(client.capabilities())?;
-        let health_sent_at = Instant::now();
         let health = optional(client.health())?;
-        let health_at = Instant::now();
         Ok(Agent {
             spec: spec.clone(),
             client,
@@ -202,8 +196,6 @@ impl Agent {
             rtt,
             caps,
             health,
-            health_at,
-            health_sent_at,
         })
     }
 
@@ -633,26 +625,22 @@ fn stop_one(c: &mut Client, kind: FleetKind, id: u64) -> std::result::Result<Las
     })
 }
 
-/// Whether the agent reached again is a new server process. Agents from
-/// 0.51.0 name their process in `instance`. Without it, the agent's uptime
-/// (monotonic there) must have grown by about the time that passed on the
-/// controller's monotonic clock; wall clocks are not used, so a clock step on
-/// either side is not taken for a restart.
-fn restarted(before: &Agent, after: &Agent) -> bool {
-    match (&before.health, &after.health) {
-        (Some(b), Some(a)) if !b.instance.is_empty() && !a.instance.is_empty() => {
-            a.instance != b.instance
-        }
-        (Some(b), Some(a)) => {
-            // From when the earlier uptime surely was read to when the later
-            // one at the earliest was: the reply's transit never counts.
-            let passed = after
-                .health_sent_at
-                .saturating_duration_since(before.health_at)
-                .as_secs_f64();
-            a.uptime_s < b.uptime_s + passed - 2.0
-        }
-        _ => false,
+/// Why the agent reached again may not be given its runs' ids, if so: it is
+/// another server process, or it cannot say which process it is (agents
+/// before 0.51.0 have no `server.health` and no `instance`). A new process
+/// may have given the same ids to other runs, so an agent whose process is
+/// not known to be the same one is never sent the old ids.
+fn not_the_same(before: Option<&Health>, after: Option<&Health>) -> Option<&'static str> {
+    fn instance(h: Option<&Health>) -> Option<&str> {
+        h.map(|h| h.instance.as_str()).filter(|i| !i.is_empty())
+    }
+    match (instance(before), instance(after)) {
+        (Some(b), Some(a)) if a == b => None,
+        (Some(_), Some(_)) => Some("the agent came back restarted, without its runs"),
+        _ => Some(
+            "the agent came back, but cannot say whether it is the same server process \
+             (ferotrx before 0.51.0), so its runs are given up",
+        ),
     }
 }
 
@@ -668,22 +656,22 @@ fn follow(slot: &mut Slot, tasks: &[Task], plan: &FleetPlan, start_s: f64) -> An
             since_s,
             error,
         } => match Agent::connect(&slot.agent.spec) {
-            Ok(a) if restarted(&slot.agent, &a) => {
-                // A new server process: the runs it had are gone, and its
-                // run ids may now name other runs. Never send it the old ids.
-                slot.link = Link::Lost;
-                out.lost = true;
-                slot.failure = Some(AgentFailure {
-                    agent: slot.name().to_string(),
-                    at_s: since_s,
-                    lost_at_s: now_s(),
-                    error: format!("{error}; then the agent came back restarted, without its runs"),
-                    last_seen_s: slot.last_seen_s,
-                    runs: Vec::new(),
-                });
-                return out;
-            }
             Ok(mut a) => {
+                if let Some(why) = not_the_same(slot.agent.health.as_ref(), a.health.as_ref()) {
+                    // Its runs may be gone and their ids given to other
+                    // runs: never send it the old ids.
+                    slot.link = Link::Lost;
+                    out.lost = true;
+                    slot.failure = Some(AgentFailure {
+                        agent: slot.name().to_string(),
+                        at_s: since_s,
+                        lost_at_s: now_s(),
+                        error: format!("{error}; then {why}"),
+                        last_seen_s: slot.last_seen_s,
+                        runs: Vec::new(),
+                    });
+                    return out;
+                }
                 // Keep the clock reading the start times and captures were
                 // taken with; health readings track the offset from here on.
                 a.offset = slot.agent.offset;
@@ -1852,5 +1840,38 @@ fn run_passed(kind: FleetKind, m: &Metrics) -> bool {
         FleetKind::Scenario | FleetKind::Bench | FleetKind::Y1564 => m.get("passed") == Some(&1.0),
         FleetKind::Hosts => m.get("failed").is_none_or(|f| *f == 0.0),
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn health(instance: &str) -> Health {
+        Health {
+            instance: instance.into(),
+            ..Health::default()
+        }
+    }
+
+    #[test]
+    fn only_the_same_server_process_gets_its_runs_back() {
+        let (a, b) = (health("1-a-0"), health("2-b-0"));
+        assert_eq!(not_the_same(Some(&a), Some(&a)), None);
+        assert!(not_the_same(Some(&a), Some(&b))
+            .unwrap()
+            .contains("restarted"));
+        // Agents before 0.51.0: no server.health, or one without instance.
+        for (x, y) in [
+            (None, None),
+            (Some(&a), None),
+            (None, Some(&a)),
+            (Some(&health("")), Some(&health(""))),
+        ] {
+            assert!(
+                not_the_same(x, y).unwrap().contains("0.51.0"),
+                "{x:?} {y:?}"
+            );
+        }
     }
 }

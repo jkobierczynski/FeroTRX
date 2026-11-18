@@ -269,6 +269,12 @@ agent east: control connection lost (connection reset by peer); connecting again
 agent east: back after 2.1 s
 ```
 
+The controller only takes the agent back if it is the same server process:
+`server.health` names the process in `instance`. An agent that restarted
+in the meantime, or one before 0.51.0 that cannot say, is lost at once. A
+new process may have given the old run ids to other runs, so the
+controller never sends them.
+
 An agent that does not come back within `reconnect` is lost. The fleet goes
 on with the others (`on_agent_loss = "continue"`) or stops every run
 (`"stop"`). Either way the fleet fails, and the report says what was lost:
