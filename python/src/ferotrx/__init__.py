@@ -25,6 +25,7 @@ from .errors import (
 from .types import (
     AppCounters,
     AuditHealth,
+    Capabilities,
     CountCounters,
     Counters,
     DhcpLeaseInfo,
@@ -33,6 +34,7 @@ from .types import (
     FileInfo,
     FlowCounters,
     HandshakeCounters,
+    Health,
     HostAddressInfo,
     HostGroupInfo,
     HostInfo,
@@ -69,7 +71,7 @@ from .types import (
     Y1564RunInfo,
 )
 
-__version__ = "0.50.0"
+__version__ = "0.51.0"
 
 __all__ = [
     "__version__",
@@ -93,6 +95,8 @@ __all__ = [
     "Role",
     "RunState",
     "ServerInfo",
+    "Capabilities",
+    "Health",
     "ReloadInfo",
     "AuditHealth",
     "InterfaceEntry",

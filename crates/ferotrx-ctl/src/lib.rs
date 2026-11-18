@@ -152,6 +152,7 @@ pub mod fleet;
 #[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub mod fuzzing;
+mod hosts;
 mod limits;
 pub mod ports;
 pub mod protocol;

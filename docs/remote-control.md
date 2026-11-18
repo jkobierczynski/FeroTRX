@@ -49,6 +49,8 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 | Method | Params | Result |
 | --- | --- | --- |
 | `server.info` | | name, version, protocol, interfaces, backends, auth_required, tls, this connection's role and user, the server's clock `time` (Unix seconds), `max_file` and `certificate_expires` |
+| `server.capabilities` | | what the server can run (0.51.0): `version`, `cpus`, `memory_mb`, `backends`, `interfaces` (names and aliases), `kinds` of runs, `apps`, `os`, `limits`; read role |
+| `server.health` | | how the server is doing now (0.51.0): `time`, `uptime_s`, `instance` (names the server process; another after a restart), `cpus`, `cpu_pct` (machine) and `process_cpu_pct` since the previous call, `memory_available_mb`, `running` (runs going), `connections`; read role |
 | `auth` | `token` | `true`; the connection now has the token's role |
 | `interfaces.list` | | `[{name, description}]` |
 | `ports.list`, `ports.acquire`, `ports.release`, `session.info`, `session.list`, `session.name` | see [Several users](#several-users) | |
@@ -82,18 +84,22 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 | `rx.stats`, `rx.remove` | `id` | the receiver |
 | `rx.list` | | every receiver |
 | `scenario.check` | a scenario as `path` (on the server) or `toml` (+ `base_dir`); optional `set` (`{name: value}`, as `--set`), `iface` | its checks and their conditions; nothing runs |
-| `scenario.start` | as `scenario.check`, and optional `only` (check names), `lab` (default true: build the lab router the scenario names in `[lab]` first; needs `--lab`) | the scenario run: its checks run one after the other on the server |
+| `scenario.start` | as `scenario.check`, and optional `only` (check names), `lab` (default true: build the lab router the scenario names in `[lab]` first; needs `--lab`), `start_at` | the scenario run: its checks run one after the other on the server |
 | `scenario.get`, `scenario.remove` | `id` | the scenario run: `state`, each check's `state` (`waiting`, `running`, `pass`, `fail`, `error`, `skipped`), live `progress` and `report`, and the whole report once it has ended |
 | `scenario.stop` | `id`, `wait` (default true) | the scenario run: the running check ends, the rest are skipped |
 | `scenario.list` | | every scenario run |
-| `bench.start` | a [benchmark profile](benchmarking.md) as `path` (on the server) or `toml`; `iface` (send) and `rx` (receive); optional `tests`, `sizes` (`"rfc2544"`, `"imix"`, `"124"`, …), `line_rate`, `trial_duration`, `repetitions`, `backend`, `xdp_mode`, `queue`, `workers`, `cpus` | the benchmark run, started on a thread of the server |
+| `bench.start` | a [benchmark profile](benchmarking.md) as `path` (on the server) or `toml`; `iface` (send) and `rx` (receive); optional `tests`, `sizes` (`"rfc2544"`, `"imix"`, `"124"`, …), `line_rate`, `trial_duration`, `repetitions`, `backend`, `xdp_mode`, `queue`, `workers`, `cpus`, `start_at` | the benchmark run, started on a thread of the server |
 | `bench.get`, `bench.remove` | `id` | the benchmark run: `state`, `elapsed_s`, `tests`, `sizes`, every finished `trial` with its `size`, the run `info` (host, interfaces, backend), and once it has ended the `report` (as in `ferotrx bench --report`) and its `text` |
 | `bench.stop` | `id`, `wait` (default true) | the benchmark run: it ends after the trial under way, with a partial report |
 | `bench.list` | | every benchmark run |
-| `y1564.start` | a [Y.1564 profile](y1564.md) as `path` or `toml`; `iface` and `rx`; optional `tests`, `services`, `line_rate`, `step_duration`, `performance_duration`, `backend`, `xdp_mode`, `queue`, `workers`, `cpus` | the Y.1564 run, on a thread of the server |
+| `y1564.start` | a [Y.1564 profile](y1564.md) as `path` or `toml`; `iface` and `rx`; optional `tests`, `services`, `line_rate`, `step_duration`, `performance_duration`, `backend`, `xdp_mode`, `queue`, `workers`, `cpus`, `start_at` | the Y.1564 run, on a thread of the server |
 | `y1564.get`, `y1564.remove` | `id` | the Y.1564 run: `state`, `elapsed_s`, `tests`, `services`, every finished `steps` record (flows and service verdicts), the run `info`, and once it has ended the `report` (as in `ferotrx y1564 --report`) and its `text` |
 | `y1564.stop` | `id`, `wait` (default true) | the run: the step under way ends early, and the report is partial |
 | `y1564.list` | | every Y.1564 run |
+| `host.start` | a [host profile](host-emulation.md) as `path` or `toml`; optional `iface`, `duration`, `backend`, `queue`, `xdp_mode`, `impair`, `impair_rx`, `until_ready` (end once every host is ready), `start_at` (0.51.0) | the host run |
+| `host.stop` | `id`, `wait` (default true) | the host run, final counters |
+| `host.stats`, `host.remove` | `id` | the host run: `state`, `ready`, `failed`, `tx_packets`, `rx_packets`, each host's addresses and state, `impair` |
+| `host.list` | | every host run |
 | `lab.start` | optional `ipv6`, `nat`, `loss`, `delay`, `block_tcp`, `block_udp`, `dhcp`, `queues` | the lab router, built (server started with `--lab`; see [lab scripts](lab-scripts.md#a-standing-lab-router)) |
 | `lab.stop` | | the lab router, removed |
 | `lab.get` | | the lab router, or why there can be none |

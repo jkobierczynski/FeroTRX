@@ -29,7 +29,7 @@ pub const ANONYMOUS: &str = "anonymous";
 /// Kinds of runs whose owner is recorded, and that `*.stop` and friends
 /// check against it.
 pub(crate) const KINDS: &[&str] = &[
-    "run", "tcp", "udp", "rx", "scenario", "bench", "y1564", "capture",
+    "run", "tcp", "udp", "rx", "host", "scenario", "bench", "y1564", "capture",
 ];
 
 /// How many finished runs' owners are remembered.

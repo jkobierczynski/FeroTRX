@@ -105,7 +105,7 @@ fn reads_a_plan() {
     );
 
     let clients = &plan.runs[1];
-    assert_eq!(clients.kind, CheckKind::Tcp);
+    assert_eq!(clients.kind, FleetKind::Tcp);
     assert_eq!(clients.slug(), "web-clients");
     assert_eq!(clients.delay, Duration::from_millis(500));
     assert_eq!(clients.settings.cps, Some(25.0));
@@ -125,7 +125,7 @@ fn reads_a_plan() {
     assert_eq!(plan.runs[0].instances[0].iface.as_deref(), Some("s0"));
 
     let probe = &plan.runs[2];
-    assert_eq!(probe.kind, CheckKind::Traffic);
+    assert_eq!(probe.kind, FleetKind::Traffic);
     assert_eq!(probe.source, "inline");
     assert_eq!(probe.instances[0].file_name, "probe.toml");
     assert!(probe.instances[0].text.contains("10.9.0.100"));
@@ -185,7 +185,8 @@ fn mistakes_are_named() {
     assert!(err(agent).contains("[[run]]"));
     assert!(err(&format!("{agent}[[run]]\nagent = \"b\"\n{tcp}")).contains("no agent called 'b'"));
     assert!(err(&format!("{agent}[[run]]\n{tcp}")).contains("agent or agents"));
-    assert!(err(&format!("{agent}[[run]]\nagent = \"a\"\n")).contains("tcp, udp or traffic"));
+    assert!(err(&format!("{agent}[[run]]\nagent = \"a\"\n"))
+        .contains("tcp, udp, traffic, hosts, scenario, bench or y1564"));
     assert!(err(&format!(
         "{agent}[[run]]\nagent = \"a\"\n{tcp}rate = \"1kpps\"\n"
     ))
@@ -295,4 +296,100 @@ fn captures_on_the_agents() {
     let all =
         FleetPlan::from_toml(&format!("{base}[[capture]]\niface = \"x\"\n"), &dir, &[]).unwrap();
     assert_eq!(all.captures.len(), 2);
+}
+
+#[test]
+fn other_kinds_of_runs() {
+    let d = lab("kinds");
+    std::fs::write(
+        d.join("plans/hosts.toml"),
+        "format = 1\n[[host]]\nipv4 = \"10.1.0.5/24\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("plans/bench.toml"),
+        "format = 1\n[benchmark]\ntests = [\"throughput\"]\nsizes = [\"64\"]\nline_rate = \"10mbps\"\n\
+         packet = \"eth/ipv4(src=10.0.0.1,dst=10.0.0.2)/udp\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("plans/check.toml"),
+        "format = 1\n[vars]\nn = \"5\"\n[[check]]\nname = \"web\"\ntcp = \"server.toml\"\n\
+         [check.vars]\n",
+    )
+    .unwrap();
+    let text = r#"
+reconnect = "3s"
+on_agent_loss = "stop"
+telemetry = false
+[vars]
+server = "10.1.0.80"
+[[agent]]
+name = "a"
+address = "h:1"
+iface = "d0"
+[[run]]
+name = "hosts"
+agent = "a"
+hosts = "hosts.toml"
+until_ready = true
+require = ["ready_pct == 100"]
+[[run]]
+name = "bench"
+agent = "a"
+bench = "bench.toml"
+rx = "d1"
+line_rate = "1gbps"
+require = ["throughput_pct > 50"]
+[require]
+hosts = ["failed == 0"]
+bench = ["passed == 1"]
+"#;
+    let plan = FleetPlan::from_toml(text, &d.join("plans"), &[]).unwrap();
+    assert_eq!(plan.reconnect, Duration::from_secs(3));
+    assert_eq!(plan.on_agent_loss, OnAgentLoss::Stop);
+    assert!(!plan.telemetry);
+    assert_eq!(plan.runs[0].kind, FleetKind::Hosts);
+    assert!(plan.runs[0].settings.until_ready);
+    assert_eq!(plan.runs[1].kind, FleetKind::Bench);
+    // A benchmark ends by itself: no duration, even with the plan's.
+    assert_eq!(plan.runs[1].settings.duration, None);
+    assert_eq!(plan.runs[1].settings.line_rate.as_deref(), Some("1gbps"));
+    assert_eq!(plan.require.len(), 2);
+    assert!(FleetKind::Bench.runs_to_the_end() && !FleetKind::Hosts.runs_to_the_end());
+
+    let err = |extra: &str| {
+        FleetPlan::from_toml(
+            &format!("[[agent]]\nname = \"a\"\naddress = \"h:1\"\niface = \"d0\"\n{extra}"),
+            &d.join("plans"),
+            &[],
+        )
+        .unwrap_err()
+        .to_string()
+    };
+    assert!(
+        err("[[run]]\nagent = \"a\"\nbench = \"bench.toml\"\nduration = \"5s\"\n")
+            .contains("leave out duration")
+    );
+    assert!(
+        err("[[run]]\nagent = \"a\"\nhosts = \"hosts.toml\"\nsizes = [\"64\"]\n")
+            .contains("sizes is for bench runs")
+    );
+    assert!(
+        err("[[run]]\nagent = \"a\"\nhosts = \"hosts.toml\"\nrequire = [\"cps > 1\"]\n")
+            .contains("a hosts check has no metric 'cps'")
+    );
+    assert!(
+        err("[[run]]\nagent = \"a\"\nbench = \"bench.toml\"\nline_rate = \"5kpps\"\n")
+            .contains("a bit rate")
+    );
+    assert!(err("on_agent_loss = \"panic\"\n").contains("on_agent_loss"));
+    assert!(
+        err("[[run]]\nagent = \"a\"\nhosts = \"hosts.toml\"\n[require]\nfoo = [\"x > 1\"]\n")
+            .contains("no such kind of run")
+    );
+    assert!(
+        err("[[run]]\nagent = \"a\"\nhosts = \"hosts.toml\"\nbench = \"bench.toml\"\n")
+            .contains("give one of hosts, bench")
+    );
 }

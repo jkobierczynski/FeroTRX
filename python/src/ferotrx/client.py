@@ -14,10 +14,12 @@ from . import _wire
 from ._wire import Address, Call, PathLike
 from .errors import ConnectionClosed, Forbidden, NotFound, ProtocolError
 from .types import (
+    Capabilities,
     CaptureInfo,
     CaptureRead,
     FileChunk,
     FileInfo,
+    Health,
     InterfaceEntry,
     Notification,
     PortInfo,
@@ -305,6 +307,16 @@ class Client:
     def info(self) -> ServerInfo:
         """The server's version, protocol, backends, and this connection's login."""
         return self._run(_wire.info())
+
+    def capabilities(self) -> Capabilities:
+        """What the server can run: cores, memory, backends, interfaces,
+        kinds of runs, applications and limits (servers from 0.51.0)."""
+        return self._run(_wire.capabilities())
+
+    def health(self) -> Health:
+        """How the server is doing now: its clock, CPU load since the
+        previous call, free memory, runs going (servers from 0.51.0)."""
+        return self._run(_wire.health())
 
     def auth(self, token: str) -> None:
         """Logs in with a token (``--token``, ``--read-token`` or ``--tokens``)."""

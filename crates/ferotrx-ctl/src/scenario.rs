@@ -423,7 +423,7 @@ pub fn scenario_info(s: &Scenario) -> ScenarioInfo {
 pub(crate) struct ScenarioRun {
     info: Mutex<ScenarioRunInfo>,
     stop: Arc<AtomicBool>,
-    started: Instant,
+    started: Mutex<Instant>,
     ended: (Mutex<bool>, Condvar),
 }
 
@@ -435,6 +435,7 @@ impl ScenarioRun {
         scenario: Scenario,
         only: Vec<String>,
         runner: LabRunner,
+        start_at: Option<std::time::SystemTime>,
     ) -> std::io::Result<Arc<Self>> {
         let checks = scenario
             .checks
@@ -456,23 +457,36 @@ impl ScenarioRun {
                 description: scenario.description.clone(),
                 file: scenario.path.as_ref().map(|p| p.display().to_string()),
                 state: RunState::Running,
+                started_at: None,
                 elapsed_s: 0.0,
                 checks,
                 report: None,
                 error: None,
             }),
             stop: Arc::new(AtomicBool::new(false)),
-            started: Instant::now(),
+            started: Mutex::new(Instant::now()),
             ended: (Mutex::new(false), Condvar::new()),
         });
         let r = run.clone();
         std::thread::Builder::new()
             .name(format!("scenario-{id}"))
-            .spawn(move || r.main(scenario, only, runner))?;
+            .spawn(move || r.main(scenario, only, runner, start_at))?;
         Ok(run)
     }
 
-    fn main(self: Arc<Self>, scenario: Scenario, only: Vec<String>, runner: LabRunner) {
+    fn main(
+        self: Arc<Self>,
+        scenario: Scenario,
+        only: Vec<String>,
+        runner: LabRunner,
+        start_at: Option<std::time::SystemTime>,
+    ) {
+        // Every check waits for the shared start of a fleet (`start_at`).
+        if crate::controller::wait_start(start_at, &self.stop) {
+            *lock(&self.started) = Instant::now();
+            lock(&self.info).started_at =
+                Some(ferotrx_core::unix_seconds(std::time::SystemTime::now()));
+        }
         let me = self.clone();
         let mut runner = runner.with_progress(move |check, line| {
             me.update(&check.name, |c| c.progress = line.to_string());
@@ -506,7 +520,9 @@ impl ScenarioRun {
         }));
         {
             let mut info = lock(&self.info);
-            info.elapsed_s = self.started.elapsed().as_secs_f64();
+            if info.started_at.is_some() {
+                info.elapsed_s = lock(&self.started).elapsed().as_secs_f64();
+            }
             match result {
                 Ok(report) => {
                     info.state = if report.stopped {
@@ -540,8 +556,8 @@ impl ScenarioRun {
 
     pub fn info(&self) -> ScenarioRunInfo {
         let mut info = lock(&self.info).clone();
-        if info.state.is_running() {
-            info.elapsed_s = self.started.elapsed().as_secs_f64();
+        if info.state.is_running() && info.started_at.is_some() {
+            info.elapsed_s = lock(&self.started).elapsed().as_secs_f64();
         }
         info
     }

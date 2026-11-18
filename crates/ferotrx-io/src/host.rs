@@ -310,3 +310,135 @@ mod tests {
         assert_eq!(describe_interface("../etc").mtu, None);
     }
 }
+
+/// CPU time used so far, in seconds: by the whole machine (`busy` of
+/// `total`, every core added up) and by this process. Two readings apart
+/// give the load in between ([`CpuTimes::load_since`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CpuTimes {
+    /// Every core's time spent on anything but idle and waiting for I/O.
+    pub busy_s: f64,
+    /// Every core's time.
+    pub total_s: f64,
+    /// This process's user and system time.
+    pub process_s: f64,
+}
+
+impl CpuTimes {
+    /// The machine's load and this process's, in percent of all the cores,
+    /// between `earlier` and this reading; `None` when no time went by.
+    pub fn load_since(&self, earlier: &CpuTimes) -> Option<(f64, f64)> {
+        let total = self.total_s - earlier.total_s;
+        if total <= 0.0 {
+            return None;
+        }
+        let busy = ((self.busy_s - earlier.busy_s) / total * 100.0).clamp(0.0, 100.0);
+        let process = ((self.process_s - earlier.process_s) / total * 100.0).clamp(0.0, 100.0);
+        Some((busy, process))
+    }
+}
+
+/// The CPU times now (Linux: `/proc/stat` and `/proc/self/stat`); `None`
+/// where they cannot be read.
+pub fn cpu_times() -> Option<CpuTimes> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: sysconf only reads a constant of the system.
+        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        let hz = if hz > 0 { hz as f64 } else { 100.0 };
+        let stat = std::fs::read_to_string("/proc/stat").ok()?;
+        let (busy, total) = parse_proc_stat(&stat)?;
+        let me = std::fs::read_to_string("/proc/self/stat").ok()?;
+        let process = parse_self_stat(&me)?;
+        Some(CpuTimes {
+            busy_s: busy as f64 / hz,
+            total_s: total as f64 / hz,
+            process_s: process as f64 / hz,
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Memory available and in all, in MiB (Linux: `/proc/meminfo`).
+pub fn memory_mb() -> Option<(u64, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+        parse_meminfo(&text)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// The `cpu` line of `/proc/stat`: (busy, total) in clock ticks.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_proc_stat(text: &str) -> Option<(u64, u64)> {
+    let line = text.lines().find(|l| l.starts_with("cpu "))?;
+    let v: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    if v.len() < 4 {
+        return None;
+    }
+    // user nice system idle iowait irq softirq steal (guests are in user).
+    let total: u64 = v.iter().take(8).sum();
+    let idle = v[3] + v.get(4).copied().unwrap_or(0);
+    Some((total - idle, total))
+}
+
+/// utime + stime of `/proc/self/stat`, in clock ticks.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_self_stat(text: &str) -> Option<u64> {
+    // The command name may hold spaces: count from after its ')'.
+    let rest = &text[text.rfind(')')? + 1..];
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    // After the name: state is field 3, utime 14 and stime 15.
+    let utime: u64 = f.get(11)?.parse().ok()?;
+    let stime: u64 = f.get(12)?.parse().ok()?;
+    Some(utime + stime)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
+    let field = |name: &str| -> Option<u64> {
+        let line = text.lines().find(|l| l.starts_with(name))?;
+        line.split_whitespace().nth(1)?.parse::<u64>().ok()
+    };
+    Some((field("MemAvailable:")? / 1024, field("MemTotal:")? / 1024))
+}
+
+#[cfg(test)]
+mod cpu_tests {
+    use super::*;
+
+    #[test]
+    fn proc_stat_and_self_stat_are_read() {
+        let stat = "cpu  100 5 50 800 20 3 2 0 0 0\ncpu0 1 2 3 4\n";
+        assert_eq!(parse_proc_stat(stat), Some((160, 980)));
+        let me = "1234 (ferotrx serve) S 1 1234 1234 0 -1 4194560 100 0 0 0 70 30 0 0 20 0 5 0";
+        assert_eq!(parse_self_stat(me), Some(100));
+        let mem = "MemTotal:        8000000 kB\nMemFree: 1 kB\nMemAvailable:    4096000 kB\n";
+        assert_eq!(parse_meminfo(mem), Some((4000, 7812)));
+        let a = CpuTimes {
+            busy_s: 1.0,
+            total_s: 4.0,
+            process_s: 0.5,
+        };
+        let b = CpuTimes {
+            busy_s: 2.0,
+            total_s: 8.0,
+            process_s: 1.0,
+        };
+        assert_eq!(b.load_since(&a), Some((25.0, 12.5)));
+        assert_eq!(a.load_since(&a), None);
+        #[cfg(target_os = "linux")]
+        assert!(cpu_times().is_some() && memory_mb().is_some());
+    }
+}

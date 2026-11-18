@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use ferotrx_core::scenario::{CheckKind, ConditionResult, Metrics};
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::RunState;
+use ferotrx_core::DropCounters;
+
+use crate::protocol::{Capabilities, RunState};
 
 /// `format` of the JSON report.
 pub const FLEET_REPORT_FORMAT: &str = "ferotrx-fleet-1";
@@ -25,6 +27,122 @@ pub struct AgentRecord {
     pub rtt_ms: f64,
     /// The agent's clock minus the controller's.
     pub offset_ms: f64,
+    /// What the agent can run (agents from 0.51.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Capabilities>,
+    /// `ok`, `reconnected` (its control connection broke and came back) or
+    /// `lost` (it did not come back; see `failure`).
+    #[serde(default = "ok")]
+    pub status: String,
+    /// Times the controller connected again after losing it.
+    #[serde(default)]
+    pub reconnects: u32,
+    /// What the agent's health readings said over the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<AgentTelemetry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<AgentFailure>,
+}
+
+fn ok() -> String {
+    "ok".into()
+}
+
+/// An agent's health over a fleet run (`server.health` once per interval).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentTelemetry {
+    /// Readings taken.
+    pub samples: u32,
+    /// The machine's CPU load, in percent of all its CPUs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_avg_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_max_pct: Option<f64>,
+    /// The agent process's share, at most.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_cpu_max_pct: Option<f64>,
+    /// Memory available, at least.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_min_mb: Option<u64>,
+    /// Its clock offset, as measured along the way: the lowest and highest.
+    /// Their difference is how far the clocks drifted (or how uncertain the
+    /// readings were).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset_min_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset_max_ms: Option<f64>,
+    /// The slowest round trip of a reading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtt_max_ms: Option<f64>,
+    /// Frames dropped before they were read or sent, by layer, over the
+    /// agent's runs ([`DropCounters`]).
+    pub drops: DropCounters,
+}
+
+/// An agent the controller lost during the run.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentFailure {
+    pub agent: String,
+    /// When its control connection broke, in seconds from the shared start.
+    pub at_s: f64,
+    /// When the controller gave up on it.
+    pub lost_at_s: f64,
+    pub error: String,
+    /// Its last answer, in seconds from the shared start: its counters in
+    /// the report are from then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_s: Option<f64>,
+    /// The runs it had (`RUN` or `RUN (receiver)`): their parts on it are
+    /// incomplete, and may still be going there.
+    pub runs: Vec<String>,
+}
+
+impl AgentFailure {
+    /// One line on it.
+    pub fn line(&self) -> String {
+        format!(
+            "agent '{}' out of reach from {:.1} s, given up at {:.1} s ({}); it had {}; {}",
+            self.agent,
+            self.at_s,
+            self.lost_at_s,
+            self.error,
+            if self.runs.is_empty() {
+                "no runs".to_string()
+            } else {
+                self.runs.join(", ")
+            },
+            match self.last_seen_s {
+                Some(t) => format!("its counters are from {t:.1} s"),
+                None => "no counters came from it".into(),
+            }
+        )
+    }
+}
+
+/// One agent at one moment of the run.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentSample {
+    pub agent: String,
+    /// `up`, `down` (the controller is trying to reach it again) or `lost`.
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_cpu_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_available_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<f64>,
+    /// The agent's runs going now, all kinds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub running: Option<usize>,
+    /// Frames dropped so far over the plan's runs on it, by layer.
+    pub drops: DropCounters,
 }
 
 /// A run's profile and files, sent to one agent.
@@ -94,7 +212,7 @@ pub struct InstanceRecord {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunRecord {
     pub name: String,
-    /// `tcp`, `udp` or `traffic`.
+    /// `tcp`, `udp`, `traffic`, `hosts`, `scenario`, `bench` or `y1564`.
     pub kind: String,
     pub source: String,
     pub instances: Vec<InstanceRecord>,
@@ -110,8 +228,11 @@ pub struct FleetSample {
     pub t_s: f64,
     pub running: usize,
     pub runs: usize,
-    /// By kind: `tcp`, `udp`, `traffic`.
+    /// By kind: `tcp`, `udp`, `traffic`, `hosts`, `scenario`, `bench`, `y1564`.
     pub totals: BTreeMap<String, Metrics>,
+    /// Every agent's health and drops.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<AgentSample>,
 }
 
 /// What a fleet run did.
@@ -148,6 +269,9 @@ pub struct FleetReport {
     /// The captures merged into one pcapng (`--merge`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged: Option<String>,
+    /// Agents lost during the run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<AgentFailure>,
 }
 
 /// The few metrics a line shows for a kind.
@@ -182,6 +306,29 @@ fn headline(kind: &str, m: &Metrics) -> String {
             add("timed out", get("timed_out"), &int);
             add("tps", get("tps"), &one);
         }
+        "hosts" => {
+            add("hosts", get("hosts"), &int);
+            add("ready", get("ready"), &int);
+            add("failed", get("failed"), &int);
+            add("ready avg", get("ready_avg"), &msf);
+        }
+        "scenario" => {
+            add("checks", get("checks"), &int);
+            add("passed", get("checks_passed"), &int);
+            add("failed", get("checks_failed"), &int);
+        }
+        "bench" => {
+            add("trials", get("trials"), &int);
+            add("throughput", get("throughput_pct"), &|v| format!("{v:.1}%"));
+            add("Mbit/s", get("throughput_mbps"), &one);
+            add("latency avg", get("latency_avg"), &msf);
+        }
+        "y1564" => {
+            add("steps", get("steps"), &int);
+            add("failed", get("steps_failed"), &int);
+            add("FLR", get("flr_pct"), &pc);
+            add("FTD", get("ftd"), &msf);
+        }
         _ => {
             add("sent", get("tx_packets"), &int);
             add("Mbit/s", get("tx_mbps"), &|v| format!("{v:.3}"));
@@ -200,6 +347,18 @@ impl FleetSample {
         let mut s = format!("{:>6.1}s  {}/{} running", self.t_s, self.running, self.runs);
         for (kind, m) in &self.totals {
             s.push_str(&format!("  {kind}: {}", headline(kind, m)));
+        }
+        if !self.agents.is_empty() {
+            let parts: Vec<String> = self
+                .agents
+                .iter()
+                .map(|a| match (a.status.as_str(), a.cpu_pct) {
+                    ("up", Some(c)) => format!("{} {c:.0}%", a.agent),
+                    ("up", None) => a.agent.clone(),
+                    (st, _) => format!("{} {}", a.agent, st.to_uppercase()),
+                })
+                .collect();
+            s.push_str(&format!("  cpu: {}", parts.join(" ")));
         }
         s
     }
@@ -220,19 +379,53 @@ impl FleetReport {
         line(String::new());
         line("Agents:".into());
         line(format!(
-            "  {:<12} {:<22} {:<8} {:>9} {:>11}",
-            "agent", "address", "version", "rtt", "clock"
+            "  {:<12} {:<22} {:<8} {:>9} {:>11} {:>6} {:>8}  status",
+            "agent", "address", "version", "rtt", "clock", "cpus", "cpu max"
         ));
         for a in &self.agents {
+            let t = a.telemetry.as_ref();
             line(format!(
-                "  {:<12} {:<22} {:<8} {:>7.2}ms {:>+9.1}ms{}",
+                "  {:<12} {:<22} {:<8} {:>7.2}ms {:>+9.1}ms {:>6} {:>8}  {}{}{}",
                 a.name,
                 a.address,
                 a.version,
                 a.rtt_ms,
                 a.offset_ms,
-                if a.tls { "  tls" } else { "" }
+                a.capabilities
+                    .as_ref()
+                    .map_or("?".to_string(), |c| c.cpus.to_string()),
+                t.and_then(|t| t.cpu_max_pct)
+                    .map_or("-".to_string(), |c| format!("{c:.0}%")),
+                a.status,
+                if a.reconnects > 0 {
+                    format!(" ({}x)", a.reconnects)
+                } else {
+                    String::new()
+                },
+                if a.tls { ", tls" } else { "" }
             ));
+            if let Some(t) = t {
+                let mut extra = Vec::new();
+                if let (Some(lo), Some(hi)) = (t.offset_min_ms, t.offset_max_ms) {
+                    extra.push(format!("clock {lo:+.1}..{hi:+.1} ms"));
+                }
+                if let Some(m) = t.memory_min_mb {
+                    extra.push(format!("memory free >= {m} MiB"));
+                }
+                let (rx, tx) = (t.drops.rx_total(), t.drops.tx_total());
+                if rx + tx > 0 {
+                    extra.push(format!(
+                        "dropped {rx} received, {tx} sent ({})",
+                        drops_text(&t.drops)
+                    ));
+                }
+                if !extra.is_empty() {
+                    line(format!("  {:<12} {}", "", extra.join("; ")));
+                }
+            }
+        }
+        for f in &self.failures {
+            line(format!("LOST: {}", f.line()));
         }
         if !self.deployed.is_empty() {
             let sent: usize = self.deployed.iter().map(|d| d.files_sent).sum();
@@ -350,6 +543,28 @@ impl FleetReport {
     pub fn total(&self, kind: CheckKind) -> Option<&Metrics> {
         self.totals.get(kind.as_str())
     }
+
+    /// The sums of one kind of run.
+    pub fn total_of(&self, kind: ferotrx_core::fleet::FleetKind) -> Option<&Metrics> {
+        self.totals.get(kind.as_str())
+    }
+}
+
+/// The layers that dropped frames, e.g. `capture 12, nic_rx_missed 3`.
+fn drops_text(d: &DropCounters) -> String {
+    [
+        ("nic_rx_missed", d.nic_rx_missed),
+        ("nic_rx_errors", d.nic_rx_errors),
+        ("ring_rx_dropped", d.ring_rx_dropped),
+        ("capture", d.capture_dropped),
+        ("nic_tx_errors", d.nic_tx_errors),
+        ("ring_tx_invalid", d.ring_tx_invalid),
+    ]
+    .into_iter()
+    .filter(|(_, n)| *n > 0)
+    .map(|(k, n)| format!("{k} {n}"))
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
 fn condition_line(c: &ConditionResult) -> String {

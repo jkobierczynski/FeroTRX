@@ -80,13 +80,15 @@ pub(crate) struct BenchJob {
     pub iface: String,
     pub rx: String,
     pub send: SendSettings,
+    /// The shared start of a fleet, by this machine's clock.
+    pub start_at: Option<std::time::SystemTime>,
 }
 
 /// A benchmark running on a thread of its own.
 pub(crate) struct BenchRun {
     info: Mutex<BenchRunInfo>,
     stop: Arc<AtomicBool>,
-    started: Instant,
+    started: Mutex<Instant>,
     ended: (Mutex<bool>, Condvar),
 }
 
@@ -155,6 +157,7 @@ impl BenchRun {
                 iface: job.iface.clone(),
                 rx: job.rx.clone(),
                 state: RunState::Running,
+                started_at: None,
                 error: None,
                 elapsed_s: 0.0,
                 tests: c.tests.iter().map(|t| t.name().to_string()).collect(),
@@ -165,7 +168,7 @@ impl BenchRun {
                 text: None,
             }),
             stop: stop.clone(),
-            started: Instant::now(),
+            started: Mutex::new(Instant::now()),
             ended: (Mutex::new(false), Condvar::new()),
         });
 
@@ -199,14 +202,25 @@ impl BenchRun {
         std::thread::Builder::new()
             .name(format!("bench-{id}"))
             .spawn(move || {
-                r.main(job.profile, make_runner());
+                r.main(job.profile, make_runner(), job.start_at);
                 drop(link);
             })
             .map_err(|e| format!("cannot start the benchmark: {e}"))?;
         Ok(run)
     }
 
-    fn main(self: Arc<Self>, profile: BenchProfile, mut runner: JobTrialRunner) {
+    fn main(
+        self: Arc<Self>,
+        profile: BenchProfile,
+        mut runner: JobTrialRunner,
+        start_at: Option<std::time::SystemTime>,
+    ) {
+        // The trials wait for the shared start of a fleet (`start_at`).
+        if crate::controller::wait_start(start_at, &self.stop) {
+            *lock(&self.started) = Instant::now();
+            lock(&self.info).started_at =
+                Some(ferotrx_core::unix_seconds(std::time::SystemTime::now()));
+        }
         let me = self.clone();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             run_benchmark(&profile.config, &mut runner, |size, t| {
@@ -218,7 +232,9 @@ impl BenchRun {
         }));
         {
             let mut info = lock(&self.info);
-            info.elapsed_s = self.started.elapsed().as_secs_f64();
+            if info.started_at.is_some() {
+                info.elapsed_s = lock(&self.started).elapsed().as_secs_f64();
+            }
             match result {
                 Ok(Ok(report)) => {
                     info.state = if report.stopped {
@@ -257,8 +273,8 @@ impl BenchRun {
 
     pub fn info(&self) -> BenchRunInfo {
         let mut info = lock(&self.info).clone();
-        if info.state.is_running() {
-            info.elapsed_s = self.started.elapsed().as_secs_f64();
+        if info.state.is_running() && info.started_at.is_some() {
+            info.elapsed_s = lock(&self.started).elapsed().as_secs_f64();
         }
         info
     }

@@ -19,6 +19,7 @@ use crate::audit::AuditLog;
 use crate::bench::{open_bench_sinks, BenchJob, BenchRun, BenchSinkOpener};
 use crate::capture::{CaptureOpener, CaptureRun, MAX_CAPTURES};
 use crate::files::FilePolicy;
+use crate::hosts::{start_hosts_with, HostRun};
 use crate::limits::{self, Demand, Guard, Limits};
 use crate::ports::{self, Ports, Who};
 use crate::protocol::*;
@@ -248,6 +249,14 @@ pub struct Controller {
     runs: Arc<Mutex<BTreeMap<u64, Arc<Run>>>>,
     tcp_runs: Arc<Mutex<BTreeMap<u64, Arc<TcpRun>>>>,
     udp_runs: Arc<Mutex<BTreeMap<u64, Arc<UdpRun>>>>,
+    host_runs: Mutex<BTreeMap<u64, Arc<HostRun>>>,
+    /// When the controller was made, for `server.health`.
+    born: std::time::Instant,
+    /// Names this controller in `server.health`.
+    instance: String,
+    /// The CPU times at the last `server.health`, and the load then.
+    #[allow(clippy::type_complexity)]
+    cpu_seen: Mutex<Option<(std::time::Instant, ferotrx_io::CpuTimes, Option<(f64, f64)>)>>,
     rx_runs: Mutex<BTreeMap<u64, Arc<RxRun>>>,
     next_run: Arc<AtomicU64>,
     auth_required: bool,
@@ -330,6 +339,22 @@ impl Default for Controller {
     }
 }
 
+/// A name no other controller has had: the process id, the time it was made
+/// in nanoseconds and a count of the controllers made in this process.
+fn new_instance() -> String {
+    static MADE: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{:x}-{:x}-{}",
+        std::process::id(),
+        nanos,
+        MADE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 impl Controller {
     pub fn new() -> Self {
         Self {
@@ -337,6 +362,10 @@ impl Controller {
             runs: Arc::default(),
             tcp_runs: Arc::default(),
             udp_runs: Arc::default(),
+            host_runs: Mutex::default(),
+            born: std::time::Instant::now(),
+            instance: new_instance(),
+            cpu_seen: Mutex::default(),
             rx_runs: Mutex::default(),
             next_run: Arc::new(AtomicU64::new(1)),
             auth_required: false,
@@ -927,6 +956,8 @@ impl Controller {
             "session.info" => to_value(self.ports.session(&ports::caller().user)),
             "session.list" => to_value(self.ports.sessions()),
             "server.info" => to_value(self.info()),
+            "server.capabilities" => to_value(self.capabilities()),
+            "server.health" => to_value(self.health()),
             "interfaces.list" => to_value(self.interfaces()?),
             "profile.load" => to_value(self.load_profile(parse(params)?)?),
             "profile.get" => {
@@ -986,6 +1017,22 @@ impl Controller {
                 let p: RunId = parse(params)?;
                 let info = self.udp_stop(p.id, true)?;
                 lock(&self.udp_runs).remove(&p.id);
+                to_value(info)
+            }
+            "host.start" => to_value(self.host_start(parse(params)?)?),
+            "host.stop" => {
+                let p: StopParams = parse(params)?;
+                to_value(self.host_stop(p.id, p.wait)?)
+            }
+            "host.stats" => {
+                let p: RunId = parse(params)?;
+                to_value(self.host_run(p.id)?.info())
+            }
+            "host.list" => to_value(self.host_runs()),
+            "host.remove" => {
+                let p: RunId = parse(params)?;
+                let info = self.host_stop(p.id, true)?;
+                lock(&self.host_runs).remove(&p.id);
                 to_value(info)
             }
             "rx.start" => to_value(self.rx_start(parse(params)?)?),
@@ -1157,6 +1204,117 @@ impl Controller {
             certificate_expires: None,
             require_acquire: self.ports.require_acquire,
         }
+    }
+
+    /// What this server can run (`server.capabilities`).
+    pub fn capabilities(&self) -> Capabilities {
+        let info = self.info();
+        #[cfg(feature = "pcap")]
+        // By name, and by the alias Windows shows ("Ethernet 2").
+        let interfaces = ferotrx_io::list_interfaces()
+            .map(|l| {
+                l.into_iter()
+                    .flat_map(|i| std::iter::once(i.name).chain(i.alias))
+                    .collect()
+            })
+            .unwrap_or_default();
+        #[cfg(not(feature = "pcap"))]
+        let interfaces = Vec::new();
+        let mut kinds = vec![
+            "traffic", "tcp", "udp", "rx", "hosts", "scenario", "bench", "y1564", "capture",
+        ];
+        if !info.interfaces {
+            kinds.retain(|k| *k != "capture");
+        }
+        Capabilities {
+            version: info.version,
+            cpus: cpus(),
+            memory_mb: ferotrx_io::memory_mb().map(|(_, total)| total),
+            backends: info.backends,
+            interfaces,
+            kinds: kinds.into_iter().map(String::from).collect(),
+            apps: ferotrx_core::app::AppRegistry::builtin()
+                .names()
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            os: info.os,
+            limits: info.limits,
+        }
+    }
+
+    /// How the server is doing (`server.health`): its clock, the machine's
+    /// CPU load since the last call (none on the first), memory and runs.
+    pub fn health(&self) -> Health {
+        let now = std::time::Instant::now();
+        let mut load = None;
+        if let Some(cur) = ferotrx_io::cpu_times() {
+            let mut seen = lock(&self.cpu_seen);
+            load = match *seen {
+                // Against the last reading; one too close (two callers at
+                // once) gives the load measured then.
+                Some((t, c, last)) if now - t < Duration::from_millis(100) => {
+                    let _ = c;
+                    last
+                }
+                Some((_, c, _)) => cur.load_since(&c),
+                None => None,
+            };
+            if seen.is_none_or(|(t, _, _)| now - t >= Duration::from_millis(100)) {
+                *seen = Some((now, cur, load));
+            }
+        }
+        Health {
+            time: ferotrx_core::unix_seconds(std::time::SystemTime::now()),
+            uptime_s: self.born.elapsed().as_secs_f64(),
+            instance: self.instance.clone(),
+            cpus: cpus(),
+            cpu_pct: load.map(|l| l.0),
+            process_cpu_pct: load.map(|l| l.1),
+            memory_available_mb: ferotrx_io::memory_mb().map(|(avail, _)| avail),
+            running: self.running_count(),
+            connections: 0,
+        }
+    }
+
+    /// Runs of every kind going now.
+    fn running_count(&self) -> usize {
+        lock(&self.runs)
+            .values()
+            .filter(|r| r.job.is_running())
+            .count()
+            + lock(&self.tcp_runs)
+                .values()
+                .filter(|r| r.job.is_running())
+                .count()
+            + lock(&self.udp_runs)
+                .values()
+                .filter(|r| r.job.is_running())
+                .count()
+            + lock(&self.host_runs)
+                .values()
+                .filter(|r| r.job.is_running())
+                .count()
+            + lock(&self.rx_runs)
+                .values()
+                .filter(|r| r.job.is_running())
+                .count()
+            + lock(&self.scenario_runs)
+                .values()
+                .filter(|r| r.is_running())
+                .count()
+            + lock(&self.bench_runs)
+                .values()
+                .filter(|r| r.is_running())
+                .count()
+            + lock(&self.y1564_runs)
+                .values()
+                .filter(|r| r.is_running())
+                .count()
+            + lock(&self.captures)
+                .values()
+                .filter(|c| c.job.is_running())
+                .count()
     }
 
     /// Writes a piece of a file a client sends (`file.put`), such as a
@@ -1684,6 +1842,13 @@ impl Controller {
         for r in &rx {
             r.job.stop();
         }
+        let hosts: Vec<Arc<HostRun>> = lock(&self.host_runs).values().cloned().collect();
+        for r in &hosts {
+            r.job.stop();
+        }
+        for r in &hosts {
+            r.job.wait(Some(STOP_TIMEOUT));
+        }
         for r in &runs {
             r.job.stop();
         }
@@ -1716,6 +1881,7 @@ impl Controller {
         lock(&self.runs).clear();
         lock(&self.tcp_runs).clear();
         lock(&self.udp_runs).clear();
+        lock(&self.host_runs).clear();
         lock(&self.rx_runs).clear();
         lock(&self.scenario_runs).clear();
         lock(&self.bench_runs).clear();
@@ -1826,6 +1992,7 @@ impl Controller {
     /// Starts running a scenario's checks, one after the other, on a thread
     /// of its own; `scenario.get` follows it.
     pub fn scenario_start(&self, p: ScenarioStartParams) -> Result<ScenarioRunInfo, RpcError> {
+        let start_at = start_time(p.start_at)?;
         let mut scenario = self.read_scenario(&p)?;
         let starting = self.begin_start()?;
         let sends_on = scenario_ports(&scenario, &p.only)?;
@@ -1857,7 +2024,7 @@ impl Controller {
             });
         }
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
-        let run = ScenarioRun::spawn(id, scenario, p.only, runner)
+        let run = ScenarioRun::spawn(id, scenario, p.only, runner, start_at)
             .map_err(|e| RpcError::failed(format!("cannot start the scenario: {e}")))?;
         let info = run.info();
         {
@@ -1871,7 +2038,7 @@ impl Controller {
             "scenario",
             id,
             sends_on,
-            None,
+            start_at,
             self.limits
                 .max_duration()
                 .map(|m| m * checks + DURATION_GRACE),
@@ -1920,6 +2087,7 @@ impl Controller {
     /// Starts a benchmark (RFC 2544 tests, as `ferotrx bench`) on a thread
     /// of its own; `bench.get` follows its trials.
     pub fn bench_start(&self, p: BenchStartParams) -> Result<BenchRunInfo, RpcError> {
+        let start_at = start_time(p.start_at)?;
         let bad = |e: String| RpcError::invalid_params(e);
         let (text, name) = match (&p.path, &p.toml) {
             (Some(path), None) => {
@@ -2003,6 +2171,7 @@ impl Controller {
             iface: p.iface,
             rx: p.rx,
             send,
+            start_at,
         };
         let run = BenchRun::spawn(
             id,
@@ -2022,7 +2191,7 @@ impl Controller {
             "bench",
             id,
             vec![iface.clone()],
-            None,
+            start_at,
             self.limits.max_duration(),
             move || watched.is_running(),
             move || run.stop(),
@@ -2069,6 +2238,7 @@ impl Controller {
     /// Starts a Y.1564 service activation test (as `ferotrx y1564`) on a
     /// thread of its own; `y1564.get` follows its steps.
     pub fn y1564_start(&self, p: Y1564StartParams) -> Result<Y1564RunInfo, RpcError> {
+        let start_at = start_time(p.start_at)?;
         let bad = |e: String| RpcError::invalid_params(e);
         let (text, name) = match (&p.path, &p.toml) {
             (Some(path), None) => {
@@ -2143,6 +2313,7 @@ impl Controller {
             iface: p.iface,
             rx: p.rx,
             send,
+            start_at,
         };
         let run = Y1564Run::spawn(
             id,
@@ -2162,7 +2333,7 @@ impl Controller {
             "y1564",
             id,
             vec![iface.clone()],
-            None,
+            start_at,
             self.allowance(),
             move || watched.is_running(),
             move || run.stop(),
@@ -2204,6 +2375,108 @@ impl Controller {
         }
         lock(&self.y1564_runs).remove(&id);
         Ok(run.info())
+    }
+
+    /// Starts emulated hosts from a host profile (`host.start`).
+    pub fn host_start(&self, p: HostStartParams) -> Result<HostRunInfo, RpcError> {
+        let start_at = start_time(p.start_at)?;
+        let mut profile = match (p.path, p.toml) {
+            (Some(path), None) => {
+                let (text, _) = self.files.read_text(&path)?;
+                ferotrx_core::HostProfile::from_toml(&text)
+                    .map_err(|e| RpcError::failed(format!("{}: {e}", path.display())))?
+            }
+            (None, Some(text)) => {
+                self.files.upload(&text)?;
+                ferotrx_core::HostProfile::from_toml(&text).map_err(RpcError::failed)?
+            }
+            _ => return Err(RpcError::invalid_params("give either path or toml")),
+        };
+        let duration = p
+            .duration
+            .as_deref()
+            .map(parse_duration)
+            .transpose()
+            .map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        if duration.is_some() {
+            profile.duration = duration;
+        }
+        let starting = self.begin_start()?;
+        let sends_on = profile
+            .interfaces(p.iface.as_deref())
+            .map_err(RpcError::failed)?;
+        self.check_ports(&sends_on)?;
+        for i in &sends_on {
+            self.limits.check_iface(i)?;
+        }
+        self.limits.check_duration(profile.duration)?;
+        let output = OutputSpec {
+            backend: p.backend,
+            queue: p.queue,
+            xdp_mode: p.xdp_mode,
+            ..Default::default()
+        }
+        .send_settings()?;
+        profile.output = output.or(&profile.output);
+        apply_impair(&mut profile.impair, &p.impair, &p.impair_rx)?;
+        let config = TcpRunConfig {
+            duration: self.limits.duration_or_max(profile.duration),
+            stop: None,
+            start_at,
+            pinning: None,
+        };
+        let (job, interfaces) = start_hosts_with(
+            &profile,
+            p.iface.as_deref(),
+            p.until_ready,
+            config,
+            &*self.port_opener(),
+        )
+        .map_err(RpcError::failed)?;
+        let id = self.next_run.fetch_add(1, Ordering::Relaxed);
+        let run = Arc::new(HostRun {
+            id,
+            interfaces,
+            job,
+            stopped_by_request: Default::default(),
+        });
+        let info = run.info();
+        {
+            let mut runs = lock(&self.host_runs);
+            runs.insert(id, run.clone());
+            prune(&mut runs, |r| r.job.is_running());
+        }
+        let watched = run.clone();
+        self.track(
+            "host",
+            id,
+            sends_on,
+            start_at,
+            self.allowance(),
+            move || watched.job.is_running(),
+            move || run.stop(None),
+        );
+        drop(starting);
+        Ok(info)
+    }
+
+    /// Stops a run of hosts; they release their addresses as they go.
+    pub fn host_stop(&self, id: u64, wait: bool) -> Result<HostRunInfo, RpcError> {
+        let run = self.host_run(id)?;
+        run.stop(wait.then_some(STOP_TIMEOUT));
+        Ok(run.info())
+    }
+
+    pub fn host_runs(&self) -> Vec<HostRunInfo> {
+        let runs: Vec<Arc<HostRun>> = lock(&self.host_runs).values().cloned().collect();
+        runs.iter().map(|r| r.info()).collect()
+    }
+
+    fn host_run(&self, id: u64) -> Result<Arc<HostRun>, RpcError> {
+        lock(&self.host_runs)
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| RpcError::not_found(format!("no host run {id}")))
     }
 
     /// Starts a stateful TCP run from a TCP profile.
@@ -2837,6 +3110,29 @@ fn lab_info(l: &ferotrx_io::Lab, unavailable: Option<String>) -> LabInfo {
         },
         unavailable,
     }
+}
+
+/// Waits until `at` by the system clock, or until `stop` is set; true when
+/// the time came (or there was none).
+pub(crate) fn wait_start(
+    at: Option<std::time::SystemTime>,
+    stop: &std::sync::atomic::AtomicBool,
+) -> bool {
+    let Some(at) = at else { return true };
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        match at.duration_since(std::time::SystemTime::now()) {
+            Ok(left) if !left.is_zero() => std::thread::sleep(left.min(Duration::from_millis(20))),
+            _ => return true,
+        }
+    }
+}
+
+/// Logical CPUs this process may use.
+fn cpus() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
 /// An impairment spec from a request; `None` for one that does nothing.

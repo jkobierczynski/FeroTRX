@@ -279,6 +279,12 @@ first data directory. `start`, `tcp_start` and `udp_start` take
 `start_at`, Unix seconds by the server's clock; the run's `started_at` says
 when it began. [Fleets](fleet.md) do all this from one plan.
 
+Before handing a server work, `c.capabilities()` (servers from 0.51.0) says
+what it can run: `cpus`, `memory_mb`, `backends`, `interfaces`, `kinds` of
+runs, `apps` and `limits`. `c.health()` says how it is doing now: its clock
+`time`, `cpu_pct` of the machine and `process_cpu_pct` of the server since
+the previous call, `memory_available_mb` and the runs going (`running`).
+
 ## Captures and files
 
 ```python

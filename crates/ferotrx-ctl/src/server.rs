@@ -1153,6 +1153,11 @@ impl Connection {
                     });
                     to_value(info)
                 }
+                "server.health" => {
+                    let mut h = self.controller.health();
+                    h.connections = self.shared.open.load(Ordering::Relaxed);
+                    to_value(h)
+                }
                 "stats.subscribe" => {
                     // The response must go out before the first notification.
                     self.subscribe(req.params, req.id)?;

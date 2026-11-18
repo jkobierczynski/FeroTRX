@@ -813,7 +813,7 @@ fn fleet(p: &crate::fleet::FleetPlan, out: &mut FileCheck) {
         }
         if r.settings.duration.is_none()
             && r.settings.limit.is_none()
-            && r.kind == crate::scenario::CheckKind::Traffic
+            && r.kind == crate::fleet::FleetKind::Traffic
         {
             out.warnings.push(format!(
                 "run '{}': no duration; a stream that loops for ever runs until Ctrl-C",

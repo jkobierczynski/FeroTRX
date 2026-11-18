@@ -224,6 +224,48 @@ class ServerInfo(Record):
     require_acquire: bool = False
 
 
+@dataclass(kw_only=True)
+class Capabilities(Record):
+    """Result of ``server.capabilities`` (servers from 0.51.0): what the
+    server can run."""
+
+    version: str = ""
+    cpus: int = 0
+    #: Memory of the machine, MiB.
+    memory_mb: int | None = None
+    backends: list[str] = field(default_factory=list)
+    #: Interface names, and their aliases on Windows.
+    interfaces: list[str] = field(default_factory=list)
+    #: Kinds of runs: ``traffic``, ``tcp``, ``udp``, ``rx``, ``hosts``,
+    #: ``scenario``, ``bench``, ``y1564``, ``capture``.
+    kinds: list[str] = field(default_factory=list)
+    #: Application protocols (``http``, ``dns``, ...).
+    apps: list[str] = field(default_factory=list)
+    os: str | None = None
+    limits: Limits | None = None
+
+
+@dataclass(kw_only=True)
+class Health(Record):
+    """Result of ``server.health`` (servers from 0.51.0): how the server is
+    doing now."""
+
+    #: The server's clock, seconds since 1970.
+    time: float = 0.0
+    uptime_s: float = 0.0
+    #: Names the server process; it changes when the server restarts.
+    instance: str = ""
+    cpus: int = 0
+    #: CPU load of the machine and of the server process, percent of all
+    #: cores, since the previous call (``None`` on the first or off Linux).
+    cpu_pct: float | None = None
+    process_cpu_pct: float | None = None
+    memory_available_mb: int | None = None
+    #: Runs going now, of every kind.
+    running: int = 0
+    connections: int | None = None
+
+
 # ----- ports.*, session.* (servers from 0.49.0) -----
 
 

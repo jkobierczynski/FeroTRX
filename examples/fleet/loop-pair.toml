@@ -1,0 +1,15 @@
+# Both ends of a web session on one agent: the client on l0, the server on
+# l1, the two ends of a cable (see loop-check.toml).
+format = 1
+pcap = "../http.pcap"
+cps = 50
+connections = 20
+
+[client]
+iface = "l0"
+ip = "10.97.0.10/24"
+
+[server]
+iface = "l1"
+ip = "10.97.0.80/24"
+port = 80

@@ -1,0 +1,9 @@
+# A scenario for fleet-kinds.toml: a TCP client and server of the agent
+# talk over its cable l0 - l1; every connection must complete.
+format = 1
+name = "loop"
+
+[[check]]
+name = "web over the cable"
+tcp = "loop-pair.toml"
+require = ["completed_pct == 100", "connections == 20"]

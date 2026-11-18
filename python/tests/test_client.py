@@ -26,6 +26,21 @@ def test_info(server: Server) -> None:
     assert info.version.count(".") == 2
 
 
+def test_capabilities_and_health(server: Server) -> None:
+    with connect(server) as c:
+        caps = c.capabilities()
+        first = c.health()
+        second = c.health()
+    assert caps.version.count(".") == 2
+    assert caps.cpus >= 1
+    assert "tcp" in caps.kinds and "y1564" in caps.kinds
+    assert "http" in caps.apps
+    assert first.cpus == caps.cpus
+    assert first.running == 0
+    assert second.time >= first.time > 0
+    assert second.uptime_s >= first.uptime_s
+
+
 def test_profiles_load_get_list_unload(server: Server) -> None:
     with connect(server) as c:
         p = c.load_profile(name="lab", toml=PROFILE)

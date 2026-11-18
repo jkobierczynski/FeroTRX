@@ -782,6 +782,12 @@ pub struct Condition {
 impl Condition {
     /// Parses `METRIC OP VALUE` for a check of `kind`.
     pub fn parse(text: &str, kind: CheckKind) -> Result<Condition> {
+        Self::parse_in(text, kind.as_str(), kind.metrics())
+    }
+
+    /// Parses `METRIC OP VALUE` with the metrics `defs` of a kind of run
+    /// called `kind` (for messages).
+    pub fn parse_in(text: &str, kind: &str, defs: &[MetricDef]) -> Result<Condition> {
         let bad = |why: String| Error::Profile(format!("condition '{text}': {why}"));
         let t = text.trim();
         let end = t
@@ -791,8 +797,8 @@ impl Condition {
         if metric.is_empty() {
             return Err(bad("start with a metric name, e.g. loss_pct < 1%".into()));
         }
-        let def = kind.metric(metric).ok_or_else(|| {
-            let names: Vec<&str> = kind.metrics().iter().map(|m| m.name).collect();
+        let def = defs.iter().find(|m| m.name == metric).ok_or_else(|| {
+            let names: Vec<&str> = defs.iter().map(|m| m.name).collect();
             bad(format!(
                 "a {kind} check has no metric '{metric}'; it has {}",
                 names.join(", ")

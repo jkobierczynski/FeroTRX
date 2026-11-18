@@ -13,11 +13,13 @@ from typing import Any, Generic, TypeVar
 
 from .errors import ProtocolError, RpcError
 from .types import (
+    Capabilities,
     CapturedFrame,
     CaptureInfo,
     CaptureRead,
     FileChunk,
     FileInfo,
+    Health,
     InterfaceEntry,
     Notification,
     PortInfo,
@@ -250,6 +252,14 @@ def _upload(path: PathLike) -> str:
 
 def info() -> Call[ServerInfo]:
     return Call("server.info", None, _record(ServerInfo))
+
+
+def capabilities() -> Call[Capabilities]:
+    return Call("server.capabilities", None, _record(Capabilities))
+
+
+def health() -> Call[Health]:
+    return Call("server.health", None, _record(Health))
 
 
 def reload() -> Call[ReloadInfo]:

@@ -1,0 +1,77 @@
+# A FeroTRX fleet plan with the other kinds of runs: emulated hosts, a
+# scenario, an RFC 2544 benchmark and a Y.1564 test, on the three agents of
+# fleet.toml, all started together. scripts/fleet-netns.sh runs it; there
+# each agent has a cable of its own between two interfaces, l0 and l1, so
+# the benchmark, the Y.1564 test and the scenario's check need no device
+# in between. In a real lab, point iface and rx at the device under test.
+#
+# The agents here have no ca: beyond loopback, give each agent ca = "..."
+# (and cert/key to log in by certificate) so the token goes over TLS; see
+# docs/fleet.md. scripts/fleet-netns.sh adds ca to its copy.
+#
+#   ferotrx fleet check examples/fleet/fleet-kinds.toml
+#   FEROTRX_TOKEN=... ferotrx fleet run examples/fleet/fleet-kinds.toml --report kinds.json
+format = 1
+name = "kinds-lab"
+description = "hosts, a scenario, a benchmark and a Y.1564 test on three agents"
+start_delay = "2s"
+interval = "1s"
+reconnect = "5s"          # how long to try an agent again whose connection broke
+on_agent_loss = "continue" # or "stop": stop every run when an agent is lost
+
+[vars]
+east = "10.99.0.11:4510"
+west = "10.99.0.12:4510"
+srv = "10.99.0.13:4510"
+
+[[agent]]
+name = "east"
+address = "${east}"
+token_env = "FEROTRX_TOKEN"
+iface = "d0"
+
+[[agent]]
+name = "west"
+address = "${west}"
+token_env = "FEROTRX_TOKEN"
+iface = "d0"
+
+[[agent]]
+name = "srv"
+address = "${srv}"
+token_env = "FEROTRX_TOKEN"
+iface = "d0"
+
+[[run]]
+name = "hosts"
+agent = "west"
+hosts = "hosts.toml"
+until_ready = true        # ends once every host has its address
+duration = "20s"
+require = ["ready_pct == 100"]
+
+[[run]]
+name = "loop check"
+agent = "east"
+scenario = "loop-check.toml"
+require = ["passed == 1"]
+
+[[run]]
+name = "benchmark"
+agent = "srv"
+bench = "loop-bench.toml"
+iface = "l0"
+rx = "l1"
+require = ["passed == 1", "throughput_pct > 90"]
+
+[[run]]
+name = "service test"
+agent = "west"
+y1564 = "loop-y1564.toml"
+iface = "l0"
+rx = "l1"
+require = ["passed == 1"]
+
+[require]
+hosts = ["failed == 0"]
+scenario = ["checks_failed == 0"]

@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -62,6 +62,40 @@ pub struct Client {
     notifications: VecDeque<Notification>,
 }
 
+/// Connects to `addr` (`host:port`), trying each address it names; with
+/// `timeout`, each for at most that long.
+fn tcp_connect(addr: &str, timeout: Option<Duration>) -> io::Result<TcpStream> {
+    let Some(timeout) = timeout else {
+        return TcpStream::connect(addr);
+    };
+    // Name lookups block, and std gives them no timeout: look up on a thread
+    // of its own and give up on it after `timeout` (it ends by itself).
+    let (tx, rx) = std::sync::mpsc::channel();
+    let name = addr.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(name.to_socket_addrs().map(|a| a.collect::<Vec<_>>()));
+    });
+    let addrs = match rx.recv_timeout(timeout) {
+        Ok(r) => r?,
+        Err(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("looking up {addr} took longer than {timeout:?}"),
+            ))
+        }
+    };
+    let mut last = None;
+    for a in addrs {
+        match TcpStream::connect_timeout(&a, timeout) {
+            Ok(s) => return Ok(s),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("{addr} names no address"))
+    }))
+}
+
 impl Client {
     /// Connects over plain TCP.
     pub fn connect(addr: impl ToSocketAddrs) -> io::Result<Client> {
@@ -79,20 +113,74 @@ impl Client {
     /// certificate for `host` (or the name `tls` sets) and logging in with
     /// the client certificate `tls` has, if any.
     pub fn connect_tls(addr: &str, tls: &ClientTls) -> Result<Client, ClientError> {
+        Self::connect_tls_within(addr, tls, None)
+    }
+
+    /// [`connect`](Client::connect), giving up on an address that does not
+    /// answer within `timeout`.
+    pub fn connect_timeout(addr: &str, timeout: Duration) -> io::Result<Client> {
+        let stream = tcp_connect(addr, Some(timeout))?;
+        stream.set_nodelay(true)?;
+        Ok(Client {
+            reader: BufReader::new(Box::new(stream.try_clone()?)),
+            sock: stream,
+            next_id: 1,
+            notifications: VecDeque::new(),
+        })
+    }
+
+    /// [`connect_tls`](Client::connect_tls), giving up within `timeout`
+    /// for the connection and again for the handshake (`None`: 30 s for the
+    /// handshake only).
+    pub fn connect_tls_within(
+        addr: &str,
+        tls: &ClientTls,
+        timeout: Option<Duration>,
+    ) -> Result<Client, ClientError> {
         let host = match addr.rsplit_once(':') {
             Some((h, _)) => h,
             None => addr,
         };
         let mut conn = tls.connection(host)?;
-        let mut stream = TcpStream::connect(addr)?;
+        let mut stream = tcp_connect(addr, timeout)?;
         stream.set_nodelay(true)?;
         // Finish the handshake here, so a refused certificate shows as an
         // error from connect rather than from the first call.
-        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        // The whole handshake gets one deadline, however the server trickles.
+        let deadline = Instant::now() + timeout.unwrap_or(Duration::from_secs(30));
         while conn.is_handshaking() {
-            conn.complete_io(&mut stream).map_err(tls_error)?;
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the TLS handshake took too long",
+                )
+                .into());
+            }
+            stream.set_read_timeout(Some(left))?;
+            stream.set_write_timeout(Some(left))?;
+            if conn.wants_write() {
+                conn.write_tls(&mut stream)?;
+            } else if conn.wants_read() {
+                if conn.read_tls(&mut stream)? == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "the server closed the connection during the TLS handshake",
+                    )
+                    .into());
+                }
+                if let Err(e) = conn.process_new_packets() {
+                    // Tell the server why, as complete_io would.
+                    let _ = conn.write_tls(&mut stream);
+                    return Err(ClientError::Tls(TlsError::from_rustls(&e)));
+                }
+            }
+        }
+        while conn.wants_write() {
+            conn.write_tls(&mut stream)?;
         }
         stream.set_read_timeout(None)?;
+        stream.set_write_timeout(None)?;
         let sock = stream.try_clone()?;
         Ok(Client {
             reader: BufReader::new(Box::new(rustls::StreamOwned::new(conn, stream))),
@@ -207,6 +295,18 @@ impl Client {
 
     pub fn info(&mut self) -> Result<ServerInfo, ClientError> {
         self.call("server.info", &Value::Null)
+    }
+
+    /// What the server can run: CPUs, interfaces, backends, kinds of runs
+    /// and application protocols (`server.capabilities`, servers from 0.51.0).
+    pub fn capabilities(&mut self) -> Result<Capabilities, ClientError> {
+        self.call("server.capabilities", &Value::Null)
+    }
+
+    /// How the server is doing: its clock, CPU load, memory and runs
+    /// (`server.health`, servers from 0.51.0).
+    pub fn health(&mut self) -> Result<Health, ClientError> {
+        self.call("server.health", &Value::Null)
     }
 
     /// Makes the server read its tokens, certificates, revocation lists and
@@ -519,6 +619,28 @@ impl Client {
         self.call("udp.remove", &RunId { id })
     }
 
+    /// Starts emulated hosts from a host profile (`host.start`).
+    pub fn host_start(&mut self, params: &HostStartParams) -> Result<HostRunInfo, ClientError> {
+        self.call("host.start", params)
+    }
+
+    /// Stops a run of hosts and waits for it to end.
+    pub fn host_stop(&mut self, id: u64) -> Result<HostRunInfo, ClientError> {
+        self.call("host.stop", &StopParams { id, wait: true })
+    }
+
+    pub fn host_stats(&mut self, id: u64) -> Result<HostRunInfo, ClientError> {
+        self.call("host.stats", &RunId { id })
+    }
+
+    pub fn host_runs(&mut self) -> Result<Vec<HostRunInfo>, ClientError> {
+        self.call("host.list", &Value::Null)
+    }
+
+    pub fn host_remove(&mut self, id: u64) -> Result<HostRunInfo, ClientError> {
+        self.call("host.remove", &RunId { id })
+    }
+
     /// Starts a receiver on an interface of the server (see `rx.start`).
     pub fn rx_start(&mut self, params: &RxStartParams) -> Result<RxRunInfo, ClientError> {
         self.call("rx.start", params)
@@ -634,13 +756,5 @@ impl Client {
     pub fn unsubscribe(&mut self, subscription: u64) -> Result<(), ClientError> {
         self.call::<_, Value>("stats.unsubscribe", &Subscription { subscription })
             .map(drop)
-    }
-}
-
-fn tls_error(e: io::Error) -> ClientError {
-    // rustls reports a refused handshake as InvalidData with its own error inside.
-    match e.get_ref().and_then(|i| i.downcast_ref::<rustls::Error>()) {
-        Some(t) => ClientError::Tls(TlsError::from_rustls(t)),
-        None => ClientError::Io(e),
     }
 }

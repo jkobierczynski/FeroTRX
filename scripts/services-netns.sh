@@ -446,7 +446,12 @@ EOT
         pids="$pids $host_pid"
         sleep 1
         # dhcpcd keeps its lease when stopped (no release without -k).
-        r timeout 8 dhcpcd -6 -B -d -f "$tmp/dhcpcd.conf" p0 >"$tmp/dhcpcd.log" 2>&1 || true
+        # Its own /var/lib/dhcpcd: a DUID saved there (runner images have
+        # one) wins over `duid ll`, and the lease would go to that MAC.
+        mkdir -p /var/lib/dhcpcd
+        r unshare -m sh -c 'mount -t tmpfs tmpfs /var/lib/dhcpcd &&
+            timeout 8 dhcpcd -6 -B -d -f "$1" p0' sh "$tmp/dhcpcd.conf" \
+            >"$tmp/dhcpcd.log" 2>&1 || true
         wait "$host_pid" || fail "ferotrx host (DHCPv6 server) failed"
         # The server's lease lines: `lease fd00:8000:100::/56 to MAC, ...`.
         if grep -qE "lease fd00:80[0-9a-f:]*/56 to 02:80:00:00:00:01" "$tmp/pd.log"; then
