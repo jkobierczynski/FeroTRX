@@ -535,8 +535,10 @@ EOT
             -n 10 --cps 10 -q >"$log" 2>&1 || status=$?
         cat "$log"
         line=$(grep -E "^  client: " "$log" || true)
-        echo "$line" | grep -Eq "^  client: 10 connections, 10 established, 10 completed;" ||
+        echo "$line" | grep -Eq "^  client: 10 connections, 10 established, 10 completed;" || {
+            sed 's/^/  mosquitto: /' "$tmp/mosquitto.log"
             fail "MQTT $v: the emulated clients did not complete their connections to mosquitto"
+        }
         echo "$line" | grep -Eq "transactions \(.*\), 0 failed" ||
             fail "MQTT $v: mosquitto's answers were not the expected ones"
         echo "$line" | grep -q "PUBCOMP x20" || fail "MQTT $v: not every QoS 2 publish completed"
