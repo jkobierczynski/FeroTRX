@@ -10,7 +10,8 @@ use std::process::Command;
 
 use ferotrx_packet::{decode, PacketSpec};
 
-/// A packet, tshark options it needs, and `field=value` pairs tshark must show.
+/// A packet, tshark options it needs, and `field=value` pairs tshark must
+/// show; `A or B` takes either, for fields that differ between versions.
 struct Case {
     spec: &'static str,
     opts: &'static [&'static str],
@@ -64,7 +65,12 @@ const CASES: &[Case] = &[
         spec: "eth/ipv6/udp/gtpu(teid=99)/ipv6/icmp",
         opts: &[],
         want: &[
-            ("frame.protocols", "eth:ethertype:ipv6:udp:gtp:ipv6:icmpv6"),
+            // Wireshark 4.6 names the GTP-U payload's IPv6 header "ip".
+            (
+                "frame.protocols",
+                "eth:ethertype:ipv6:udp:gtp:ipv6:icmpv6 or eth:ethertype:ipv6:udp:gtp:ip:icmpv6",
+            ),
+            ("icmpv6.type", "128"),
             ("gtp.teid", "0x00000063"),
             ("gtp.message", "0xff"),
         ],
@@ -280,7 +286,7 @@ fn tshark_dissects_what_was_built() {
         let got: Vec<&str> = line.split('|').collect();
         for (i, (f, want)) in case.want.iter().enumerate() {
             let g = got.get(i).copied().unwrap_or_default();
-            if g != *want {
+            if !want.split(" or ").any(|w| w == g) {
                 failures.push(format!("{}: {f} is '{g}', wanted '{want}'", case.spec));
             }
         }
