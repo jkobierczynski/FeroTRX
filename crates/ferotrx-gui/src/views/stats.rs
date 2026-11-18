@@ -449,7 +449,7 @@ impl FeroApp {
         let Some(s) = self.servers.get(self.sel_server) else {
             return;
         };
-        let id = ui.id().with("chart-mode");
+        let id = ui.scope_id().with("chart-mode");
         let mut mode = ui.data_mut(|d| *d.get_persisted_mut_or(id, ChartMode::Pps));
         ui.horizontal(|ui| {
             ui.heading(format!("Charts of {}", s.settings.addr));
@@ -556,7 +556,7 @@ fn receive_charts(ui: &mut egui::Ui, s: &crate::app::ServerState) {
         );
         return;
     }
-    let id = ui.id().with("latency-series");
+    let id = ui.scope_id().with("latency-series");
     let mut on: Vec<bool> = ui.data_mut(|d| {
         d.get_persisted_mut_or(id, vec![true, false, true, false, false, true])
             .clone()
@@ -569,7 +569,7 @@ fn receive_charts(ui: &mut egui::Ui, s: &crate::app::ServerState) {
         }
     });
     ui.data_mut(|d| d.insert_persisted(id, on.clone()));
-    let group = ui.id().with("rx-axis");
+    let group = ui.scope_id().with("rx-axis");
     let h = (ui.available_height() - 24.0) / 3.0;
     let flows: Vec<&FlowHistory> = s.flows.values().collect();
     let line = |label: String, pts: Vec<[f64; 2]>| Line::new(label, PlotPoints::from(pts));

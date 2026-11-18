@@ -602,7 +602,7 @@ impl ProtocolEditor for PayloadEditor {
             }
             Mode::Fill => {}
         }
-        egui::Grid::new(ui.id().with("raw-len")).show(ui, |ui| {
+        egui::Grid::new(ui.scope_id().with("raw-len")).show(ui, |ui| {
             for key in ["len", "fill"] {
                 let f = RAW_FIELDS.iter().find(|f| f.key == key).expect("field");
                 ui.label(f.label).on_hover_text(f.help);

@@ -904,7 +904,7 @@ fn layer_editor(ui: &mut egui::Ui, registry: &Registry, ed: &mut EditorState, sp
     for (n, l) in layers.iter_mut().enumerate() {
         let e = registry.editor(&l.name);
         let bad = l.to_layer().err();
-        let id = ui.id().with(("layer", n, l.name.clone()));
+        let id = ui.scope_id().with(("layer", n, l.name.clone()));
         let mut state =
             egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
         if open == Some(n) {

@@ -602,7 +602,7 @@ struct StatusColors {
 }
 
 fn status_id() -> egui::Id {
-    egui::Id::new("ferotrx-theme-status")
+    egui::Id::unique("ferotrx-theme-status")
 }
 
 fn status(ui: &egui::Ui) -> [Color32; 2] {
@@ -1117,7 +1117,7 @@ fn font_picker(
 
 /// A few widgets in the current style.
 fn preview(ui: &mut egui::Ui) {
-    let id = ui.id().with("preview");
+    let id = ui.scope_id().with("preview");
     let mut state: (bool, f32, String, usize) =
         ui.data(|d| d.get_temp(id))
             .unwrap_or((true, 40.0, "edit me".into(), 0));

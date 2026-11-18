@@ -67,7 +67,7 @@ pub fn tree(ui: &mut egui::Ui, d: &Decoded, sel: &mut Selection) {
     ui.separator();
     for (li, layer) in d.layers.iter().enumerate() {
         let selected_layer = sel.layer == Some(li) && sel.field.is_none();
-        let id = ui.id().with(("layer", li, layer.protocol));
+        let id = ui.scope_id().with(("layer", li, layer.protocol));
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
             .show_header(ui, |ui| {
                 if ui
@@ -255,7 +255,7 @@ pub fn hex_view(
     let cur_bg = ui.visuals().warn_fg_color;
     let cur_fg = ui.visuals().extreme_bg_color;
     let weak = ui.visuals().weak_text_color();
-    let focus_id = ui.id().with("hex-edit");
+    let focus_id = ui.scope_id().with("hex-edit");
     let editing = cursor.is_some();
     let focused = editing && ui.memory(|m| m.has_focus(focus_id));
     let mut out = None;
