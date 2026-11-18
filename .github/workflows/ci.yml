@@ -54,8 +54,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         if: env.CI_SKIP != 'true'
         with:
-          # Experiment: does Windows pass with the toolchain before 1.100?
-          toolchain: ${{ runner.os == 'Windows' && '1.99.1' || 'stable' }}
+          toolchain: stable
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: env.CI_SKIP != 'true'
@@ -138,10 +137,17 @@ jobs:
             # load late) ends the process without a message: show its code.
             "ferotrx.exe run --null exited with {0} (0x{1:X8})" -f $code, $code
             # Which DLL each wait/wake function is imported from, and which
-            # library the linker took it from.
-            $dumpbin = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio\2022\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($dumpbin) { & $dumpbin.FullName /imports target\debug\ferotrx.exe | Select-String -Pattern '\.dll$|WaitOnAddress|WakeByAddress' }
-            cargo rustc -p ferotrx-cli --bin ferotrx -- -C link-arg=/VERBOSE 2>&1 | Select-String -Pattern 'WaitOnAddress|WakeByAddress|vertdll' -Context 3,1 | Select-Object -First 30
+            # library the linker took it from (link.exe /VERBOSE through a
+            # wrapper, since rustc hides the linker's output when it works).
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $link = & $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\link.exe' | Select-Object -First 1
+            "link.exe: $link"
+            $dumpbin = Join-Path (Split-Path $link) dumpbin.exe
+            & $dumpbin /imports target\debug\ferotrx.exe | Select-String -Pattern '^\s+\S+\.dll$|WaitOnAddress|WakeByAddress'
+            Set-Content link-verbose.cmd "@`"$link`" /VERBOSE %* > `"%~dp0link-verbose.txt`""
+            cargo rustc -p ferotrx-cli --bin ferotrx -- -C linker="$PWD\link-verbose.cmd" -C link-arg=/NOLOGO
+            Select-String -Path link-verbose.txt -Pattern 'WaitOnAddress|WakeByAddress|vertdll' -Context 4,1 | Select-Object -First 40
+            Select-String -Path link-verbose.txt -Pattern 'Searching .*\.lib' | ForEach-Object { $_.Line.Trim() } | Select-Object -Unique | Select-Object -First 60
             # The build tree's ferotrx.exe under the debugger: where it crashed.
             $cdb = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64\cdb.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($cdb) {
