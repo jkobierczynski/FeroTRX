@@ -633,13 +633,16 @@ fn stop_one(c: &mut Client, kind: FleetKind, id: u64) -> std::result::Result<Las
     })
 }
 
-/// Whether the agent reached again is a new server process. Its uptime
-/// (monotonic on the agent) must have grown by about as much time as passed
-/// on the controller's monotonic clock; a reset or a shortfall of more than a
-/// few seconds means a new process. Wall clocks are not used, so a clock
-/// correction on either side is not mistaken for a restart.
+/// Whether the agent reached again is a new server process. Agents from
+/// 0.51.0 name their process in `instance`. Without it, the agent's uptime
+/// (monotonic there) must have grown by about the time that passed on the
+/// controller's monotonic clock; wall clocks are not used, so a clock step on
+/// either side is not taken for a restart.
 fn restarted(before: &Agent, after: &Agent) -> bool {
     match (&before.health, &after.health) {
+        (Some(b), Some(a)) if !b.instance.is_empty() && !a.instance.is_empty() => {
+            a.instance != b.instance
+        }
         (Some(b), Some(a)) => {
             // From when the earlier uptime surely was read to when the later
             // one at the earliest was: the reply's transit never counts.

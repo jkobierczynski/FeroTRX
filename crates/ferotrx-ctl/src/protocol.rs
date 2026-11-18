@@ -261,6 +261,10 @@ pub struct Health {
     pub time: f64,
     /// Seconds since the server started.
     pub uptime_s: f64,
+    /// Names this server process: a restarted server answers another one,
+    /// so a controller never sends it the run ids of the old one (0.51.0).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub instance: String,
     pub cpus: usize,
     /// The machine's CPU load since the last `server.health` (from any
     /// client), in percent of all its CPUs; absent on the first call and

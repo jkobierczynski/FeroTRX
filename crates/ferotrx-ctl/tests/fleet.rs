@@ -508,6 +508,7 @@ fn plans_beyond_an_agents_limits_fail_before_anything_starts() {
 /// agent's machine went away), `cut(false)` lets them through again.
 struct Proxy {
     addr: SocketAddr,
+    to: Arc<Mutex<SocketAddr>>,
     cut: Arc<std::sync::atomic::AtomicBool>,
     open: Arc<Mutex<Vec<std::net::TcpStream>>>,
 }
@@ -519,7 +520,8 @@ impl Proxy {
         let addr = listener.local_addr().unwrap();
         let cut: Arc<std::sync::atomic::AtomicBool> = Arc::default();
         let open: Arc<Mutex<Vec<TcpStream>>> = Arc::default();
-        let (c, o) = (cut.clone(), open.clone());
+        let to = Arc::new(Mutex::new(to));
+        let (c, o, t) = (cut.clone(), open.clone(), to.clone());
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(conn) = conn else { continue };
@@ -527,7 +529,8 @@ impl Proxy {
                     drop(conn);
                     continue;
                 }
-                let Ok(up) = TcpStream::connect(to) else {
+                let target = *t.lock().unwrap();
+                let Ok(up) = TcpStream::connect(target) else {
                     continue;
                 };
                 {
@@ -546,7 +549,17 @@ impl Proxy {
                 }
             }
         });
-        Proxy { addr, cut, open }
+        Proxy {
+            addr,
+            to,
+            cut,
+            open,
+        }
+    }
+
+    /// New connections go to `to` from now on.
+    fn retarget(&self, to: SocketAddr) {
+        *self.to.lock().unwrap() = to;
     }
 
     fn cut(&self, yes: bool) {
@@ -690,6 +703,45 @@ fn an_agent_whose_connection_broke_is_reached_again() {
         .find(|i| i.agent == "flaky")
         .unwrap();
     assert_eq!(part.state, Some(RunState::Finished), "{text}");
+}
+
+#[test]
+fn an_agent_restarted_quickly_is_lost_not_reused() {
+    // The agent behind the proxy is replaced by a new server process while
+    // the connection is cut, and reached again within half a second: too
+    // soon for its uptime to give it away. Its instance does: the old run
+    // ids must not be sent to the new process.
+    let cables = Cables::default();
+    let (steady, _) = agent("restart-steady", &cables);
+    let (behind, _) = agent("restart-flaky", &cables);
+    let (fresh, _) = agent("restart-fresh", &cables);
+    let proxy = Proxy::new(behind);
+    let plan = two_agents("restart", steady, proxy.addr, "reconnect = \"10s\"");
+    let mut events = Vec::new();
+    let report = std::thread::scope(|s| {
+        s.spawn(|| {
+            std::thread::sleep(Duration::from_millis(1000));
+            proxy.cut(true);
+            proxy.retarget(fresh);
+            std::thread::sleep(Duration::from_millis(300));
+            proxy.cut(false);
+        });
+        run_fleet(&plan, &FleetOptions::default(), &mut |e| match e {
+            FleetEvent::AgentDown { agent, .. } => events.push(format!("down {agent}")),
+            FleetEvent::AgentBack { agent, .. } => events.push(format!("back {agent}")),
+            FleetEvent::AgentLost(f) => events.push(format!("lost {}", f.agent)),
+            _ => {}
+        })
+        .unwrap()
+    });
+    let text = report.text();
+    assert_eq!(events, ["down flaky", "lost flaky"], "{text}");
+    assert!(!report.passed, "{text}");
+    let f = &report.failures[0];
+    assert!(f.error.contains("restarted"), "{f:?}");
+    // The new process was never asked about the old run.
+    let mut c = Client::connect(fresh).unwrap();
+    assert!(c.tcp_runs().unwrap().is_empty());
 }
 
 #[test]

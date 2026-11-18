@@ -252,6 +252,8 @@ pub struct Controller {
     host_runs: Mutex<BTreeMap<u64, Arc<HostRun>>>,
     /// When the controller was made, for `server.health`.
     born: std::time::Instant,
+    /// Names this controller in `server.health`.
+    instance: String,
     /// The CPU times at the last `server.health`, and the load then.
     #[allow(clippy::type_complexity)]
     cpu_seen: Mutex<Option<(std::time::Instant, ferotrx_io::CpuTimes, Option<(f64, f64)>)>>,
@@ -337,6 +339,22 @@ impl Default for Controller {
     }
 }
 
+/// A name no other controller has had: the process id, the time it was made
+/// in nanoseconds and a count of the controllers made in this process.
+fn new_instance() -> String {
+    static MADE: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{:x}-{:x}-{}",
+        std::process::id(),
+        nanos,
+        MADE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 impl Controller {
     pub fn new() -> Self {
         Self {
@@ -346,6 +364,7 @@ impl Controller {
             udp_runs: Arc::default(),
             host_runs: Mutex::default(),
             born: std::time::Instant::now(),
+            instance: new_instance(),
             cpu_seen: Mutex::default(),
             rx_runs: Mutex::default(),
             next_run: Arc::new(AtomicU64::new(1)),
@@ -1248,6 +1267,7 @@ impl Controller {
         Health {
             time: ferotrx_core::unix_seconds(std::time::SystemTime::now()),
             uptime_s: self.born.elapsed().as_secs_f64(),
+            instance: self.instance.clone(),
             cpus: cpus(),
             cpu_pct: load.map(|l| l.0),
             process_cpu_pct: load.map(|l| l.1),

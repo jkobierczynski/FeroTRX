@@ -50,7 +50,7 @@ with ferotrx.Client("192.168.56.10", ca="ca.pem", cert="alice.pem", key="alice-k
 | --- | --- | --- |
 | `server.info` | | name, version, protocol, interfaces, backends, auth_required, tls, this connection's role and user, the server's clock `time` (Unix seconds), `max_file` and `certificate_expires` |
 | `server.capabilities` | | what the server can run (0.51.0): `version`, `cpus`, `memory_mb`, `backends`, `interfaces` (names and aliases), `kinds` of runs, `apps`, `os`, `limits`; read role |
-| `server.health` | | how the server is doing now (0.51.0): `time`, `uptime_s`, `cpus`, `cpu_pct` (machine) and `process_cpu_pct` since the previous call, `memory_available_mb`, `running` (runs going), `connections`; read role |
+| `server.health` | | how the server is doing now (0.51.0): `time`, `uptime_s`, `instance` (names the server process; another after a restart), `cpus`, `cpu_pct` (machine) and `process_cpu_pct` since the previous call, `memory_available_mb`, `running` (runs going), `connections`; read role |
 | `auth` | `token` | `true`; the connection now has the token's role |
 | `interfaces.list` | | `[{name, description}]` |
 | `ports.list`, `ports.acquire`, `ports.release`, `session.info`, `session.list`, `session.name` | see [Several users](#several-users) | |

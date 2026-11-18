@@ -253,6 +253,8 @@ class Health(Record):
     #: The server's clock, seconds since 1970.
     time: float = 0.0
     uptime_s: float = 0.0
+    #: Names the server process; it changes when the server restarts.
+    instance: str = ""
     cpus: int = 0
     #: CPU load of the machine and of the server process, percent of all
     #: cores, since the previous call (``None`` on the first or off Linux).
