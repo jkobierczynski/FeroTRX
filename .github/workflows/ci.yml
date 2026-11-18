@@ -54,7 +54,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         if: env.CI_SKIP != 'true'
         with:
-          toolchain: stable
+          # Experiment: does Windows pass with the toolchain before 1.100?
+          toolchain: ${{ runner.os == 'Windows' && '1.99.1' || 'stable' }}
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: env.CI_SKIP != 'true'
