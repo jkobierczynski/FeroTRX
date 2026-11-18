@@ -12,10 +12,12 @@ from . import _wire
 from ._wire import Address, Call, PathLike
 from .errors import ConnectionClosed, FerotrxError, Forbidden, NotFound, ProtocolError
 from .types import (
+    Capabilities,
     CaptureInfo,
     CaptureRead,
     FileChunk,
     FileInfo,
+    Health,
     InterfaceEntry,
     Notification,
     PortInfo,
@@ -317,6 +319,12 @@ class AsyncClient:
 
     async def info(self) -> ServerInfo:
         return await self._run(_wire.info())
+
+    async def capabilities(self) -> Capabilities:
+        return await self._run(_wire.capabilities())
+
+    async def health(self) -> Health:
+        return await self._run(_wire.health())
 
     async def auth(self, token: str) -> None:
         await self._run(_wire.auth(token))

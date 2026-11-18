@@ -1,0 +1,9 @@
+# Emulated hosts for fleet-kinds.toml: five hosts with static addresses
+# that announce themselves (gratuitous ARP) and answer ARP and pings.
+format = 1
+
+[[host]]
+count = 5
+mac = "02:00:00:00:77:01"
+ipv4 = "10.98.0.120/24"     # then .121 ...
+announce = true

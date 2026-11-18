@@ -60,7 +60,7 @@ protocol is tested against is in [interop.md](interop.md).
 | Performance sweep (`bench --sweep`), repeatability | Partial | [performance.md](performance.md); no numbers from a physical NIC yet |
 | Y.1564 service activation | Partial | delay across two machines needs synced clocks; no far-end reflector |
 | Scenarios (pass/fail, history, compare, JUnit) | Done | [scenarios.md](scenarios.md) |
-| Fleet of agents | Partial | no discovery; no benchmarks, Y.1564, scenarios or hosts in plans; calls not in parallel |
+| Fleet of agents | Done | [fleet.md](fleet.md): capabilities, health and telemetry per agent, reconnects, lost-agent reports, every kind of run; no discovery, a lost agent is not replaced |
 
 ## Control and tools
 
@@ -78,5 +78,4 @@ protocol is tested against is in [interop.md](interop.md).
 
 From the comparison with TRex and Ostinato:
 [#108](https://github.com/jkobierczynski/FeroTRX/issues/108) accurate latency
-and [#109](https://github.com/jkobierczynski/FeroTRX/issues/109) fleet
-robustness (M55, M56).
+(M55).

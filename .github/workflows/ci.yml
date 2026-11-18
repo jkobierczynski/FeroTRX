@@ -620,12 +620,14 @@ jobs:
       # Three agents (ferotrx serve) in namespaces, driven by `ferotrx fleet
       # run`: deployed, started together, counters added up; then one agent
       # cut off, which must fail. Captures on two agents are collected and
-      # merged (read back with tcpdump).
+      # merged (read back with tcpdump). Then an agent killed mid-run (lost,
+      # reported), a control connection reset (reconnected), and hosts, a
+      # scenario, a benchmark and a Y.1564 test in one plan.
       - name: Fleet of agents started together (Linux)
         if: env.CI_SKIP != 'true' && runner.os == 'Linux'
         run: |
           cargo build -p ferotrx-cli
-          sudo apt-get install -y tcpdump
+          sudo apt-get install -y tcpdump iptables
           sudo SPREAD=200 scripts/fleet-netns.sh ./target/debug/ferotrx
 
       # Live captures with BPF filters: to files, ring files, stdout into

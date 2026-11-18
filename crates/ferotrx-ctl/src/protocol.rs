@@ -224,6 +224,61 @@ pub struct ServerInfo {
     pub require_acquire: bool,
 }
 
+/// What a server can run (`server.capabilities`, servers from 0.51.0): a
+/// controller checks a plan against it before it starts anything.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Capabilities {
+    pub version: String,
+    /// Logical CPUs the server may use.
+    pub cpus: usize,
+    /// Memory in all, in MiB, where the system says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+    /// The interface backends: `pcap`, `af_xdp`, `dpdk`.
+    pub backends: Vec<String>,
+    /// The interfaces it can send on, by name (empty when it cannot list them).
+    pub interfaces: Vec<String>,
+    /// The kinds of runs it starts: `traffic`, `tcp`, `udp`, `rx`, `hosts`,
+    /// `scenario`, `bench`, `y1564`, `capture`.
+    pub kinds: Vec<String>,
+    /// The application protocols of TCP and UDP profiles (`app = "..."`).
+    pub apps: Vec<String>,
+    /// `linux`, `windows`, `macos`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+    /// The server's limits on remote runs, when its owner set any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Box<LimitsInfo>>,
+}
+
+/// How a server is doing (`server.health`, servers from 0.51.0): a
+/// controller reads it every interval of a fleet run.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Health {
+    /// The server's clock, in seconds since the Unix epoch.
+    pub time: f64,
+    /// Seconds since the server started.
+    pub uptime_s: f64,
+    pub cpus: usize,
+    /// The machine's CPU load since the last `server.health` (from any
+    /// client), in percent of all its CPUs; absent on the first call and
+    /// where the system does not say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_pct: Option<f64>,
+    /// The server process's share of all the CPUs, the same way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_cpu_pct: Option<f64>,
+    /// Memory available, in MiB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_available_mb: Option<u64>,
+    /// Runs of every kind going now.
+    pub running: usize,
+    /// Connections open on the server now.
+    pub connections: usize,
+}
+
 /// What `server.reload` read again (servers from 0.43.0).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReloadInfo {
@@ -307,11 +362,35 @@ impl Role {
     pub fn required_for(method: &str) -> Option<Role> {
         match method {
             "server.info" | "auth" => None,
-            "interfaces.list" | "profile.get" | "profile.list" | "run.stats" | "run.list"
-            | "tcp.stats" | "tcp.list" | "udp.stats" | "udp.list" | "rx.stats" | "rx.list"
-            | "lab.get" | "scenario.get" | "scenario.list" | "bench.get" | "bench.list"
-            | "y1564.get" | "y1564.list" | "capture.get" | "capture.list" | "stats.subscribe"
-            | "stats.unsubscribe" | "ports.list" | "session.info" | "session.list"
+            "server.capabilities"
+            | "server.health"
+            | "host.stats"
+            | "host.list"
+            | "interfaces.list"
+            | "profile.get"
+            | "profile.list"
+            | "run.stats"
+            | "run.list"
+            | "tcp.stats"
+            | "tcp.list"
+            | "udp.stats"
+            | "udp.list"
+            | "rx.stats"
+            | "rx.list"
+            | "lab.get"
+            | "scenario.get"
+            | "scenario.list"
+            | "bench.get"
+            | "bench.list"
+            | "y1564.get"
+            | "y1564.list"
+            | "capture.get"
+            | "capture.list"
+            | "stats.subscribe"
+            | "stats.unsubscribe"
+            | "ports.list"
+            | "session.info"
+            | "session.list"
             | "session.name" => Some(Role::Read),
             _ => Some(Role::Operator),
         }
@@ -2229,6 +2308,68 @@ impl From<&HostStatus> for HostInfo {
     }
 }
 
+// ----- host.* -----
+
+/// Parameters of `host.start`: emulated hosts from a host profile
+/// (`[[host]]` tables, as `ferotrx host`), servers from 0.51.0.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostStartParams {
+    /// A host profile on the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// The profile's text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toml: Option<String>,
+    /// The interface of hosts whose table names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iface: Option<String>,
+    /// How long the hosts stay (default: the profile's; until stopped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xdp_mode: Option<String>,
+    /// Impairments of what the hosts send and receive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impair: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impair_rx: Option<String>,
+    /// End once every host has its addresses (or failed).
+    #[serde(default)]
+    pub until_ready: bool,
+    /// Start at this time, in seconds since the Unix epoch by the server's
+    /// clock, as `tcp.start` takes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<f64>,
+}
+
+/// A run of emulated hosts, as `host.start`, `host.stats`, `host.stop` and
+/// `host.list` show it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostRunInfo {
+    pub id: u64,
+    pub interfaces: Vec<String>,
+    pub state: RunState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub elapsed_s: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
+    /// Hosts with their addresses, and hosts that failed.
+    pub ready: usize,
+    pub failed: usize,
+    pub tx_packets: u64,
+    pub rx_packets: u64,
+    pub hosts: Vec<HostInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impair: Option<PortImpairCounters>,
+}
+
 // ----- lab.* -----
 
 /// Parameters of `lab.start`: the lab router to build on the server. See
@@ -2319,6 +2460,12 @@ pub struct ScenarioStartParams {
     /// the checks on whatever is there, e.g. a lab changed on purpose.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lab: Option<bool>,
+    /// Start at this time, in seconds since the Unix epoch by the server's
+    /// clock (`server.info`'s `time`), so that runs on several servers start
+    /// together; until then the run waits. A time gone by starts at once; at
+    /// most an hour ahead (servers from 0.51.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<f64>,
 }
 
 /// A check of a scenario, as `scenario.check` reads it and a scenario run
@@ -2389,6 +2536,10 @@ pub struct ScenarioRunInfo {
     /// running, finished (every check has a verdict), stopped, or failed
     /// (the runner itself broke; see `error`).
     pub state: RunState,
+    /// When it started, in seconds since the Unix epoch by the server's
+    /// clock; absent while it waits for its `start_at` (servers from 0.51.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
     #[serde(default)]
     pub elapsed_s: f64,
     /// The checks, in order, with their state.
@@ -2446,6 +2597,12 @@ pub struct BenchStartParams {
     pub trial_duration: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repetitions: Option<u32>,
+    /// Start at this time, in seconds since the Unix epoch by the server's
+    /// clock (`server.info`'s `time`), so that runs on several servers start
+    /// together; until then the run waits. A time gone by starts at once; at
+    /// most an hour ahead (servers from 0.51.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<f64>,
 }
 
 /// One trial of a benchmark, with the frame size it was for.
@@ -2466,6 +2623,10 @@ pub struct BenchRunInfo {
     pub iface: String,
     pub rx: String,
     pub state: RunState,
+    /// When it started, in seconds since the Unix epoch by the server's
+    /// clock; absent while it waits for its `start_at` (servers from 0.51.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default)]
@@ -2530,6 +2691,12 @@ pub struct Y1564StartParams {
     /// Length of the performance test, e.g. `15m`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub performance_duration: Option<String>,
+    /// Start at this time, in seconds since the Unix epoch by the server's
+    /// clock (`server.info`'s `time`), so that runs on several servers start
+    /// together; until then the run waits. A time gone by starts at once; at
+    /// most an hour ahead (servers from 0.51.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<f64>,
 }
 
 /// A Y.1564 run, as `y1564.start`, `y1564.get`, `y1564.stop` and
@@ -2542,6 +2709,10 @@ pub struct Y1564RunInfo {
     pub iface: String,
     pub rx: String,
     pub state: RunState,
+    /// When it started, in seconds since the Unix epoch by the server's
+    /// clock; absent while it waits for its `start_at` (servers from 0.51.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default)]

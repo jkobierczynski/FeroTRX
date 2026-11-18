@@ -62,6 +62,24 @@ pub struct Client {
     notifications: VecDeque<Notification>,
 }
 
+/// Connects to `addr` (`host:port`), trying each address it names; with
+/// `timeout`, each for at most that long.
+fn tcp_connect(addr: &str, timeout: Option<Duration>) -> io::Result<TcpStream> {
+    let Some(timeout) = timeout else {
+        return TcpStream::connect(addr);
+    };
+    let mut last = None;
+    for a in addr.to_socket_addrs()? {
+        match TcpStream::connect_timeout(&a, timeout) {
+            Ok(s) => return Ok(s),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("{addr} names no address"))
+    }))
+}
+
 impl Client {
     /// Connects over plain TCP.
     pub fn connect(addr: impl ToSocketAddrs) -> io::Result<Client> {
@@ -79,16 +97,40 @@ impl Client {
     /// certificate for `host` (or the name `tls` sets) and logging in with
     /// the client certificate `tls` has, if any.
     pub fn connect_tls(addr: &str, tls: &ClientTls) -> Result<Client, ClientError> {
+        Self::connect_tls_within(addr, tls, None)
+    }
+
+    /// [`connect`](Client::connect), giving up on an address that does not
+    /// answer within `timeout`.
+    pub fn connect_timeout(addr: &str, timeout: Duration) -> io::Result<Client> {
+        let stream = tcp_connect(addr, Some(timeout))?;
+        stream.set_nodelay(true)?;
+        Ok(Client {
+            reader: BufReader::new(Box::new(stream.try_clone()?)),
+            sock: stream,
+            next_id: 1,
+            notifications: VecDeque::new(),
+        })
+    }
+
+    /// [`connect_tls`](Client::connect_tls), giving up within `timeout`
+    /// for the connection and again for the handshake (`None`: 30 s for the
+    /// handshake only).
+    pub fn connect_tls_within(
+        addr: &str,
+        tls: &ClientTls,
+        timeout: Option<Duration>,
+    ) -> Result<Client, ClientError> {
         let host = match addr.rsplit_once(':') {
             Some((h, _)) => h,
             None => addr,
         };
         let mut conn = tls.connection(host)?;
-        let mut stream = TcpStream::connect(addr)?;
+        let mut stream = tcp_connect(addr, timeout)?;
         stream.set_nodelay(true)?;
         // Finish the handshake here, so a refused certificate shows as an
         // error from connect rather than from the first call.
-        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        stream.set_read_timeout(Some(timeout.unwrap_or(Duration::from_secs(30))))?;
         while conn.is_handshaking() {
             conn.complete_io(&mut stream).map_err(tls_error)?;
         }
@@ -207,6 +249,18 @@ impl Client {
 
     pub fn info(&mut self) -> Result<ServerInfo, ClientError> {
         self.call("server.info", &Value::Null)
+    }
+
+    /// What the server can run: CPUs, interfaces, backends, kinds of runs
+    /// and application protocols (`server.capabilities`, servers from 0.51.0).
+    pub fn capabilities(&mut self) -> Result<Capabilities, ClientError> {
+        self.call("server.capabilities", &Value::Null)
+    }
+
+    /// How the server is doing: its clock, CPU load, memory and runs
+    /// (`server.health`, servers from 0.51.0).
+    pub fn health(&mut self) -> Result<Health, ClientError> {
+        self.call("server.health", &Value::Null)
     }
 
     /// Makes the server read its tokens, certificates, revocation lists and
@@ -517,6 +571,28 @@ impl Client {
 
     pub fn udp_remove(&mut self, id: u64) -> Result<UdpRunInfo, ClientError> {
         self.call("udp.remove", &RunId { id })
+    }
+
+    /// Starts emulated hosts from a host profile (`host.start`).
+    pub fn host_start(&mut self, params: &HostStartParams) -> Result<HostRunInfo, ClientError> {
+        self.call("host.start", params)
+    }
+
+    /// Stops a run of hosts and waits for it to end.
+    pub fn host_stop(&mut self, id: u64) -> Result<HostRunInfo, ClientError> {
+        self.call("host.stop", &StopParams { id, wait: true })
+    }
+
+    pub fn host_stats(&mut self, id: u64) -> Result<HostRunInfo, ClientError> {
+        self.call("host.stats", &RunId { id })
+    }
+
+    pub fn host_runs(&mut self) -> Result<Vec<HostRunInfo>, ClientError> {
+        self.call("host.list", &Value::Null)
+    }
+
+    pub fn host_remove(&mut self, id: u64) -> Result<HostRunInfo, ClientError> {
+        self.call("host.remove", &RunId { id })
     }
 
     /// Starts a receiver on an interface of the server (see `rx.start`).

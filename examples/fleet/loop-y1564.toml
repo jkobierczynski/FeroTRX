@@ -1,0 +1,21 @@
+# A short Y.1564 performance test for fleet-kinds.toml, over the agent's
+# cable l0 - l1 (see examples/lab-y1564.toml for a real one). The cable has
+# no policer, so the configuration test's policing step would fail: this runs
+# only the performance test, the service at its CIR.
+format = 1
+
+[y1564]
+line_rate = "100mbps"
+tests = ["performance"]
+performance_duration = "4s"
+interval = "1s"
+
+[[service]]
+name = "data"
+packet = "eth(src=02:00:00:00:65:01,dst=02:00:00:00:65:02)/ipv4(src=10.95.0.1,dst=10.95.0.2)/udp(sport=4000,dport=9000)"
+sizes = 508
+cir = "5mbps"
+flr = 0.5
+ftd = "50ms"
+fdv = "20ms"
+availability = 50

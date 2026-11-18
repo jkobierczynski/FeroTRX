@@ -5,8 +5,8 @@
 use ferotrx_core::scenario::Metrics;
 
 use crate::protocol::{
-    FlowCounters, LatencyCounters, RunInfo, RxRunInfo, TcpCounters, TcpRunInfo, UdpCounters,
-    UdpRunInfo,
+    BenchRunInfo, FlowCounters, HostRunInfo, LatencyCounters, RunInfo, RunState, RxRunInfo,
+    ScenarioRunInfo, TcpCounters, TcpRunInfo, UdpCounters, UdpRunInfo, Y1564RunInfo,
 };
 
 fn put(m: &mut Metrics, name: &str, v: f64) {
@@ -392,6 +392,176 @@ pub fn traffic_metrics(parts: &[TrafficPart<'_>]) -> Metrics {
         }
     }
     m
+}
+
+/// The metrics of runs of emulated hosts on several agents, added up
+/// (`ferotrx_core::fleet::HOSTS_METRICS`).
+pub fn hosts_metrics(runs: &[&HostRunInfo]) -> Metrics {
+    let mut m = Metrics::new();
+    let hosts: usize = runs.iter().map(|r| r.hosts.len()).sum();
+    let ready: usize = runs.iter().map(|r| r.ready).sum();
+    put(&mut m, "hosts", hosts as f64);
+    put(&mut m, "ready", ready as f64);
+    put(&mut m, "ready_pct", pct(ready as u64, hosts as u64));
+    put(
+        &mut m,
+        "failed",
+        runs.iter().map(|r| r.failed).sum::<usize>() as f64,
+    );
+    let times: Vec<f64> = runs
+        .iter()
+        .flat_map(|r| r.hosts.iter().filter_map(|h| h.ready_after_s))
+        .collect();
+    if !times.is_empty() {
+        put(
+            &mut m,
+            "ready_avg",
+            times.iter().sum::<f64>() / times.len() as f64 * 1000.0,
+        );
+        put(
+            &mut m,
+            "ready_max",
+            times.iter().cloned().fold(0.0, f64::max) * 1000.0,
+        );
+    }
+    put(&mut m, "tx_packets", sum(runs, |r| r.tx_packets) as f64);
+    put(&mut m, "rx_packets", sum(runs, |r| r.rx_packets) as f64);
+    m
+}
+
+/// The metrics of scenario runs on several agents, added up
+/// (`ferotrx_core::fleet::SCENARIO_METRICS`): `passed` only when every
+/// agent's scenario ended with every check it ran passing.
+pub fn scenario_metrics(runs: &[&ScenarioRunInfo]) -> Metrics {
+    let mut m = Metrics::new();
+    let (mut checks, mut passed, mut all_passed) = (0u64, 0u64, !runs.is_empty());
+    for r in runs {
+        let done: Vec<&str> = r
+            .checks
+            .iter()
+            .map(|c| c.state.as_str())
+            .filter(|s| matches!(*s, "pass" | "fail" | "error"))
+            .collect();
+        let ok = done.iter().filter(|s| **s == "pass").count() as u64;
+        checks += done.len() as u64;
+        passed += ok;
+        if r.state != RunState::Finished || ok < done.len() as u64 || done.is_empty() {
+            all_passed = false;
+        }
+    }
+    put(&mut m, "passed", if all_passed { 1.0 } else { 0.0 });
+    put(&mut m, "checks", checks as f64);
+    put(&mut m, "checks_passed", passed as f64);
+    put(&mut m, "checks_failed", (checks - passed) as f64);
+    put(&mut m, "checks_passed_pct", pct(passed, checks));
+    m
+}
+
+/// The metrics of benchmarks on several agents (`ferotrx_core::fleet::BENCH_METRICS`):
+/// throughputs add up, the worst latency and loss count, and `passed` only
+/// when every benchmark ran to its end.
+pub fn bench_metrics(runs: &[&BenchRunInfo]) -> Metrics {
+    let mut m = Metrics::new();
+    let mut passed = !runs.is_empty();
+    let mut trials = 0u64;
+    let (mut pct_min, mut mbps, mut pps): (Option<f64>, f64, f64) = (None, 0.0, 0.0);
+    let (mut lat_avg, mut lat_max, mut loss): (Option<f64>, Option<f64>, Option<f64>) =
+        (None, None, None);
+    let mut limited = 0u64;
+    let max = |a: Option<f64>, b: f64| Some(a.map_or(b, |a: f64| a.max(b)));
+    for r in runs {
+        trials += r.trials.len() as u64;
+        let Some(report) = &r.report else {
+            passed = false;
+            continue;
+        };
+        if r.state != RunState::Finished || report.stopped {
+            passed = false;
+        }
+        // The size with the lowest throughput stands for the agent.
+        let worst = report
+            .sizes
+            .iter()
+            .filter_map(|s| s.throughput.as_ref())
+            .min_by(|a, b| a.load_pct.total_cmp(&b.load_pct));
+        if let Some(t) = worst {
+            pct_min = Some(pct_min.map_or(t.load_pct, |p| p.min(t.load_pct)));
+            mbps += t.mbps;
+            pps += t.pps;
+        }
+        for s in &report.sizes {
+            if s.throughput.as_ref().is_some_and(|t| t.sender_limited) {
+                limited += 1;
+            }
+            if let Some(l) = &s.latency {
+                if let Some(a) = l.latency.avg_us {
+                    lat_avg = max(lat_avg, a / 1000.0);
+                }
+                if let Some(x) = l.latency.max_us {
+                    lat_max = max(lat_max, x / 1000.0);
+                }
+            }
+            if let Some(p) = s
+                .frame_loss
+                .iter()
+                .max_by(|a, b| a.load_pct.total_cmp(&b.load_pct))
+            {
+                loss = max(loss, p.loss_pct);
+            }
+        }
+    }
+    put(&mut m, "passed", if passed { 1.0 } else { 0.0 });
+    put(&mut m, "trials", trials as f64);
+    if let Some(p) = pct_min {
+        put(&mut m, "throughput_pct", p);
+        put(&mut m, "throughput_mbps", mbps);
+        put(&mut m, "throughput_pps", pps);
+    }
+    if let Some(v) = lat_avg {
+        put(&mut m, "latency_avg", v);
+    }
+    if let Some(v) = lat_max {
+        put(&mut m, "latency_max", v);
+    }
+    if let Some(v) = loss {
+        put(&mut m, "frame_loss_pct", v);
+    }
+    put(&mut m, "sender_limited", limited as f64);
+    m
+}
+
+/// The metrics of Y.1564 tests on several agents (`Y1564_METRICS`): the
+/// worst step and service count, rates and counts add up, and `passed`
+/// only when every agent's test passed.
+pub fn y1564_metrics(runs: &[&Y1564RunInfo]) -> Metrics {
+    let mut out = Metrics::new();
+    let parts: Vec<Metrics> = runs
+        .iter()
+        .filter_map(|r| r.report.as_ref())
+        .map(ferotrx_core::scenario::y1564_metrics)
+        .collect();
+    let all = !runs.is_empty()
+        && parts.len() == runs.len()
+        && runs.iter().all(|r| r.state == RunState::Finished);
+    for p in &parts {
+        for (k, v) in p {
+            let e = out.entry(k.clone()).or_insert(*v);
+            *e = match k.as_str() {
+                "passed" | "availability_pct" => e.min(*v),
+                "flr_pct" | "ftd" | "fdv" | "yellow_loss_pct" => e.max(*v),
+                _ => continue,
+            };
+        }
+    }
+    for k in ["steps", "steps_failed", "services_failed", "ses", "ir_mbps"] {
+        let total: f64 = parts.iter().filter_map(|p| p.get(k)).sum();
+        if parts.iter().any(|p| p.contains_key(k)) {
+            put(&mut out, k, total);
+        }
+    }
+    let passed = all && parts.iter().all(|p| p.get("passed") == Some(&1.0));
+    put(&mut out, "passed", if passed { 1.0 } else { 0.0 });
+    out
 }
 
 #[cfg(test)]

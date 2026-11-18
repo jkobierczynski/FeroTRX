@@ -10,7 +10,9 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use ferotrx_core::fleet::FleetPlan;
 use ferotrx_core::parse_duration;
-use ferotrx_ctl::fleet::{connect_all, deploy, run_fleet, FleetEvent, FleetOptions, FleetReport};
+use ferotrx_ctl::fleet::{
+    check_fit, connect_all, deploy, run_fleet, FleetEvent, FleetOptions, FleetReport,
+};
 
 use crate::scenario::parse_var;
 
@@ -26,8 +28,9 @@ enum FleetCommand {
     /// Deploy the plan's profiles to its agents, start every run at one
     /// instant, follow them and add up their counters.
     Run(RunArgs),
-    /// Read the plan, reach every agent and show its version and clock;
-    /// nothing is sent or started.
+    /// Read the plan, reach every agent, show its version, clock, CPUs and
+    /// load, and check that the plan fits it (kinds of runs, backends,
+    /// interfaces, CPUs, limits); nothing is sent or started.
     Check(PlanArgs),
     /// Send the profiles and the files they name to the agents, and start
     /// nothing.
@@ -125,6 +128,14 @@ fn print_event(e: &FleetEvent) {
             ferotrx_core::scenario::format_utc(Duration::from_secs_f64(at.max(0.0)))
         ),
         FleetEvent::Sample(s) => eprintln!("{}", s.line()),
+        FleetEvent::AgentDown { agent, error } => {
+            eprintln!("agent {agent}: control connection lost ({error}); connecting again")
+        }
+        FleetEvent::AgentBack { agent, after_s } => {
+            eprintln!("agent {agent}: back after {after_s:.1} s")
+        }
+        FleetEvent::AgentLost(f) => eprintln!("LOST: {}", f.line()),
+        FleetEvent::Note(n) => eprintln!("note: {n}"),
     }
 }
 
@@ -133,28 +144,40 @@ fn check(p: &PlanArgs) -> Result<()> {
     for line in plan.summary() {
         println!("{line}");
     }
-    let mut agents = connect_all(&plan, &mut print_event)?;
-    let mut missing = 0;
-    for run in &plan.runs {
-        for inst in &run.instances {
-            let Some(iface) = &inst.iface else {
-                continue;
-            };
-            let a = agents
-                .iter_mut()
-                .find(|a| a.spec.name == inst.agent)
-                .expect("the plan checked its agents");
-            match a.client.interfaces() {
-                Ok(list) if !list.iter().any(|i| &i.name == iface) => {
-                    missing += 1;
-                    println!(
-                        "warning: run '{}': agent '{}' has no interface {iface}",
-                        run.name, inst.agent
-                    );
-                }
-                _ => {}
-            }
+    let agents = connect_all(&plan, &mut print_event)?;
+    for a in &agents {
+        match (&a.caps, &a.health) {
+            (Some(c), h) => println!(
+                "  {}: {} CPU(s){}, {} interface(s), backends {}, runs {}{}",
+                a.spec.name,
+                c.cpus,
+                c.memory_mb
+                    .map(|m| format!(", {m} MiB"))
+                    .unwrap_or_default(),
+                c.interfaces.len(),
+                if c.backends.is_empty() {
+                    "none".to_string()
+                } else {
+                    c.backends.join(" ")
+                },
+                c.kinds.join(" "),
+                h.as_ref()
+                    .and_then(|h| h.cpu_pct)
+                    .map(|l| format!("; CPU {l:.0}% busy now"))
+                    .unwrap_or_default()
+            ),
+            (None, _) => println!(
+                "  {}: FeroTRX {} reports no capabilities (agents from 0.51.0 do)",
+                a.spec.name, a.info.version
+            ),
         }
+    }
+    let fit = check_fit(&plan, &FleetOptions::default(), &agents);
+    for w in &fit.warnings {
+        println!("warning: {w}");
+    }
+    for e in fit.problems.iter().chain(&fit.missing_interfaces) {
+        println!("error: {e}");
     }
     let worst = agents.iter().map(|a| a.offset.abs()).fold(0.0f64, f64::max);
     if worst > 0.01 {
@@ -164,10 +187,11 @@ fn check(p: &PlanArgs) -> Result<()> {
             worst * 1000.0
         );
     }
-    if missing > 0 {
-        bail!("{missing} interface(s) not found on the agents");
+    let problems = fit.problems.len() + fit.missing_interfaces.len();
+    if problems > 0 {
+        bail!("the plan does not fit its agents ({problems} problem(s))");
     }
-    println!("ok: every agent answers");
+    println!("ok: every agent answers, and the plan fits them");
     Ok(())
 }
 
