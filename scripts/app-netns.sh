@@ -94,6 +94,7 @@ cleanup() {
     for l in t0 c0 s0; do ip link del $l 2>/dev/null || true; done
     ip netns del $NS 2>/dev/null || true
     rm -rf "$tmp"
+    [ -z "${mq_conf:-}" ] || rm -f "$mq_conf"
 }
 trap cleanup EXIT
 for l in t0 c0 s0; do ip link del $l 2>/dev/null || true; done
@@ -515,12 +516,12 @@ fi
 if command -v mosquitto >/dev/null 2>&1 && [ $have_ethtool = yes ]; then
     echo "== the emulated MQTT clients against mosquitto"
     if [ "${IPV6:-}" = 1 ]; then bind=::; else bind=0.0.0.0; fi
-    printf 'listener 1883 %s\nallow_anonymous true\n' "$bind" >"$tmp/mosquitto.conf"
-    # mosquitto 2.0.22 (Ubuntu 26.04) drops to the mosquitto user before reading
-    # the config: let that user reach the file in the private temp folder.
-    chmod 711 "$tmp"
-    chmod 644 "$tmp/mosquitto.conf"
-    r mosquitto -c "$tmp/mosquitto.conf" >"$tmp/mosquitto.log" 2>&1 &
+    # mosquitto 2.0.22 on Ubuntu 26.04 cannot open a config outside
+    # /etc/mosquitto, even as root: put ours there while it runs.
+    mq_conf="$tmp/mosquitto.conf"
+    [ -d /etc/mosquitto ] && mq_conf=/etc/mosquitto/ferotrx-app-$$.conf
+    printf 'listener 1883 %s\nallow_anonymous true\n' "$bind" >"$mq_conf"
+    r mosquitto -c "$mq_conf" >"$tmp/mosquitto.log" 2>&1 &
     bg_pid=$!
     sleep 1
     for v in 3.1.1 5; do
