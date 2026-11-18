@@ -116,6 +116,8 @@ pub struct Agent {
     pub caps: Option<Capabilities>,
     /// Its health when the controller connected (`None`: older agent).
     pub health: Option<Health>,
+    /// When that health was read, on the controller's monotonic clock.
+    pub health_at: Instant,
 }
 
 impl Agent {
@@ -188,6 +190,7 @@ impl Agent {
         // Agents before 0.51.0 know neither call: they answer "no such method".
         let caps = optional(client.capabilities())?;
         let health = optional(client.health())?;
+        let health_at = Instant::now();
         Ok(Agent {
             spec: spec.clone(),
             client,
@@ -196,6 +199,7 @@ impl Agent {
             rtt,
             caps,
             health,
+            health_at,
         })
     }
 
@@ -625,13 +629,19 @@ fn stop_one(c: &mut Client, kind: FleetKind, id: u64) -> std::result::Result<Las
     })
 }
 
-/// Whether the agent reached again is a new server process: its clock minus
-/// its uptime (when it started) moved by more than a few seconds.
+/// Whether the agent reached again is a new server process. Its uptime
+/// (monotonic on the agent) must have grown by about as much time as passed
+/// on the controller's monotonic clock; a reset or a shortfall of more than a
+/// few seconds means a new process. Wall clocks are not used, so a clock
+/// correction on either side is not mistaken for a restart.
 fn restarted(before: &Agent, after: &Agent) -> bool {
     match (&before.health, &after.health) {
         (Some(b), Some(a)) => {
-            let born = |h: &Health| h.time - h.uptime_s;
-            (born(a) - born(b)).abs() > 2.0
+            let passed = after
+                .health_at
+                .saturating_duration_since(before.health_at)
+                .as_secs_f64();
+            a.uptime_s < b.uptime_s + passed - 2.0
         }
         _ => false,
     }
