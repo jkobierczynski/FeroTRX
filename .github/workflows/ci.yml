@@ -129,34 +129,17 @@ jobs:
           if ($open -notlike '*ferotrx-gui.exe*%1*') { throw "*.ferotrx opens with: $open" }
           & "$dir\ferotrx.exe" --version
           if ($LASTEXITCODE -ne 0) { throw "ferotrx.exe --version failed" }
-          $env:RUST_BACKTRACE = '1'
+          # WaitOnAddress must come from the system, not from vertdll.dll (the
+          # enclave runtime): see crates/ferotrx-io/build.rs.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $link = & $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\link.exe' | Select-Object -First 1
+          $imports = & (Join-Path (Split-Path $link) dumpbin.exe) /imports "$dir\ferotrx.exe" | Out-String
+          if ($imports -match 'vertdll') { throw "ferotrx.exe imports from vertdll.dll" }
           & "$dir\ferotrx.exe" run examples\lab-built-packets.toml --null --duration 1s
           $code = $LASTEXITCODE
-          if ($code -ne 0) {
-            # A crash (access violation, stack overflow, a DLL that failed to
-            # load late) ends the process without a message: show its code.
-            "ferotrx.exe run --null exited with {0} (0x{1:X8})" -f $code, $code
-            # Which DLL each wait/wake function is imported from, and which
-            # library the linker took it from (link.exe /VERBOSE through a
-            # wrapper, since rustc hides the linker's output when it works).
-            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-            $link = & $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\link.exe' | Select-Object -First 1
-            "link.exe: $link"
-            $dumpbin = Join-Path (Split-Path $link) dumpbin.exe
-            & $dumpbin /imports target\debug\ferotrx.exe | Select-String -Pattern '^\s+\S+\.dll$|WaitOnAddress|WakeByAddress'
-            Set-Content link-verbose.cmd "@`"$link`" /VERBOSE %* > `"%~dp0link-verbose.txt`""
-            cargo rustc -p ferotrx-cli --bin ferotrx -- -C linker="$PWD\link-verbose.cmd" -C link-arg=/NOLOGO
-            Select-String -Path link-verbose.txt -Pattern 'WaitOnAddress|WakeByAddress|vertdll' -Context 4,1 | Select-Object -First 40
-            Select-String -Path link-verbose.txt -Pattern 'Searching .*\.lib' | ForEach-Object { $_.Line.Trim() } | Select-Object -Unique | Select-Object -First 60
-            # The build tree's ferotrx.exe under the debugger: where it crashed.
-            $cdb = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64\cdb.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($cdb) {
-              & $cdb.FullName -g -G -lines -y target\debug -c ".ecxr;kn 40;q" target\debug\ferotrx.exe run examples\lab-built-packets.toml --null --duration 1s
-            } else {
-              "no cdb.exe on this runner"
-            }
-            throw "ferotrx.exe run --null failed"
-          }
+          # A crash (access violation, stack overflow, a DLL that failed to
+          # load late) ends the process without a message: show its code.
+          if ($code -ne 0) { throw ("ferotrx.exe run --null failed: exit code 0x{0:X8}" -f $code) }
           # The Windows service: install it from the installed ferotrx.exe, log
           # in through it, check the token is not on its command line, remove it.
           & "$dir\ferotrx.exe" service install -- --token ci-secret
