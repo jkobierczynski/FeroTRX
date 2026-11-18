@@ -118,6 +118,8 @@ pub struct Agent {
     pub health: Option<Health>,
     /// When that health was read, on the controller's monotonic clock.
     pub health_at: Instant,
+    /// When its health request was sent, on the same clock.
+    pub health_sent_at: Instant,
 }
 
 impl Agent {
@@ -189,6 +191,7 @@ impl Agent {
         }
         // Agents before 0.51.0 know neither call: they answer "no such method".
         let caps = optional(client.capabilities())?;
+        let health_sent_at = Instant::now();
         let health = optional(client.health())?;
         let health_at = Instant::now();
         Ok(Agent {
@@ -200,6 +203,7 @@ impl Agent {
             caps,
             health,
             health_at,
+            health_sent_at,
         })
     }
 
@@ -637,8 +641,10 @@ fn stop_one(c: &mut Client, kind: FleetKind, id: u64) -> std::result::Result<Las
 fn restarted(before: &Agent, after: &Agent) -> bool {
     match (&before.health, &after.health) {
         (Some(b), Some(a)) => {
+            // From when the earlier uptime surely was read to when the later
+            // one at the earliest was: the reply's transit never counts.
             let passed = after
-                .health_at
+                .health_sent_at
                 .saturating_duration_since(before.health_at)
                 .as_secs_f64();
             a.uptime_s < b.uptime_s + passed - 2.0
