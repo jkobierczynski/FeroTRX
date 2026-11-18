@@ -516,6 +516,10 @@ if command -v mosquitto >/dev/null 2>&1 && [ $have_ethtool = yes ]; then
     echo "== the emulated MQTT clients against mosquitto"
     if [ "${IPV6:-}" = 1 ]; then bind=::; else bind=0.0.0.0; fi
     printf 'listener 1883 %s\nallow_anonymous true\n' "$bind" >"$tmp/mosquitto.conf"
+    # mosquitto 2.0.22 (Ubuntu 26.04) drops to the mosquitto user before reading
+    # the config: let that user reach the file in the private temp folder.
+    chmod 711 "$tmp"
+    chmod 644 "$tmp/mosquitto.conf"
     r mosquitto -c "$tmp/mosquitto.conf" >"$tmp/mosquitto.log" 2>&1 &
     bg_pid=$!
     sleep 1
