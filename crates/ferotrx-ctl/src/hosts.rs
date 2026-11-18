@@ -50,8 +50,10 @@ pub(crate) struct HostRun {
 
 impl HostRun {
     pub fn info(&self) -> HostRunInfo {
+        // Running first: once it is false, the final counters are stored.
+        let running = self.job.is_running();
         let stats = self.job.stats();
-        let state = if self.job.is_running() {
+        let state = if running {
             RunState::Running
         } else if self.job.error().is_some() {
             RunState::Failed

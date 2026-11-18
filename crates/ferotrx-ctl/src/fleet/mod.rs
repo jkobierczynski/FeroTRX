@@ -625,6 +625,18 @@ fn stop_one(c: &mut Client, kind: FleetKind, id: u64) -> std::result::Result<Las
     })
 }
 
+/// Whether the agent reached again is a new server process: its clock minus
+/// its uptime (when it started) moved by more than a few seconds.
+fn restarted(before: &Agent, after: &Agent) -> bool {
+    match (&before.health, &after.health) {
+        (Some(b), Some(a)) => {
+            let born = |h: &Health| h.time - h.uptime_s;
+            (born(a) - born(b)).abs() > 2.0
+        }
+        _ => false,
+    }
+}
+
 /// One interval with one agent: reconnects when it is down, reads its
 /// health and its runs' counters when it is up.
 fn follow(slot: &mut Slot, tasks: &[Task], plan: &FleetPlan, start_s: f64) -> Answers {
@@ -637,7 +649,25 @@ fn follow(slot: &mut Slot, tasks: &[Task], plan: &FleetPlan, start_s: f64) -> An
             since_s,
             error,
         } => match Agent::connect(&slot.agent.spec) {
-            Ok(a) => {
+            Ok(a) if restarted(&slot.agent, &a) => {
+                // A new server process: the runs it had are gone, and its
+                // run ids may now name other runs. Never send it the old ids.
+                slot.link = Link::Lost;
+                out.lost = true;
+                slot.failure = Some(AgentFailure {
+                    agent: slot.name().to_string(),
+                    at_s: since_s,
+                    lost_at_s: now_s(),
+                    error: format!("{error}; then the agent came back restarted, without its runs"),
+                    last_seen_s: slot.last_seen_s,
+                    runs: Vec::new(),
+                });
+                return out;
+            }
+            Ok(mut a) => {
+                // Keep the clock reading the start times and captures were
+                // taken with; health readings track the offset from here on.
+                a.offset = slot.agent.offset;
                 slot.agent = a;
                 slot.link = Link::Up;
                 slot.reconnects += 1;
@@ -878,6 +908,11 @@ pub fn run_fleet(
         .runs
         .iter()
         .map(|r| {
+            // Scenarios, benchmarks and Y.1564 tests take no duration
+            // (not even --duration): they end when their work is done.
+            if r.kind.runs_to_the_end() {
+                return None;
+            }
             options
                 .duration
                 .or(r.settings.duration)
@@ -1475,6 +1510,10 @@ fn finish_rx(plan: &FleetPlan, slots: &mut [Slot], started: &mut [Started]) {
     for s in started.iter_mut() {
         if let Some((b, id)) = s.rx {
             if !slots[b].up() {
+                s.error.get_or_insert(format!(
+                    "receiver: agent '{}' was out of reach at the end; its counters are partial",
+                    slots[b].name()
+                ));
                 continue;
             }
             match slots[b].agent.client.rx_stop(id) {
@@ -1731,8 +1770,10 @@ impl FleetReport {
             let conditions = judge(&run.require, &metrics);
             let ok = instances.len() == run.instances.len()
                 && instances.iter().all(|i| {
+                    // Only a run seen to its end passes: no counters, or a
+                    // last reading while it still ran, is not a pass.
                     i.error.is_none()
-                        && i.state != Some(RunState::Failed)
+                        && matches!(i.state, Some(RunState::Finished | RunState::Stopped))
                         && i.conditions.iter().all(|c| c.pass)
                 })
                 && conditions.iter().all(|c| c.pass)

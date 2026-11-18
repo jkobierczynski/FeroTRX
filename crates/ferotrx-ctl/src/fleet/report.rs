@@ -103,9 +103,10 @@ impl AgentFailure {
     /// One line on it.
     pub fn line(&self) -> String {
         format!(
-            "agent '{}' lost at {:.1} s ({}); it had {}; {}",
+            "agent '{}' out of reach from {:.1} s, given up at {:.1} s ({}); it had {}; {}",
             self.agent,
             self.at_s,
+            self.lost_at_s,
             self.error,
             if self.runs.is_empty() {
                 "no runs".to_string()

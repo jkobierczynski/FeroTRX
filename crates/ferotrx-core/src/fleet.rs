@@ -1199,10 +1199,37 @@ impl RawRun {
                         }
                     }
                 }
-                K::Bench => drop(crate::BenchProfile::from_toml(&text).map_err(ctx)?),
-                K::Y1564 => drop(crate::Y1564Profile::from_toml(&text).map_err(ctx)?),
+                K::Bench => {
+                    drop(crate::BenchProfile::from_toml(&text).map_err(ctx)?);
+                    // The overrides as the agent reads them.
+                    for t in &self.tests {
+                        t.parse::<crate::bench::BenchTest>().map_err(ctx)?;
+                    }
+                    for z in &self.sizes {
+                        if !z.trim().eq_ignore_ascii_case("rfc2544") {
+                            z.parse::<crate::SizeMix>().map_err(ctx)?;
+                        }
+                    }
+                }
+                K::Y1564 => {
+                    let mut p = crate::Y1564Profile::from_toml(&text).map_err(ctx)?;
+                    for t in &self.tests {
+                        t.parse::<crate::y1564::Y1564Test>().map_err(ctx)?;
+                    }
+                    if !self.services.is_empty() {
+                        p.keep_services(&self.services).map_err(ctx)?;
+                    }
+                }
             }
-            let table: toml::Table = toml::from_str(&crate::check::blank(&text))
+            // A scenario's own [vars] name its profiles: fill them in before
+            // looking for the files to send along.
+            let deps_text = match kind {
+                K::Scenario => crate::scenario::read_vars(&text, &[], "scenario")
+                    .and_then(|v| crate::scenario::substitute(&text, &v, "scenario"))
+                    .unwrap_or_else(|_| text.clone()),
+                _ => text.clone(),
+            };
+            let table: toml::Table = toml::from_str(&crate::check::blank(&deps_text))
                 .map_err(|e| Error::Profile(format!("{source}: {e}")))?;
             let iface = self.iface.clone().or_else(|| agent.iface.clone());
             if matches!(kind, K::Traffic | K::Bench | K::Y1564) && iface.is_none() {

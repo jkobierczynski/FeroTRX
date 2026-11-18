@@ -639,7 +639,10 @@ fn an_agent_lost_mid_run_is_reported_and_the_others_go_on() {
     );
     // The run took its whole time: the controller did not give up early.
     assert!(report.elapsed_s >= 2.5, "{}", report.elapsed_s);
-    assert!(text.contains("LOST: agent 'flaky' lost at"), "{text}");
+    assert!(
+        text.contains("LOST: agent 'flaky' out of reach from"),
+        "{text}"
+    );
     // Later samples say so.
     let last = report.samples.last().unwrap();
     let a = last.agents.iter().find(|a| a.agent == "flaky").unwrap();

@@ -274,11 +274,11 @@ on with the others (`on_agent_loss = "continue"`) or stops every run
 (`"stop"`). Either way the fleet fails, and the report says what was lost:
 
 ```text
-LOST: agent 'west' lost at 8.0 s (connection refused); it had web clients; its counters are from 5.0 s
+LOST: agent 'west' out of reach from 5.2 s, given up at 8.2 s (connection refused); it had web clients; its counters are from 5.0 s
 ```
 
 `failures` in the JSON report has one entry per lost agent: when the
-connection broke (`lost_at_s`) and when it was given up (`at_s`), the error,
+connection broke (`at_s`) and when it was given up (`lost_at_s`), the error,
 the runs it had, and the time of its last counters. Those counters stay in
 the report, marked lost, and its parts of runs fail with that error. An
 agent the controller cannot reach to stop its runs at the end is noted;

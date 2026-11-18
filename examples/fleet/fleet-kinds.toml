@@ -5,6 +5,10 @@
 # the benchmark, the Y.1564 test and the scenario's check need no device
 # in between. In a real lab, point iface and rx at the device under test.
 #
+# The agents here have no ca: beyond loopback, give each agent ca = "..."
+# (and cert/key to log in by certificate) so the token goes over TLS; see
+# docs/fleet.md. scripts/fleet-netns.sh adds ca to its copy.
+#
 #   ferotrx fleet check examples/fleet/fleet-kinds.toml
 #   FEROTRX_TOKEN=... ferotrx fleet run examples/fleet/fleet-kinds.toml --report kinds.json
 format = 1

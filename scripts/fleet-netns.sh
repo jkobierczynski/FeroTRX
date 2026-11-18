@@ -302,7 +302,7 @@ check "west's part says it was lost" \
     "[$(run_of "web clients") | .instances[] | select(.agent == \"west\") | .error | test(\"lost\")] == [true]" "$j"
 check "the samples show west lost at the end" \
     '[.samples[-1].agents[] | select(.agent == "west") | .status] == ["lost"]' "$j"
-if grep -q "LOST: agent 'west' lost at" "$WORK/lost.out"; then
+if grep -q "LOST: agent 'west' out of reach from" "$WORK/lost.out"; then
     echo "ok: the controller said so as it happened"
 else
     echo "FAILED: no LOST line in the output:"

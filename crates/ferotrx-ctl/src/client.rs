@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -68,8 +68,24 @@ fn tcp_connect(addr: &str, timeout: Option<Duration>) -> io::Result<TcpStream> {
     let Some(timeout) = timeout else {
         return TcpStream::connect(addr);
     };
+    // Name lookups block, and std gives them no timeout: look up on a thread
+    // of its own and give up on it after `timeout` (it ends by itself).
+    let (tx, rx) = std::sync::mpsc::channel();
+    let name = addr.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(name.to_socket_addrs().map(|a| a.collect::<Vec<_>>()));
+    });
+    let addrs = match rx.recv_timeout(timeout) {
+        Ok(r) => r?,
+        Err(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("looking up {addr} took longer than {timeout:?}"),
+            ))
+        }
+    };
     let mut last = None;
-    for a in addr.to_socket_addrs()? {
+    for a in addrs {
         match TcpStream::connect_timeout(&a, timeout) {
             Ok(s) => return Ok(s),
             Err(e) => last = Some(e),
@@ -130,11 +146,41 @@ impl Client {
         stream.set_nodelay(true)?;
         // Finish the handshake here, so a refused certificate shows as an
         // error from connect rather than from the first call.
-        stream.set_read_timeout(Some(timeout.unwrap_or(Duration::from_secs(30))))?;
+        // The whole handshake gets one deadline, however the server trickles.
+        let deadline = Instant::now() + timeout.unwrap_or(Duration::from_secs(30));
         while conn.is_handshaking() {
-            conn.complete_io(&mut stream).map_err(tls_error)?;
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the TLS handshake took too long",
+                )
+                .into());
+            }
+            stream.set_read_timeout(Some(left))?;
+            stream.set_write_timeout(Some(left))?;
+            if conn.wants_write() {
+                conn.write_tls(&mut stream)?;
+            } else if conn.wants_read() {
+                if conn.read_tls(&mut stream)? == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "the server closed the connection during the TLS handshake",
+                    )
+                    .into());
+                }
+                if let Err(e) = conn.process_new_packets() {
+                    // Tell the server why, as complete_io would.
+                    let _ = conn.write_tls(&mut stream);
+                    return Err(ClientError::Tls(TlsError::from_rustls(&e)));
+                }
+            }
+        }
+        while conn.wants_write() {
+            conn.write_tls(&mut stream)?;
         }
         stream.set_read_timeout(None)?;
+        stream.set_write_timeout(None)?;
         let sock = stream.try_clone()?;
         Ok(Client {
             reader: BufReader::new(Box::new(rustls::StreamOwned::new(conn, stream))),
@@ -710,13 +756,5 @@ impl Client {
     pub fn unsubscribe(&mut self, subscription: u64) -> Result<(), ClientError> {
         self.call::<_, Value>("stats.unsubscribe", &Subscription { subscription })
             .map(drop)
-    }
-}
-
-fn tls_error(e: io::Error) -> ClientError {
-    // rustls reports a refused handshake as InvalidData with its own error inside.
-    match e.get_ref().and_then(|i| i.downcast_ref::<rustls::Error>()) {
-        Some(t) => ClientError::Tls(TlsError::from_rustls(t)),
-        None => ClientError::Io(e),
     }
 }

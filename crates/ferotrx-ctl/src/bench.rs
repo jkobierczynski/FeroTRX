@@ -232,7 +232,9 @@ impl BenchRun {
         }));
         {
             let mut info = lock(&self.info);
-            info.elapsed_s = lock(&self.started).elapsed().as_secs_f64();
+            if info.started_at.is_some() {
+                info.elapsed_s = lock(&self.started).elapsed().as_secs_f64();
+            }
             match result {
                 Ok(Ok(report)) => {
                     info.state = if report.stopped {
@@ -271,7 +273,7 @@ impl BenchRun {
 
     pub fn info(&self) -> BenchRunInfo {
         let mut info = lock(&self.info).clone();
-        if info.state.is_running() {
+        if info.state.is_running() && info.started_at.is_some() {
             info.elapsed_s = lock(&self.started).elapsed().as_secs_f64();
         }
         info

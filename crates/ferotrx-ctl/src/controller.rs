@@ -1291,6 +1291,10 @@ impl Controller {
                 .values()
                 .filter(|r| r.is_running())
                 .count()
+            + lock(&self.captures)
+                .values()
+                .filter(|c| c.job.is_running())
+                .count()
     }
 
     /// Writes a piece of a file a client sends (`file.put`), such as a
