@@ -129,8 +129,18 @@ jobs:
           if ($open -notlike '*ferotrx-gui.exe*%1*') { throw "*.ferotrx opens with: $open" }
           & "$dir\ferotrx.exe" --version
           if ($LASTEXITCODE -ne 0) { throw "ferotrx.exe --version failed" }
+          # WaitOnAddress must come from the system, not from vertdll.dll (the
+          # enclave runtime): see crates/ferotrx-io/build.rs.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $link = & $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\link.exe' | Select-Object -First 1
+          $imports = & (Join-Path (Split-Path $link) dumpbin.exe) /imports "$dir\ferotrx.exe" | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin /imports failed: exit code $LASTEXITCODE" }
+          if ($imports -match 'vertdll') { throw "ferotrx.exe imports from vertdll.dll" }
           & "$dir\ferotrx.exe" run examples\lab-built-packets.toml --null --duration 1s
-          if ($LASTEXITCODE -ne 0) { throw "ferotrx.exe run --null failed" }
+          $code = $LASTEXITCODE
+          # A crash (access violation, stack overflow, a DLL that failed to
+          # load late) ends the process without a message: show its code.
+          if ($code -ne 0) { throw ("ferotrx.exe run --null failed: exit code 0x{0:X8}" -f $code) }
           # The Windows service: install it from the installed ferotrx.exe, log
           # in through it, check the token is not on its command line, remove it.
           & "$dir\ferotrx.exe" service install -- --token ci-secret
