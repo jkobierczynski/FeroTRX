@@ -23,7 +23,7 @@ ferotrx-ctl = { path = "crates/ferotrx-ctl", version = "0.51.0", default-feature
 ferotrx-io = { path = "crates/ferotrx-io", version = "0.51.0", default-features = false }
 pcap-file = "2.0"
 pcap = "2.2"
-thiserror = "1"
+thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 toml = "1.2"
 serde_json = "1"
